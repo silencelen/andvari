@@ -16,10 +16,13 @@ package io.silencelen.andvari.core.crypto
  *     (After the window, branch A8 makes both of those anomalies; not built here.)
  *  4. the MAC for the reason's domain (`remove-v2` for removed, `leave` for left) with target = MY userId,
  *     constant-time compared;
- *  5. the nonce is not in the consumed set (this device's ∪ the account state's, for this vault) — else
- *     [Verdict.REPLAY_DENIED];
+ *  5. the nonce is not in THIS DEVICE's consumed set — else [Verdict.REPLAY_DENIED];
  *  6. `liveSince − 10 min <= issuedAt <= now + 10 min`, where `liveSince` is the DEVICE-LOCAL time this device last
  *     saw the vault go from not-live to live (never a server value). A missing `liveSince` fails closed.
+ *  6′. (A7 review MEDIUM-2, a refinement of design §6.3 step 5) a nonce found only in the ACCOUNT-STATE set, inside
+ *     this device's window, was consumed by another of this user's devices for the same genuine removal:
+ *     [Verdict.ALREADY_RECORDED], calm, and consumed here too. The window is checked first, so a proof replayed
+ *     after a re-add this device saw is still an anomaly.
  *  7. valid: the caller consumes `(vaultId, nonce, issuedAt)` in the same transaction that moves the vault to the
  *     holding area.
  *
@@ -43,8 +46,11 @@ object RemovalProof {
         /** Any failed step except a consumed nonce: the "server may be misbehaving" warning. */
         ANOMALY("anomaly"),
 
-        /** The nonce was already consumed on this device or in account state (§6.3 step 5). Anomaly tone. */
+        /** The nonce was already consumed on THIS device (§6.3 step 5). Anomaly tone. */
         REPLAY_DENIED("replay_denied"),
+
+        /** The nonce is only in account state: another of this user's devices consumed it. Calm (A7 review MEDIUM-2). */
+        ALREADY_RECORDED("already_recorded"),
     }
 
     /** The verdict, and for a valid one the record to consume. [step] names the §6.3 step that decided it. */
@@ -61,12 +67,13 @@ object RemovalProof {
         nonce: String?,
         issuedAt: Long?,
         consumed: Set<String>,
+        consumedAccount: Set<String>,
         liveSince: Long?,
         now: Long,
     ): Decision {
         if (reason != "removed" && reason != "left") return Decision(Verdict.ANOMALY, "reason")
         // Step 3: a complete v2 proof, else the in-window legacy rows.
-        if (proofV != 2) return legacy(crypto, lifecycleKey, vaultId, myUserId, reason, proofV, proof, nonce, consumed, now)
+        if (proofV != 2) return legacy(crypto, lifecycleKey, vaultId, myUserId, reason, proofV, proof, nonce, consumed, consumedAccount, now)
         if (proof.isNullOrEmpty() || nonce == null || issuedAt == null || !LifecycleProof.isV2Nonce(nonce)) {
             return Decision(Verdict.ANOMALY, "fields")
         }
@@ -76,10 +83,12 @@ object RemovalProof {
             else LifecycleProof.leave(crypto, lifecycleKey, vaultId, myUserId, nonce, issuedAt)
         }.getOrNull() ?: return Decision(Verdict.ANOMALY, "mac")
         if (!LifecycleProof.verify(expected, proof)) return Decision(Verdict.ANOMALY, "mac")
-        // Step 5: single use.
+        // Step 5: single use on THIS device.
         if (nonce in consumed) return Decision(Verdict.REPLAY_DENIED, "nonce")
         // Step 6: inside THIS device's own window.
         if (liveSince == null || issuedAt < liveSince - SKEW_MS || issuedAt > now + SKEW_MS) return Decision(Verdict.ANOMALY, "window")
+        // Step 6': consumed by another of my devices (account state only).
+        if (nonce in consumedAccount) return Decision(Verdict.ALREADY_RECORDED, "recorded", nonce, issuedAt)
         return Decision(Verdict.VALID, "valid", nonce, issuedAt)
     }
 
@@ -94,6 +103,7 @@ object RemovalProof {
         proof: String?,
         nonce: String?,
         consumed: Set<String>,
+        consumedAccount: Set<String>,
         now: Long,
     ): Decision {
         if (proofV != null && proofV != 1) return Decision(Verdict.ANOMALY, "fields") // an unknown proof version
@@ -106,6 +116,7 @@ object RemovalProof {
             ?: return Decision(Verdict.ANOMALY, "mac")
         if (!LifecycleProof.verify(expected, proof)) return Decision(Verdict.ANOMALY, "mac")
         if (nonce in consumed) return Decision(Verdict.REPLAY_DENIED, "nonce")
+        if (nonce in consumedAccount) return Decision(Verdict.ALREADY_RECORDED, "recorded", nonce, now)
         return Decision(Verdict.VALID_LEGACY, "legacy", nonce, now)
     }
 }

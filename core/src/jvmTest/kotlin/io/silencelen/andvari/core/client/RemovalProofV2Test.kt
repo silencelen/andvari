@@ -216,6 +216,9 @@ class RemovalProofV2Test {
         val v1 = RemovedGrantInfo(s.vaultId, "removed", removeProof = LifecycleProof.remove(crypto, s.key, s.vaultId, s.member.userId, nonce), removeNonce = nonce)
         s.deliver(v1)
         assertEquals("removed", s.notice().kind)
+        // A7 review LOW-3: a legacy proof is qualified, never shown as fully genuine.
+        assertEquals(SyncEngine.REMOVED_LEGACY, s.notice().reason)
+        assertTrue(HouseholdCopy.removedLegacyNotice("Family").contains("(sent by an older app version)"))
         assertEquals<List<String>?>(listOf(nonce), s.cache.consumedNonces()[s.vaultId]?.map { it.nonce }, "a legacy proof is consumed too")
         s.reAdd()
         s.deliver(v1)
@@ -304,8 +307,10 @@ class RemovalProofV2Test {
         assertTrue(second.accountState.doc.consumedNonces[s.vaultId].orEmpty().any { it.nonce == info.removeNonce })
     }
 
+    /** A7 review MEDIUM-2: a nonce found only in ACCOUNT STATE (another of this user's devices consumed it) is the
+     *  calm "already recorded" verdict for a genuine in-window proof, not a replay alarm; it is consumed here too. */
     @Test
-    fun theAccountStateSetAloneDeniesAReplay() {
+    fun aNonceOnlyInAccountStateIsAlreadyRecordedNotAReplay() {
         val s = seeded()
         val info = s.removedV2()
         // Another device of this user consumed it and flushed; this device has no device record.
@@ -316,6 +321,14 @@ class RemovalProofV2Test {
         s.server.accountSeq = 3
         runBlocking { s.engine.accountState.refresh() }
         assertTrue(s.cache.consumedNonces().isEmpty())
+        s.deliver(info)
+        assertEquals("removed", s.notice().kind)
+        assertEquals(SyncEngine.ALREADY_RECORDED, s.notice().reason)
+        assertTrue(HouseholdCopy.removalAlreadyRecordedNotice("Family").contains("already recorded on another of your devices"))
+        assertEquals<List<String?>?>(listOf(info.removeNonce), s.cache.consumedNonces()[s.vaultId]?.map { it.nonce }, "consumed on this device too")
+        assertNotNull(s.engine.heldVaultInfos().singleOrNull { it.vaultId == s.vaultId }, "holding as usual")
+        // ...and the same proof replayed after a re-add THIS device saw is now this device's own replay.
+        s.reAdd()
         s.deliver(info)
         assertEquals("replay-denied", s.notice().kind)
     }
@@ -383,7 +396,7 @@ class RemovalProofV2Test {
         assertNotNull(body)
         assertEquals(2, body.proofV)
         assertTrue(LifecycleProof.isV2Nonce(body.nonce!!))
-        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "left", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), body.issuedAt!! - 1, System.currentTimeMillis())
+        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "left", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), emptySet(), body.issuedAt!! - 1, System.currentTimeMillis())
         assertEquals(RemovalProof.Verdict.VALID, d.verdict)
     }
 
@@ -396,7 +409,7 @@ class RemovalProofV2Test {
         assertEquals(s.member.userId, target)
         assertNotNull(body)
         assertEquals(2, body.proofV)
-        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "removed", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), body.issuedAt!! - 1, System.currentTimeMillis())
+        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "removed", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), emptySet(), body.issuedAt!! - 1, System.currentTimeMillis())
         assertEquals(RemovalProof.Verdict.VALID, d.verdict)
     }
 

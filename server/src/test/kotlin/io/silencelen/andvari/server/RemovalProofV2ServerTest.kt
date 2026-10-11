@@ -6,6 +6,9 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
+import io.ktor.http.content.OutgoingContent
+import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.writeFully
 import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.model.VaultLeaveRequest
 import io.silencelen.andvari.core.model.VaultMemberRemoveRequest
@@ -133,5 +136,59 @@ class RemovalProofV2ServerTest : LifecycleTestSupport() {
         val badLeave = client.vaultLeave(bob, handle.vaultId, VaultLeaveRequest(1, proof, uuid(), null))
         assertEquals(HttpStatusCode.BadRequest, badLeave.status)
         assertEquals("bad_proof_version", errorOf(badLeave))
+    }
+
+    /** A7 review LOW-5: a CHUNKED leave body (no Content-Length) is parsed too, never silently dropped. */
+    @Test
+    fun aChunkedV2LeaveBodyIsStoredAndRelayed() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("owner@x.com", "owner a7 password one", fast = true)
+        client.register(owner, bootstrapToken)
+        val bob = client.enrollSecond(owner, "bob@x.com", "bob a7 password two")
+        val (createReq, handle) = owner.buildCreateSharedVault()
+        client.createVault(owner, createReq)
+        client.addMember(owner, handle, bob, "writer")
+        val cursor = client.sync(bob).rev
+        val key = LifecycleProof.lifecycleKey(crypto, handle.vk)
+        val nonce = LifecycleProof.newNonce(crypto)
+        val at = System.currentTimeMillis()
+        val proof = LifecycleProof.leave(crypto, key, handle.vaultId, bob.userId, nonce, at)
+        val bytes = """{"proofV":2,"proof":"$proof","nonce":"$nonce","issuedAt":$at}""".encodeToByteArray()
+        val r = client.post("/api/v1/vaults/${handle.vaultId}/leave") {
+            authed(bob)
+            setBody(object : OutgoingContent.WriteChannelContent() {
+                override val contentType = ContentType.Application.Json
+                override suspend fun writeTo(channel: ByteWriteChannel) { channel.writeFully(bytes) }
+            })
+        }
+        assertEquals(HttpStatusCode.OK, r.status)
+        val info = client.sync(bob, cursor).removedGrantsInfo.single { it.vaultId == handle.vaultId }
+        assertEquals(2, info.proofV)
+        assertEquals(nonce, info.removeNonce)
+    }
+
+    /** A7 review LOW-5: a removal that revokes nothing (target not an active member) never claims the nonce, so the
+     *  same nonce is still usable for the real removal later. */
+    @Test
+    fun aRemovalOfANonMemberDoesNotClaimTheNonce() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("owner@x.com", "owner a7 password one", fast = true)
+        client.register(owner, bootstrapToken)
+        val bob = client.enrollSecond(owner, "bob@x.com", "bob a7 password two")
+        val (createReq, handle) = owner.buildCreateSharedVault()
+        client.createVault(owner, createReq)
+        client.addMember(owner, handle, bob, "writer")
+        assertEquals(HttpStatusCode.OK, client.removeMember(owner, handle.vaultId, bob.userId).status) // bare: revoked
+        val key = LifecycleProof.lifecycleKey(crypto, handle.vk)
+        val nonce = LifecycleProof.newNonce(crypto)
+        val at = System.currentTimeMillis()
+        val body = VaultMemberRemoveRequest(LifecycleProof.removeV2(crypto, key, handle.vaultId, bob.userId, nonce, at), nonce, 2, at)
+        assertEquals(HttpStatusCode.NotFound, client.removeMember(owner, handle.vaultId, bob.userId, body).status)
+        assertEquals(HttpStatusCode.Created, client.addMember(owner, handle, bob, "writer").status)
+        assertEquals(HttpStatusCode.OK, client.removeMember(owner, handle.vaultId, bob.userId, body).status, "the nonce was never claimed")
     }
 }

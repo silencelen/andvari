@@ -909,10 +909,12 @@ fun Application.andvariModule(services: Services) {
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
             // Root cause A §6.2 (branch A7): the v2 leave proof body. Older clients post `{}` (or nothing), which the
             // compatibility window still accepts; a PRESENT body that does not parse is a 400, never silently dropped.
-            val body = if ((call.request.contentLength() ?: 0L) > 0L) {
-                runCatching { call.receive<io.silencelen.andvari.core.model.VaultLeaveRequest>() }
+            // A7 review LOW-5: read the body whenever one is sent, chunked (no Content-Length) included.
+            val text = call.receiveText()
+            val body = if (text.isBlank()) null else {
+                runCatching { json.decodeFromString(io.silencelen.andvari.core.model.VaultLeaveRequest.serializer(), text) }
                     .getOrElse { throw BadRequest("bad_request") }
-            } else null
+            }
             call.respond(service.leaveVault(p, vaultId, call.clientIp(config), body))
         }
         post("/api/v1/vaults/{vaultId}/transfer") {
