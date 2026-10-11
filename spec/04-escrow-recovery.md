@@ -41,18 +41,40 @@ The recovery **public key + fingerprint** are pinned in THREE places that must a
 
 ## 3. Escrow blob
 
-`sealed = crypto_box_seal(recoveryPub, canonical-JSON payload)` with payload
-(canonical JSON, exact key order):
+**v2 (written by every client since the escrow v2 release; security review 2026-10, root cause A §2).**
+`sealed = crypto_box_seal(recoveryPub, SignedStatement)` — the spec 01 §5.1 frame with purpose code
+`0x02` (`escrow-uvk`), signed with the member's JOINT Ed25519 key (spec 01 §5), statement:
+
+```json
+{"v":2,"purpose":"escrow-uvk","userId":"<uuid>","identityKey":"<b64_32 seed-derived X25519 identityPub>","recoveryFp":"<hex64>","issuedAt":<ms>,"key":"<b64_32 UVK>"}
+```
+
+- The sealing client MUST refuse unless `hex(SHA-256(recoveryPub)) == recoveryFp` IN FULL (64 hex),
+  where `recoveryFp` is a value a human confirmed (the typed 32-hex sheet check against it, §2) or a
+  build baked in — never a bare server response. The signer key MUST map to `identityKey`.
+- There is no sha256 self-check: the signature supersedes it. Test vectors:
+  `spec/test-vectors/escrow-v2.json`.
+
+**v1 (legacy; still read, never refused while the identity check passes — owner decision Q3):**
+payload (canonical JSON, exact key order):
 
 ```json
 {"v":1,"userId":"<uuid>","keyType":"uvk","key":"<base64url 32B>","sha256":"<base64url sha256(key bytes)>"}
 ```
 
-Self-validating: on open, recovery-cli re-computes `sha256(key)` and rejects
-mismatches (catches client-side sealing bugs at recovery time — and earlier, see
-canary). Uploaded at registration and re-uploaded on any future UVK change
-(none in v1) via `PUT /escrow/self`. UVK stability (spec 01 §4) keeps blobs evergreen
+The v1 `sha256` self-check proves INTEGRITY only (it catches client-side sealing bugs), never
+authenticity: anyone holding the public org key can mint a v1 blob. A v1 blob is therefore opened ONLY
+through the identity check of §4 and is reported `v1_legacy`, never as v2-equivalent.
+
+Format detection on the opened plaintext: first byte `{` → v1; the four bytes `avs\x02` → v2;
+anything else → refuse (`unknown_format`). The canary (§4) stays v1. Uploaded at registration and
+re-uploaded on a re-seal via `PUT /escrow/self`. UVK stability (spec 01 §4) keeps blobs evergreen
 across password changes.
+
+**Retention (migration safety).** When `PUT /escrow/self` replaces a member's blob the server keeps
+the PREVIOUS one (`escrow_legacy`, the oldest undrilled one wins) until a fleet drill passes on the new
+one (§4 drill hook). A defective new seal therefore cannot strand a member: the admin download still
+carries the retained blob (`legacySealed`), and `recover --legacy` opens it.
 
 ## 4. Ceremony & flows (normative steps; an instance's own operator runbook wraps them)
 
@@ -80,14 +102,47 @@ on the recovered account's next sync like any offline device.
 4. First (admin) enrollment proceeds only after 3 passes.
 
 **Account recovery (forgot master password):**
-1. Admin fetches the user's sealed blob: `GET /admin/users/{id}/escrow` (spec 03 §7;
+1. Admin fetches the member's escrow download: `GET /admin/users/{id}/escrow` (spec 03 §7;
    audited `escrow_admin_read`) — in the web admin panel, the member row's "Download
-   backstop key".
-2. Offline: `recovery-cli recover <sealedBlobB64>` (positional arg — matches the CLI) — prompts for sheet seed, opens
-   blob, validates internal sha256 + keyType, then generates a one-time temp
-   password, derives temp salt/params/authKey/wrapKey, re-wraps UVK, and prints an
-   upload bundle `{tempAuthKey, tempWrappedUvk, tempKdfSalt, tempKdfParams}`.
+   backstop key". It is JSON `{userId, sealed, encryptedIdentitySeed, identityPub, legacySealed?}`:
+   the blob plus the account's IDENTITY FILE. All of it is server-supplied and used only as
+   something to check against.
+2. Offline: `recovery-cli recover --user <uuid> --identity-fp <32..64 hex> --identity-file <download> [--legacy | <blob>]`.
+   The identity fingerprint (`hex(SHA-256(identityPub))`, 32+ hex) MUST come from outside the
+   server: the admin's own client view of that member, the line on the member's recovery sheet
+   (§6), or a co-member. The CLI runs these steps IN ORDER; the first failure aborts with its verdict
+   (pinned by `escrow-v2.json`):
+   0. refuse without `--user`; without `--identity-fp` unless `--no-identity-anchor`; without
+      `--identity-file` (`bad_user_id`, `bad_anchor`, `identity_check_required`);
+   1. read the sheet seed, derive the org keypair, print its fingerprint grouped;
+   2. **anchor**: `hex(SHA-256(identityFile.identityPub))` starts with `--identity-fp`
+      (`identity_fp_mismatch`). Unanchored mode instead requires the admin to type
+      `I understand this recovery is UNANCHORED` (`unanchored_not_acknowledged`). This is the only
+      place an identity enters the trust path; it never comes from the blob;
+   3. `crypto_box_seal_open` (`unopenable`); 4. format (`unknown_format`);
+   5. v2: frame, purpose `0x02`, strict parse (`bad_frame`, `non_canonical`, `bad_statement`); the
+      statement's `userId == --user` (`user_mismatch`: the server substituted another member's blob)
+      and `recoveryFp == SHA-256(org pub)` (`recovery_fp_mismatch`); the signer maps to the ANCHORED
+      identity key (`signer_not_pinned_key`); the signature verifies (`bad_signature`); and after the
+      signature, the statement's `userId`, `identityKey` and `recoveryFp` EQUAL the anchor
+      (`identity_mismatch` when a valid signature names another identity);
+      v1: legacy JSON, `v == 1`, `keyType == "uvk"`, 32-byte key (`v1_malformed`), sha256 self-check
+      (`v1_self_check_failed`), `userId == --user` (`user_mismatch`);
+   6. **identity check, both formats**: open `encryptedIdentitySeed` under the escrowed key with
+      `Ad.idkey(--user)`, derive the X25519 public key, require it `==` the anchored identity
+      (`identity_check_failed`). A forged UVK' cannot open the real seed, and a forged seed cannot
+      derive the anchored key, so this is what makes even a v1 blob authentic;
+   7. print the account, the identity fingerprint (32 hex grouped), the format and `anchored: yes/no`,
+      and require the admin to type `RECOVER <first 8 characters of the userId>`;
+   8. only then generate a one-time temp password, derive temp salt/params/authKey/wrapKey, re-wrap
+      the UVK under `Ad.uvk(--user)`, and print an upload bundle
+      `{userId: --user, tempAuthKey, tempWrappedUvk, tempKdfSalt, tempKdfParams}`. An unanchored run
+      marks the bundle UNANCHORED.
    The UVK itself never touches the online machine.
+   **Unanchored residual:** `--no-identity-anchor` still refuses a blob swapped in from another
+   member, but cannot detect a wholesale server-minted identity (a forged UVK' with a forged,
+   self-consistent seed). Every device that unlocked the account before refuses that forgery at the
+   member's next unlock (spec 01 §5 self-identity backstop).
 3. Admin uploads via `POST /admin/recovery` (sets mustChangePassword, revokes
    sessions) — in the web admin panel, the same member row's "Apply recovery bundle"
    (paste or pick the CLI's JSON; it is posted verbatim) — and hands the temp password to
@@ -98,7 +153,11 @@ on the recovered account's next sync like any offline device.
 
 **Annual drill (calendar it — an instance with no drill has an untested recovery
 path):** `canary verify` from the printed sheet, a fleet
-`verify <seedFile> <escrowDumpJson>` pass over every escrowed account, + a full
+`verify <seedFile> <escrowDumpJson>` pass over every escrowed account (it opens each blob through
+the SAME steps as `recover`, unanchored, so the dump must carry each account's identity columns:
+`SELECT e.userId, e.sealed, e.fingerprint, e.updatedAt, u.encryptedIdentitySeed, u.identityPub FROM
+escrow e LEFT JOIN users u ON u.userId = e.userId`; it prints each account's identity fingerprint for
+comparison with the admin's own pins), + a full
 recovery of a dedicated drill account. `scripts/recovery-drill.sh` drives that last leg
 end to end against a scratch server, so the machinery can be exercised without touching a
 live instance. Failures are a P1 incident: re-ceremony + re-escrow of ALL accounts
@@ -106,13 +165,25 @@ live instance. Failures are a P1 incident: re-ceremony + re-escrow of ALL accoun
 `escrowStale` in `AccountKeys` at login/unlock, with policy/`AccountKeys` carrying
 the new fingerprint as the re-seal target).
 
+**Drill hook.** `verify` prints a receipt `{"passed":[{"userId","sealedSha256"}]}` (hex SHA-256 of
+each passed blob; nothing secret). The admin posts it via `POST /admin/escrow/drill` (web admin
+panel: "Record a fleet drill"); the server drops `escrow_legacy` only for accounts whose CURRENT blob
+hashes to the drilled one, keeps it otherwise, and audits each drop `escrow_legacy_dropped`.
+
+**v1 → v2 migration (§8.4 of the security review design).** New enrolments seal v2. An existing member,
+on the next FULL-PASSWORD unlock, sees `escrowNeedsV2` in `AccountKeys` (a server hint: the stored blob
+is v1-sized under the current org key) and a recurring, dismissible card "Confirm your household
+recovery key": the member types the first 32 hex of the org fingerprint from the sheet, the client binds
+the fetched org public key to that fingerprint IN FULL and re-seals v2. v1 blobs are never refused
+(Q3), so a member who never migrates stays recoverable through the identity check.
+
 ## 5. recovery-cli requirements
 
 Offline-first fat jar (`tools/recovery-cli`): no network I/O ever (compile-time —
 no HTTP client on the classpath); refuses to run if it detects an andvari server URL
 argument. Input/output via files + stdin/QR. Ships with `keygen`,
 `canary make`/`canary verify`, the fleet `verify <seedFile> <escrowDumpJson>`,
-`recover`, `fingerprint <pubkey>`. Uses the same `:core` crypto as
+`recover --user … (--identity-fp … | --no-identity-anchor) --identity-file …`, `fingerprint <pubkey>`. Uses the same `:core` crypto as
 everything else, so vectors pin its behavior too.
 
 ## 6. Per-member self-service recovery

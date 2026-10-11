@@ -119,7 +119,11 @@ cache OFF.
   `escrowStale` above), delivered regardless of the member's escrow posture; it is the empty
   string only when the org has no recovery key configured. Waived posture is **not** signalled
   by this field — it is reconciled server-side via `users.escrowPolicy` / the absence of an
-  escrow row (design §F.4, spec 02 §5). Failures are uniform `401 invalid_credentials` (no
+  escrow row (design §F.4, spec 02 §5). `escrowNeedsV2` (additive, default `false`; security
+  review 2026-10, root cause A) is `true` when the stored escrow blob is a v1 seal (exactly
+  226 bytes) under the CURRENT org fingerprint: the client offers the v2 re-seal (spec 04 §4,
+  "v1 → v2 migration") on a full-password unlock. A hint only — never a security input.
+  Failures are uniform `401 invalid_credentials` (no
   user/password distinction). **TOTP matrix (2026-07-15 pivot — enrolled TOTP is
   origin-independent):** an account with server-TOTP **enrolled** has it verified on
   **every** origin. A **missing** code → `401 totp_required` (the client's cue to render
@@ -168,7 +172,10 @@ cache OFF.
   both password change and KDF upgrade (spec 01 §7). UVK is unchanged, so the org-escrow
   and per-member-recovery (§12) blobs both stay valid (spec 01 §4).
 - `PUT /escrow/self { sealed, fingerprint }` — client (re)uploads its
-  sealed UVK; server validates fingerprint equals the pinned org fingerprint.
+  sealed UVK; server validates fingerprint equals the pinned org fingerprint. Unchanged on the
+  wire for escrow v2 (spec 04 §3). The blob it replaces is retained server-side as
+  `escrow_legacy` (oldest undrilled blob wins; an identical re-upload retains nothing) until the
+  drill hook below releases it.
 - Per-member recovery setup/rotation (`PUT /recovery/self-setup`) and the two-phase
   self-service reset (`POST /recovery/self/verify` + `/commit`) live in §12.
 - `GET /usage` → `{ sealedUsage: string | null, updatedAt }` and
@@ -472,13 +479,22 @@ strips them degrades every client to the poll path (correct, just slower).
   (audit H25); a server that reports raw rows here is wrong even though its JSON
   validates.
 - `GET /admin/users/{id}/escrow` — step 1 of the admin recovery ceremony (spec 04 §4):
-  returns the member's sealed escrow blob (base64url text; `404 no_escrow` when the
-  account was enrolled `waived`). The blob is useless without the printed sheet, but the
+  returns JSON `{ userId, sealed, encryptedIdentitySeed, identityPub, legacySealed? }`
+  (security review 2026-10, root cause A: the account's identity file rides with the blob so
+  the offline CLI can check the escrowed key against it; `legacySealed` is the retained
+  previous blob, absent when none; `404 no_escrow` when the account was enrolled `waived`).
+  Before escrow v2 this route returned the bare base64url blob as text. The blob is useless without the printed sheet, but the
   read is the first move of a takeover-capable ceremony, so it is **audited** like every
   other admin call — audit type **`escrow_admin_read`**, `userId` = the admin, `meta` =
   the target user id (audit H61: the route shipped for the web admin's "Download backstop
   key" without a row, so a hijacked admin session could pull every member's blob and leave
   no trail).
+- `POST /admin/escrow/drill { passed: [{ userId, sealedSha256 }] }` → `{ dropped: [userId],
+  kept: [userId] }` (admin; ≤ 1000 rows; rate-bucketed per admin) — the escrow drill hook
+  (spec 04 §4): for each row whose account's CURRENT escrow blob hashes (hex SHA-256 of the
+  decoded bytes) to `sealedSha256`, the retained `escrow_legacy` blob is deleted and audited
+  `escrow_legacy_dropped` (`meta` = the member); any other account with a retained blob is
+  listed in `kept`.
 - `POST /admin/recovery { userId, tempAuthKey, tempWrappedUvk, tempKdfSalt,
   tempKdfParams }` — uploads recovery-cli output (spec 04 §4; the web admin panel's "Apply
   recovery bundle" control posts the CLI's JSON verbatim); sets `mustChangePassword`;

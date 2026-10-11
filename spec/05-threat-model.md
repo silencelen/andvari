@@ -175,6 +175,16 @@ origin (closing the latent gap that an enrolled secret was only ever checked on 
 public origin). Residual: distributed low-rate guessing below both rate keys — bounded by
 the password-strength floor (T8's math applies online too, one attempt at a time).
 
+**R13 (unanchored org recovery — escrow v2, security review 2026-10, root cause A).** Admin recovery
+(spec 04 §4) is anchored by the member's identity fingerprint, which must come from outside the
+server. When no anchor exists (the admin never pinned the member and the member lost their sheet),
+`recovery-cli recover --no-identity-anchor` runs after a typed acknowledgment (owner decision Q2): it
+still refuses a blob swapped in from another member, but cannot detect a wholesale server-minted
+identity (a forged UVK with a forged, self-consistent identity seed). The bundle is marked UNANCHORED,
+and every device that unlocked the account before refuses the forged identity at the next unlock
+(spec 01 §5 self-identity backstop); a member with no such device has no backstop. v1 escrow blobs
+remain recoverable indefinitely (Q3), but only through the mandatory identity check.
+
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
 Enabling quick unlock changes the at-rest story of exactly one asset: a
