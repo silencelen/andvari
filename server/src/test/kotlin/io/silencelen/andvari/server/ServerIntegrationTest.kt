@@ -232,14 +232,23 @@ class ServerIntegrationTest {
         client.registerAdmin(vc, bootstrapToken)
 
         // Admin pulls the user's sealed escrow blob; the offline recovery key opens it.
-        val sealed = client.get("/api/v1/admin/users/${vc.userId}/escrow") {
-            header("Authorization", "Bearer ${vc.accessToken}"); header("X-Andvari-Client", "test/1.0.0")
-        }.bodyAsText()
-        val payload = Escrow.open(crypto, recovery.publicKey, recovery.privateKey, Bytes.fromB64(sealed))
-        assertEquals(vc.userId, payload.userId)
-        assertEquals(Escrow.KEY_TYPE_UVK, payload.keyType)
+        // Design §2.5: the download is {sealed, encryptedIdentitySeed, identityPub} — the identity file
+        // recovery checks the escrowed key against. (VirtualClient seals v1: a legacy member.)
+        val dl = kotlinx.serialization.json.Json.decodeFromString(
+            io.silencelen.andvari.core.model.AdminEscrowDownload.serializer(),
+            client.get("/api/v1/admin/users/${vc.userId}/escrow") {
+                header("Authorization", "Bearer ${vc.accessToken}"); header("X-Andvari-Client", "test/1.0.0")
+            }.bodyAsText(),
+        )
+        assertEquals(Bytes.toB64(vc.identityPub), dl.identityPub)
+        val opened = Escrow.open(
+            crypto, recovery, Bytes.fromB64(dl.sealed), vc.userId, Escrow.fingerprint(crypto, vc.identityPub),
+            io.silencelen.andvari.core.crypto.IdentityCheck(dl.encryptedIdentitySeed, dl.identityPub),
+        )
+        assertEquals(vc.userId, opened.userId)
+        assertEquals(io.silencelen.andvari.core.crypto.EscrowFormat.V1_LEGACY, opened.format)
         // The escrowed key IS the client's UVK — recovery can rebuild the vault.
-        assertEquals(Bytes.toB64(vc.uvk), payload.key)
+        assertEquals(Bytes.toB64(vc.uvk), Bytes.toB64(opened.uvk))
     }
 
     @Test

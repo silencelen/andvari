@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Account } from "../vault/account";
-import { fromB64 } from "./bytes";
+import { fromB64, toB64 } from "./bytes";
 import type { KdfParams } from "./keys";
 import { boxKeypairFromSeed, ed25519PkToCurve25519, randomBytes, signDetached, signKeypairFromSeed, signVerifyDetached } from "./provider";
 import {
@@ -14,8 +14,11 @@ import {
   type Statement,
   SignedStatementError,
   signedMessage,
+  verifyEscrowStatement,
   verifySignedStatement,
 } from "./signedstatement";
+import { fingerprint as orgFingerprint } from "./escrow";
+import { sealOpen } from "./provider";
 import { CryptoError, initSodium } from "./sodium";
 
 /**
@@ -30,6 +33,13 @@ const sg = JSON.parse(readFileSync(vectorsDir + "sharedgrant.json", "utf-8"));
 
 const hex = (s: string) => Uint8Array.from(s.match(/../g) ?? [], (h) => parseInt(h, 16));
 const enc = (s: string) => new TextEncoder().encode(s);
+
+/** Escrow statements verify only through the ANCHORED wrapper (A4 / A3 review); the vector rows use the
+ *  valid escrow case's own account and org key as the anchor, which is what an honest recovery supplies. */
+function verifyAny(frame: Uint8Array, code: number, pin: Uint8Array) {
+  if (code === 2) return verifyEscrowStatement(frame, v.valid[1].fields.userId, pin, v.valid[1].fields.recoveryFp);
+  return verifySignedStatement(frame, code as 1, pin);
+}
 
 function statementOf(f: Record<string, string>, purposeCode: number): Statement {
   if (purposeCode === 1) {
@@ -108,8 +118,11 @@ describe("signedstatement.json — joint key + SignedStatement v2", () => {
       expect(m, `${c.name}: M`).toEqual(hex(c.messageHex));
       expect(signDetached(signer.privateKey, m), `${c.name}: deterministic Ed25519`).toEqual(fromB64(c.signatureB64));
       expect(buildSignedStatement(signer, st), `${c.name}: frame bytes`).toEqual(fromB64(c.frameB64));
-      expect(parseStatement(c.purposeCode, bytes)).toEqual(st);
-      const verified = verifySignedStatement(fromB64(c.frameB64), c.purposeCode, pin);
+      const parsed = parseStatement(c.purposeCode, bytes);
+      expect(parsed.purpose).toBe(st.purpose);
+      if (parsed.purpose === "escrow-uvk" && st.purpose === "escrow-uvk") expect(parsed.userId).toBe(st.userId);
+      if (parsed.purpose === "vault-grant" && st.purpose === "vault-grant") expect(parsed.from).toBe(st.from);
+      const verified = verifyAny(fromB64(c.frameB64), c.purposeCode, pin);
       expect(verified.statement).toEqual(st);
       expect(verified.signerPub).toEqual(signer.publicKey);
     }
@@ -133,7 +146,7 @@ describe("signedstatement.json — joint key + SignedStatement v2", () => {
     const pinned = fromB64(v.pinnedIdentityPubB64);
     for (const c of v.reject) {
       const pin = c.pinnedIdentityPubB64 !== undefined ? fromB64(c.pinnedIdentityPubB64) : pinned;
-      expect(verdictOf(() => verifySignedStatement(fromB64(c.frameB64), c.expectedPurposeCode, pin)), c.why).toBe(c.verdict);
+      expect(verdictOf(() => verifyAny(fromB64(c.frameB64), c.expectedPurposeCode, pin)), c.why).toBe(c.verdict);
     }
   });
 
@@ -183,13 +196,14 @@ describe("Account — joint signing key (owner decision: joint key)", () => {
     });
     expect(unlocked.signPub).toEqual(a.account.signPub);
 
-    const st: Statement = {
-      purpose: "vault-grant", from: a.request.userId, to: b.request.userId, toKey: b.account.identityPub,
-      vaultId: a.account.personalVaultId, grantId: randomBytes(16), issuedAt: 1791590400000, vk: randomBytes(32),
-    };
-    const frame = unlocked.signStatement(st);
-    const verified = verifySignedStatement(frame, 1, a.account.identityPub);
-    expect(verified.statement).toEqual(st);
-    expect(verdictOf(() => verifySignedStatement(frame, 1, b.account.identityPub))).toBe("signer_not_pinned_key");
+    // The account's only signing path is escrow v2 (A4): the joint key signs the statement the
+    // re-seal produces, which verifies under the account's own identity and no other.
+    const org = boxKeypairFromSeed(randomBytes(32));
+    const orgFp = await orgFingerprint(org.publicKey);
+    const { sealed } = await unlocked.resealEscrowFor(toB64(org.publicKey), orgFp);
+    const frame = sealOpen(org.publicKey, org.privateKey, fromB64(sealed));
+    const verified = verifyEscrowStatement(frame, a.request.userId, a.account.identityPub, orgFp);
+    expect(verified.signerPub).toEqual(a.account.signPub);
+    expect(verdictOf(() => verifyEscrowStatement(frame, a.request.userId, b.account.identityPub, orgFp))).toBe("signer_not_pinned_key");
   });
 });

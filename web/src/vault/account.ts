@@ -2,13 +2,12 @@ import { adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk } from "../crypto/ad
 import { usageKey } from "../crypto/usagekey";
 import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open, seal, structuralRefusal } from "../crypto/envelope";
-import { fingerprint as recoveryFingerprint, sealUvk } from "../crypto/escrow";
+import { fingerprint as recoveryFingerprint, sealUvkV2 } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
 import { boxKeypairFromSeed, randomBytes, signKeypairFromSeed } from "../crypto/provider";
 import { identityFingerprint, openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
-import { buildSignedStatement, type Statement } from "../crypto/signedstatement";
 import { CryptoError } from "../crypto/sodium";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
 import type {
@@ -231,8 +230,13 @@ export class Account {
     const uvk = randomBytes(32);
     const identitySeed = randomBytes(32);
     const vk = randomBytes(32);
+    // The joint signing secret embeds the seed: wiped with it if anything below throws before the
+    // Account takes ownership.
+    let signingForCleanup: Uint8Array | null = null;
     try {
       const identity = boxKeypairFromSeed(identitySeed);
+      const signing = signKeypairFromSeed(identitySeed);
+      signingForCleanup = signing.privateKey;
       const wrappedUvk = seal(wrapKey, uvk, adUvk(userId));
       const encryptedIdentitySeed = seal(uvk, identitySeed, adIdkey(userId));
       const wrappedVk = seal(uvk, vk, adVk(personalVaultId, userId));
@@ -248,7 +252,12 @@ export class Account {
         if (fp == null) throw new CryptoError("recoveryFingerprint is required when sealing org escrow");
         const computedFp = await recoveryFingerprint(params.recoveryPublicKey);
         if (computedFp !== fp) throw new CryptoError("recovery public key does not match its fingerprint");
-        escrow = { sealed: toB64(await sealUvk(params.recoveryPublicKey, userId, uvk)), fingerprint: fp };
+        // Escrow v2 (security review 2026-10, root cause A §2.1): signed with the joint key, binding
+        // this account's userId and identity key and the FULL org fingerprint (core Account.enroll parity).
+        const sealed = await sealUvkV2({
+          recoveryPub: params.recoveryPublicKey, verifiedRecoveryFp: fp, userId, identityPub: identity.publicKey, signer: signing, uvk, issuedAt: Date.now(),
+        });
+        escrow = { sealed: toB64(sealed), fingerprint: fp };
       }
 
       // Per-member self-service recovery piece — MANDATORY for every new account (§F.4). The 256-bit
@@ -273,11 +282,12 @@ export class Account {
       };
 
       const vaultKeys = new Map([[personalVaultId, vk]]);
-      const signing = signKeypairFromSeed(identitySeed);
       const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, personalVaultId, vaultKeys);
       account.vaultRoles.set(personalVaultId, "owner");
+      signingForCleanup = null; // owned by the returned Account now
       return { request, account, recoverySecret: recovery.recoverySecret };
     } finally {
+      signingForCleanup?.fill(0);
       authKey.fill(0);
       wrapKey.fill(0);
       identitySeed.fill(0);
@@ -368,7 +378,7 @@ export class Account {
    * Unlock a device that has only the password + the server's account keys.
    * Rebuilds UVK and identity; vault keys are added later from grants.
    */
-  static async unlock(userId: string, password: string, keys: AccountKeys): Promise<Account> {
+  static async unlock(userId: string, password: string, keys: AccountKeys, selfIdentityPub: Uint8Array | null = null): Promise<Account> {
     // ZEROIZATION (audit H80, spec 01 §2; core Account.unlock parity): after the wrappedUvk open
     // the session needs only the UVK — MK and wrapKey are wiped on the way out, success or
     // failure (a wrong password must not leave the MK it derived on the heap either).
@@ -407,7 +417,7 @@ export class Account {
     // Password path validates the password by the wrappedUvk open above; from here the work is
     // identical to the recovery (UVK-in-hand) path — one shared tail, so the identity-pubkey
     // hard-fail can never diverge between them (core Account.unlock parity).
-    return Account.unlockFromUvk(userId, uvk, keys);
+    return Account.unlockFromUvk(userId, uvk, keys, selfIdentityPub);
   }
 
   /**
@@ -429,7 +439,7 @@ export class Account {
    * base64/version/alg refusal, so the "validation by consequence" signal that path relies on is
    * untouched.
    */
-  private static unlockFromUvk(userId: string, uvk: Uint8Array, keys: AccountKeys): Account {
+  private static unlockFromUvk(userId: string, uvk: Uint8Array, keys: AccountKeys, selfIdentityPub: Uint8Array | null = null): Account {
     let seedEnvelope: Uint8Array;
     try {
       seedEnvelope = fromB64(keys.encryptedIdentitySeed);
@@ -459,6 +469,16 @@ export class Account {
     if (serverIdentityPub === null || !ctEquals(identity.publicKey, serverIdentityPub)) {
       // The signing secret embeds the seed (libsodium's seed ‖ pk layout): never leave it behind.
       signing.privateKey.fill(0);
+      identity.privateKey.fill(0);
+      throw new IdentityMismatchError();
+    }
+    // Design §2.4 (core parity): this browser's own record of the identity key wins over anything the
+    // server can change — a recovery that swapped the identity seed is refused on every device that
+    // unlocked the account before. (Web code is server-served, spec 05 T6, so on web this guards an
+    // honest bundle against a server that only tampers with data, not one that rewrites the app.)
+    if (selfIdentityPub !== null && !ctEquals(identity.publicKey, selfIdentityPub)) {
+      signing.privateKey.fill(0);
+      identity.privateKey.fill(0);
       throw new IdentityMismatchError();
     }
     return new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, "", new Map());
@@ -662,15 +682,6 @@ export class Account {
     this.vaultKeys.set(vaultId, vk);
     this.vaultRoles.set(vaultId, "owner");
     return { request, vaultId };
-  }
-
-  /**
-   * Sign `statement` with this account's joint key and return the v2 frame (spec 01 §5.1). Twin of
-   * core `Account.signStatement`. A3 ships it with NO product caller: escrow v2 and signed grants
-   * (later branches) seal the frame to the recipient.
-   */
-  signStatement(statement: Statement): Uint8Array {
-    return buildSignedStatement({ publicKey: this.signPub, privateKey: this.signSecret }, statement);
   }
 
   /**
@@ -924,7 +935,19 @@ export class Account {
     if ((await recoveryFingerprint(pub)) !== verifiedFingerprint) {
       throw new CryptoError("recovery public key does not match the verified fingerprint — refusing to re-seal escrow");
     }
-    const sealed = await sealUvk(pub, this.userId, this.uvk);
+    // Escrow v2 (security review 2026-10, root cause A §2.1 / §8.4) — also the v1 → v2 migration seal.
+    // The server keeps the previous blob as `escrow_legacy` until a fleet drill passes on this one.
+    // The joint signing secret never leaves this class: there is deliberately no public
+    // `signStatement` (module-private parity with core's `internal`, A3 review).
+    const sealed = await sealUvkV2({
+      recoveryPub: pub,
+      verifiedRecoveryFp: verifiedFingerprint,
+      userId: this.userId,
+      identityPub: this.identityPub,
+      signer: { publicKey: this.signPub, privateKey: this.signSecret },
+      uvk: this.uvk,
+      issuedAt: Date.now(),
+    });
     return { sealed: toB64(sealed), fingerprint: verifiedFingerprint };
   }
 

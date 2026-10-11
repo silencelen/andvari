@@ -410,6 +410,21 @@ class SessionStore(context: Context) {
             // params -> null = cache miss -> the caller refetches through the fenced AndvariApi.
             ?.takeIf { runCatching { io.silencelen.andvari.core.client.KdfUpgrade.requireServerKdfParams(it.kdfParams) }.isSuccess }
 
+    /**
+     * Design §2.4 (security review 2026-10, root cause A): the seed-derived identityPub this device saw
+     * the first time it unlocked [userId] on the current origin ([SelfIdentityPin]). PUBLIC data, and
+     * deliberately NOT removed by [clear] / [clearAccountKeys] / a revocation purge: an admin recovery
+     * revokes every session first, and a pin wiped with the session would protect nothing.
+     */
+    fun selfIdentityPub(userId: String): ByteArray? =
+        io.silencelen.andvari.core.client.SelfIdentityPin.decode(prefs.getString(ns(currentOriginKey(), "selfIdentityPub.$userId"), null))
+
+    /** Record the pin once, from an unlock that passed; never overwritten afterwards. */
+    fun recordSelfIdentityPub(userId: String, account: io.silencelen.andvari.core.client.Account) {
+        val k = ns(currentOriginKey(), "selfIdentityPub.$userId")
+        if (prefs.getString(k, null) == null) prefs.edit().putString(k, io.silencelen.andvari.core.client.SelfIdentityPin.encode(account)).apply()
+    }
+
     /** Drop the CURRENT origin's cached accountKeys. */
     fun clearAccountKeys() = clearAccountKeys(currentOriginKey())
 

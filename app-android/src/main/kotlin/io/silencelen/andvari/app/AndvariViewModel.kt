@@ -407,6 +407,11 @@ data class UiState(
     // target + the value the user verifies against the new printed sheet).
     val escrowStale: Boolean = false,
     val escrowFingerprint: String = "",
+    // Escrow v2 migration (security review 2026-10, root cause A §8.4): the server hints this account's
+    // escrow is still a v1 seal. Raised on a FULL-PASSWORD unlock only (never quick unlock); the same
+    // re-seal card asks the member to confirm the household recovery key (32 hex from the sheet), then
+    // re-seals v2. Dismissible ("Later"), recurring on the next full-password unlock.
+    val escrowNeedsV2: Boolean = false,
     // Shown-once recovery-phrase reveal (design §F.4/§F.7): the base64url display form
     // (MemberRecovery.displayForm) of a self-service recovery secret — a fresh enrollee's, or the
     // fresh piece the §F.9 capture gate committed — held ONLY for the RecoverySetup screen's
@@ -483,7 +488,7 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     // P4: the ReSealCard lives in the GLOBAL AttentionArea (it renders on Unlock and Welcome
     // too), so escrowStale MUST clear here — else a "Later"-deferred re-seal card shows on the
     // lock screen with a dead action (engine torn down). A fresh unlock re-reads it.
-    escrowStale = false, escrowFingerprint = "",
+    escrowStale = false, escrowFingerprint = "", escrowNeedsV2 = false,
     // §F.7/§F.9: the reveal's display form + gate state die with the session (the raw secret is
     // zeroed by the caller); a fresh unlock re-derives everything.
     recoveryPhrase = null, recoverySetupWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false,
@@ -1056,7 +1061,8 @@ class AndvariViewModel(
                 throw e
             } catch (t: Throwable) { a.close(); throw t }
             val acct = try {
-                withContext(Dispatchers.Default) { Account.unlockWithUvk(userId, uvk, keys) }
+                withContext(Dispatchers.Default) { Account.unlockWithUvk(userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(userId)) }
+                    .also { store.recordSelfIdentityPub(userId, it) }
             } catch (t: Throwable) {
                 a.close()
                 // §5: seed won't open under the recovered UVK → wipe (stale/foreign); an identityPub
@@ -1511,7 +1517,7 @@ class AndvariViewModel(
         val pub = withContext(Dispatchers.Default) { a.recoveryPubkey() }
         val upload = withContext(Dispatchers.Default) { acct.resealEscrowFor(pub, fp) }
         a.escrowSelf(upload)
-        _ui.value = _ui.value.copy(busy = false, escrowStale = false, notice = "Account re-protected — your recovery is up to date.")
+        _ui.value = _ui.value.copy(busy = false, escrowStale = false, escrowNeedsV2 = false, notice = "Account re-protected — your recovery is up to date.")
     }
 
     /** Item history (feature): load + decrypt the currently-viewed item's archived versions. */
@@ -1588,14 +1594,15 @@ class AndvariViewModel(
                     else -> throw e
                 }
             }
-            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
+            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPub(s.userId)) }
+            store.recordSelfIdentityPub(s.userId, acct)
             store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             bind(a, acct)
             // F58: a recovery TEMP password logs in with mustChangePassword=true — persist it
             // (only a login/register response carries the flag) and raise the blocking banner.
             store.mustChangePassword = s.mustChangePassword
-            _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
+            _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowNeedsV2 = s.accountKeys.escrowNeedsV2, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
             // A1: stamp the 30-day window on a real full-password unlock; A6/§7: F61 rides online.
             store.stampFullPasswordUnlock(s.userId)
             // §F.9 gate decision: the server says this account's recovery piece was never durably
@@ -1657,7 +1664,8 @@ class AndvariViewModel(
             }
             val acct = try {
                 // KDF off the Main thread (argon2id 64 MiB — the unlock spinner must animate).
-                withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
+                withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.userId)) }
+                    .also { store.recordSelfIdentityPub(session.userId, it) }
             } catch (t: Throwable) { a.close(); throw t }
             // F74 (review [1]): bind() itself can throw — sqliteVaultCache open + SyncEngine
             // hydrate() do raw cache reads, and a corrupt vault-<userId>.db throws there. The
@@ -1665,7 +1673,7 @@ class AndvariViewModel(
             // VaultSession has adopted `a`, it owns it and lock() closes it.
             try {
                 bind(a, acct)
-                _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
+                _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowNeedsV2 = keys.escrowNeedsV2, escrowFingerprint = keys.escrowFingerprint)
                 // A1: stamp on EVERY full-password unlock, including offline ones.
                 store.stampFullPasswordUnlock(session.userId)
                 // §F.9 gate decision (desktop unlock parity): only FRESH keys may gate — an
@@ -1789,6 +1797,7 @@ class AndvariViewModel(
             recoveryPieceId = s.recoveryPieceId
             store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
+            store.recordSelfIdentityPub(s.userId, acct)
             bind(a, acct)
             // §4.1 rule 3 (B2-6): enrollment SUCCEEDED — COMMIT the pending invite switch. Clearing
             // the uncommitted marker is the commit (baseUrl already points here), and it leaves the

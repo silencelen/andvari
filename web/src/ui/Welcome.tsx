@@ -13,6 +13,7 @@ import { maybeKdfUpgrade } from "../vault/kdfupgrade";
 import { VaultStore } from "../vault/store";
 import { NullCache, openVaultCache } from "../vault/idbcache";
 import { unlockExistingSession } from "./unlock";
+import { loadSelfIdentityPub, recordSelfIdentityPub } from "../vault/selfidentity";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
 import { safeHttpUrl } from "./safeurl";
@@ -66,6 +67,8 @@ export interface LoginMeta {
   // client should re-seal on this unlock. escrowFingerprint is the CURRENT org recovery
   // fingerprint (the re-seal target + the value the user verifies against the new sheet).
   escrowStale: boolean;
+  /** §8.4 escrow v2 migration hint (security review 2026-10, root cause A). Optional: older paths omit it. */
+  escrowNeedsV2?: boolean;
   escrowFingerprint: string;
   /** design 2026-07-13-web-offline-cache §C6: set ONLY by an OFFLINE unlock whose cached
    *  `recoveryConfirmed !== true`. The vault shows a persistent, NON-blocking reminder banner
@@ -493,7 +496,8 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           installId: installId(),
         }),
       );
-      const account = await Account.unlock(s.userId, password, s.accountKeys);
+      const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId));
+      recordSelfIdentityPub(s.userId, account);
       // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
       // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1 dark-ship
       // gate, consent-keyed (design 2026-07-15 §5.4.1): durable only with this user's per-device
@@ -517,7 +521,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         isAdmin: s.isAdmin,
         tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
       });
-      const meta: LoginMeta = { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint };
+      const meta: LoginMeta = { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowNeedsV2: s.accountKeys.escrowNeedsV2 ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint };
       if (needsRecoveryCapture(s.accountKeys)) {
         // `authKey` IS the login authKey derived from the just-typed master password — reuse it as
         // currentAuthKey (the server re-verifies it at self-setup). BLOCK on the capture gate.
@@ -793,6 +797,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         installId: installId(), // F28: same stable id as sign-in
       });
       const s = await net(client.register(request));
+      recordSelfIdentityPub(s.userId, account); // design §2.4: this browser now knows the real identity key
       // register() succeeded → the invite is CONSUMED. Stash the secret bytes for the ONE-TIME reveal
       // BEFORE anything can bounce us back to the form (a resubmit could only yield "invite used").
       secretRef.current = recoverySecret;

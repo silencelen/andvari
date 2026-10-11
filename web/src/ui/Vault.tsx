@@ -145,6 +145,9 @@ interface Props {
   mustChangePassword: boolean;
   /** F57: this account's escrow is sealed to a superseded recovery key — offer a re-seal. */
   escrowStale: boolean;
+  /** §8.4 escrow v2 migration (security review 2026-10, root cause A): the escrow is still a v1 seal —
+   *  the same banner asks the member to confirm the household recovery key, then re-seals v2. */
+  escrowNeedsV2?: boolean;
   /** F57: the CURRENT org recovery fingerprint (re-seal target + short-form verify anchor). */
   escrowFingerprint: string;
   /** §C6 (design 2026-07-13-web-offline-cache): this session came in via an OFFLINE unlock whose
@@ -158,7 +161,7 @@ interface Props {
   onRevoked: (kind: SessionEndKind) => void;
 }
 
-export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked }: Props) {
+export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowNeedsV2 = false, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked }: Props) {
   // Usage ledger (spec 02 §8.2) — one per unlocked session. Recording is in-memory and the flush
   // is debounced, because spec 03 §3 forbids a PUT per fill: that would turn the blob's own
   // updatedAt into a keystroke-grade activity trace, which is the leak the single-blob design
@@ -618,7 +621,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         </div>
       )}
 
-      {escrowStale && escrowFingerprint && <ReSealBanner account={account} client={client} escrowFingerprint={escrowFingerprint} />}
+      {(escrowStale || escrowNeedsV2) && escrowFingerprint && <ReSealBanner account={account} client={client} escrowFingerprint={escrowFingerprint} migration={!escrowStale} />}
 
       {/* §C6 (design 2026-07-13-web-offline-cache): an OFFLINE unlock with cached
           recoveryConfirmed !== true PROCEEDS with this persistent, non-dismissable REMINDER —
@@ -1024,7 +1027,7 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
  * hostile server cannot redirect the escrow to an attacker key. Non-blocking: "Later" just leaves
  * it for the next unlock (escrowStale persists server-side until the re-seal lands).
  */
-function ReSealBanner({ account, client, escrowFingerprint }: { account: Account; client: ApiClient; escrowFingerprint: string }) {
+function ReSealBanner({ account, client, escrowFingerprint, migration = false }: { account: Account; client: ApiClient; escrowFingerprint: string; migration?: boolean }) {
   const [open, setOpen] = useState(false);
   const [entry, setEntry] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1063,7 +1066,11 @@ function ReSealBanner({ account, client, escrowFingerprint }: { account: Account
   if (!open) {
     return (
       <div className="banner">
-        <span>Your household's recovery key changed — re-protect this account so it stays recoverable.</span>
+        <span>
+          {migration
+            ? "Confirm your household recovery key — it upgrades how this account is protected for an admin recovery."
+            : "Your household's recovery key changed — re-protect this account so it stays recoverable."}
+        </span>
         <button className="link" onClick={() => setOpen(true)}>Re-protect →</button>
       </div>
     );
@@ -1072,8 +1079,10 @@ function ReSealBanner({ account, client, escrowFingerprint }: { account: Account
     <div className="banner">
       <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", width: "100%" }}>
         <span className="muted">
-          Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. Your master
-          key never leaves this device except sealed to the recovery key you verify below.
+          {migration
+            ? "Confirm the recovery fingerprint from your printed household recovery sheet, then re-protect."
+            : "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect."}{" "}
+          Your master key never leaves this device except sealed to the recovery key you verify below.
         </span>
         {/* Audit F10: this gate's twin in the ENROLLMENT path (Welcome's required-typed check
             block) is a `Field`, so its prompt is associated with its box; here the bare <label>

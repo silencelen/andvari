@@ -36,6 +36,8 @@ object ServerCrypto {
 
     fun newToken(): String = Bytes.toB64(crypto.randomBytes(32))
 
+    fun sha256(data: ByteArray): ByteArray = crypto.sha256(data)
+
     fun hashToken(token: String): String = Bytes.toB64(crypto.sha256(token.encodeToByteArray()))
 
     /** Deterministic 16-byte fake salt for unknown emails (looks real, leaks nothing). */

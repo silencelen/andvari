@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { fromB64, toB64 } from "../crypto/bytes";
 import { fingerprint, openEscrow } from "../crypto/escrow";
+import { identityFingerprint } from "../crypto/sharedgrant";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
@@ -42,7 +43,11 @@ describe("Account vault-lifecycle crypto (spec 03 §11)", () => {
       kdfParams: KDF, recoveryPublicKey: rec1.publicKey, recoveryFingerprint: fp1,
     });
     // Oracle: the UVK recovered from the ORIGINAL escrow (sealed to key #1).
-    const uvk1 = await openEscrow(rec1.publicKey, rec1.privateKey, fromB64(request.escrow!.sealed));
+    const anchor = await identityFingerprint(fromB64(request.identityPub));
+    const identityCheck = { encryptedIdentitySeedB64: request.encryptedIdentitySeed, identityPubB64: request.identityPub };
+    const uvk1 = await openEscrow({
+      recoveryKeypair: rec1, sealed: fromB64(request.escrow!.sealed), expectedUserId: request.userId, expectedIdentityFpPrefix: anchor, identityCheck,
+    });
 
     // Re-ceremony rotates to recovery key #2; the user confirmed fp2 against the new sheet.
     const rec2 = boxKeypairFromSeed(randomBytes(32));
@@ -50,8 +55,11 @@ describe("Account vault-lifecycle crypto (spec 03 §11)", () => {
     const upload = await account.resealEscrowFor(toB64(rec2.publicKey), fp2);
     expect(upload.fingerprint).toBe(fp2);
     // The re-sealed blob opens with key #2 and yields the SAME UVK (data stays recoverable).
-    const uvk2 = await openEscrow(rec2.publicKey, rec2.privateKey, fromB64(upload.sealed));
-    expect(uvk2.key).toBe(uvk1.key);
+    const uvk2 = await openEscrow({
+      recoveryKeypair: rec2, sealed: fromB64(upload.sealed), expectedUserId: request.userId, expectedIdentityFpPrefix: anchor, identityCheck,
+    });
+    expect(uvk2.format).toBe("v2");
+    expect(uvk2.uvk).toEqual(uvk1.uvk);
     expect(uvk2.userId).toBe(account.userId);
 
     // SECURITY: refuse to seal if the fetched pubkey doesn't match the sheet-verified fingerprint —

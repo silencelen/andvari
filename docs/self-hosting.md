@@ -260,15 +260,23 @@ cryptographically verified by clients.
   `GET /metrics` is Prometheus-format, loopback-trust only — scrape from inside the
   network namespace or drop a sidecar; never expose it.
 - **Recovery of a locked-out member** (admin backstop, `required` members): in the web
-  app's **Admin** page, the member's row has **Download backstop key** — that file is the
-  sealed escrow blob. Carry it to an **offline** machine and run
-  `recovery-cli recover <blob>` with the printed seed; it prints a one-time temporary
-  password and writes `andvari-recovery-<userId>.json`. Back in the same Admin row,
+  app's **Admin** page, the member's row has **Download backstop key** — that JSON file is
+  the sealed escrow blob plus the account's identity file. Carry it to an **offline** machine
+  and run `recovery-cli recover --user <their id> --identity-fp <their identity fingerprint>
+  --identity-file <the download>` with the printed seed. The identity fingerprint (32+ hex)
+  must come from outside the server: your own client's view of that member, or the line on
+  the member's own recovery sheet. The tool refuses a backstop key that is not provably that
+  member's, asks you to type `RECOVER <first 8 characters of their id>`, then prints a one-time
+  temporary password and writes `andvari-recovery-<userId>.json`. Without any fingerprint,
+  `--no-identity-anchor` works after a typed acknowledgment, but it cannot detect a
+  server-forged identity and the bundle is marked UNANCHORED. Back in the same Admin row,
   **Apply recovery bundle** takes that JSON (paste it, or pick the file) and posts it as-is
   to the server, which forces a password change and signs the member out everywhere. Hand
   the temporary password over out-of-band (in person, not in the same chat as the bundle),
   then delete the bundle file — until the member completes the forced change it is their
-  login credential. The normative steps are spec 04 §4. The recovery-cli in the image is
+  login credential. After members re-protect their accounts the server keeps each previous
+  backstop key until a fleet drill (`recovery-cli verify`) passes on the new one; paste the
+  receipt it prints into **Admin → Record a fleet drill**. The normative steps are spec 04 §4. The recovery-cli in the image is
   the same tool:
   `docker run --rm -it --network none ghcr.io/silencelen/andvari:<ver> recovery-cli`.
 - **Members' self-service recovery** works out of the box (`/recovery/self/*`): each

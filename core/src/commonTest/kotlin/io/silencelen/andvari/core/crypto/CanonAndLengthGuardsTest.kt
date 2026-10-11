@@ -121,7 +121,7 @@ class CanonAndLengthGuardsTest {
     }
 
     /**
-     * The sha256 self-check inside [Escrow.open] passes for a key of ANY length — it only proves
+     * The sha256 self-check inside the v1 parse ([Escrow.parseV1], behind [Escrow.open]) passes for a key of ANY length — it only proves
      * the blob is internally consistent. recovery-cli's `recover` re-wraps whatever comes back as
      * the victim's temporary wrappedUvk, so a short key would reach libsodium at their next
      * unlock; the length assertion belongs in the shared helper, not in one CLI subcommand.
@@ -135,12 +135,13 @@ class CanonAndLengthGuardsTest {
             recovery.publicKey,
             Escrow.canonicalPayload(userId, Escrow.KEY_TYPE_UVK, shortKey, crypto),
         )
-        val e = assertFailsWith<CryptoException> {
-            Escrow.open(crypto, recovery.publicKey, recovery.privateKey, sealed)
+        val e = assertFailsWith<EscrowOpenException> {
+            Escrow.parseV1(crypto, crypto.sealOpen(recovery.publicKey, recovery.privateKey, sealed))
         }
+        assertEquals(EscrowVerdict.V1_MALFORMED, e.verdict)
         assertTrue(e.message!!.contains("not 32 bytes"), "expected a length refusal, got: ${e.message}")
-        // A well-formed blob still opens — the guard adds a rule, it doesn't change the format.
-        val good = Escrow.sealUvk(crypto, recovery.publicKey, userId, crypto.randomBytes(32))
-        assertEquals(Escrow.KEY_TYPE_UVK, Escrow.open(crypto, recovery.publicKey, recovery.privateKey, good).keyType)
+        // A well-formed blob still parses — the guard adds a rule, it doesn't change the format.
+        val good = Escrow.sealUvkV1(crypto, recovery.publicKey, userId, crypto.randomBytes(32))
+        assertEquals(Escrow.KEY_TYPE_UVK, Escrow.parseV1(crypto, crypto.sealOpen(recovery.publicKey, recovery.privateKey, good)).keyType)
     }
 }

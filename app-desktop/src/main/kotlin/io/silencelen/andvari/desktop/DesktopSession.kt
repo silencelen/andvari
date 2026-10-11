@@ -275,6 +275,24 @@ class DesktopSessionStore(
             // params -> null = cache miss -> the caller refetches through the fenced AndvariApi.
             ?.takeIf { runCatching { io.silencelen.andvari.core.client.KdfUpgrade.requireServerKdfParams(it.kdfParams) }.isSuccess }
 
+    private fun selfIdentityFile(key: String, userId: String) = File(nsDir(key, userId), "self-identity-pub")
+
+    /**
+     * Design §2.4 (security review 2026-10, root cause A): the seed-derived identityPub this device saw
+     * the first time it unlocked [userId] on origin [key] ([SelfIdentityPin]). PUBLIC data, kept beside
+     * the account keys but deliberately NOT removed by [clearAccountKeys] / [clear] / a revocation
+     * purge: an admin recovery revokes every session first, and a pin wiped with the session would
+     * protect nothing.
+     */
+    fun loadSelfIdentityPub(key: String, userId: String): ByteArray? =
+        io.silencelen.andvari.core.client.SelfIdentityPin.decode(runCatching { selfIdentityFile(key, userId).readText() }.getOrNull())
+
+    /** Record the pin once, from an unlock that passed; never overwritten afterwards. */
+    fun recordSelfIdentityPub(key: String, userId: String, account: io.silencelen.andvari.core.client.Account) {
+        val f = selfIdentityFile(key, userId)
+        if (!f.exists()) f.writeTextOwnerOnly(io.silencelen.andvari.core.client.SelfIdentityPin.encode(account))
+    }
+
     /** §4.2: per-origin — clearing keys for one origin never touches another's namespace. */
     fun clearAccountKeys(key: String, userId: String) { accountKeysFile(key, userId).delete() }
 
