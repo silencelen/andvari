@@ -13,7 +13,7 @@ import { boxKeypairFromSeed, randomBytes, sealTo, signKeypairFromSeed } from "..
 import { openSharedGrant, sealSharedGrant } from "../crypto/sharedgrant";
 import { buildGrantFrame, openSignedGrant } from "../crypto/signedgrant";
 import { initSodium } from "../crypto/sodium";
-import { Account, VaultKeyNotVerifiedError } from "./account";
+import { Account, legacyTagOf, VaultKeyNotVerifiedError } from "./account";
 import { memoryClientState } from "./accountstatesync";
 import type { Contact } from "./accountstate";
 import { IdbVaultCache, openVaultCache } from "./idbcache";
@@ -522,10 +522,10 @@ describe("A6 fix round", () => {
     const d2 = await unlock(w.member);
     const s2 = new VaultStore(server2.asClient(), d2, undefined, local);
     await s2.sync();
-    expect(d2.hasVault(w.vaultId)).toBe(true);
-    expect(d2.isLegacyReadOnly(w.vaultId)).toBe(true);
+    // Round 3 (the vouch gate): the swapped-in key is not even held read-only; it is refused as vk_mismatch.
+    expect(d2.hasVault(w.vaultId)).toBe(false);
+    expect(d2.grantAnomalies().get(w.vaultId)).toBe("vk_mismatch");
     expect(server2.selfWraps).toEqual([]);
-    expect(() => d2.encryptItem(w.vaultId, d2.newItemId(), { type: "login", name: "x" })).toThrow(VaultKeyNotVerifiedError);
   });
 
   it("HIGH-1: the vouch restores from persisted state on reload; a line with no tag is ignored", async () => {
@@ -764,6 +764,118 @@ describe("A6 fix round", () => {
     expect(store.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["unopenable"]);
     expect(store.legacyReviewVaults()).toEqual([]);
     await expect(store.acceptLegacyVault(w.vaultId)).rejects.toBeTruthy();
+  });
+});
+
+// ---- A6 re-review round 3: ONE vouch gate on every key-source path (core SignedGrantEngineTest twins) ----
+
+async function signedBy(w: World, signer: Enrolled, vk: Uint8Array): Promise<string> {
+  const frame = buildGrantFrame(signKeypairFromSeed(await seedOf(signer)), {
+    purpose: "vault-grant", from: signer.userId, to: w.member.userId, toKey: fromB64(w.member.identityPub), vaultId: w.vaultId,
+    grantId: randomBytes(16), issuedAt: 1_791_590_400_000, vk,
+  });
+  return toB64(sealTo(fromB64(w.member.identityPub), frame));
+}
+const sealFor = (w: World, vk: Uint8Array) => toB64(sealSharedGrant(fromB64(w.member.identityPub), w.vaultId, vk));
+async function wrapFor(w: World, vk: Uint8Array): Promise<string> {
+  return toB64(seal(await uvkOf(w.member), vk, adVk(w.vaultId, w.member.userId)));
+}
+
+/** A device that vouched for the real key K (Accept) and pinned the owner, restarted, then served [rows] in order. */
+async function vouchedThenServe(w: World, rows: (WireGrant | null)[]): Promise<{ d: Account; store: VaultStore; server: FakeServer }> {
+  const local = memoryClientState();
+  const first = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)));
+  const s1 = new VaultStore(first.asClient(), await unlock(w.member), undefined, local);
+  await s1.sync();
+  await s1.acceptLegacyVault(w.vaultId);
+  await s1.accountState.pin(pinOf(w.owner, "Owner"));
+  const server = new FakeServer(feed(w, 10, null));
+  server.accountStateBlob = first.accountStateBlob;
+  server.accountSeq = first.accountSeq;
+  const d = await unlock(w.member);
+  const store = new VaultStore(server.asClient(), d, undefined, local);
+  let rev = 12;
+  for (const row of rows) {
+    server.feed = feed(w, rev, row ? { ...row, rev } : null);
+    await store.sync();
+    rev += 3;
+  }
+  return { d, store, server };
+}
+
+async function assertVouchHolds(w: World, kPrime: Uint8Array, d: Account, store: VaultStore, server: FakeServer, ruleTwo: boolean, label: string) {
+  const heldIsKPrime = d.hasVault(w.vaultId) && d.legacyKeyTag(w.vaultId) === legacyTagOf(kPrime);
+  if (ruleTwo) {
+    expect(heldIsKPrime, `${label}: the UVK wrap is used (A1)`).toBe(true);
+    expect(d.grantAnomalies().get(w.vaultId), `${label}: flagged`).toBe("vk_mismatch");
+  } else {
+    expect(heldIsKPrime, `${label}: K' never held`).toBe(false);
+  }
+  if (heldIsKPrime) {
+    expect(d.selfWrapAuthorized(w.vaultId), `${label}: never self-wrapped`).toBe(false);
+    expect(() => d.buildOwnerWrap(w.vaultId), `${label}: never owner-wrapped`).toThrow();
+  }
+  for (const sw of server.selfWraps) {
+    expect(toB64(await opensTo(w.member, sw.wrappedVk, w.vaultId)), `${label}: no self-wrap of K'`).not.toBe(toB64(kPrime));
+  }
+  expect(store.legacyReviewVaults().some((r) => r.vaultId === w.vaultId), `${label}: no Accept offer`).toBe(false);
+  await expect(store.acceptLegacyVault(w.vaultId), `${label}: Accept refuses`).rejects.toBeTruthy();
+}
+
+describe("A6 re-review round 3 — the vouch gate", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  it("holds for every row shape, single-pull and two-pull", async () => {
+    const third = await enroll("a6-unpinned-sender");
+    const shapes: [string, (w: World, k: Uint8Array) => Promise<WireGrant | null>][] = [
+      ["wrap", async (w, k) => ({ ...memberRow(w, 0, null, null), wrappedVk: await wrapFor(w, k) })],
+      ["v2", async (w, k) => memberRow(w, 0, null, await signedBy(w, w.owner, k))],
+      ["v2+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), await signedBy(w, w.owner, k))],
+      ["seal", async (w, k) => memberRow(w, 0, sealFor(w, k), null)],
+      ["pending+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), await signedBy(w, third, k))],
+      ["broken+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), toB64(randomBytes(200)))],
+      ["absent", async () => null],
+    ];
+    for (const [name, shape] of shapes) {
+      for (const twoPull of [false, true]) {
+        const w = await world();
+        const kPrime = randomBytes(32);
+        const rows = twoPull ? [memberRow(w, 0, sealFor(w, kPrime), null), await shape(w, kPrime)] : [await shape(w, kPrime)];
+        const { d, store, server } = await vouchedThenServe(w, rows);
+        await assertVouchHolds(w, kPrime, d, store, server, name === "wrap", `${name}/${twoPull ? "two-pull" : "single"}`);
+      }
+    }
+  }, 120_000);
+
+  it("MEDIUM-B: seal for K_s then a verified v2 for K_s never promotes K_s against the vouch", async () => {
+    const w = await world();
+    const ks = randomBytes(32);
+    const { d, store, server } = await vouchedThenServe(w, [memberRow(w, 0, sealFor(w, ks), null), memberRow(w, 0, sealFor(w, ks), await signedBy(w, w.owner, ks))]);
+    expect(d.keySource(w.vaultId)).not.toBe("signed-grant");
+    expect(store.notices().some((n) => n.kind === "grant-anomaly" && n.reason === "vk_mismatch")).toBe(true);
+    await assertVouchHolds(w, ks, d, store, server, false, "MEDIUM-B");
+  });
+
+  it("LOW-E: a v1 seal for another key than the vouch is vk_mismatch, not an Accept offer", async () => {
+    const w = await world();
+    const k = randomBytes(32);
+    const { d, store, server } = await vouchedThenServe(w, [memberRow(w, 0, sealFor(w, k), null)]);
+    expect(store.notices().some((n) => n.kind === "grant-anomaly" && n.reason === "vk_mismatch")).toBe(true);
+    await assertVouchHolds(w, k, d, store, server, false, "LOW-E");
+  });
+
+  it("LOW-F: another device's UVK wrap for another key is used but flagged", async () => {
+    const w = await world();
+    const k = randomBytes(32);
+    const { d, store, server } = await vouchedThenServe(w, [{ ...memberRow(w, 0, null, null), wrappedVk: await wrapFor(w, k) }]);
+    expect(d.keySource(w.vaultId)).toBe("uvk-wrap");
+    expect(store.notices().some((n) => n.kind === "grant-anomaly" && n.reason === "vk_mismatch")).toBe(true);
+    await assertVouchHolds(w, k, d, store, server, true, "LOW-F");
   });
 });
 

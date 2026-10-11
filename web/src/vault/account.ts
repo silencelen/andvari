@@ -614,7 +614,9 @@ export class Account {
       if (this.keySources.get(grant.vaultId) === "legacy-seal" && grant.signedGrant) {
         const o = this.openSigned(grant, null);
         if (o.verdict === "adopt") {
-          if (ctEquals(o.vk, held)) {
+          // Round 3 MEDIUM-B: promotion goes through the vouch gate too — a held key that contradicts this device's
+          // vouch is never promoted, even when a verified grant carries that same key.
+          if (ctEquals(o.vk, held) && this.vouchGate(grant.vaultId, held) !== "mismatch") {
             this.keySources.set(grant.vaultId, "signed-grant");
             this.signedGrantFrom.set(grant.vaultId, o.from);
             this.pendingGrantsByVault.delete(grant.vaultId);
@@ -715,7 +717,9 @@ export class Account {
       const sealVk = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
       // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it.
       const signedDiffers = !!grant.signedGrant && this.openSigned(grant, vk).verdict === "vk_mismatch";
-      return { vk, source: "uvk-wrap", sealMismatch: (sealVk !== null && !ctEquals(sealVk, vk)) || signedDiffers };
+      // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
+      const gate = this.vouchGate(grant.vaultId, vk) === "mismatch" ? ("vk_mismatch" as GrantVerdict) : undefined;
+      return { vk, source: "uvk-wrap", sealMismatch: (sealVk !== null && !ctEquals(sealVk, vk)) || signedDiffers, anomaly: gate };
     }
     // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
     if (grant.signedGrant) {
@@ -727,8 +731,7 @@ export class Account {
         // MED-2 / re-review MEDIUM-A: decided from the device-local vouch TAG, not from whether the server kept
         // the v1 seal. A verified grant naming a DIFFERENT key than the vouched one is vk_mismatch: keep the vouched
         // key when the seal still opens to it, otherwise refuse the row with no key. Never adopt it.
-        const vouch = this.legacyVouches.get(grant.vaultId);
-        if (vouch && vouch.tag !== legacyTagOf(o.vk)) {
+        if (this.vouchGate(grant.vaultId, o.vk) === "mismatch") {
           if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false, anomaly: "vk_mismatch" };
           throw new GrantRefusedSignal("vk_mismatch");
         }
@@ -747,18 +750,38 @@ export class Account {
     // through the graded function (LOW-3): post-window, a key with no pre-upgrade evidence is refused outright.
     if (grant.sealedVk) {
       const vk = openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk));
+      // Round 3 LOW-E: a seal for another key than this device's vouch is vk_mismatch, not a read-only key waiting
+      // for an "Accept anyway" that would overwrite the vouch.
+      if (this.vouchGate(grant.vaultId, vk) === "mismatch") throw new GrantRefusedSignal("vk_mismatch");
       if (this.legacyModeFor(grant.vaultId, vk) === "refused") throw new CryptoError(`legacy grant for ${grant.vaultId} refused (compatibility window closed)`);
       return { vk, source: "legacy-seal", sealMismatch: false };
     }
     throw new CryptoError(`grant for ${grant.vaultId} carries no key`);
   }
 
-  /** The row's v1 seal key, only when it is the key this device vouched for (tag match). */
+  /**
+   * THE vouch gate (A6 re-review round 3: one rule, every key-source path; core `Account.vouchGate` twin). While
+   * this device holds a §8.2 vouch for `vaultId`, a key whose SHA-256 differs from the vouch tag is "mismatch": it
+   * is never adopted writable, never promoted, never self-wrapped, owner-wrapped, signed onward or transferred, and
+   * never offered for "Accept anyway". Only rule 2 (our own UVK wrap, canonical per A1) still USES such a key, and
+   * flags vk_mismatch. Every key-source decision in this class routes through here.
+   */
+  vouchGate(vaultId: string, key: Uint8Array | null | undefined): "no-vouch" | "ok" | "mismatch" {
+    const v = this.legacyVouches.get(vaultId);
+    if (!v) return "no-vouch";
+    return key && legacyTagOf(key) === v.tag ? "ok" : "mismatch";
+  }
+
+  /** True when the key HELD for `vaultId` contradicts this device's vouch for it. */
+  heldKeyContradictsVouch(vaultId: string): boolean {
+    return this.vaultKeys.has(vaultId) && this.vouchGate(vaultId, this.vaultKeys.get(vaultId)) === "mismatch";
+  }
+
+  /** The row's v1 seal key, only when the gate says it IS the vouched key. */
   private vouchedSealKey(grant: WireGrant): Uint8Array | null {
-    const v = this.legacyVouches.get(grant.vaultId);
-    if (!v || !grant.sealedVk) return null;
+    if (!grant.sealedVk) return null;
     const k = this.openSealOrNull(grant.vaultId, grant.sealedVk);
-    return k && legacyTagOf(k) === v.tag ? k : null;
+    return k && this.vouchGate(grant.vaultId, k) === "ok" ? k : null;
   }
 
   /**
@@ -836,7 +859,7 @@ export class Account {
    * key only an unconfirmed v1 seal vouches for is never wrapped (the A1 trust-laundering bug).
    */
   selfWrapAuthorized(vaultId: string): boolean {
-    if (!this.vaultKeys.has(vaultId)) return false;
+    if (!this.vaultKeys.has(vaultId) || this.heldKeyContradictsVouch(vaultId)) return false;
     const src = this.keySources.get(vaultId);
     if (src === "signed-grant") return true;
     const mode = this.heldLegacyMode(vaultId);
@@ -908,7 +931,7 @@ export class Account {
    * from an unconfirmed v1 seal (signing it would launder it to the member). The signing secret never leaves here.
    */
   buildSignedGrant(vaultId: string, pin: Contact): string {
-    if (this.isLegacyReadOnly(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    if (this.isLegacyReadOnly(vaultId) || this.heldKeyContradictsVouch(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     if (pin.userId === this.userId) throw new CryptoError("a vault grant cannot be addressed to its sender");
     const pinKey = fromB64(pin.identityPub);
     const frame = buildGrantFrame(
@@ -1316,7 +1339,7 @@ export class Account {
    */
   buildOwnerWrap(vaultId: string): string {
     // A transfer accept must not launder a key only an unconfirmed v1 seal vouches for (root cause A §8.2).
-    if (this.isLegacyReadOnly(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    if (this.isLegacyReadOnly(vaultId) || this.heldKeyContradictsVouch(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     return this.roundTripWrap(vaultId, "owner wrap");
   }
 
