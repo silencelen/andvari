@@ -294,14 +294,19 @@ The invariant (build-contract §F.1, CRITICAL):
 > as out-of-band-verified. A fingerprint is an anchor only when a **human** or a
 > **build-baked** value put it there.
 
-- **In-person QR (client-composed, full T10 guarantee):** the **admin** type-confirms the
-  org short-fingerprint against the printed sheet at compose time (the
-  `Account.resealEscrowFor` verified-fingerprint discipline) and the admin's own client
-  stamps *that confirmed value* as the enroll link's `rfp` — never a `/admin/status` or
-  `/client-policy` fetch. The invitee scans the QR off the admin's screen (bypassing the
-  server) and eyeball-confirms the displayed `rfp` matches what the admin shows — a
-  one-tap confirm, not a 16-char type. This `rfp` is as trustworthy as the old printed
-  sheet.
+- **In-person QR (client-composed, full T10 guarantee; security review 2026-10, root cause A,
+  A5):** the **admin** TYPES the first 32 hex of the printed sheet, which must match the FULL
+  fingerprint the admin's client computes from the served recovery key; the confirmed value is that
+  full 64-hex fingerprint, and the admin's own client stamps it as the enroll link's `rfp` — never a
+  `/admin/status` or `/client-policy` fetch, never a short id. The QR also carries the admin's own
+  identity (`ifp`, `iu`), and the admin's screen shows the link's **in-person code** (spec 03 §7).
+  The invitee scans the QR and TYPES the in-person code from the admin's screen; only then does the
+  client honour the link: the served recovery key must hash to `rfp` at FULL length, the escrow seal's
+  verified fingerprint is that `rfp`, and the admin is pinned as a household contact (`method:
+  "enrol"`) iff the key served for `iu` hashes to `ifp` at full length. The enrolment ends on the
+  invitee's identity QR for the admin to scan (or type), pinning the invitee: one in-person
+  enrolment, a mutual pin. Until A5 the invitee eyeball-confirmed a 16-hex `rfp` on any NAVIGATED
+  link, which a server-composed link could satisfy; the typed code is the provenance it lacked.
 - **Emailed / remote (server-composed):** the emailed link is composed on the server, so a
   hostile server could stamp a fingerprint it controls — TOFU-from-server, only as
   trustworthy as the server at compose time (spec 05 R8/T1). Therefore the server-composed
@@ -312,7 +317,7 @@ The invariant (build-contract §F.1, CRITICAL):
   discourages it.
 - **Fail-safe polarity:** a **missing** `rfp` ⇒ fall back to the typed-sheet ceremony (or,
   if waived, to nothing) — **NEVER** auto-trust the server pubkey. A **present** `rfp` is
-  honored only via the in-person affirmation above. The server can force "missing" (safe)
+  honored only via the in-person affirmation above, i.e. after the typed in-person code matches. The server can force "missing" (safe)
   but can never force silent auto-trust. The invitee client cannot cryptographically tell a
   client-composed link from a server-composed one (no shared enroll secret; identity keys
   are box, not signing, keys), so provenance is a **human** decision the UI surfaces, never
