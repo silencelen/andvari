@@ -79,4 +79,13 @@ class LifecycleNoticeCopyTest {
         val missing = LifecycleNotice(id = "n4", vaultId = "v3", vaultName = "Family", kind = "write-rejected")
         assertEquals(HouseholdCopy.writeRejectedNotice(0, "Family", null), noticeBody(missing).first)
     }
+
+    /** Root cause A §3.1: the two key-precedence notices render the canon, in the danger tone. */
+    @Test
+    fun keyPrecedenceNoticesRenderTheCanonAsWarnings() {
+        val mismatch = LifecycleNotice(id = "n2", vaultId = "v1", vaultName = "Household", kind = "vk-mismatch")
+        assertEquals(Pair(HouseholdCopy.vkMismatchNotice("Household"), true), noticeBody(mismatch))
+        val unreadable = LifecycleNotice(id = "n3", vaultId = "v1", vaultName = "", kind = "key-unreadable")
+        assertEquals(Pair(HouseholdCopy.KEY_UNREADABLE_NOTICE, true), noticeBody(unreadable))
+    }
 }

@@ -7,6 +7,7 @@ import kotlinx.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * Pins every [HouseholdCopy] sentence VERBATIM (the extension errors.test.ts idiom, #23):
@@ -175,6 +176,16 @@ class HouseholdCopyTest {
         )
         // The retired wordings must not creep back on any surface (see the KDoc's decision notes).
         assertFalse(HouseholdCopy.replayDeniedNotice(2, "Household").contains("your role"))
+    }
+
+    /** Root cause A §3.1: the key-precedence notices, pinned verbatim (web pins its twins to this source). */
+    @Test
+    fun keyPrecedenceNotices_pinnedVerbatim() {
+        assertEquals(
+            "The server sent a key for “Household” that doesn't match the one saved for your account. andvari kept your own key and ignored the other. Tell your admin — the server may be misbehaving.",
+            HouseholdCopy.vkMismatchNotice("Household"),
+        )
+        assertTrue(HouseholdCopy.KEY_UNREADABLE_NOTICE.startsWith("The key for one of your vaults is unreadable — tell your admin."))
     }
 
     // ---- forError: the shared map ----

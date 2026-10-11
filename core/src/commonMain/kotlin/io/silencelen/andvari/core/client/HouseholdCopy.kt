@@ -265,6 +265,25 @@ object HouseholdCopy {
     // ---- lifecycle-notice copy (spec 03 §11) ----
 
     /**
+     * Security review 2026-10, root cause A §3.1: a grant row carried a seal (which the server can
+     * mint) whose key differs from the one wrapped under this account's own UVK. The client kept
+     * its own key and refused the seal; nothing was lost, so the copy says so, and names the one
+     * party who can look at the server. Danger tone on every surface. TWIN of web Vault.tsx
+     * noticeBody "vk-mismatch", byte-equal, pinned by web/src/ui/vault-copy.test.ts.
+     */
+    fun vkMismatchNotice(vaultName: String): String =
+        "The server sent a key for “$vaultName” that doesn't match the one saved for your account. andvari kept your own key and ignored the other. Tell your admin — the server may be misbehaving."
+
+    /**
+     * Root cause A §3.1: this account's own UVK wrap of a vault key is present and does not open,
+     * so the vault stays closed rather than fall back to a seal the server could have minted. The
+     * vault's name cannot be decrypted without its key, hence no name. TWIN of web Vault.tsx
+     * noticeBody "key-unreadable", byte-equal, pinned by web/src/ui/vault-copy.test.ts.
+     */
+    const val KEY_UNREADABLE_NOTICE: String =
+        "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made."
+
+    /**
      * TWIN of web Vault.tsx noticeBody's "replay-denied" branch (android SharingScreen +
      * desktop Ui call this directly). Not an error map: the §11 notices are calm statements,
      * and this is the one whose sentence INTERPOLATES (count + vault name) — which is why it

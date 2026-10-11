@@ -989,6 +989,21 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
           `A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). ` +
           `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
       };
+    case "vk-mismatch":
+      // Root cause A §3.1 (security review 2026-10): our own UVK-wrapped key was kept and a
+      // conflicting seal refused. TWIN of core HouseholdCopy.vkMismatchNotice, byte-equal, pinned
+      // by vault-copy.test.ts.
+      return {
+        warn: true,
+        body: `The server sent a key for “${name}” that doesn't match the one saved for your account. andvari kept your own key and ignored the other. Tell your admin — the server may be misbehaving.`,
+      };
+    case "key-unreadable":
+      // Root cause A §3.1: our UVK wrap is present and does not open; no seal fallback. TWIN of
+      // core HouseholdCopy.KEY_UNREADABLE_NOTICE, byte-equal, pinned by vault-copy.test.ts.
+      return {
+        warn: true,
+        body: "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made.",
+      };
     case "meta-regression":
       // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV regressed below the
       // one held here was kept as-is (anti-replay). Calm, informational — never an error tone.

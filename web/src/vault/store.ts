@@ -112,7 +112,11 @@ export interface LifecycleNotice {
     | "replay-denied"
     | "write-refused"
     | "write-rejected"
-    | "meta-regression";
+    | "meta-regression"
+    // Root cause A §3.1 (security review 2026-10): a grant row carried a seal whose key differs from
+    // our own UVK wrap (ours was kept), or our UVK wrap is present and does not open (no seal fallback).
+    | "vk-mismatch"
+    | "key-unreadable";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
   /** verified delete: N of the member's edits parked for replay on restore (F21).
@@ -346,6 +350,10 @@ export class VaultStore {
    *  lifecycle notices; cleared automatically when a later pull opens the grant, the grant is
    *  revoked, or a resync no longer re-delivers it. */
   private undecryptableGrants = new Set<string>();
+  /** "kind|vaultId" key anomalies already surfaced this session (root cause A §3.1: show once). */
+  private readonly keyAnomaliesShown = new Set<string>();
+  /** Vaults whose member self-wrap this session already tried to post (root cause A §3.2). */
+  private readonly selfWrapAttempted = new Set<string>();
 
   // ---- durable offline cache (design 2026-07-13 §D) ----
   /** §D.1: the in-flight pull's buffered cache ops. Helpers reached from the pull
@@ -553,6 +561,7 @@ export class VaultStore {
     // one has settled). Bounded: one extra pull per sync; a bell landing during THIS pull is
     // caught by its own syncNow's comparison after it joins.
     if (this.bellRev > this.cursor) await this.pull();
+    await this.postSelfWraps();
     try {
       await this.surfaceStagedDenials();
     } finally {
@@ -595,7 +604,7 @@ export class VaultStore {
    * while an older pull is still in flight — the epoch counters classify it correctly.
    */
   private pull(): Promise<void> {
-    this.syncInFlight ??= this.pullOnce().finally(() => {
+    this.syncInFlight ??= this.pullOnce().then(() => this.surfaceKeyAnomalies()).finally(() => {
       this.syncInFlight = null;
     });
     return this.syncInFlight;
@@ -708,7 +717,10 @@ export class VaultStore {
         // PERSISTENT "can't open this shared vault on this device" warning until a later pull opens
         // it. Guarded on !heldBefore so a re-delivered grant for a vault we ALREADY hold (a role
         // update whose sealedVk happens to fail to re-open) never fabricates a false warning.
-        if (!heldBefore) this.undecryptableGrants.add(grant.vaultId);
+        // A damaged UVK wrap (root cause A §3.1) is its own "key unreadable" notice, not F20's
+        // "sealed to another device" — the copy for F20 would send the member to the wrong fix.
+        if (this.account.keyUnreadable(grant.vaultId)) this.undecryptableGrants.delete(grant.vaultId);
+        else if (!heldBefore) this.undecryptableGrants.add(grant.vaultId);
       }
     }
     for (const delivered of resp.vaults) {
@@ -1250,8 +1262,9 @@ export class VaultStore {
         this.undecryptableGrants.delete(grant.vaultId);
       } catch {
         // F20 recompute: the same persistent "can't open this shared vault" warning a
-        // pull maintains; cleared when a later pull delivers an openable grant.
-        this.undecryptableGrants.add(grant.vaultId);
+        // pull maintains; cleared when a later pull delivers an openable grant. A damaged UVK
+        // wrap is the separate "key unreadable" notice instead (root cause A §3.1).
+        if (!this.account.keyUnreadable(grant.vaultId)) this.undecryptableGrants.add(grant.vaultId);
       }
     }
     for (const vault of await this.cache.vaults()) {
@@ -1338,6 +1351,7 @@ export class VaultStore {
     for (const m of await this.cache.pending()) this.pendingSyncItemIds.add(m.itemId);
     this.cursor = await this.cache.cursor();
     this._lastSyncAt = await this.cache.lastSyncAt();
+    this.surfaceKeyAnomalies();
   }
 
   /**
@@ -1840,6 +1854,49 @@ export class VaultStore {
           kind: "transfer-anomaly",
           newOwnerUserId: lt.newOwnerUserId,
         });
+      }
+    }
+  }
+
+  /**
+   * Canonical-key precedence, the surfacing half (security review 2026-10, root cause A §3.1; core
+   * `SyncEngine.surfaceKeyAnomalies` twin): Account.addGrant already kept our UVK-wrapped key and
+   * refused the seal, or refused a damaged wrap outright; this raises the house "server may be
+   * misbehaving" notice ONCE per vault per session. Rebuilt from the cached rows on every hydrate,
+   * so a server that keeps serving the bad row is reported again next session.
+   */
+  private surfaceKeyAnomalies(): void {
+    for (const vaultId of this.account.vkMismatchVaultIds()) {
+      if (this.keyAnomaliesShown.has(`vk-mismatch|${vaultId}`)) continue;
+      this.keyAnomaliesShown.add(`vk-mismatch|${vaultId}`);
+      const v = this.vaultsById.get(vaultId);
+      const vaultName = v ? this.account.decryptVaultName(vaultId, v.metaBlob) : "(vault)";
+      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName, kind: "vk-mismatch" });
+    }
+    for (const vaultId of this.account.keyUnreadableVaultIds()) {
+      if (this.keyAnomaliesShown.has(`key-unreadable|${vaultId}`)) continue;
+      this.keyAnomaliesShown.add(`key-unreadable|${vaultId}`);
+      // No key, so the name cannot be decrypted: the copy falls back to "a vault".
+      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: "", kind: "key-unreadable" });
+    }
+  }
+
+  /**
+   * Member self-wrap (root cause A §3.2; core `SyncEngine.postSelfWraps` twin): for every vault whose
+   * key this session adopted from a v1 seal while our row carries no UVK wrap, build the wrap
+   * (round-trip verified) and store it with `PUT /vaults/{id}/grant/self-wrap`. Best effort, tried
+   * once per vault per session; a failure (an older server, the public origin, offline) leaves the
+   * seal path working exactly as before. The server's grant-rev bump re-delivers the row to every
+   * device of this account.
+   */
+  private async postSelfWraps(): Promise<void> {
+    for (const grant of [...this.grantWireByVault.values()]) {
+      if (!this.account.needsSelfWrap(grant) || this.selfWrapAttempted.has(grant.vaultId)) continue;
+      this.selfWrapAttempted.add(grant.vaultId);
+      try {
+        await this.api.putGrantSelfWrap(grant.vaultId, { wrappedVk: this.account.buildSelfWrap(grant.vaultId) });
+      } catch {
+        /* best effort — the seal still opens; the next session retries */
       }
     }
   }

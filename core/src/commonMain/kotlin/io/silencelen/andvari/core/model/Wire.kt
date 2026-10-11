@@ -407,6 +407,14 @@ data class TransferOfferResponse(val rev: Long, val expiresAt: Long)
 @Serializable
 data class TransferAcceptRequest(val offerId: String, val wrappedVk: String, val proof: String)
 
+/**
+ * Member self-wrap (security review 2026-10, root cause A §3.2): `PUT /vaults/{id}/grant/self-wrap`.
+ * [wrappedVk] = `Envelope(UVK, VK, Ad.vk(vaultId, userId))` built by the member's own client; the
+ * server stores it on the caller's own active non-owner grant (≤ 1 KiB) and cannot open it.
+ */
+@Serializable
+data class SelfWrapRequest(val wrappedVk: String)
+
 @Serializable
 data class VaultMetaUpdateRequest(val metaBlob: String, val baseVaultRev: Long? = null)
 

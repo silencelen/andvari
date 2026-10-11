@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PushRequest
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RemovedGrantInfo
+import io.silencelen.andvari.core.model.SelfWrapRequest
 import io.silencelen.andvari.core.model.TransferAcceptRequest
 import io.silencelen.andvari.core.model.TransferOfferRequest
 import io.silencelen.andvari.core.model.VaultDeleteRequest
@@ -56,7 +57,10 @@ data class LifecycleNotice(
      *  transfer-anomaly | replay-denied | write-rejected. `added` (H71) and `write-rejected`
      *  (H03/H19) are the web store's twins: "You were added to X" for a genuinely new
      *  non-owner grant, and "N offline changes to X couldn't be applied — <reason>" for
-     *  queue rows the server definitively refused and the drain durably dropped. */
+     *  queue rows the server definitively refused and the drain durably dropped.
+     *  `vk-mismatch` / `key-unreadable` (security review 2026-10, root cause A §3.1): a grant row
+     *  carried a seal whose key differs from our own UVK wrap (ours was kept), or our UVK wrap is
+     *  present and does not open (no seal fallback; the vault stays keyless). */
     val kind: String,
     /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
     val purgeAt: Long? = null,
@@ -182,6 +186,10 @@ class SyncEngine(
     // live in [VaultCache].
     /** Notices awaiting the UI banner. */
     private val noticeList = mutableListOf<LifecycleNotice>()
+    /** "kind|vaultId" key anomalies already surfaced this engine (root cause A §3.1: show once). */
+    private val keyAnomaliesShown = mutableSetOf<String>()
+    /** Vaults whose member self-wrap this engine already tried to post (root cause A §3.2). */
+    private val selfWrapAttempted = mutableSetOf<String>()
     /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no
      *  banner). One-shot AND scoped to the action's own reconcile (removed in a finally
      *  there), so a failed reconcile can never leave a stale entry that would misread a
@@ -443,6 +451,7 @@ class SyncEngine(
         flushQueue()
         pull()
         surfaceStagedDenials()
+        postSelfWraps()
     }
 
     /**
@@ -490,6 +499,7 @@ class SyncEngine(
         for (v in cache.vaults()) {
             runCatching { applyTransferState(v, noticeable = false) }
         }
+        surfaceKeyAnomalies()
     }
 
     /** Close the underlying cache (must precede deleting its DB file — Windows file locks). */
@@ -565,6 +575,43 @@ class SyncEngine(
         drainReplayDenied()
 
         materializeOutstandingConflicts()
+        surfaceKeyAnomalies()
+    }
+
+    /**
+     * Canonical-key precedence, the surfacing half (security review 2026-10, root cause A §3.1):
+     * [Account.addGrant] already kept our own UVK-wrapped key and refused the seal, or refused a
+     * damaged wrap outright; this turns those verdicts into the house "server may be misbehaving"
+     * signal, ONCE per vault per engine. The key verdicts are rebuilt from the cached rows on
+     * every hydrate, so a server that keeps serving the bad row is reported again next session.
+     */
+    private fun surfaceKeyAnomalies() {
+        for (vaultId in account.vkMismatchVaultIds()) {
+            if (!keyAnomaliesShown.add("vk-mismatch|$vaultId")) continue
+            val name = cache.vaults().firstOrNull { it.vaultId == vaultId }
+                ?.let { account.decryptVaultName(vaultId, it.metaBlob) } ?: VAULT_NAME_FALLBACK
+            pushNotice(LifecycleNotice(account.newItemId(), vaultId, name, "vk-mismatch"))
+        }
+        for (vaultId in account.keyUnreadableVaultIds()) {
+            if (!keyAnomaliesShown.add("key-unreadable|$vaultId")) continue
+            // No key, so the name cannot be decrypted: the copy falls back to "a vault".
+            pushNotice(LifecycleNotice(account.newItemId(), vaultId, "", "key-unreadable"))
+        }
+    }
+
+    /**
+     * Member self-wrap (root cause A §3.2): for every vault whose key this device adopted from a
+     * v1 seal while our row carries no UVK wrap, build the wrap ([Account.buildSelfWrap], round-trip
+     * verified) and store it with `PUT /vaults/{id}/grant/self-wrap`. Best effort and tried once
+     * per vault per engine: a failure (an older server without the route, the public origin,
+     * offline) leaves the seal path working exactly as before, and the next session retries.
+     * The server's grant-rev bump re-delivers the row to every device of this account.
+     */
+    private suspend fun postSelfWraps() {
+        for (g in cache.grants()) {
+            if (!account.needsSelfWrap(g) || !selfWrapAttempted.add(g.vaultId)) continue
+            runCatching { api.putGrantSelfWrap(g.vaultId, SelfWrapRequest(account.buildSelfWrap(g.vaultId))) }
+        }
     }
 
     private class ReinstatedVault(val vaultId: String, val cachedName: String)
