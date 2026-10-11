@@ -110,7 +110,51 @@ export class AccountStateSync {
     return this.doc.contacts;
   }
 
+  // ---- pin currency (security review 2026-10, root cause A, A5 review L-3; closed in A6; core twin) ----
+  // A fresh device has no high-water mark, so it accepts ANY authentic account-state blob the server serves,
+  // including an older one still carrying a pin this account later tombstoned. From A6 a pin skips the add-member
+  // check and auto-adopts grants, so it may do either only when it is CURRENT here: pins this browser read while it
+  // had no established mark are recorded "not current here" (userId + key + verifiedAt) and stay so; pins it made
+  // itself, or first saw after establishing a mark, are current; re-verifying writes a new pin. The mark and the
+  // record share one store, so losing one loses both: the failure direction is "verify again", never "trust".
+
+  private static pinKey(c: Contact): string {
+    return `${c.userId}|${c.identityPub}|${c.verifiedAt}`;
+  }
+
+  private notCurrentHere(): Set<string> {
+    return new Set((this.local.get("acctstate.untrusted") ?? "").split("\n").filter((x) => x.length > 0));
+  }
+
+  private markNotCurrent(contacts: Contact[]): void {
+    if (contacts.length === 0) return;
+    const next = this.notCurrentHere();
+    for (const c of contacts) next.add(AccountStateSync.pinKey(c));
+    this.local.set("acctstate.untrusted", [...next].sort().join("\n"));
+  }
+
+  /** True when `c` may skip verification on THIS device. */
+  isCurrent(c: Contact): boolean {
+    return this.highWater() > 0 && !this.notCurrentHere().has(AccountStateSync.pinKey(c));
+  }
+
+  /** The pin for `userId` when it is current on this device; null when there is none or it is not current. */
+  currentPin(userId: string): Contact | null {
+    const c = this.doc.contacts.find((x) => x.userId === userId);
+    return c && this.isCurrent(c) ? c : null;
+  }
+
   async refresh(): Promise<AccountStateDoc> {
+    const established = this.highWater() > 0;
+    try {
+      return await this.refreshInner();
+    } finally {
+      // A device with no mark of its own cannot tell a current blob from an older authentic one (L-3).
+      if (!established) this.markNotCurrent(this.doc.contacts);
+    }
+  }
+
+  private async refreshInner(): Promise<AccountStateDoc> {
     for (let attempt = 0; attempt < 3; attempt++) {
       const resp = await this.api.accountState();
       this.serverSeq = resp.seq;

@@ -528,6 +528,11 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/grant/self-wrap`, body);
   }
 
+  /** Owner re-issue of a member's grant as v2 with the same vault key (root cause A §8.2 step 4, A6). */
+  async reissueGrant(vaultId: string, userId: string, body: { signedGrant: string }) {
+    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}/grant`, body);
+  }
+
   putEscrow(sealed: string, fingerprint: string) {
     return this.raw("PUT", "/api/v1/escrow/self", { sealed, fingerprint });
   }

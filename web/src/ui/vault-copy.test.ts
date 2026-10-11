@@ -157,6 +157,21 @@ describe("Vault.tsx key-precedence notices — the core HouseholdCopy twins", ()
     expect(vaultTsx).toContain(asTemplate(fn![1]!));
   });
 
+  it("grant-anomaly carries HouseholdCopy.GRANT_ANOMALY_NOTICE byte-equal (A6)", () => {
+    const m = householdKt.match(/const val GRANT_ANOMALY_NOTICE: String =\s*"([^"]+)"/);
+    expect(m, "HouseholdCopy.GRANT_ANOMALY_NOTICE moved — update the pin").not.toBeNull();
+    expect(vaultTsx).toContain(JSON.stringify(m![1]!));
+  });
+
+  it("added carries both branches of HouseholdCopy.addedNotice byte-equal (A6)", () => {
+    const fn = householdKt.match(/fun addedNotice\(vaultName: String, byLabel: String\?\): String =\s*if \(byLabel\.isNullOrBlank\(\)\) "([^"]+)" else "([^"]+)"/);
+    expect(fn, "HouseholdCopy.addedNotice moved or was renamed — update the pin").not.toBeNull();
+    const plain = fn![1]!.replace("$vaultName", "${name}");
+    const by = fn![2]!.replace("$vaultName", "${name}").replace("$byLabel", "${n.byLabel}");
+    expect(vaultTsx).toContain("`" + plain + "`");
+    expect(vaultTsx).toContain("`" + by + "`");
+  });
+
   it("key-unreadable carries HouseholdCopy.KEY_UNREADABLE_NOTICE byte-equal", () => {
     const m = householdKt.match(/const val KEY_UNREADABLE_NOTICE: String =\s*"([^"]+)"/);
     expect(m, "HouseholdCopy.KEY_UNREADABLE_NOTICE moved — update the pin").not.toBeNull();

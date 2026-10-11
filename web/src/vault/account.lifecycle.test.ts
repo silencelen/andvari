@@ -84,6 +84,9 @@ describe("Account vault-lifecycle crypto (spec 03 §11)", () => {
     const { vaultId } = owner.buildCreateSharedVault("Family");
     const sealed = owner.wrapVkForMember(member.identityPub, vaultId);
     member.addGrant({ vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 1, sealedVk: sealed });
+    // A6: an owner wrap is never minted for an UNCONFIRMED v1 key (no laundering); this member vouched for it.
+    expect(() => member.buildOwnerWrap(vaultId)).toThrow();
+    member.authorizeLegacyKey(vaultId);
 
     // The accept flow's wrappedVk (round-trip-verified inside buildOwnerWrap).
     const wrappedVk = member.buildOwnerWrap(vaultId);

@@ -155,6 +155,9 @@ describe("canonical-key precedence — Account", () => {
     const first = await device(member);
     first.addGrant(row);
     expect(first.needsSelfWrap(row)).toBe(true);
+    // A6: a key only an unconfirmed v1 seal vouches for is never wrapped; this member vouched for it.
+    expect(() => first.buildSelfWrap(vaultId)).toThrow();
+    first.authorizeLegacyKey(vaultId);
     const wrap = first.buildSelfWrap(vaultId);
     expect(first.needsSelfWrap({ ...row, wrappedVk: wrap })).toBe(false);
 
@@ -235,7 +238,9 @@ describe("canonical-key precedence — VaultStore", () => {
     expect(first.hasVault(vaultId)).toBe(true);
     // A seal is server-mintable: wrapping its key under the UVK would make a server-chosen key canonical.
     expect(api.selfWraps).toEqual([]);
-
+    // A6: the self-wrap exists only once the member vouched for the key (the review card's Accept).
+    expect(() => first.buildSelfWrap(vaultId)).toThrow();
+    first.authorizeLegacyKey(vaultId);
     const wrap = first.buildSelfWrap(vaultId);
     const api2 = new FakeApi();
     api2.queue.push({ rev: 8, full: true, vaults: [vault], grants: [{ ...sealed, wrappedVk: wrap, sealedVk: null, rev: 8 }], items: [], removedGrants: [] });

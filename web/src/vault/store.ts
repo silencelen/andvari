@@ -8,6 +8,8 @@ import type {
   PersonalWrap,
   PushResponse,
   RemovedGrantInfo,
+  UserLookupResponse,
+  VaultMemberSummary,
   WireGrant,
   WireItem,
   WireVault,
@@ -26,6 +28,8 @@ import {
 import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
+import type { Contact } from "./accountstate";
+import { pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
 import { type CoHolder, type PersonalCandidate, type PersonalChange, type PersonalChoiceInfo, type PersonalVaultProposal, personalVaultChoices } from "./personalvault";
 import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
@@ -119,7 +123,10 @@ export interface LifecycleNotice {
     // Root cause A §3.1 (security review 2026-10): a grant row carried a seal whose key differs from
     // our own UVK wrap (ours was kept), or our UVK wrap is present and does not open (no seal fallback).
     | "vk-mismatch"
-    | "key-unreadable";
+    | "key-unreadable"
+    // Root cause A §1.4 (A6): a v2 grant failed a check that only a misbehaving server explains; nothing was
+    // adopted. `reason` carries the verdict code; vaultName is "" (no authenticated key, no name).
+    | "grant-anomaly";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
   /** verified delete: N of the member's edits parked for replay on restore (F21).
@@ -144,7 +151,51 @@ export interface LifecycleNotice {
   /** transfer-complete: who now owns the vault, and whether that is us. */
   newOwnerUserId?: string;
   becameMine?: boolean;
+  /** `added` from a VERIFIED v2 grant (root cause A §1.6): the PINNED contact's label, for "…by <contact>". */
+  byLabel?: string;
 }
+
+/** §1.6: a v2 grant from someone not verified on this device. Not adopted; no vault name (it would decrypt under
+ *  a key nobody authenticated). `fromUserId` is unverified routing data: whom to verify. Core `PendingInvitation`. */
+export interface PendingInvitation {
+  vaultId: string;
+  fromUserId: string;
+  grantIdB64: string;
+}
+
+/** §8.2 "Review your shared vaults": a vault readable only through a v1 seal nobody vouched for yet. */
+export interface LegacyVaultReview {
+  vaultId: string;
+  name: string | null;
+  itemCount: number;
+}
+
+/** How a served identity relates to this device's pins, for add-member (§1.5, §7.2; core `MemberPinState`). */
+export type MemberPinState = "pinned" | "key-changed" | "needs-verification";
+
+/** add-member refused a member not pinned (or not current) on this device (§1.5): verify them first. */
+export class MemberNotVerifiedError extends Error {
+  constructor(readonly userId: string) {
+    super("Verify this member before sharing with them — their identity code is not confirmed on this device.");
+    this.name = "MemberNotVerifiedError";
+  }
+}
+
+/** A5b review LOW-1/LOW-2 (closed in A6): what "Use the new personal vault" means, loaded BEFORE it is offered.
+ *  Co-holders and origin are what the SERVER reports. Core `PersonalChangeDetails` twin. */
+export interface PersonalChangeDetails {
+  currentVaultId: string;
+  currentName: string | null;
+  servedVaultId: string;
+  servedName: string | null;
+  servedCoHolders: CoHolder[];
+  servedOrigin: "created" | "received";
+}
+
+// Root cause A §8.2 (A6) client-state keys (per user, survive a reload). Core SyncEngine twins.
+const LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized";
+const FREEZE_DONE_KEY = "grant.freeze.done";
+const DECLINED_KEY = "grant.declined";
 
 /** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
 export interface DeletedVaultInfo {
@@ -303,6 +354,9 @@ export class VaultStore {
    *  from list() but ENUMERATED into a backup (mirrors the Kotlin ExportPlanner), never silently
    *  omitted. Kept separate from undecryptableById (held-but-failed); merged in [undecryptable]. */
   private missingVkById = new Map<string, UndecryptableItem>();
+  /** The wire rows behind missingVkById (A6): a pending invitation accepted later, or a re-issued grant, makes
+   *  these readable without a re-pull. Memory only; every entry is ciphertext. */
+  private missingVkWire = new Map<string, WireItem>();
   private _lastSyncAt: number | null = null;
 
   // ---- vault lifecycle state (spec 03 §11) ----
@@ -620,10 +674,301 @@ export class VaultStore {
   /** The human confirmed the change: the served wrap (authenticated under our UVK) is in force and cached.
    *  Mints nothing. Keeping the current vault instead is a confirmed re-designation with the password. */
   acceptPersonalChange(): void {
+    const change = this.personalChange();
+    if (!change || this.personalChangeDescribed !== change.servedVaultId) {
+      throw new Error('"Use the new personal vault" is offered only after its co-holders were loaded (describePersonalChange)');
+    }
+    this.personalChangeDescribed = null;
     this.account.acceptPersonalChange();
     const w = this.account.personalWrap;
     if (w) this.rememberPersonalWrap(w);
     this.decidePersonalLocally();
+  }
+
+  private personalChangeDescribed: string | null = null;
+
+  /**
+   * A5b review LOW-1/LOW-2: load what "Use the new personal vault" would mean — the new vault's co-holders (as the
+   * server reports them) and origin. REJECTS when the member lookup fails, and then {@link acceptPersonalChange}
+   * stays refused: the human only switches to a vault whose co-holders they were shown. Keeping needs nothing.
+   */
+  async describePersonalChange(): Promise<PersonalChangeDetails> {
+    this.personalChangeDescribed = null;
+    const change = this.personalChange();
+    if (!change) throw new Error("no personal-vault change is pending");
+    const servedCoHolders = await this.loadCoHolders(change.servedVaultId);
+    const nameOf = (id: string): string | null => {
+      const row = this.vaultsById.get(id);
+      if (!row || !this.account.hasVault(id)) return null;
+      const n = this.account.decryptVaultName(id, row.metaBlob);
+      return n && n !== "(vault)" ? n : null;
+    };
+    this.personalChangeDescribed = change.servedVaultId;
+    return {
+      currentVaultId: change.currentVaultId,
+      currentName: nameOf(change.currentVaultId),
+      servedVaultId: change.servedVaultId,
+      servedName: nameOf(change.servedVaultId),
+      servedCoHolders,
+      servedOrigin: this.vaultsById.get(change.servedVaultId)?.lastTransfer?.newOwnerUserId === this.account.userId ? "received" : "created",
+    };
+  }
+
+  // ---- signed grants (security review 2026-10, root cause A §1.4–§1.6, §3.2, §8.2; branch A6; core twin) ----
+
+  private persistedSet(key: string): Set<string> {
+    return new Set((this.clientState.get(key) ?? "").split("\n").filter((x) => x.length > 0));
+  }
+
+  private persistSet(key: string, set: Set<string>): void {
+    this.clientState.set(key, set.size === 0 ? null : [...set].sort().join("\n"));
+  }
+
+  /**
+   * §8.2 step 3, once per browser profile: a v1-only key is FROZEN (self-wrapped silently) when the opted-in
+   * durable cache already held the vault's grant row AND an item that decrypted under it before this release ran
+   * here (hydrate is the only caller, and only rows from disk are in memory then). Every v1-only vault that
+   * arrives later is legacy-read-only until the human accepts it (or the owner re-issues).
+   */
+  private freezeOnce(): void {
+    if (this.clientState.get(FREEZE_DONE_KEY) !== null) return;
+    const decrypted = new Set<string>();
+    for (const it of this.itemsById.values()) decrypted.add(it.vaultId);
+    const evidence: string[] = [];
+    for (const g of this.grantWireByVault.values()) {
+      if (g.userId === this.account.userId && decrypted.has(g.vaultId) && this.account.keySource(g.vaultId) === "legacy-seal") evidence.push(g.vaultId);
+    }
+    if (evidence.length > 0) {
+      const auth = this.persistedSet(LEGACY_AUTHORIZED_KEY);
+      for (const id of evidence) auth.add(id);
+      this.persistSet(LEGACY_AUTHORIZED_KEY, auth);
+    }
+    for (const id of evidence) this.account.authorizeLegacyKey(id);
+    this.clientState.set(FREEZE_DONE_KEY, "1");
+  }
+
+  /** Re-run §1.4 for rows whose key is not held (pending, refused) or held only from a v1 seal; make the items of
+   *  any vault that became readable visible. */
+  private reevaluateGrants(): void {
+    const newlyHeld = new Set<string>();
+    for (const g of [...this.grantWireByVault.values()]) {
+      if (g.userId !== this.account.userId || this.holding.has(g.vaultId)) continue;
+      const held = this.account.hasVault(g.vaultId);
+      const retry = !held || (this.account.keySource(g.vaultId) === "legacy-seal" && !!g.signedGrant);
+      if (!retry) continue;
+      try {
+        this.account.addGrant(g);
+      } catch {
+        /* unchanged */
+      }
+      if (!held && this.account.hasVault(g.vaultId)) newlyHeld.add(g.vaultId);
+    }
+    if (newlyHeld.size === 0) return;
+    for (const w of [...this.missingVkWire.values()]) {
+      if (newlyHeld.has(w.vaultId) && this.missingVkById.has(w.itemId)) this.applyWireItem(w);
+    }
+  }
+
+  /** §1.4 anomalies, once per vault+verdict per store ("the server may be misbehaving — tell your admin"). */
+  private surfaceGrantStates(): void {
+    for (const [vaultId, verdict] of this.account.grantAnomalies()) {
+      const k = `grant-anomaly|${vaultId}|${verdict}`;
+      if (this.keyAnomaliesShown.has(k)) continue;
+      this.keyAnomaliesShown.add(k);
+      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: "", kind: "grant-anomaly", reason: verdict });
+    }
+  }
+
+  private readonly selfWrapsPosted = new Set<string>();
+
+  private async postAuthorizedSelfWraps(): Promise<void> {
+    for (const g of [...this.grantWireByVault.values()]) await this.postSelfWrapIfAuthorized(g);
+  }
+
+  /** §3.2: post the member self-wrap iff {@link Account.selfWrapAuthorized} vouches for the held key. Best effort. */
+  private async postSelfWrapIfAuthorized(g: WireGrant): Promise<boolean> {
+    if (this.selfWrapsPosted.has(g.vaultId) || !this.account.needsSelfWrap(g) || !this.account.selfWrapAuthorized(g.vaultId)) return false;
+    try {
+      await this.api.putGrantSelfWrap(g.vaultId, { wrappedVk: this.account.buildSelfWrap(g.vaultId) });
+      this.selfWrapsPosted.add(g.vaultId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Pending invitations the human has not declined. */
+  pendingInvitations(): PendingInvitation[] {
+    const declined = this.persistedSet(DECLINED_KEY);
+    return this.account
+      .pendingGrants()
+      .filter((p) => !declined.has(p.grantIdB64) && !this.account.hasVault(p.vaultId))
+      .map((p) => ({ vaultId: p.vaultId, fromUserId: p.fromUserId, grantIdB64: p.grantIdB64 }));
+  }
+
+  /** Who the SERVER says sent `inv` (display name + the key a human must verify). Untrusted. */
+  invitationSender(inv: PendingInvitation): Promise<UserLookupResponse> {
+    return this.api.userIdentity(inv.fromUserId);
+  }
+
+  /** Pin `served` iff the human-typed code (THEIR 32 hex, read from THEIR screen) matches SHA-256 of the served
+   *  key. Null (nothing pinned) on a mismatch. */
+  async verifyMemberTyped(served: UserLookupResponse, typed: string): Promise<Contact | null> {
+    const c = await pinFromTyped(typed, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
+    if (!c) return null;
+    await this.accountState.pin(c);
+    return c;
+  }
+
+  /** Pin `served` iff a scanned identity QR matches the served key at FULL length. */
+  async verifyMemberQr(served: UserLookupResponse, qrPayload: string): Promise<Contact | null> {
+    const c = await pinFromQr(qrPayload, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
+    if (!c) return null;
+    await this.accountState.pin(c);
+    return c;
+  }
+
+  /** Accept `inv` (§1.6): the verification ceremony for its sender, then §1.4 again. True only when adopted. */
+  async acceptInvitation(inv: PendingInvitation, typedCode: string): Promise<boolean> {
+    const served = await this.api.userIdentity(inv.fromUserId);
+    if (served.userId !== inv.fromUserId) return false;
+    if (!(await this.verifyMemberTyped(served, typedCode))) return false;
+    return this.afterInvitationPin(inv);
+  }
+
+  /** As {@link acceptInvitation}, with a scan of the sender's identity QR. */
+  async acceptInvitationQr(inv: PendingInvitation, qrPayload: string): Promise<boolean> {
+    const served = await this.api.userIdentity(inv.fromUserId);
+    if (served.userId !== inv.fromUserId) return false;
+    if (!(await this.verifyMemberQr(served, qrPayload))) return false;
+    return this.afterInvitationPin(inv);
+  }
+
+  private async afterInvitationPin(inv: PendingInvitation): Promise<boolean> {
+    this.reevaluateGrants();
+    this.surfaceGrantStates();
+    const adopted = this.account.hasVault(inv.vaultId) && this.account.keySource(inv.vaultId) === "signed-grant";
+    const g = this.grantWireByVault.get(inv.vaultId);
+    if (adopted && g) await this.postSelfWrapIfAuthorized(g);
+    return adopted;
+  }
+
+  /** "Decline": hide `inv` on this browser (by grantId, so a re-issued grant asks again). */
+  declineInvitation(inv: PendingInvitation): void {
+    const d = this.persistedSet(DECLINED_KEY);
+    d.add(inv.grantIdB64);
+    this.persistSet(DECLINED_KEY, d);
+  }
+
+  /** §8.2 "Review your shared vaults": vaults readable only through an unconfirmed v1 seal. */
+  legacyReviewVaults(): LegacyVaultReview[] {
+    const ids = new Set(this.account.legacyReadOnlyVaultIds());
+    if (ids.size === 0) return [];
+    const counts = new Map<string, number>();
+    for (const it of this.itemsById.values()) counts.set(it.vaultId, (counts.get(it.vaultId) ?? 0) + 1);
+    const out: LegacyVaultReview[] = [];
+    for (const v of this.vaultsById.values()) {
+      if (!ids.has(v.vaultId)) continue;
+      const n = this.account.decryptVaultName(v.vaultId, v.metaBlob);
+      out.push({ vaultId: v.vaultId, name: n && n !== "(vault)" ? n : null, itemCount: counts.get(v.vaultId) ?? 0 });
+    }
+    return out.sort((a, b) => (a.vaultId < b.vaultId ? -1 : a.vaultId > b.vaultId ? 1 : 0));
+  }
+
+  /** The owner the SERVER reports for `vaultId` (the review card labels it as server-reported). */
+  async reportedOwner(vaultId: string): Promise<CoHolder | null> {
+    const o = (await this.api.vaultMembers(vaultId)).find((m) => m.role === "owner");
+    return o ? { userId: o.userId, displayName: o.displayName, email: o.email, role: o.role } : null;
+  }
+
+  /** "Accept anyway" on the review card (Q7, trust on first use): vouch for the v1-only key, post the self-wrap. */
+  async acceptLegacyVault(vaultId: string): Promise<void> {
+    if (!this.account.isLegacyReadOnly(vaultId)) throw new Error("that vault is not awaiting review");
+    const auth = this.persistedSet(LEGACY_AUTHORIZED_KEY);
+    auth.add(vaultId);
+    this.persistSet(LEGACY_AUTHORIZED_KEY, auth);
+    this.account.authorizeLegacyKey(vaultId);
+    const g = this.grantWireByVault.get(vaultId);
+    if (g) await this.postSelfWrapIfAuthorized(g);
+  }
+
+  // ---- owner side (§1.5, §8.2 step 4) ----
+
+  memberPinState(userId: string, servedIdentityPub: string): MemberPinState {
+    if (!this.accountState.currentPin(userId)) return "needs-verification";
+    switch (pinState(this.accountState.doc, { userId, identityPub: servedIdentityPub })) {
+      case "pinned-match":
+        return "pinned";
+      case "pinned-mismatch":
+        return "key-changed";
+      default:
+        return "needs-verification";
+    }
+  }
+
+  /** Add `userId` to `vaultId` (owner, §1.5): only a member PINNED and current here; the v2 grant and the
+   *  dual-sent v1 seal are both sealed to the PIN key. Throws {@link MemberNotVerifiedError} otherwise. */
+  async addVaultMember(vaultId: string, userId: string, role: string): Promise<void> {
+    const pin = this.accountState.currentPin(userId);
+    if (!pin) throw new MemberNotVerifiedError(userId);
+    const signedGrant = this.account.buildSignedGrant(vaultId, pin);
+    const sealedVk = this.account.wrapVkForMember(fromB64(pin.identityPub), vaultId);
+    await this.api.addVaultMember(vaultId, { userId, role, sealedVk, signedGrant });
+  }
+
+  /** §8.2 step 4: re-issue `userId`'s grant for `vaultId` as v2 with the SAME key (owner, pinned member). */
+  async reissueGrant(vaultId: string, userId: string): Promise<void> {
+    const pin = this.accountState.currentPin(userId);
+    if (!pin) throw new MemberNotVerifiedError(userId);
+    await this.api.reissueGrant(vaultId, userId, { signedGrant: this.account.buildSignedGrant(vaultId, pin) });
+    this.reissuedThisSession.add(`${vaultId}|${userId}`);
+  }
+
+  private readonly reissuedThisSession = new Set<string>();
+  private readonly legacyMembersByVault = new Map<string, VaultMemberSummary[]>();
+  private readonly reissueCheckedWith = new Map<string, string>();
+
+  /** §8.2 step 4, best effort: re-issue v2 to legacy members (server hint) this device has pinned (current, same
+   *  key); the rest stay in {@link legacyGrantMembers}. Re-read only when the current pins change. */
+  private async reissueLegacyGrants(): Promise<void> {
+    const pinsTag = this.accountState.doc.contacts
+      .filter((c) => this.accountState.isCurrent(c))
+      .map((c) => `${c.userId}:${c.identityPub}`)
+      .join(",");
+    for (const v of [...this.vaultsById.values()]) {
+      const vaultId = v.vaultId;
+      if (!this.account.hasVault(vaultId) || vaultId === this.account.personalVaultId) continue;
+      if (this.account.serverRoleFor(vaultId) !== "owner" || this.account.isLegacyReadOnly(vaultId)) continue;
+      if (this.reissueCheckedWith.get(vaultId) === pinsTag) continue;
+      let members: VaultMemberSummary[];
+      try {
+        members = await this.api.vaultMembers(vaultId);
+      } catch {
+        continue;
+      }
+      this.reissueCheckedWith.set(vaultId, pinsTag);
+      const left: VaultMemberSummary[] = [];
+      for (const m of members) {
+        if (m.legacyGrant !== true || m.role === "owner" || m.userId === this.account.userId) continue;
+        if (this.reissuedThisSession.has(`${vaultId}|${m.userId}`)) continue;
+        if (this.memberPinState(m.userId, m.identityPub) === "pinned") {
+          try {
+            await this.reissueGrant(vaultId, m.userId);
+            continue;
+          } catch {
+            /* listed below */
+          }
+        }
+        left.push(m);
+      }
+      this.legacyMembersByVault.set(vaultId, left);
+    }
+  }
+
+  /** The "legacy grants" list for an owned vault: members still on a v1 grant whom this device could not re-issue
+   *  to (not pinned here, or their key changed). From the last check. */
+  legacyGrantMembers(vaultId: string): VaultMemberSummary[] {
+    return this.legacyMembersByVault.get(vaultId) ?? [];
   }
 
   /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
@@ -645,6 +990,18 @@ export class VaultStore {
   ) {
     this.clientState = clientState ?? localClientState(account.userId);
     this.accountState = new AccountStateSync(api, account, this.clientState);
+    // Root cause A §1.4 step 7: the verifier picks the pin by the sender the statement NAMES, from this account's
+    // human-verified contacts, and learns whether that pin is current on this device (L-3).
+    this.account.grantPins = (uid) => {
+      const c = this.accountState.doc.contacts.find((x) => x.userId === uid);
+      if (!c) return null;
+      try {
+        return { identityPub: fromB64(c.identityPub), current: this.accountState.isCurrent(c) };
+      } catch {
+        return null;
+      }
+    };
+    for (const id of this.persistedSet(LEGACY_AUTHORIZED_KEY)) this.account.authorizeLegacyKey(id);
     // CR-01 (compliance 2026-07-15): the moment this cache's IndexedDB connection closes out
     // from under us — a browser-forced close (eviction/corruption) or a sibling tab / session-
     // level wipe firing deleteDatabase → versionchange — idbcache invokes onClosed. Demote to
@@ -747,6 +1104,9 @@ export class VaultStore {
    * surfaceStagedDenials so the Editor's failure UX is unchanged.
    */
   async sync(): Promise<void> {
+    // §8.2: evidence is what THIS cache held before the upgrade; if no hydrate looked at it, nothing pulled from
+    // now on may count as pre-upgrade evidence.
+    if (this.clientState.get(FREEZE_DONE_KEY) === null) this.clientState.set(FREEZE_DONE_KEY, "1");
     await this.flushQueue();
     await this.pull();
     // H38 (audit 2026-09-13): a bell that rang DURING that pull joined it and got a snapshot
@@ -758,9 +1118,14 @@ export class VaultStore {
     // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
     this.decidePersonalLocally();
     await this.accountState.refresh().catch(() => {});
-    // Member self-wrap (root cause A §3.2) is deliberately NOT posted yet (core SyncEngine.sync
-    // twin): the only key a member can wrap today came from a server-mintable v1 seal, and wrapping
-    // it would launder a server-chosen key into the canonical slot. Waits for v2 verification.
+    // Root cause A (A6, core SyncEngine.sync twin): pins may have changed, so re-run §1.4 for rows not yet adopted;
+    // then the member self-wrap (§3.2), minted ONLY for a key from a verified v2 grant or a v1 key this device
+    // froze or the human confirmed (never an unconfirmed v1 seal: the A1 laundering bug); then the owner's
+    // §8.2 step 4 re-issue.
+    this.reevaluateGrants();
+    this.surfaceGrantStates();
+    await this.postAuthorizedSelfWraps();
+    await this.reissueLegacyGrants().catch(() => {});
     try {
       await this.surfaceStagedDenials();
     } finally {
@@ -965,7 +1330,10 @@ export class VaultStore {
       // already excluded by heldBefore — and it emits its own transfer-complete notice regardless.
       if (this.account.roleFor(vaultId) === "owner") continue;
       this.addedNoticed.add(vaultId);
-      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: this.account.decryptVaultName(vaultId, v.metaBlob), kind: "added" });
+      // §1.6: a verified grant names the PINNED contact who signed it; a legacy add names no one.
+      const sender = this.account.signedGrantSender(vaultId);
+      const byLabel = sender ? this.accountState.doc.contacts.find((c) => c.userId === sender)?.label : undefined;
+      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: this.account.decryptVaultName(vaultId, v.metaBlob), kind: "added", ...(byLabel ? { byLabel } : {}) });
     }
 
     const conflictsToMaterialize: WireItem[] = [];
@@ -1388,10 +1756,16 @@ export class VaultStore {
       // re-deliver these unchanged items, so they stay enumerated-as-skipped until the next full
       // sync reloads + clears them below — over-reporting, which for a BACKUP is safe: an item
       // named as "skipped" beats a silent omission, which is spec 07 §2.4's whole point.)
-      if (item.deleted) this.missingVkById.delete(item.itemId);
-      else this.missingVkById.set(item.itemId, { itemId: item.itemId, vaultId: item.vaultId, formatVersion: item.formatVersion });
+      if (item.deleted) {
+        this.missingVkById.delete(item.itemId);
+        this.missingVkWire.delete(item.itemId);
+      } else {
+        this.missingVkById.set(item.itemId, { itemId: item.itemId, vaultId: item.vaultId, formatVersion: item.formatVersion });
+        this.missingVkWire.set(item.itemId, item);
+      }
       return;
     }
+    this.missingVkWire.delete(item.itemId);
     // The vault VK is held now — clear any prior missing-VK enumeration for this item. This one
     // line covers became-decryptable (below), held-but-newer-fv (the catch), and held-tombstone,
     // and prevents a missing-VK→held-newer-fv item being counted in BOTH maps (double-count).
@@ -1465,6 +1839,7 @@ export class VaultStore {
     // the §8.5 rule run, offline, over the replayed provenance (core hydrate parity).
     this.decidePersonalLocally();
     for (const item of await this.cache.envelopes()) this.applyWireItem(item);
+    this.freezeOnce();
     for (const rec of await this.cache.heldVaults()) {
       this.holding.set(rec.vault.vaultId, { ...rec, cachedName: this.peekHeldName(rec) });
     }
@@ -1889,7 +2264,7 @@ export class VaultStore {
       // The snapshot's wire fv MUST be the fv the blob was just re-sealed at (the AD binds
       // it) — any restatement here would make reinstate's rehydrate decryptItem throw and
       // silently drop the item. encryptItem returns its fv for exactly this reason.
-      const upload = this.account.encryptItem(vaultId, it.itemId, it.doc);
+      const upload = this.account.resealForHolding(vaultId, it.itemId, it.doc); // local, never pushed (A6)
       items.push({
         itemId: it.itemId,
         vaultId,
@@ -1956,6 +2331,10 @@ export class VaultStore {
     this.incomingByVault.delete(vaultId);
     this.undecryptableGrants.delete(vaultId); // F20: access gone → the "can't open" warning is moot
     this.account.removeVault(vaultId);
+    // A vouched-for legacy key dies with the vault: a later v1 grant for the same vaultId (a re-add, or a server
+    // replay) starts read-only again instead of inheriting this device's old trust.
+    const auth = this.persistedSet(LEGACY_AUTHORIZED_KEY);
+    if (auth.delete(vaultId)) this.persistSet(LEGACY_AUTHORIZED_KEY, auth);
     // §D.1: inside a pull, mirror the drop to disk (grant + vault row + items — the
     // removedGrants purge, spec 03 §4). C4: queue rows are NOT dropped vault-wide here — a
     // commit-time dropPending also erased rows staged AFTER moveToHolding's fold-read but
