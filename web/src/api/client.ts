@@ -498,6 +498,12 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/meta`, body);
   }
 
+  /** Member self-wrap (security review 2026-10, root cause A §3.2): store our own UVK wrap of the VK
+   *  on our grant row so every device of this account reads the key from it, not the seal. */
+  async putGrantSelfWrap(vaultId: string, body: { wrappedVk: string }) {
+    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/grant/self-wrap`, body);
+  }
+
   putEscrow(sealed: string, fingerprint: string) {
     return this.raw("PUT", "/api/v1/escrow/self", { sealed, fingerprint });
   }

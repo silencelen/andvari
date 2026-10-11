@@ -883,6 +883,15 @@ fun Application.andvariModule(services: Services) {
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
             call.respond(service.acceptTransfer(p, vaultId, call.receive(), call.clientIp(config)))
         }
+        put("/api/v1/vaults/{vaultId}/grant/self-wrap") {
+            // Root cause A §3.2: a member stores its own UVK wrap of the VK on its own grant.
+            // Same sharing preamble (version-checked, refused on the public origin); its own
+            // bucket so a device's one-time posts never compete with lifecycle actions.
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_self_wrap:${p.userId}", 60, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            call.respond(service.putGrantSelfWrap(p, vaultId, call.receive(), call.clientIp(config)))
+        }
         put("/api/v1/vaults/{vaultId}/meta") {
             val p = sharingPrincipal(config, service)
             if (!limiter.allow("vault_destructive:${p.userId}", 10, 3_600_000)) throw RateLimited()

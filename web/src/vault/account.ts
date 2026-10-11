@@ -86,6 +86,24 @@ export const VAULT_KEYS_DAMAGED =
  * password", so living outside that type is what makes the collapse structurally impossible rather
  * than merely un-coded-for today. TERMINAL, never retryable: the same blob fails identically forever.
  */
+/**
+ * A grant row carries OUR UVK wrap (`wrappedVk`) and it does not open — structurally broken or an
+ * AEAD tag failure (security review 2026-10, root cause A §3.1; spec 01 §4 extended to VK wraps).
+ * The UVK already proved itself at unlock, so this is a damaged or substituted row: the vault shows
+ * as "key unreadable — tell your admin" and the seal on the same row is NEVER tried instead (a seal
+ * is crypto_box_seal to our public key, which the server can mint). Core twin:
+ * `VaultGrantKeyUnreadableException`.
+ */
+export class VaultGrantKeyUnreadableError extends Error {
+  constructor(
+    readonly vaultId: string,
+    reason: string,
+  ) {
+    super(`vault key for ${vaultId} is unreadable (${reason})`);
+    this.name = "VaultGrantKeyUnreadableError";
+  }
+}
+
 export class VaultKeyDamagedError extends Error {
   constructor(detail: string, cause?: unknown) {
     super(VAULT_KEYS_DAMAGED);
@@ -129,6 +147,13 @@ export class Account {
    * go stale across a reload. Kotlin twin: `Account.memberGrantedVaults`.
    */
   private readonly memberGrantedVaults = new Set<string>();
+
+  /** Root cause A §3.1: vaults whose row carried a seal that opened to a DIFFERENT key than the one
+   *  we hold from our own UVK wrap ("vault key mismatch"; ours was kept). Core: `vkMismatchVaults`. */
+  private readonly vkMismatchVaults = new Set<string>();
+
+  /** Vaults whose UVK wrap is present but does not open ("key unreadable — tell your admin"). */
+  private readonly unreadableKeyVaults = new Set<string>();
 
   /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
    *  max(docFloor, this): the server enforces per-item monotonic fv, so an edit must never
@@ -427,25 +452,120 @@ export class Account {
   /**
    * Apply a grant from sync (spec 01 §6). The role update is UNCONDITIONAL — a role
    * change re-delivers the grant while the VK is already held, and MUST still take
-   * effect; the key-open is attempted only when the VK is missing. Member grants carry
-   * `sealedVk` (crypto_box_seal to our identity key); personal/owner grants carry
-   * `wrappedVk` under the UVK.
+   * effect; the key-open is attempted only when the VK is missing, by {@link openGrantVk}'s
+   * canonical-key precedence (security review 2026-10, root cause A §3.1).
+   *
+   * Throws {@link VaultGrantKeyUnreadableError} when the row carries our UVK wrap and it does not
+   * open: the vault stays keyless (no seal fallback) and {@link keyUnreadable} says so.
    */
   addGrant(grant: WireGrant) {
     if (grant.role) this.vaultRoles.set(grant.vaultId, grant.role);
-    if (this.vaultKeys.has(grant.vaultId)) return;
-    const arrivedByMemberGrant = !!grant.sealedVk;
-    const vk = arrivedByMemberGrant
-      ? openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk!))
-      : open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
-    this.vaultKeys.set(grant.vaultId, vk);
-    // Provenance of the KEY, recorded at the one moment it is knowable (audit H64). Never
-    // re-stamped by a later re-delivery — the early return above means the grant that actually
-    // opened the key is the one that says how it arrived, so a hostile server cannot launder a
-    // member-granted vault by re-sending it with a wrappedVk, and a post-transfer owner grant
-    // carrying BOTH forms (spec 02 §4) does not retroactively make a vault we joined as a
-    // member look like one we minted.
-    if (arrivedByMemberGrant) this.memberGrantedVaults.add(grant.vaultId);
+    const held = this.vaultKeys.get(grant.vaultId);
+    if (held) {
+      // Already held: the row cannot change our key, but a re-delivered row that now carries a
+      // DIFFERENT key is still worth surfacing.
+      if (this.rowCarriesOtherKey(grant, held)) this.vkMismatchVaults.add(grant.vaultId);
+      return;
+    }
+    let opened: { vk: Uint8Array; viaSeal: boolean; sealMismatch: boolean };
+    try {
+      opened = this.openGrantVk(grant);
+    } catch (e) {
+      if (e instanceof VaultGrantKeyUnreadableError) this.unreadableKeyVaults.add(grant.vaultId);
+      throw e;
+    }
+    this.vaultKeys.set(grant.vaultId, opened.vk);
+    this.unreadableKeyVaults.delete(grant.vaultId);
+    if (opened.sealMismatch) this.vkMismatchVaults.add(grant.vaultId);
+    // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and never
+    // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
+    // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer separates
+    // shared from mine-alone: a row is member-granted when the key came from a seal, OR it carries
+    // any seal, OR its role is not owner. Only an owner row with a bare UVK wrap and no seal is a
+    // personal candidate, which is what enrolment mints. Residue (unchanged, see setPersonalVault):
+    // those signals are server plaintext until the personal-vault identity of §4 lands.
+    if (opened.viaSeal || !!grant.sealedVk || grant.role !== "owner") this.memberGrantedVaults.add(grant.vaultId);
+  }
+
+  /**
+   * Canonical-key precedence (security review 2026-10, root cause A §3.1) — core `openGrantVk` twin.
+   * The VK comes from the FIRST of: (1) the personal wrap (§4, not yet built); (2) our own UVK wrap
+   * `wrappedVk` (owner wrap, post-transfer new-owner wrap, member self-wrap §3.2); (3) a v2 signed
+   * grant (§1.4, not yet built); (4) a v1 `sealedVk`, legacy only. A seal is never preferred over a
+   * UVK wrap: when the wrap opens, a seal on the same row is opened only to compare (same → silent,
+   * different → `sealMismatch`, unopenable → ignored). A wrap that is present but does not open
+   * throws {@link VaultGrantKeyUnreadableError} and the seal is never tried.
+   */
+  private openGrantVk(grant: WireGrant): { vk: Uint8Array; viaSeal: boolean; sealMismatch: boolean } {
+    if (grant.wrappedVk) {
+      let vk: Uint8Array;
+      try {
+        const envelope = fromB64(grant.wrappedVk);
+        const refusal = structuralRefusal(envelope);
+        if (refusal !== null) throw new VaultGrantKeyUnreadableError(grant.vaultId, refusal);
+        vk = open(this.uvk, envelope, adVk(grant.vaultId, this.userId));
+      } catch (e) {
+        if (e instanceof VaultGrantKeyUnreadableError) throw e;
+        throw new VaultGrantKeyUnreadableError(grant.vaultId, "wrap does not open");
+      }
+      // A wrap that OPENS under our UVK was minted by one of our own clients: a wrong length is a
+      // buggy writer (core audit F32 parity: CryptoError), still terminal, still no seal fallback.
+      if (vk.length !== 32) throw new CryptoError(`vault key for ${grant.vaultId} is not 32 bytes`);
+      const sealVk = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
+      return { vk, viaSeal: false, sealMismatch: sealVk !== null && !ctEquals(sealVk, vk) };
+    }
+    // (3) v2 signed grant: verified per root cause A §1.4 once that construction exists.
+    if (grant.sealedVk) {
+      return { vk: openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk)), viaSeal: true, sealMismatch: false };
+    }
+    throw new CryptoError(`grant for ${grant.vaultId} carries no key`);
+  }
+
+  private openSealOrNull(vaultId: string, sealedVk: string): Uint8Array | null {
+    try {
+      return openSharedGrant(this.identityPub, this.identityPriv, vaultId, fromB64(sealedVk));
+    } catch {
+      return null;
+    }
+  }
+
+  /** A re-delivered row for a vault whose key we hold: does any key it carries differ from it? */
+  private rowCarriesOtherKey(grant: WireGrant, held: Uint8Array): boolean {
+    let fromWrap: Uint8Array | null = null;
+    if (grant.wrappedVk) {
+      try {
+        fromWrap = open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
+      } catch {
+        fromWrap = null;
+      }
+    }
+    const fromSeal = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
+    return [fromWrap, fromSeal].some((k) => k !== null && !ctEquals(k, held));
+  }
+
+  /** True when a row for this vault carried a seal whose key differs from the one we hold (the
+   *  "vault key mismatch" anomaly, root cause A §3.1). Display only: the held key is canonical. */
+  vkMismatch(vaultId: string): boolean {
+    return this.vkMismatchVaults.has(vaultId);
+  }
+
+  vkMismatchVaultIds(): string[] {
+    return [...this.vkMismatchVaults];
+  }
+
+  /** True when this vault's grant carries our UVK wrap and it does not open (no seal fallback). */
+  keyUnreadable(vaultId: string): boolean {
+    return this.unreadableKeyVaults.has(vaultId);
+  }
+
+  keyUnreadableVaultIds(): string[] {
+    return [...this.unreadableKeyVaults];
+  }
+
+  /** Root cause A §3.2: we hold this vault's key from a v1 seal and our row has no UVK wrap yet, so
+   *  {@link buildSelfWrap} should be posted. Core twin: `Account.needsSelfWrap`. */
+  needsSelfWrap(grant: WireGrant): boolean {
+    return this.vaultKeys.has(grant.vaultId) && !grant.wrappedVk && !!grant.sealedVk && grant.role !== "owner" && grant.userId === this.userId;
   }
 
   /**
@@ -458,6 +578,9 @@ export class Account {
    * `andvari/v1|vk|{vaultId}|{userId}`, so it is unforgeable evidence that this client itself
    * sealed that key for itself (enrollment, shared-vault creation, password-change re-wrap,
    * transfer accept). "Which vault is mine alone" must rest on the second kind of evidence.
+   *
+   * Since the member self-wrap (root cause A §3.2) a member's row can carry a `wrappedVk` too, so
+   * this also answers true for a row that carries any seal or whose role is not owner (see addGrant).
    */
   keyArrivedByMemberGrant(vaultId: string): boolean {
     return this.memberGrantedVaults.has(vaultId);
@@ -493,6 +616,8 @@ export class Account {
     this.vaultKeys.delete(vaultId);
     this.vaultRoles.delete(vaultId);
     this.memberGrantedVaults.delete(vaultId); // provenance dies with the key it describes (H64)
+    this.vkMismatchVaults.delete(vaultId);
+    this.unreadableKeyVaults.delete(vaultId);
   }
 
   /**
@@ -549,8 +674,8 @@ export class Account {
    * single-blob ledger design (spec 02 §8.2) exists to keep private.
    *
    * The refusal costs an honest account nothing: a personal vault is minted locally at
-   * enrollment and its grant is ALWAYS `wrappedVk` under our own UVK, so "arrived sealed" and
-   * "is my personal vault" are disjoint by construction.
+   * enrollment and its grant is ALWAYS an owner row with a bare `wrappedVk` under our own UVK and no
+   * seal, so "member-granted" (see addGrant) and "is my personal vault" are disjoint by construction.
    *
    * Fail-closed on purpose: when every held candidate is member-granted, `personalVaultId`
    * stays empty rather than pick one. Empty means "no personal vault", which sealUsage/
@@ -711,10 +836,24 @@ export class Account {
    * wrap that would lock the new owner out never gets posted (the "garbage-wrap" break).
    */
   buildOwnerWrap(vaultId: string): string {
+    return this.roundTripWrap(vaultId, "owner wrap");
+  }
+
+  /**
+   * Member self-wrap (security review 2026-10, root cause A §3.2): the VK this member already holds,
+   * wrapped under its OWN UVK exactly as {@link buildOwnerWrap} does, round-trip verified, for
+   * `PUT /vaults/{id}/grant/self-wrap`. Once it is on the row every device of this member takes the
+   * key from the wrap and the seal stops being load-bearing. Core twin: `Account.buildSelfWrap`.
+   */
+  buildSelfWrap(vaultId: string): string {
+    return this.roundTripWrap(vaultId, "self wrap");
+  }
+
+  private roundTripWrap(vaultId: string, what: string): string {
     const vk = this.vk(vaultId);
     const wrapped = seal(this.uvk, vk, adVk(vaultId, this.userId));
     if (!ctEquals(open(this.uvk, wrapped, adVk(vaultId, this.userId)), vk)) {
-      throw new CryptoError("owner wrap failed round-trip verification");
+      throw new CryptoError(`${what} failed round-trip verification`);
     }
     return toB64(wrapped);
   }

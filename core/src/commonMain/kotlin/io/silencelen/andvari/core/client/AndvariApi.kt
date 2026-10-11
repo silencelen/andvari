@@ -48,6 +48,7 @@ import io.silencelen.andvari.core.model.VaultMemberAdd
 import io.silencelen.andvari.core.model.VaultMemberRemoveRequest
 import io.silencelen.andvari.core.model.VaultMemberRole
 import io.silencelen.andvari.core.model.VaultMemberSummary
+import io.silencelen.andvari.core.model.SelfWrapRequest
 import io.silencelen.andvari.core.model.VaultMetaUpdateRequest
 import io.silencelen.andvari.core.model.VaultRestoreRequest
 import io.silencelen.andvari.core.model.PasswordChangeRequest
@@ -423,6 +424,10 @@ class AndvariApi(
 
     suspend fun updateVaultMeta(vaultId: String, req: VaultMetaUpdateRequest): CreateVaultResponse =
         call("PUT", "/api/v1/vaults/${pathSeg(vaultId)}/meta", req)
+
+    /** Member self-wrap (root cause A §3.2): store our own UVK wrap of the VK on our grant row. */
+    suspend fun putGrantSelfWrap(vaultId: String, req: SelfWrapRequest): CreateVaultResponse =
+        call("PUT", "/api/v1/vaults/${pathSeg(vaultId)}/grant/self-wrap", req)
 
     // ---- attachments (spec 02 §6: body = header || ciphertext chunks) ----
 

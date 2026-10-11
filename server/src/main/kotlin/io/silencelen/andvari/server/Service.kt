@@ -27,6 +27,7 @@ import io.silencelen.andvari.core.model.TokenPair
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import io.silencelen.andvari.core.model.DeletedVaultSummary
+import io.silencelen.andvari.core.model.SelfWrapRequest
 import io.silencelen.andvari.core.model.TransferAcceptRequest
 import io.silencelen.andvari.core.model.TransferOfferRequest
 import io.silencelen.andvari.core.model.TransferOfferResponse
@@ -1788,6 +1789,38 @@ class Service(
             repo.currentRev(c) to vaultMemberIds(c, vaultId)
         }
         onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    /**
+     * Member self-wrap (security review 2026-10, root cause A §3.2): the caller stores
+     * `Envelope(UVK, VK, Ad.vk(vaultId, userId))` on its OWN active grant, so every device of that
+     * member reads the VK from a wrap only its own UVK opens instead of the anonymous `sealedVk`
+     * (which anyone holding the member's public key, this server included, could have minted).
+     * The server cannot check the wrap; it enforces who writes which row:
+     *  - the caller's own grant, active (a removed/left member is an outsider: uniform 403);
+     *  - NOT an owner row: an owner's `wrappedVk` is bound into transfer accept proofs
+     *    (`currentOwnerWrap`) and owners already hold a wrap from creation or transfer accept;
+     *  - ≤ 1 KiB base64url, the same cap as every other wrap.
+     * The `sealedVk` is kept, so older clients are unaffected. An identical re-post is a no-op;
+     * otherwise the grant rev bumps so the caller's other devices receive the row. Audited.
+     */
+    suspend fun putGrantSelfWrap(p: Principal, vaultId: String, req: SelfWrapRequest, ip: String): CreateVaultResponse {
+        requireB64(req.wrappedVk, 1024, "wrapped_vk")
+        val (rev, changed) = repo.db.tx { c ->
+            val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("no_grant")
+            if (g.revokedAt != null) throw Forbidden("no_grant")
+            if (g.role == "owner") throw Forbidden("owner_wrap_immutable")
+            if (g.wrappedVk == req.wrappedVk) return@tx repo.currentRev(c) to false
+            val gr = repo.nextRev(c, "grant", vaultId, vaultId)
+            c.exec(
+                "UPDATE grants SET wrappedVk=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
+                req.wrappedVk, gr, vaultId, p.userId,
+            )
+            repo.auditOn(c, "vault_grant_self_wrap", p.userId, p.deviceId, ip, "$vaultId:${p.userId}")
+            repo.currentRev(c) to true
+        }
+        if (changed) onChange(setOf(p.userId), rev)
         return CreateVaultResponse(rev)
     }
 
