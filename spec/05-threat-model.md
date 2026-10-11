@@ -224,7 +224,10 @@ per contact per device. A tombstone in the merged state removes the pin everywhe
 tombstone (offline across the removal, and served only older blobs since) still trusts the pin IT confirmed:
 the stale-but-genuine residual. On a host whose client state is in memory only (no durable device state),
 confirmations are lost at every restart and pins are never current there until re-confirmed in that session:
-this fails closed (grants go pending, the add-member check runs) and is accepted. (c) **pending invitations** name a sender the server reports (display name
+this fails closed (grants go pending, the add-member check runs) and is accepted. A tombstone written on
+ANOTHER device does not clear this device's own confirmation record, so if the SAME key is later re-pinned (on
+any device) it is current here again without a new ceremony here: accepted, because a human on this device
+verified exactly that key. (c) **pending invitations** name a sender the server reports (display name
 and key); the human compares codes before anything is adopted, and the vault's name stays hidden until then.
 (d) **the extension** (owner decision Q8) never opens a grant: a member's new shared vault appears in the
 extension only after a full client verified the grant and posted the self-wrap. (e) **the owner's re-issue**
@@ -233,7 +236,12 @@ current on that device, sealed to the pinned key, so a wrong hint costs a redund
 one. (f) **grant authority is not bound to the vault**: a verified grant proves which PINNED contact signed
 it, not that the signer owns or may share the vault; any pinned household member who holds a vault's key can
 grant it. A verified grant naming a different key than a held one is refused as `vk_mismatch` (never a silent
-switch); binding grants to the vault's owner is an open design follow-up.
+switch); binding grants to the vault's owner is an open design follow-up. (g) **no per-vault key memory after
+a self-wrap**: a vault adopted from a verified v2 grant and then self-wrapped keeps no device-local record of its
+key (the vouch tags of §8.2 cover only legacy keys). A server that strips the self-wrap and colludes with a
+pinned contact can therefore have that contact sign a grant for a different key, which the device adopts as a
+fresh v2 grant. Closing it needs per-vault key memory, which interacts with key rotation (branch A7); it is an
+owner / A7 design item.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
