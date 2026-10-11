@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.LifecycleNotice
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
@@ -74,7 +75,8 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
             false,
         )
         "removed" -> Pair("Your access to “$name” was removed.", false)
-        "left" -> Pair("You left “$name”.", false)
+        // Root cause A §8.6 (A7): a leave with no proof, in the compatibility window, adds "Didn't do this? Tell your admin".
+        "left" -> Pair(if (n.reason == SyncEngine.LEFT_UNPROVEN) HouseholdCopy.leftUnprovenNotice(name) else "You left “$name”.", n.reason == SyncEngine.LEFT_UNPROVEN)
         "restored" -> Pair("“$name” was restored.", false)
         "transfer-complete" -> Pair(
             if (n.becameMine) "You are now the owner of “$name”." else "“$name” now has a new owner.",
@@ -88,7 +90,9 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // TWIN → core [HouseholdCopy.replayDeniedNotice] (ux-copy--3): the one §11 sentence that
         // interpolates, and the one every surface hand-wrote — it had drifted three ways from web.
         // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
-        "replay-denied" -> Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
+        // A7: the same kind also reports a REPLAYED removal proof (consumed nonce, §6.3 step 5), in the danger tone.
+        "replay-denied" -> if (n.reason == SyncEngine.REMOVAL_REPLAY) Pair(HouseholdCopy.removalReplayDeniedNotice(name), true)
+            else Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
         // H71 (web F20 twin): a genuinely new non-owner grant — calm, informational.
         // Root cause A §1.6 (A6): a verified grant names the PINNED contact who signed it (core canon).
         "added" -> Pair(HouseholdCopy.addedNotice(name, n.byLabel), false)
