@@ -216,6 +216,10 @@ object HouseholdCopy {
     /** TWIN of extension saveErrorCopy("failed") — retryable, no jargon. */
     const val SAVE_FAILED = "Could not save — try again."
 
+    /** INV-WRITE-KEY (root cause A §8.2, branch A6): the vault's key is not verified yet, so nothing is saved
+     *  into it. The review card ("Review your shared vaults") is where the member accepts it or leaves. */
+    const val VAULT_NOT_VERIFIED = "This shared vault isn't verified on this device yet, so it is read-only. Review it under Shared vaults first."
+
     /** NATIVE-PINNED: desktop manual-refresh offline notice — reassuring (cached data is
      *  still on screen), so sync flows prefer it over the bare [UNREACHABLE]. */
     const val SYNC_OFFLINE = "Can't reach the server right now — showing what's synced on this device."
@@ -282,6 +286,23 @@ object HouseholdCopy {
      */
     const val KEY_UNREADABLE_NOTICE: String =
         "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made."
+
+    /**
+     * Root cause A §1.6 (branch A6): a vault grant this client adopted after verifying it against the PINNED
+     * contact who signed it. [byLabel] is that contact's label (null for a legacy add: no sender was
+     * authenticated, so nobody is named). Calm. TWIN of web Vault.tsx noticeBody "added".
+     */
+    fun addedNotice(vaultName: String, byLabel: String?): String =
+        if (byLabel.isNullOrBlank()) "You were added to “$vaultName”." else "You were added to “$vaultName” by $byLabel."
+
+    /**
+     * Root cause A §1.4 (branch A6): a vault grant failed verification in a way only a misbehaving server (or a
+     * forger) explains: addressed to someone else, for another vault, signed by someone other than the sender it
+     * names, or a bad signature. Nothing was adopted; the vault's name is unknown. Danger tone. TWIN of web
+     * Vault.tsx noticeBody "grant-anomaly".
+     */
+    const val GRANT_ANOMALY_NOTICE: String =
+        "A shared-vault invitation failed its signature check, so andvari ignored it. Nothing was added. Tell your admin — the server may be misbehaving."
 
     /**
      * TWIN of web Vault.tsx noticeBody's "replay-denied" branch (android SharingScreen +
@@ -430,6 +451,7 @@ object HouseholdCopy {
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
+        t is VaultKeyNotVerifiedException -> VAULT_NOT_VERIFIED // A6: a legacy key is read-only, never "wrong password"
         t is CryptoException -> WRONG_MASTER_PASSWORD
         t is ApiException -> apiCopy(t)
         t is IOException -> SAVE_FAILED_OFFLINE

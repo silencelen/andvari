@@ -26,6 +26,7 @@ class AccountStateSync(
 
     private val hwKey = "acctstate.hw"
     private val copyKey = "acctstate.copy"
+    private val untrustedKey = "acctstate.untrusted"
 
     /** The current merged document (empty until the first [refresh] or a local copy exists). */
     var doc: AccountStateDoc = loadLocal() ?: AccountState.empty(account.userId)
@@ -49,8 +50,48 @@ class AccountStateSync(
 
     fun contacts(): List<Contact> = doc.contacts
 
+    // ---- pin currency (security review 2026-10, root cause A, A5 review L-3; closed in branch A6) ----
+    //
+    // A fresh device has no high-water mark, so it accepts ANY authentic account-state blob the server serves,
+    // including an older one that still carries a pin this account later tombstoned. From A6 a pin skips the
+    // add-member check and auto-adopts grants, so a pin may do either only when it is CURRENT on this device:
+    //  - pins this device read while it had NO established high-water mark are recorded as "not current here"
+    //    (by userId + key + verifiedAt), and stay so;
+    //  - pins this device made itself ([pin]), or first saw after it had established a mark, are current;
+    //  - re-verifying a contact on this device writes a new pin (new verifiedAt), which is current.
+    // The mark and the record live in the same client state, so losing one loses both and the device is fresh
+    // again: the failure direction is "verify again", never "trust".
+
+    private fun pinKey(c: Contact) = "${c.userId}|${c.identityPub}|${c.verifiedAt}"
+
+    private fun notCurrentHere(): Set<String> =
+        local.clientState(untrustedKey)?.split('\n')?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+
+    private fun markNotCurrent(contacts: List<Contact>) {
+        if (contacts.isEmpty()) return
+        val next = notCurrentHere() + contacts.map { pinKey(it) }
+        local.setClientState(untrustedKey, next.sorted().joinToString("\n"))
+    }
+
+    /** True when [c] may skip verification on THIS device (see above). */
+    fun isCurrent(c: Contact): Boolean = highWater() > 0 && pinKey(c) !in notCurrentHere()
+
+    /** The pin for [userId] when it is current on this device; null when there is none or it is not current. */
+    fun currentPin(userId: String): Contact? = doc.contact(userId)?.takeIf { isCurrent(it) }
+
     /** GET → open → merge with the local copy and high-water → write back when anything differs. */
     suspend fun refresh(): AccountStateDoc {
+        val established = highWater() > 0
+        try {
+            return refreshInner()
+        } finally {
+            // A device with no mark of its own cannot tell a current blob from an older authentic one: every pin
+            // it learns on this read is recorded as not current here (L-3).
+            if (!established) markNotCurrent(doc.contacts)
+        }
+    }
+
+    private suspend fun refreshInner(): AccountStateDoc {
         repeat(3) {
             val resp = api.accountState()
             serverSeq = resp.seq
@@ -127,6 +168,7 @@ class AccountStateSync(
         require(contact.userId != account.userId) { "cannot pin yourself" }
         if (readOnly) throw IllegalStateException("account state was written by a newer client")
         runCatching { refresh() }
+        // A pin made HERE, from a human comparison on this device, is current here even on a fresh device.
         repeat(3) {
             if (write(AccountState.withContact(doc, contact))) return
             refresh()

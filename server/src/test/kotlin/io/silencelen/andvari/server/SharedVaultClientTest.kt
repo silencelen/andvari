@@ -17,6 +17,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -75,16 +76,26 @@ class SharedVaultClientTest {
         engineOwner.sync()
         engineOwner.save(null, ItemDoc(type = "login", name = "wifi"), vaultId = nv.vaultId)
 
-        // Lookup + out-of-band fingerprint check + seal + add as WRITER.
+        // Root cause A (A6): each side verifies the other ONCE (each types the other's 32-hex code, read from the
+        // other's screen), then the owner adds the member with a SIGNED grant sealed to the pinned key.
         val info = apiOwner.lookupUser("kid@fam.com")
         assertEquals(member.identityFingerprintShort(), io.silencelen.andvari.core.crypto.SharedGrant.shortFingerprint(crypto, Bytes.fromB64(info.identityPub)),
             "the fingerprint the owner verifies matches what the member's own client displays")
-        val sealed = owner.wrapVkForMember(Bytes.fromB64(info.identityPub), nv.vaultId)
-        apiOwner.addVaultMember(nv.vaultId, VaultMemberAdd(member.userId, "writer", sealed))
+        assertFailsWith<io.silencelen.andvari.core.client.MemberNotVerifiedException> { engineOwner.addVaultMember(nv.vaultId, member.userId, "writer") }
+        assertNotNull(engineOwner.verifyMemberTyped(info, member.identityFingerprintShort()))
+        assertNotNull(engineMember.verifyMemberTyped(apiMember.lookupUser("own@fam.com"), owner.identityFingerprintShort()))
+        engineOwner.addVaultMember(nv.vaultId, member.userId, "writer")
 
-        // Member syncs: sealed grant opens, backfilled item decrypts, role is writer.
+        // Member syncs: the v2 grant verifies against the pinned owner, backfilled item decrypts, role is writer,
+        // and the member's client posts its self-wrap (§3.2).
         engineMember.sync()
+        assertEquals(io.silencelen.andvari.core.client.Account.KeySource.SIGNED_GRANT, member.keySource(nv.vaultId))
         assertEquals("writer", member.roleFor(nv.vaultId))
+        val restarted = Account.unlock(member.userId, "member family password two", apiMember.accountKeys(), crypto)
+        val second = SyncEngine(apiMember, restarted, InMemoryVaultCache())
+        second.sync()
+        assertEquals(io.silencelen.andvari.core.client.Account.KeySource.UVK_WRAP, restarted.keySource(nv.vaultId),
+            "a second device reads the key from the member's self-wrap, no grant needed")
         assertTrue(engineMember.items().any { it.doc.name == "wifi" && it.vaultId == nv.vaultId })
 
         // Member writes into the shared vault; owner sees it. Owner EDITS the member's

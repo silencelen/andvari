@@ -181,6 +181,10 @@ class VaultKeyPrecedenceTest {
         val first = freshDevice(member)
         first.addGrant(memberRow)
         assertTrue(first.needsSelfWrap(memberRow), "a key adopted from a seal with no wrap on the row needs a self-wrap")
+        // A6: but a v1-seal key is never wrapped until this device vouches for it (§8.2 freeze or the human's Accept).
+        assertFalse(first.selfWrapAuthorized(shared.vaultId))
+        assertFailsWith<VaultKeyNotVerifiedException> { first.buildSelfWrap(shared.vaultId) }
+        first.authorizeLegacyKey(shared.vaultId)
         val selfWrap = first.buildSelfWrap(shared.vaultId)
         assertFalse(first.needsSelfWrap(memberRow.copy(wrappedVk = selfWrap)), "once the wrap is on the row it is not posted again")
 

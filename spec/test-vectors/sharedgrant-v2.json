@@ -1,0 +1,392 @@
+{
+  "_about": "Signed vault grants, format v2 (security review 2026-10, root cause A §1.4-§1.5; spec 01 §6). Hand-authored decision rows; every sealed blob was produced by an INDEPENDENT oracle (Node/OpenSSL Ed25519 + X25519, tweetnacl crypto_box, @noble/hashes blake2b nonce, FIXED ephemeral keys), never by an engine. Each row: open sealedB64 as `me` (memberSeed) on a grant row for rowVaultId, with `pins` = this account's pinned contacts (userId -> X25519 identityPub) and `pinsCurrent` = whether those pins may skip verification on this device, and `heldVkB64` = a key already held from our own UVK wrap. The FIRST failing §1.4 step decides the verdict. bad_vk (step 10) is unreachable through the strict parse (vk must be canonical 32-byte base64url, so a short key is non_canonical) and has no row.",
+  "owner": {
+    "userId": "11111111-1111-4111-8111-111111111111",
+    "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+    "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+    "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o"
+  },
+  "member": {
+    "userId": "22222222-2222-4222-8222-222222222222",
+    "seedB64": "oKOmqayvsrW4u77BxMfKzdDT1tnc3-Ll6Ovu8fT3-v0",
+    "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+    "signPubB64": "s6JVnClZbikPKKTc0Db3imvaLINlV0pXZiJiA_TrMQI"
+  },
+  "third": {
+    "userId": "33333333-3333-4333-8333-333333333333",
+    "seedB64": "8-Y_Ot4gdxwTpqxkvkFy1zpMKs1R5t4Il73QMCTuB1I",
+    "identityPubB64": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+    "signPubB64": "yOc1tSI8aPFJ1ft9jxNRkWYr7t5uspJpB2Y02m5vNyI"
+  },
+  "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "vkB64": "GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM",
+  "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"AAECAwQFBgcICQoLDA0ODw\",\"issuedAt\":1791590400000,\"vk\":\"GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM\"}",
+  "frameB64": "YXZzAgGcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izytAGB5eLRbrypl7DaUb1yYpuk4ZFXS9RAAVftDIslH1pjfe1nSd-QPcGfBczqvdPvM2FEVZAweXjeRGWVpy6XQN7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1ncmFudCIsImZyb20iOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJ0byI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsInRvS2V5IjoiUnNSNmtiNlVDMkFKN0NoT3hkZ0dEelA2WDE5SXBuUV9uWFJreldNWGFSTSIsInZhdWx0SWQiOiJhYWFhYWFhYS1hYWFhLTRhYWEtOGFhYS1hYWFhYWFhYWFhYWEiLCJncmFudElkIjoiQUFFQ0F3UUZCZ2NJQ1FvTERBME9EdyIsImlzc3VlZEF0IjoxNzkxNTkwNDAwMDAwLCJ2ayI6IkdpRW9Melk5UkV0U1dXQm5iblY4ZzRxUm1KLW1yYlM3d3NuUTE5N2w3UE0ifQ",
+  "verdicts": [
+    "adopt",
+    "unopenable",
+    "bad_frame",
+    "non_canonical",
+    "bad_statement",
+    "misaddressed",
+    "vault_mismatch",
+    "pending_invitation",
+    "signer_not_pinned_key",
+    "bad_signature",
+    "bad_vk",
+    "vk_mismatch"
+  ],
+  "anomalyVerdicts": [
+    "misaddressed",
+    "vault_mismatch",
+    "signer_not_pinned_key",
+    "bad_signature",
+    "vk_mismatch"
+  ],
+  "cases": [
+    {
+      "name": "valid",
+      "why": "owner O grants V to member M; O is pinned and current",
+      "sealedB64": "00mdr-vrk_fdW9yabAAovb6VMh5vjdJXzW5TCLei13SpZZRaw5isBeDdCvZdvaB9MukbIlXNxU8cfJuxVu7iyyhq99zqbdnGkOcX6f4emHQe12PcsXmQM0eaYuILpUq7Yuy1OXjWHHawxH1-482ssG0qaFoaO7Dt_guKjcVzQSJB8x1Djo3fytRrcDHzVYjh0_4lXHD3HqdsXPhYAGx4N7s7b9xHGmNjRHjS-GbalImYGl3wbmNJoRJb94-cGFzBtj-Q9srNuqmZD1sLE-TeqCDBcJSKNOYkuEL8qQFRvG5nGKDczTwGuyxyGGVRNL43k5YiLC2S1ShS_r-8TJRJeGRB6PYXFQOczKXOCEsnx72hgRExQUlZm7LLropLNI1NFjZj6035c78CZ1PwuOApEaeEKv9kIg5a0HYjCsKKioKb6_8Axojmi97ul0f7nRdhBAcU16_TwXSixGVzyg8Zkv-EYrvJbcDMrD54XYT1YAkseaVqm-Ul8GorVCM-a7pvrrTcwEIoTofMkCzQmJxbddWeTzzTW1V0rPnpAj0ESXbNjLqxCsQvd0JCA_NJ-pAqPsTb0KWVPY7lWz9sic_dRv2pGsen4xS_EokXRayqtHBCvma_l5kLYJ6gpdtM3lAKk_F5yg",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "adopt",
+        "vkB64": "GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "grantIdB64": "AAECAwQFBgcICQoLDA0ODw",
+        "issuedAt": 1791590400000
+      }
+    },
+    {
+      "name": "valid-held-same",
+      "why": "the vault key is already held from our own UVK wrap and the grant carries the same key",
+      "sealedB64": "DlaqtrVsl9PiBRdeRzyYu940-i03hYtBj4AQr_W-9xIvp-VQb9ziCwas5s9Hvy06l3Yu52JjpT64qYKcrGn4_pSAhLnggJzFsU2vbevr5byoKBwy2gLtPrM5IPnII6Ob9N0FImTomG0qI5NItDWrTQ1KKegTRDtPmt3Huo3rSSRlSsc4ULqu6G89R5vgC59kq4VeXvNqjxPhJOd3SBDIrxelOlQXy2TyIId4A2ILaQ8PXlvotHoFa-exziWg68trXcGdPP87AT2_YhNWtN2lUgOkGlqi1hbTz8oviGEXlF3vuMEkHlN27Lx_bjjbnhsL7YLOKgGaeqTG2klnXTv7-Uz7rny8GIkgPPzO2DYxeeBmv9qjOGsRRd4aWZW4OkyBxKguvvpufRcZztayIY57UVx6kHtwLcVGiQGlvBDT2nYteXdeYFVvfpemIQAtJDl4qzl3d9tGEjaWq2Vfpw5P6abXRE6YnzeTwnPGfO3Soq5QRBCPjomln4PAMmgPvnwTc69nYQMspmD-R-U5_k_s5fzk4G-o6qe1AR6hyyota3wrzvpxV0J42xpQZJuyxbqzQVN9AtyhHzZ9fBj1WHbcxqahkpVJzltA7XSTnwZvsfG11zUsjuWdASg2C06VH4eYlnIw3A",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": "GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM",
+      "expect": {
+        "verdict": "adopt",
+        "vkB64": "GiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PM",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "grantIdB64": "AAECAwQFBgcICQoLDA0ODw",
+        "issuedAt": 1791590400000
+      }
+    },
+    {
+      "name": "unopenable",
+      "why": "sealed to another member's key (step 1)",
+      "sealedB64": "p11G5ijJixxRAan5VPn9-4bYcFZnXUOVheCIiGEE53xYBVIsRuuxwQzxo14DZ1AtTQcCrQOp-BSMean5oTpXvf3Iasoz0UddB0Lb5jsKvhUbKGxqUx-TPYJckS5y9t2ysFd3nLHi5mBdAj9c9Vk4T1HGV0UMuLKLBM29dZBimZM_ONvHsNRrFpLKCZgKOkeNgP5vTp0_LKpJcKZe0rViNa127m8fxgWrc5iWm-38iaWUhoBJ3OADzrGeXDzNQT5ltHLGdl2VcEqnXB1rKP-knHSxuGRSNBhwyV_dhNHa3TF70hnHUGrNxFACJ4YZxUczhxzEjxVUvAbMoiegpPGO_07XDb-eTgxzPr33_X767A7bcw591hObNb5HmbJpxUySCiL2dbv6nvK7iYcxdtx9Nr-swKWK4M54MwkjsvZlk1QCsl_P-Zv6OoF1slHdzCKIcQwxnPLr2aCCW8BMzA5PIgAF48yIPtEXeiBbFwwiC08QuUQ9Y9s23uI0_4ZEfKiwfJithaPr6LJaS_rWl-8o3YL0KIBo6K8-ZReJwGknzN7tLQA5UtWSJ_E1oNoamDu3B0gKijD3V9CSKgtjGOuLonneyIIw045N39yHhJOMjmJryW5Wifjs4aGg7ZxQx3qwZvJpPw",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "bad-frame-v1-json",
+      "why": "a v1 JSON payload in the v2 field (step 2)",
+      "sealedB64": "dFsznj4vUukEdEBnaUNZJxATT16_hnQiJL8RHjWrWlXk94MRHsl11IPjADm0YkUJH1L4ODPz3IqPFkG48S9TTydCX1HL1ZU4kD5pvxbzHl4MSVnVj0GPwPSuBySr3ea-A-KwbLeDJJyEpmpXm6tIi3wCWV9YvD4q8f9_QZt0QLJ8W58Upi2RpYRfh5VIzSKKTiIPr330gtoncZY",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "bad-frame-escrow-purpose",
+      "why": "purpose code 0x02 framing a grant statement (step 2)",
+      "sealedB64": "PI7-gsP53-BRmgokyAS5Tc6APKHiD6uDcKQTNcy-yHr1fIgHP-JUD6rXiZHz_84EClnEV7ulXn6YZqUIyqLecuMGrrQJvjL1-1jITjCrQkzANrBnDDXq82tJCl9P2B0VdYbAV_EkF6BWeAq_smCctVTeLdFzdGlo6xZgtibiAPdCrYiE1YTslGORWy4WS7wJbBqEAXHJRRZl_h7O_mzfmVUfAwW-lpgGScCnmOMRNG-bSNTwhOtdoK56VbBDTpozETevrqAlkgKnJsopIisfgP6DNMJfAtBjpSd2LiIfTztNUz0ltcs50pcNQRmAOww7TkG7FJtqJd78tQI92i4135YUXr1VKYWE-BX_dxYMgJ2cPaeReNJzom3mt5pEk8L3lgK_UavHtBwsuR0MGvt_FkmFNCPU5dHwbHjAsWpCgq215JuyZ4SyWgZarxZLQxx0o1vOWkLtk8tb7vpf8MK2g8BmqYqMzgopnMHe9vvZM2T-SceDulk3RSZAE_hZJOzGXl2FY1DMhqwlaVsx2nHxzdwwCzMRqzJxmqLrHbHlgwthdhu6rMmjEnytDLFccmWzGE0DBuFuR-fXu_qpUseqj3tB_vxBsQh4Vdzynl-pUBNs_eS8yIZ1TNsraasfxWZs33KE-Q",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "bad-frame-short",
+      "why": "magic and purpose code only (step 2)",
+      "sealedB64": "Qqzc1XdS6okmWmjoDfX0X3wdkkqTv5wO49VsbtsaonwinYMRWEqsFYcas-p_V0PZSpMRG7Q",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "bad-frame-magic",
+      "why": "version byte 0x03 (step 2)",
+      "sealedB64": "-H2prmnf4ZxnS9ByWBiz7R6yqUNKxKR03DjfUrvnDUw1MUCy7um8xbNF25N48Fb7Udi79OtwvC68bPzb1fmqrStWjQM7iF0XUWdxMcxGVqQjr7p03oicNMInJ5bEM3JAjGfLJCo5N8eq9uBW-VKhz5uWUYOrIgu91Bl8Itj5X4CkPVtMXHJktxw3NQq4AKLr3lKZtYr9Syhn-Yu1wGiyuUZjjki1m_JYbxuWqBxQuZxTnMTnHN_Vv01i7-3gV1dE6fxwJBU_0Am0yTUbikqVruw6KyEk0m1l__N-UEScUZKJwhxKpYu3PAgxInTlgOXW9wFLxMZhbuFKG8HxIhgiYAJUOuQVSE01HA3bKiYDeCwShLj3wFA6RaEMoLgTDZQKdaxzqLLv1jJHaGgU3MA2Mb5KUxnkCXLrdVooyouDENM49g0VbDc7Uy0nnA5aWTMo2PLVW54GmUoDSrXJYy1B4gBvzZ3gB55Dd2WustQThhICkHdZbcW-2u-ZoNyhlvmEoNwtzmWpYB5EirNc0ju1WkLDsb28H9HvQPvCm_y_YrnPZhZUpRWZJVMGRNXUATEOPFLglHb9KB63r60TmPaEYyWAu8H4Jn7ZfAPGl2nrqcyZVLM6lf053wzvbfNL7nqjTEJZqA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "non-canonical",
+      "why": "whitespace after a colon, correctly signed (step 3)",
+      "sealedB64": "4SOOD0rDHDHBP-QWylqHQM0S8Wbl3XTG5ghn5krPIC6zFkf3oMvndYU9TQIn-PQJE5ilV8t6mqxHSlmitucvUNKrywL7Mg0MDUvK6Mjd4Ak-RNZxK44hCltySx4lZN64REVoGrY21FPrwis3plb1MxzpRu9jNtFbPJBaK4RtCKUWw6h9BVsuAjaBZBLyfFNx3zEKU_dAljjsoRKVTP0qC2sep_wnAZVvXo3-EqTb5qAAxHIMVYLFIcP31iPXDzh2-0zR3Ib_O7kIfEBgq8i7z1orgjdDUY7HBMd1EwUJOVb2iuFzOZgGjyeKhl68EkVFi7png6KKvoWcP3Oqd4V8Xhe54P2POd-QFQtzGcMjV96Gpil7WqC6eMdV88Ttgu3KAz4PQgKJKhdbdqcoKwWiC1ySwzXYYgj08hOtbDMY3he29Rdj_xO6q-Bt1IIxpsE-H3H8N8ZWV6Wa7mTNBz_UGb8yHMWAuKFeNu9lNnDS5m_MM1S_s3HT-HG_8EZGJVxzAigJQ7bosoAe2NcFONgq-4drlcKCRQSlTwh7rM_xk2nCXyjFqeL3p9K0rQp3GdWaXi2pjBl6Fs0tste9nrm7y9ODr7Ck3c1LrKTXsyEJv9V57y47y4ToYJzEPEMGs9SAA0kqns0",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "bad-statement-version",
+      "why": "canonical v:3 (step 4)",
+      "sealedB64": "T-5RgDPLqDWML0jOQM-C7JOb735R45MkQycEfUIDBHBY7a6kTupqk5fRKh6qe5I3kT6wfdaFZ1caEiHL-SuNFkQOJmcxrtZI8nl754Th4TapDaCPp9OXvzoXjkiLMu2MLcnWc8popicvI5NSzpvFDp9o7ezn09euVLBMElLNjJ0FKy8ZoWJqxs6bunopR8xitYH13Ce04ZRgXQtmyB38DpA4dyNGIs8HijoJ_TZTdRD7CSMCENV64ohkg9Gw6wBAJr8j0ki8GUpS5Fk7FBhXU5pVhN2OQbjplIxUS0x2gwDc-7lWujPnDtkpVas_3wgWjDu2X8CnyUKYWtBdEe9WzTU8McizQmfc3BUi7q5hkafxd54Ttf3gw0VXfAk4bw7Qwk4qMaUqny9lm9hP233QoKSL_xKWaXnVX-_0w-TgEAm_wDPilNGEhHZcoC1xltKYbccwzgQ-TecByZ38ES7xkv_NfZAcdb4a7BwcEnv_HeIssjMkfP8Xrhm_BmJ8nzA_qw8cOrxlWS1Ny2hXJUjSVMbee3j8ExYvhL4y_Lx4w5YCkltlKi7_PApVZ2qubkFyiKKnqLUSzxjLWKvRlMsgdBOyj3uTyfAGR_cCpYLvD-8l-5sO0yYJWVEVPlywQus5v0zGuA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "bad-statement-self",
+      "why": "from == to (step 4)",
+      "sealedB64": "bCI0wtwxZiidLFW5AbKjJhDClj8fIgjKzf-06C8FZmdJY5-MOZwRJIkn_1A9Hyd2q2iOHxFS5Bais5gfumRhh6jTQ3Idcey_5HxlztcvmXjaQovyreY_fmsc8hicUxqw6IMmc_EMDgf2za2tZy8E3VOHKbi9ZZOClkeoaCq8IfhOuvLKbGo91I_93whyFl_5x7CKFK5jxAodCXBXDNgQkynKB9qaaKFe4x1p9XWnEV94kOEEXw2quya_NzSzAwIZEKN2MG8kcoZd-K9gOGCVTw6PR3VWvnORc690R38qqzjXNcK4WMQBkfw6BiSx1ceqDKu8pONsYjLCaIdRa2fJn-pJRQS7ZVTsNmEX5hnIYzHmCqSzZe448noBb3DF8rlcDcvBA21eA94YZDXIVRTvoqTIFxk_AMCCk-AzZAm43g7o4FIkRrt3zem6nSpCYbtByD4NXNuL-Gisn_FwqK7xSoPlI1el4Uym0vhaBIvmxYby9gBjfmOYW4EQkhM9XyRBkD6PhNXGUxfJ7uHaGUWsv7TXmKkDkpWV8MxGE8z9An8oeYz93V55pEDgE9Hl-qtKRL5fDOhKQ3Te55jhomjCUq7ZTqGZliTUEZrAWyO8Ycy5av5r19_-undAG3277n-neJNvQw",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "misaddressed-to",
+      "why": "addressed to member X but sealed to M (step 5)",
+      "sealedB64": "DoGzWJZiwRvttOLjVmcb6N7ZrMwPx1-GDhH4vpC2IkESdmE7eGHs6fiezLcZAuR3YUev81HsaLG9xkMZ9nYLQWPEPDbQPu5JVq7oGpmUG59NNbv59mCfYT2VeAyZrBHz6VQp6RBcr_B-EcvBXX2okCUXqBezsQTb8hGQ_J3z5Nq34jDi5df0VXphALpL9awIltGoZMz6NjFX9ockZOT1Gwhc2q4qsDQclXn8I_eZxj5dvMn6d3r7rVdTfjNlutPeGhGEL1kHplpsaLGO5OlEkwiFCdedrQtxpwMrkV5YXl25LUVObXnTCxru4pIUt8aUmG4Ot2DFNorwruoEkzd9tbXlkN9Uk-KHIgRBEO6Ppb1JrLK6IGwvX8qeYn3bM1XNFLt0tI-DI0VHCI_UCUQ8UqRYAlRdCFF6kHLS_gn0uxr9EKkYclZkf81Om3kaZ4RNwJ_irOTWcSIXajbrecAh0Vbargz7fLyHZYfznVi3xbdi1AsXkZdyEUFfgp3wEXjjT460IRx2Xtr1usrqO2cfcirxMUB5HuoWIuTMkEvwvWP08VgPA7OsE4kwWWkJdEzKAGWrziQAqfhJljxvwyys0rc3w8LdRjFLgaOEJ0867hARMvgNwovCD9lUVkZ_ACANTjUGiA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "misaddressed",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "misaddressed-tokey",
+      "why": "to M but toKey is X's key (step 5)",
+      "sealedB64": "2TuP5QYjmgEd3rQRNoOe5XOwdFBy2n8P3PfEBYsNt03NsV1rCVWHTLPn_gIurnastDs1McE5ckCHJoIgWOso9PR3k28BNJnByeYP0N5_1ip_AnceykW5T6Lr9fnaIVseMDoJNT4ChJkkQnWWWXL0Hw331q0DDvTWg9B2YD1lx9koYYkhkiZXFJBqzrzNjxVReofxlvHBnhsqmIwVP1kPhQcxuKqwQjUYTeu3CMOH8INVZjX1Asx791JLu2yV8CwSIRIPGoDI3EoNkTCuqXXyocQWPu6fptlkAVUtGe7vsd8GXDpvXLYIaDHgto3UX-bv0oJfcA6_kUqwiac0o_QukDYt8ckZeudiDlv_eKGAkNVNib9XKBNJA8LzLn0N4FazgecQyUjr0YrM-jBN6Gli4kclDbMYQo1Ad1UNS1yuXc7ZTNtuF_75yyq9dkXhr-jyleU8Ibyc9sV7IZEjXuC76c2R9-ZFMdlSDvEHvGdxVCyQvV-hiDQuyecRUvvvo2TOY4KgxaUvSOK6c9_1XsBaJ3IdiAdW1L23ydGBpfYoze3uXRq7kFMkkzDHbafT4iIV5NT8KrNqGQL6c3RPPyLkmgZFmnpDkg7C3lXXbqmWU334peAJsFl5QhingwQUrUwgkm8TVw",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "misaddressed",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "misaddressed-before-pending",
+      "why": "unpinned sender AND misaddressed: step 5 decides",
+      "sealedB64": "CkXvY2u3sXo17VOYZBhUJzEWRAinxTdot0T9PL94HgnRMcL_8u7U7JEcLy9pHOptuVC2NV_OMw39P1jPnOkWxnkdlC2Va_Z0zyiPzE-uYhV-v_N6onNTIxXA_rl7jPoZzPvO9r49q5adZ5PJDZpajhZy7liWsjd3zFg9Q0LED2o5V2Wjs-IU49cl3rwnhOmy_lkQpJE0Wis6K_IXjvTQIz-8X4BvnDLXJc8P0MB7_vcHvtqYFon_l4SoArGiTz8GRgS-gzHvR5_iCAMZ0XeT4YrhlMggITXpBS93kuhxMQ2J6I7-868UhSsAu1hupDfJZrhFBwgtjtH0eBfYAAjSEqPUK6wXoxPI0t-ojhBD4iu-DA72GnzUT03gXAW2JoTEUp_0tOOdkSKrciJvV_TiIdRI6wMx6msqw7t-a5Lbr-OaQluNqrhDEk6SsFNQKRkGsE6gR_OEXHYdgIkST7sCGSq6VGnsRI2GpLfMYC04UUYKsYaoryTHfFfFUVohF7Qpa5TR-jbirIa6wPqXjSywL8OTvxTFLD1d9j7R1seAWceLmLZO0jMjkqOXBqzIMzDKpKsneuisFq1w8HFSjteQ2DKlmUDB64uZ3GGWz9XzF5K5c4KWE68yaSnoZ5rvLKGrn5Kcgg",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "misaddressed",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "vault-mismatch",
+      "why": "statement names another vault than the row (step 6)",
+      "sealedB64": "f_ViKTm04PBAKrNTKBvuQYA7CQU0t29VJpBygI8_R2yBhMKro7ch0hGbTTCieSWdxyecbLc-2zzXZlSTRoUDQ7SVJhykhYZtQymUGZOib4aHV607ibC8qS-twfSSi_a2NNoRDUdupU0XczdUU5O42bRBDcWE5z8Aq4tN7Ib6DPY9zKSthwi7jfhvfXcboVILBNgSyizwkCt6isGwTC-wxlMTEMBrQ54CNNO2V2UpmVo9mc_FLSp8XvLqlg7ZWXwqpMknjIcldWkQ1GMxK6FCaHHDbV3l3hfkY2bayNGf4GBJGKDKMBjGX6E7Vdgp37H2tZi0T0CMNll_R1iNaie8-JS2Pqyd5kPJVlNxeTF80Hz55JZhv8K1MJNnMCWymRSKdbYHYQaQaE0Hz2yZRbRT3iVItgGYjezNXVS5bn-skFw6X5CQuBZkBR0_-7sC2q2UyQm1dRmr4onEmdcHl-55h_4L3gTm8nfHum4ixHLk7VWXvYh-HVCGqKHlb1NhY37J82h_6aHca3-t43d6K0Szvevjb6NCepky_eFnPxvs8uG4PiXEwgeOHHcy0Hcu0woxFCR4KPJhQWNo41s6HErp9zmXMQ753OpT7sP64aBNGsc-m4pt37R5ZPWR4-swZtPwKeimLA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "vault_mismatch",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "pending-unpinned",
+      "why": "the named sender O is not pinned (step 7): a pending invitation, not an adoption",
+      "sealedB64": "YJAIxHitSWRes1vxjbstkLzfhhWe5XGzc9RqGHso5nwu8BhY72EfVvtTBXV_5ThpAS1IVzA6OG3MM1WGrPvsbxg538enueciHDDP7AeFd4XByF5M1uwWv-_1h476pEVlqZeDAA0sR-WH81phus8OF56n_y_HZUHqU3WoaZZq1URzHNveBRM1630nya3CZEppPlUKPsJJuqE7cFRZ9PovhV7rlnrp7EoywA9OND_Emz10p-LjnCL7Vx4wiOYJ4n_NB8WkEFeC-ttUQMRaJc4f2hM2qrMSZwJMR4dqkcYf8ra_ooSRY8Xn7f_7y_1nFIfAcDBF387vfOHjqKM3q7pO8RuUaUVoKFJyS5KwID30-oL_DKkghbjslfOgfJxqKUgt2QqzrwZ469TveXpqdx8SJEGhGCEElnfotal6gb0PTt45C0s0B0bRCs3aJrPC_skXFa9Q6luXcL41i-zpWJlArxhgdRf44b_gbQoDi4PEH1xgrpiwD5ezv1c2aLA-CC-DnM-PTMBYXszqyrEjdSQU8F991UciHyW592UV1CAPN6o7mu2_5_XeEC_cRLCxQlRnnWBVQJ1mCzPH8sF8hIvnhy-X-kityiSNEtGrQpIQ8MCz8uicHInu456becdMwEn2IVY_Ow",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "pending_invitation",
+        "from": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "pending-pin-not-current",
+      "why": "O is pinned but the pin is not current on this device (a fresh device read it from an older blob; A5 review L-3): it cannot auto-adopt",
+      "sealedB64": "YtCn_Gli_LPFIBOQUKk7GVk6aDuiYSnvgAktvALTFVDzk_FFdSdt7LdxZRXhh7TspSUD-W_WHiQ6MDY6cvBCQHidhGuds8ROgm--Up7880CENKp1nDpqvzdo5x_8iEwesD-ldDdXDkI2I5alo_mlpeHmgnxYOZueSd4-tckdP11riKe6qNqkw-5WVtjy_kGfiUKUrCwlpLryspgZmPiq9QWDNnlsckevhdw-b7Hvv8Ho0j1CQMO6rqSv5OqVqZvGoPV08MGpCbWttFc8-E7m_ctjqG60ydo72Zeemkd2ktrGqlYA2ByMJHCtnt49Suf3vIpBk69m5XJms-o__yobDbPHp7nE2tS8QCc1OPw-MQJaOj1VPlxnvYMr0Owe2zKXKvZNQmKkV1SKWxDWw-U-WdKEqLHJ6FYYI8dfFWW3jiNVPOMBDAC-2mbTZ_V3K7pdZAM3AZst6KQKMSYQuJFfC5oRKdzeesASCj2f3vbTLvC5QaaB2KKRAjjNW4je0VYmPdMTaSeJSD2ojBCvl6ynNzi7upQiALMKlShs6IBTK6DclsXGI-d-_LuA6G0LRQWe9oXsCSZnheu52-bgy-M63vog-fCGex84LC5bwZbCZtNB4hrSUbLEtDzjjv5Kwk8wZN2bzA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": false,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "pending_invitation",
+        "from": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "pending-before-signature",
+      "why": "unpinned sender AND a flipped signature: step 7 decides",
+      "sealedB64": "AwMblcRBNhuAW_dyqR_y6hJADi7VWi3InwtJVvF_DyLVCjaN_Gsk3iXySijoL-F2gebB6B27xEoL25bZccmrgRKGSozBrGGySDWHVqaNE2x7SfkJMLLxmPTUpDOM5Ml5ELit2O1kvigHP_RuO86VPLKE7qTdknxS8MK89XX5bUY0-Vx0TeblOYFrgjimN5fNDXUXt-SHmBxmHVM-g1fwnZiD4Y15f8cBrfRc-cL6ObMk_p8eByAkZWAFvEIz_uX3kAt8KNZJ0bwSxfiW_pX-1E2T_pIQkelOQPLP8Htg07x2xfJM56FK4ZfcG0FWF2AXQddzVnM0v7yL3kGI-kiUEOh00Ads99Kn_dY_YkdWEsWE0xHhFOwa2JkJSqkgn1UQNckXdGYft9kNl6iAki2IRQiJnxuT4rGMgmGmWYaa1c9q2ghRS_gOXr_0B9xD-yGrxPcX_ep0ADHBrU_HaCzvXRhgrKzeBXz4RNtMHmcSiV2lqU-X9Y8s8aGI8ou74Pe5IrnDaFeR7j6gcHRRRNFc44PIKnmzXtnmMhTXD35UqTnSeuscXusjplwOec2PrNhnLEPqsBSE2iGTRqFnGRI8gTB_8-A6dTsE9C5iMqv0qYfOsIwzldWIetWrTaKHnRUQImf9Hg",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {},
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "pending_invitation",
+        "from": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "signer-other-pinned-member",
+      "why": "names O as the sender but is signed by X, who is ALSO pinned (step 8): pin chosen by contacts[from]",
+      "sealedB64": "HT6pONTey9q2MW0xJ1a6CJgGAliRE-jTf8mjwBwCunfxkwY1cNWnXOGiOWYfMNvEnJ_u48zCefxGgS1vZgw0_lzhBY0oxGMxm_rqh5UUXKZGOqy8jySUUcChb05Zoim4-KgTSG15cOfeEIAbFSI4NepE0p8d22bAuO-8gGtS9iKFQIaLWMOodX6efQrW7LSeW2U8Mr7VEz9BmJtECBhK6XoOQXTbux3XJiMQd8R0LrzmHH_4bx0ErJqNEcirfnwD9EbsYOOldZB8v7vn2O31xJN0LMiTuvKc9dOZeTVG0zD-lYrk1gWadP7HgKXw_g5B0Cm7qzgDYF2Mekz9AAXbGTv0yKMEEK21CZaJXLLu5CUE8mXks_ZtRGIiuEmEHtGvlUVlht5cwK4OoDAiv8TQXjMulQfjy7bfK9xuR7owKGtVpsPiYRGCZGstL08Sz5CN3HIJMbLUAeR032MyJoY__7pwXOfqvlL2Fy9PbWuZk0HEh9oURBc4EgcECPmio4gO8-EFsBg2JxSSVkVl98droeh29qE4nVvy5yqyH1AIZOIBzlNa5zdTHUac9rLQNXsSRJYLoWKHur6iU_qZRwRox0Yy_mKjTlTeo5uArVQnGDr9uJy_8k74Ck2NjmdnEVWYx6JfLg",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "signer-not-pinned-key",
+      "why": "signed by O, but the pin for O holds a different key (step 8)",
+      "sealedB64": "CTSaH3qou5I8ZGb0ckAGebYjv-SYNftXI1XydUlooyOyu6MRD_6E7TdWDI6oMlYDGmZZfAsUSQBkA0aKHAweQvcXN1MOcSVipOG4jFk4DSxHkIN7uv4uuz7EQTTyoagGcWzHGOWIrN0iNJ5wIgbMR5I2vdUFJWfPXBY67OrxmniVA2oTtDGHzRE2xMnaESCkXHMdj47DiZgjaBZnYShfCKefGOC1aTRQo3BsLcBNC0qziNb427WuK-DEyDfKXjLY9AhSLcLKiVz4uAZqRE6fayWTnuQcvQNf5lijo3hsUBerEBZBKRAH6Fy-nL9ybA77QMg8Qx1qRYgRZhgX7fTBG0knCQniz5EP4-5jmh173WjGijw5V7TNr05P-8FbBzzzdaU0Qyy4n-riVdblQibaXMJyQgaj9prBPvhyExHRJgrADVNZA7Shg_1Yhx5EY7-U9qMj9_TM9gcyX371rtuLHxtS8OWUQqDS5ydVPeCyIhUAQiNvr8kL2IC_lA1k19V3IpeY0atV6ncKCa9RjPRESo95DKwkNHrZg6VY_iufNWz92V-7bB1iNhvo-nCjgPBxKM8OG7LqiFmUm2Q45cYc3imVM3cs1Rbmbx20ASNVIrChbw26yR8GrBHmQ-IkzdYBlvVmhA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "bad-signature",
+      "why": "one signature bit flipped (step 9)",
+      "sealedB64": "9T7ODhLyYUOMkyPUeLb29qicJbXOWfwQPIHozBrALXIRBQ33n7jaZmIOZWAboo9Es6f1cPVopgKZ6dBB9N_9jUGmWLFQESyg7TVjKsQv-VTAiltHvq-QH1m8Jc64VuBV1wvqY8QqVSpJKFfX0T6MeDmKmfg4voaeaj-5N5hkom5TIcpIhdhLCG9RbRMfaPFXX6VRdQQRG8sTuzfQ7nWSpyz7nGaCTlCNB31KKeki3WOc5LJprbNTnd-Z9LN1BxxZLZFAWjpeD-rD6cjy2c5OSVRpq3e1dX5FCcoUcK3_4gaj7iEBI_cviVMruQ4hXx0LnkDaAOAdQM0hQWV_zAJ5K5BFG6wgxNxV0F9vggOtXH3teKKUWGuFTzxPJbmOLTJJ16Epk2gEI_Gd2Wb6ghzQk-jrZ6BD8SosKDzk8NNG7hrMEDr9VRHhuOmNUHNK6FtdXO_lM-8REw4CRIPTR7BWQK1Qq24MNwliv2RjngdhNkl74yIXIT7eARnKtSyPv8AFUN1sBQS6rKgiKE-4__Nx4TxaSovtjttbIqedciN1yRYGyszRpoEhIWHq2m2o1vO1460dmVWj1f4K_7u9QbQB9bgac6HTf_3EQai1HeQK7zYPB-KGtNb2zKosXWFZ4N46QRTSmQ",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_signature",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "bad-signature-code",
+      "why": "signature over purpose code 0x02, frame says 0x01 (step 9)",
+      "sealedB64": "bUaB-4tgD9AkUgv088KtxbiGbrBgWtiAuOiJRJHObAAarrc8B7mpy6Yd19ta_W_NF7Z9RbUtG_G65F9e04y9EayT70ZRwxnZPcnSJEdUq7uxKOcJs7iSeY5_YFZKj56R3PktfuVDETfgDXbh5GFkBfiWsrWVXT9fi_0dtBG5meSxwBSTHZUS1gAVvBnPwA56VD8vWhXhJZpahBQK5Uxyz3yp9TQup0LuRQwQ6qn-AypPX_gVi1Mf3jtja8FWWhG_8VPZS1wfkYsvY7DJpwZxoGVAXNq695l3mgxW7nAYUJxOXd0266U-vyQUHjwMMIUf_G2uPophRHmq4tqQtVjBIL-QJddg8BHuqHovaHInetMqqDCfZ_n96s2vAKMLWP276Mf6mc0RwgKoMtIS1oGcnRFW7uQeukWI7plAlnKrmNd4B1cEWRbpuL20k4zbpDB5J89tqNmRnIznFOYHrByvxcbs00MhSOJ0Tj75wtZJMHJ9L2UcXNAOhmtGMeVg6p38m237KbrrCAmRw6_GeKKmKQjcKHMoM0auAe4y5cQkYRPPlrT5Zd0jY4ul1dKRriJBY3bYlPtu8eQQe0Ysa5S9qV7B_e5T2DPlrDCQRPDHUgUkplVsO_oPcQIsE8wUUx7Sv-UMsg",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": null,
+      "expect": {
+        "verdict": "bad_signature",
+        "anomaly": true
+      }
+    },
+    {
+      "name": "vk-mismatch",
+      "why": "a valid grant whose key differs from the key held from our own UVK wrap (step 11): keep the held key",
+      "sealedB64": "Vqrw3lho1O1V7ZiMNp9n_fepKup1AQjV436cfpui7jQdDkJOnBzu64C4GHmKU4NhqzDjuKW4uv-SOzN293U5UKzK2uwjwI3xsj_bN1fzxPlXQNEf55MlmBxUjnlSfJszuX2ZdfeOgUxvEmJHNdTXwHjGj-AwvwJt9bztP3HeUe0SxQzSw0PrHslhmDG3S8Cnan6nx9UdLs_EAuxfuu_KCQP_5ZJR9xK7ZCfiqk_28LPtwsCnf1TblGpWiglKvT04K3l4Zy3J5lgk5qWUj1ptTG5TNR1WRyH2BaT2c9EoXI7bv_H_Qt7c_xTp3ICBHuf7luz3ahZ2sK9Zux0fUTDlhiluAM_xKahB2hk4cFRByZNFrPaDSQjVG3iQXMb4nOBvxeIq5i-nW6hvivnqTu-4iuAuc4H_21IfkWA-Vm_j73csMgHoyOvtVyGxn5EnF35eBzp-baz_bbqgGbqSY_geXJRAW4Crp0G0NfsJEit2y0jOlSLvajMiOeCbqbSE3aXscXo9604F1Ep7s5_n-H9cpoRRNsjVNbKR1JuKyE9VuUCDWuCtIldva0cLjXKKZLPBgX0LmMiDpbipA_wQNi_YpijpZ_6vhNUeOlcQRtkibrrmohFsLBbeWCPeUbjhgibRdxeCtA",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "pins": {
+        "11111111-1111-4111-8111-111111111111": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "33333333-3333-4333-8333-333333333333": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk"
+      },
+      "pinsCurrent": true,
+      "heldVkB64": "4rop-WP0gcTjBBBGPt6BRZq3VS_ohc7OhuNrcyB1heU",
+      "expect": {
+        "verdict": "vk_mismatch",
+        "anomaly": true
+      }
+    }
+  ]
+}
