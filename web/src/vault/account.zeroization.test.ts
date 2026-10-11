@@ -28,11 +28,13 @@ interface Seen {
 const rec = vi.hoisted(() => ({
   argon: [] as { live: Uint8Array; at: Uint8Array }[], // MK outputs
   seeds: [] as { live: Uint8Array; at: Uint8Array }[], // identity seeds (keypair input)
+  signSeeds: [] as { live: Uint8Array; at: Uint8Array }[], // the same seed, as the joint signing key's input
   aeadKeys: [] as { ad: Uint8Array; seen: { live: Uint8Array; at: Uint8Array } }[], // (ad, key) per seal/open
   opened: [] as { ad: Uint8Array; seen: { live: Uint8Array; at: Uint8Array } }[], // (ad, plaintext) per open
   reset() {
     this.argon.length = 0;
     this.seeds.length = 0;
+    this.signSeeds.length = 0;
     this.aeadKeys.length = 0;
     this.opened.length = 0;
   },
@@ -51,6 +53,11 @@ vi.mock("../crypto/provider", async (importOriginal) => {
     boxKeypairFromSeed: (seed: Uint8Array) => {
       rec.seeds.push(seen(seed));
       return real.boxKeypairFromSeed(seed);
+    },
+    // Security review 2026-10, root cause A §1.1: the joint Ed25519 key comes from the SAME seed array.
+    signKeypairFromSeed: (seed: Uint8Array) => {
+      rec.signSeeds.push(seen(seed));
+      return real.signKeypairFromSeed(seed);
     },
     aeadEncrypt: (key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, ad: Uint8Array) => {
       rec.aeadKeys.push({ ad: ad.slice(), seen: seen(key) });
@@ -76,6 +83,15 @@ const openedFor = (ad: Uint8Array): Seen => single(rec.opened.filter((k) => same
 function assertWiped(s: Seen, what: string) {
   expect(s.at.some((b) => b !== 0), `${what} was already all-zero when captured — nothing to prove`).toBe(true);
   expect(s.live.every((b) => b === 0), `${what} was not zeroed after use`).toBe(true);
+}
+
+/** The signing key is derived from the very seed array the identity keypair came from, and both are wiped. */
+function assertSignSeedWiped(what: string) {
+  const sign = single(rec.signSeeds, "signing-key seed");
+  const box = single(rec.seeds, "identity seed");
+  expect(sign.live === box.live, `${what}: the signing key must come from the same seed`).toBe(true);
+  expect(same(sign.at, box.at), `${what}: same seed bytes`).toBe(true);
+  assertWiped(sign, what);
 }
 
 function assertKept(s: Seen, what: string) {
@@ -110,6 +126,7 @@ describe("Account zeroization (audit H80, spec 01 §2)", () => {
     assertWiped(single(rec.argon, "MK"), "MK");
     assertWiped(keyFor(adUvk(userId)), "wrapKey (the UVK-envelope key)");
     assertWiped(single(rec.seeds, "identity seed"), "identity seed");
+    assertSignSeedWiped("identity seed (signing-key derivation)");
     // The UVK is the key that sealed the identity seed — the Account owns it; NOT wiped.
     assertKept(keyFor(adIdkey(userId)), "UVK");
   });
@@ -122,6 +139,7 @@ describe("Account zeroization (audit H80, spec 01 §2)", () => {
     assertWiped(single(rec.argon, "MK"), "MK");
     assertWiped(keyFor(adUvk(r.request.userId)), "wrapKey");
     assertWiped(single(rec.seeds, "identity seed"), "identity seed");
+    assertSignSeedWiped("identity seed (signing-key derivation)");
     // The UVK came out of the wrappedUvk open and now belongs to the Account — kept.
     assertKept(openedFor(adUvk(r.request.userId)), "UVK");
   });
@@ -170,6 +188,7 @@ describe("Account zeroization (audit H80, spec 01 §2)", () => {
     assertWiped(single(rec.argon, "new MK"), "new MK");
     assertWiped(keyFor(adUvk(userId)), "new wrapKey");
     assertWiped(single(rec.seeds, "identity seed"), "identity seed (hard-fail probe)");
+    assertSignSeedWiped("identity seed (hard-fail probe, signing-key derivation)");
     // recover() returns a commit body, not a session: the recovered UVK is dead too.
     assertWiped(openedFor(adRecovery(userId)), "recovered UVK");
   });

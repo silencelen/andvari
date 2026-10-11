@@ -44,6 +44,12 @@ class AccountZeroizationTest {
         override fun boxKeypairFromSeed(seed: ByteArray): KeyPairBytes =
             d.boxKeypairFromSeed(seed).also { seeds += Seen(seed, seed.copyOf()) }
 
+        // The joint Ed25519 signing key (security review 2026-10, root cause A §1.1) is derived from
+        // the SAME seed array at unlock and must leave it just as dead as the X25519 derivation does.
+        val signSeeds = ArrayList<Seen>()
+        override fun signKeypairFromSeed(seed: ByteArray): KeyPairBytes =
+            d.signKeypairFromSeed(seed).also { signSeeds += Seen(seed, seed.copyOf()) }
+
         override fun aeadEncrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, ad: ByteArray): ByteArray {
             aeadKeys += ad.copyOf() to Seen(key, key.copyOf())
             return d.aeadEncrypt(key, nonce, plaintext, ad)
@@ -61,6 +67,14 @@ class AccountZeroizationTest {
     private fun assertWiped(s: Seen, what: String) {
         assertTrue(s.at.any { it != 0.toByte() }, "$what was already all-zero when captured — nothing to prove")
         assertTrue(s.live.all { it == 0.toByte() }, "$what was not zeroed after use")
+    }
+
+    /** The signing key is derived from the very seed array the identity keypair came from, and both are wiped. */
+    private fun assertSignSeedWiped(rec: Recording, what: String) {
+        val sign = rec.signSeeds.single()
+        assertTrue(sign.live === rec.seeds.single().live, "$what: the signing key must come from the same seed")
+        assertTrue(sign.at.contentEquals(rec.seeds.single().at), "$what: same seed bytes")
+        assertWiped(sign, what)
     }
 
     private fun assertKept(s: Seen, what: String) {
@@ -87,6 +101,7 @@ class AccountZeroizationTest {
         assertWiped(rec.argon.single(), "MK")
         assertWiped(rec.keyFor(Ad.uvk(userId)), "wrapKey (the UVK-envelope key)")
         assertWiped(rec.seeds.single(), "identity seed")
+        assertSignSeedWiped(rec, "identity seed (signing-key derivation)")
         // The UVK is the key that sealed the identity seed — the Account owns it; NOT wiped.
         assertKept(rec.keyFor(Ad.idkey(userId)), "UVK")
     }
@@ -101,6 +116,7 @@ class AccountZeroizationTest {
         assertWiped(rec.argon.single(), "MK")
         assertWiped(rec.keyFor(Ad.uvk(r.request.userId)), "wrapKey")
         assertWiped(rec.seeds.single(), "identity seed")
+        assertSignSeedWiped(rec, "identity seed (signing-key derivation)")
         // The UVK came out of the wrappedUvk open and now belongs to the Account — kept.
         assertKept(rec.openedFor(Ad.uvk(r.request.userId)), "UVK")
     }
@@ -143,6 +159,7 @@ class AccountZeroizationTest {
         assertWiped(rec.argon.single(), "new MK")
         assertWiped(rec.keyFor(Ad.uvk(userId)), "new wrapKey")
         assertWiped(rec.seeds.single(), "identity seed (hard-fail probe)")
+        assertSignSeedWiped(rec, "identity seed (hard-fail probe, signing-key derivation)")
         // recover() returns a commit body, not a session: the recovered UVK is dead too.
         assertWiped(rec.openedFor(Ad.recovery(userId)), "recovered UVK")
     }
