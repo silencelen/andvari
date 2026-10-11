@@ -5,7 +5,7 @@ import { CryptoError } from "./sodium";
 /**
  * The v2 `SignedStatement` envelope and its canonical statement (security review 2026-10, root cause A
  * §1.1–§1.3; spec 01 §5.1). Byte-for-byte twin of core `SignedStatement.kt`, graded off the same
- * spec/test-vectors/signedstatement.json. A3 ships the codec and the verify helper with NO caller.
+ * spec/test-vectors/signedstatement.json. First caller: escrow v2 (escrow.ts, branch A4).
  *
  * ```
  * 0    4   magic        61 76 73 02   ("avs" + version 0x02)
@@ -22,7 +22,11 @@ export type StatementVerdict =
   | "non_canonical"
   | "bad_statement"
   | "signer_not_pinned_key"
-  | "bad_signature";
+  | "bad_signature"
+  // escrow anchoring (verifyEscrowStatement only; security review 2026-10, A4)
+  | "user_mismatch"
+  | "recovery_fp_mismatch"
+  | "identity_mismatch";
 
 /** Why a statement was refused; the first failing step decides {@link verdict}. */
 export class SignedStatementError extends Error {
@@ -35,37 +39,73 @@ export class SignedStatementError extends Error {
 export type PurposeCode = 1 | 2;
 const PURPOSE_LITERAL: Record<PurposeCode, "vault-grant" | "escrow-uvk"> = { 1: "vault-grant", 2: "escrow-uvk" };
 
+/**
+ * A v2 statement's fields (spec 01 §5.1): what a SENDER builds for {@link buildSignedStatement}.
+ * A parse result is NOT one of these: {@link parseStatement} returns an {@link UnverifiedStatement},
+ * and received bytes become a `Statement` only through a {@link VerifiedStatement}.
+ */
 export interface VaultGrantStatement {
-  purpose: "vault-grant";
-  from: string;
-  to: string;
-  toKey: Uint8Array;
-  vaultId: string;
-  grantId: Uint8Array;
-  issuedAt: number;
-  vk: Uint8Array;
+  readonly purpose: "vault-grant";
+  readonly from: string;
+  readonly to: string;
+  readonly toKey: Uint8Array;
+  readonly vaultId: string;
+  readonly grantId: Uint8Array;
+  readonly issuedAt: number;
+  readonly vk: Uint8Array;
 }
 
 export interface EscrowUvkStatement {
-  purpose: "escrow-uvk";
-  userId: string;
-  identityKey: Uint8Array;
-  recoveryFp: string;
-  issuedAt: number;
-  key: Uint8Array;
+  readonly purpose: "escrow-uvk";
+  readonly userId: string;
+  readonly identityKey: Uint8Array;
+  readonly recoveryFp: string;
+  readonly issuedAt: number;
+  readonly key: Uint8Array;
 }
 
 export type Statement = VaultGrantStatement | EscrowUvkStatement;
 
-declare const verifiedBrand: unique symbol;
+/** A frozen deep copy: byte fields are fresh arrays, so no holder can alter another holder's view. */
+function copyStatement(st: Statement): Statement {
+  if (st.purpose === "vault-grant") {
+    return Object.freeze({ ...st, toKey: st.toKey.slice(), grantId: st.grantId.slice(), vk: st.vk.slice() });
+  }
+  return Object.freeze({ ...st, identityKey: st.identityKey.slice(), key: st.key.slice() });
+}
+
+declare const unverifiedBrand: unique symbol;
 /**
- * A statement that passed EVERY step of {@link verifySignedStatement}. The brand symbol is not
- * exported, so nothing outside this module can produce the type without a cast.
+ * The output of a STRICT parse that has NOT been authenticated (security review 2026-10, A3 review:
+ * separate unverified from verified data at the type level). It is neither a {@link Statement} nor a
+ * {@link VerifiedStatement}, so the compiler refuses it wherever either is required, and it carries
+ * only the plain routing fields a caller may need before verifying — no key material.
  */
-export interface VerifiedStatement {
-  readonly [verifiedBrand]: true;
-  readonly statement: Statement;
-  readonly signerPub: Uint8Array;
+export type UnverifiedStatement =
+  | { readonly [unverifiedBrand]: true; readonly purpose: "vault-grant"; readonly from: string; readonly to: string; readonly vaultId: string }
+  | { readonly [unverifiedBrand]: true; readonly purpose: "escrow-uvk"; readonly userId: string; readonly recoveryFp: string };
+
+const verifiedToken: unique symbol = Symbol("verified-statement");
+/**
+ * A statement that passed EVERY step of {@link verifySignedStatement} or {@link verifyEscrowStatement}.
+ * Nominal (private `#` fields) and minted only with a module-private token, so nothing outside this
+ * module can produce one. Read-only: `statement` returns a frozen deep copy and `signerPub` a copy, so
+ * a caller cannot alter the verified key material after the fact.
+ */
+export class VerifiedStatement {
+  readonly #statement: Statement;
+  readonly #signerPub: Uint8Array;
+  constructor(token: typeof verifiedToken, statement: Statement, signerPub: Uint8Array) {
+    if (token !== verifiedToken) throw new Error("VerifiedStatement is minted only by the verify helpers");
+    this.#statement = copyStatement(statement);
+    this.#signerPub = signerPub.slice();
+  }
+  get statement(): Statement {
+    return copyStatement(this.#statement);
+  }
+  get signerPub(): Uint8Array {
+    return this.#signerPub.slice();
+  }
 }
 
 export interface SignedStatementFrame {
@@ -183,10 +223,20 @@ function b64(obj: Record<string, unknown>, key: string, len: 16 | 32): Uint8Arra
 
 /**
  * STRICT parse of a statement under `purposeCode` — the same six steps, in the same order, as core
- * `SignedStatement.parseStatement` (spec 01 §5.1). The result is NOT authenticated: a caller may read
- * it only to choose which pin to verify against; trust comes from {@link verifySignedStatement} alone.
+ * `SignedStatement.parseStatement` (spec 01 §5.1). The result is NOT authenticated and is typed so
+ * ({@link UnverifiedStatement}): a caller may read its routing fields only to choose which pin to verify
+ * against; trust comes from {@link verifySignedStatement} / {@link verifyEscrowStatement} alone.
  */
-export function parseStatement(purposeCode: number, statement: Uint8Array): Statement {
+export function parseStatement(purposeCode: number, statement: Uint8Array): UnverifiedStatement {
+  const st = parseFields(purposeCode, statement);
+  const routing =
+    st.purpose === "vault-grant"
+      ? { purpose: st.purpose, from: st.from, to: st.to, vaultId: st.vaultId }
+      : { purpose: st.purpose, userId: st.userId, recoveryFp: st.recoveryFp };
+  return Object.freeze(routing) as UnverifiedStatement;
+}
+
+function parseFields(purposeCode: number, statement: Uint8Array): Statement {
   if (!isPurposeCode(purposeCode)) return refuse("bad_frame", "unknown purpose code");
   if (statement.length < MIN_STATEMENT_BYTES || statement.length > MAX_STATEMENT_BYTES) refuse("bad_frame", "statement length");
   for (const b of statement) if (b < 0x20 || b > 0x7e) refuse("non_canonical", "not printable ASCII");
@@ -271,17 +321,13 @@ export function parseFrame(frame: Uint8Array): SignedStatementFrame {
   };
 }
 
-/**
- * THE signer-key binding helper — the only way to get a {@link VerifiedStatement}. Twin of core
- * `SignedStatement.verify`; fails closed, first failing step decides the verdict (design §1.4 steps
- * 2, 3, 8, 9): frame + expected purpose (`bad_frame`), strict canonical parse (`non_canonical` /
- * `bad_statement`), `ed25519PkToCurve25519(signerPub) == pinnedIdentityPub` (`signer_not_pinned_key`;
- * the pin MUST come from out of band, never a server response), then the signature (`bad_signature`).
- */
-export function verifySignedStatement(frame: Uint8Array, expectedPurposeCode: PurposeCode, pinnedIdentityPub: Uint8Array): VerifiedStatement {
+function frameFor(frame: Uint8Array, expectedPurposeCode: PurposeCode): SignedStatementFrame {
   const f = parseFrame(frame);
   if (f.purposeCode !== expectedPurposeCode) refuse("bad_frame", `purpose code ${f.purposeCode}, expected ${expectedPurposeCode}`);
-  const statement = parseStatement(f.purposeCode, f.statement);
+  return f;
+}
+
+function verifySigner(f: SignedStatementFrame, statement: Statement, pinnedIdentityPub: Uint8Array): VerifiedStatement {
   if (pinnedIdentityPub.length !== 32) refuse("signer_not_pinned_key", "pinned identity key is not 32 bytes");
   let curve: Uint8Array;
   try {
@@ -293,5 +339,49 @@ export function verifySignedStatement(frame: Uint8Array, expectedPurposeCode: Pu
   if (!signVerifyDetached(f.signerPub, f.signature, signedMessage(f.purposeCode, f.signerPub, f.statement))) {
     refuse("bad_signature", "signature does not verify");
   }
-  return { statement, signerPub: f.signerPub } as VerifiedStatement;
+  return new VerifiedStatement(verifiedToken, statement, f.signerPub);
+}
+
+/**
+ * THE signer-key binding helper for VAULT GRANTS. Twin of core `SignedStatement.verify`; fails closed,
+ * first failing step decides the verdict (design §1.4 steps 2, 3, 8, 9): frame + expected purpose
+ * (`bad_frame`), strict canonical parse (`non_canonical` / `bad_statement`),
+ * `ed25519PkToCurve25519(signerPub) == pinnedIdentityPub` (`signer_not_pinned_key`; the pin MUST come
+ * from out of band, never a server response), then the signature (`bad_signature`).
+ *
+ * Escrow statements are REFUSED here: they verify only through {@link verifyEscrowStatement}, which
+ * cannot be called without the out-of-band anchor (security review 2026-10, A3 review).
+ */
+export function verifySignedStatement(frame: Uint8Array, expectedPurposeCode: PurposeCode, pinnedIdentityPub: Uint8Array): VerifiedStatement {
+  if (expectedPurposeCode === 2) throw new Error("escrow statements verify only through verifyEscrowStatement (anchored)");
+  const f = frameFor(frame, expectedPurposeCode);
+  return verifySigner(f, parseFields(f.purposeCode, f.statement), pinnedIdentityPub);
+}
+
+/**
+ * The ESCROW-specific binding helper (security review 2026-10, root cause A §2.3; A3 review "bind
+ * statement fields to the anchor, not to themselves"). Twin of core `SignedStatement.verifyEscrow`.
+ * Every input is the caller's OUT-OF-BAND anchor, never a value read from the statement: the account
+ * the admin named, the identity key the anchor vouches for, and the fingerprint of the org key whose
+ * secret opened the seal. Order: frame + strict parse; the UNVERIFIED `userId` / `recoveryFp` routing
+ * fields (`user_mismatch` / `recovery_fp_mismatch`, a refusal only); signer → anchor
+ * (`signer_not_pinned_key`), signature (`bad_signature`); then the VERIFIED `userId`, `identityKey` and
+ * `recoveryFp` must EQUAL the anchor (`user_mismatch` / `identity_mismatch` / `recovery_fp_mismatch`).
+ */
+export function verifyEscrowStatement(
+  frame: Uint8Array,
+  expectedUserId: string,
+  anchoredIdentityPub: Uint8Array,
+  expectedRecoveryFp: string,
+): VerifiedStatement {
+  const f = frameFor(frame, 2);
+  const unverified = parseFields(f.purposeCode, f.statement) as EscrowUvkStatement;
+  if (unverified.userId !== expectedUserId) refuse("user_mismatch", "statement names another account");
+  if (unverified.recoveryFp !== expectedRecoveryFp) refuse("recovery_fp_mismatch", "statement names another recovery key");
+  const verified = verifySigner(f, unverified, anchoredIdentityPub);
+  const st = verified.statement as EscrowUvkStatement;
+  if (st.userId !== expectedUserId) refuse("user_mismatch", "verified statement names another account");
+  if (!ctEquals(st.identityKey, anchoredIdentityPub)) refuse("identity_mismatch", "statement identityKey is not the anchored identity");
+  if (st.recoveryFp !== expectedRecoveryFp) refuse("recovery_fp_mismatch", "verified statement names another recovery key");
+  return verified;
 }

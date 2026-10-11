@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { adIdkey, adItem, adUvk, adVaultMeta, adVk } from "./ad";
 import { fromB64, fromUtf8, toB64, utf8 } from "./bytes";
 import { open, sealWithNonce } from "./envelope";
-import { CANARY_USER_ID, KEY_TYPE_UVK, fingerprint, openEscrow, shortFingerprint } from "./escrow";
+import { CANARY_KEY, CANARY_USER_ID, KEY_TYPE_UVK, fingerprint, openCanary, shortFingerprint } from "./escrow";
 import {
   canonicalGrantPayload,
   identityFingerprint,
@@ -123,15 +123,16 @@ describe("seal.json", () => {
     for (const c of v.open) {
       expect(toB64(sealOpen(kp.publicKey, kp.privateKey, fromB64(c.sealedB64)))).toBe(c.plaintextB64);
     }
-    const escrow = await openEscrow(kp.publicKey, kp.privateKey, fromB64(v.escrowUvk.sealedB64));
+    // The v1 legacy payload layout; RECOVERING it (anchor + identity check) is graded by escrow-v2.json,
+    // where this very blob is the member's legacy escrow.
+    const escrow = JSON.parse(new TextDecoder().decode(sealOpen(kp.publicKey, kp.privateKey, fromB64(v.escrowUvk.sealedB64))));
     expect(escrow.userId).toBe(v.escrowUvk.userId);
     expect(escrow.keyType).toBe(KEY_TYPE_UVK);
     expect(toB64(fromB64(escrow.key))).toBe(v.escrowUvk.uvkB64);
 
-    const canary = await openEscrow(kp.publicKey, kp.privateKey, fromB64(v.canary.sealedB64));
-    expect(canary.userId).toBe(CANARY_USER_ID);
-    expect(canary.userId).toBe(v.canary.expectedUserId);
-    expect(escrowKeyB64(canary.key)).toBe(v.canary.expectedKeyB64);
+    expect(CANARY_USER_ID).toBe(v.canary.expectedUserId);
+    expect(escrowKeyB64(toB64(CANARY_KEY))).toBe(v.canary.expectedKeyB64);
+    await openCanary(kp, fromB64(v.canary.sealedB64)); // throws unless it is exactly the fixed canary
 
     const wrong = boxKeypairFromSeed(fromB64(v.rejectWrongKey.wrongSeedB64));
     expect(() => sealOpen(wrong.publicKey, wrong.privateKey, fromB64(v.rejectWrongKey.sealedB64))).toThrow();
