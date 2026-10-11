@@ -1,34 +1,28 @@
 /**
- * The once-per-account personal-vault migration (security review 2026-10, root cause A §8.5) — twin of
- * core `PersonalVaultMigration.kt`, pinned by `spec/test-vectors/personalwrap.json`.
+ * The once-per-account personal-vault QUESTION (security review 2026-10, root cause A §8.5, as amended by the
+ * A5 review, H-1) — twin of core `PersonalVaultMigration.kt`, pinned by `spec/test-vectors/personalwrap.json`.
  *
- * A candidate (1) is labelled `personal` by the server and (2) has a VK that opened from a UVK wrap on our
- * OWN grant row, from no seal. Mint automatically only when exactly one vault meets (1) and (2), its
- * decrypted name is exactly `Personal`, and (when this device remembers one) it is the personal vault last
- * used here. Otherwise ask the human, listing only vaults that meet (1) and (2).
+ * There is NO automatic pick: the old auto rule let the server's label decide whenever it withheld the wrap,
+ * and the client then minted a genuine wrap for that pick. With no wrap served and none cached on this
+ * device, the client asks; the human's answer is the only thing that mints. The choices are every held vault
+ * keyed from a UVK wrap on our own grant row (no seal), regardless of label or role, which neither filter nor
+ * order them: the last-used vault first (if it is a choice), then by vaultId.
  */
-
-export const ENROLMENT_NAME = "Personal";
 
 export interface PersonalCandidate {
   vaultId: string;
-  labelledPersonal: boolean;
   ownUvkWrap: boolean;
   name: string | null;
   itemCount: number;
 }
 
-export type PersonalDecision = { kind: "auto"; vaultId: string } | { kind: "ask"; choices: PersonalCandidate[] };
-
-export function decidePersonalVault(candidates: PersonalCandidate[], lastUsedPersonalVaultId: string | null): PersonalDecision {
-  const eligible = candidates
-    .filter((c) => c.labelledPersonal && c.ownUvkWrap)
-    .sort((a, b) => (a.vaultId < b.vaultId ? -1 : a.vaultId > b.vaultId ? 1 : 0));
-  if (eligible.length === 1) {
-    const only = eligible[0]!;
-    if (only.name === ENROLMENT_NAME && (!lastUsedPersonalVaultId || lastUsedPersonalVaultId === only.vaultId)) {
-      return { kind: "auto", vaultId: only.vaultId };
-    }
-  }
-  return { kind: "ask", choices: eligible };
+export function personalVaultChoices(candidates: PersonalCandidate[], lastUsedPersonalVaultId: string | null): PersonalCandidate[] {
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return candidates
+    .filter((c) => c.ownUvkWrap)
+    .sort((a, b) => {
+      const la = a.vaultId === lastUsedPersonalVaultId ? 0 : 1;
+      const lb = b.vaultId === lastUsedPersonalVaultId ? 0 : 1;
+      return la !== lb ? la - lb : cmp(a.vaultId, b.vaultId);
+    });
 }

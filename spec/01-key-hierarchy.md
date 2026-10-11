@@ -289,9 +289,10 @@ key signs only through the flows that need it (today: escrow v2).
   replaced only by `PUT /account/personal-wrap` with a fresh password reauth (re-designation, owner
   decision Q9). Client rules: the personal vault is the wrap's `vaultId` iff the wrap opens, and its
   VK is THE key for that vault (precedence rule 1: held before any grant row is applied, so a row
-  can only be compared against it); absent → no personal vault until the once-per-account
-  migration (spec 02 §4) resolves; present but unopenable → no personal vault, an anomaly, and no
-  label fallback. "No personal vault" means no default save/import destination and no usage ledger.
+  can only be compared against it); absent while this device cached a wrap before → the server
+  WITHHELD it, an anomaly, and the cached (UVK-sealed) wrap stands; absent and never seen → no
+  personal vault until the HUMAN answers the designation question (spec 02 §4; never an automatic
+  pick); present but unopenable → no personal vault, an anomaly, and no label fallback. "No personal vault" means no default save/import destination and no usage ledger.
   Vectors: `spec/test-vectors/personalwrap.json`.
 - **Shared vault** (`type=shared`): the creator generates `vaultId`, `VK`, `metaBlob`.
   - The **creator's own grant** uses `wrappedVk = Envelope(key = UVK, plaintext = VK,

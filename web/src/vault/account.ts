@@ -27,7 +27,7 @@ import type {
 } from "../api/types";
 
 /** Where the personal vault came from (security review 2026-10, root cause A §4.3, §8.5). */
-export type PersonalStatus = "confirmed" | "migrated-unstored" | "absent" | "unreadable";
+export type PersonalStatus = "confirmed" | "withheld" | "absent" | "unreadable";
 
 /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed; core parity). */
 export const ITEM_FORMAT_VERSION = 2;
@@ -188,7 +188,7 @@ export class Account {
   /**
    * The personal vault (security review 2026-10, root cause A §4): named by `AccountKeys.personalWrap`
    * (only this user's UVK can mint it, {@link applyPersonalWrap}) or picked by the §8.5 migration
-   * ({@link adoptMigrationPick}). "" = no personal vault: no default destination, no usage ledger.
+   * (the human's answer, never an automatic pick: A5 review H-1). "" = no personal vault: no default destination, no usage ledger.
    * NEVER set from a server `type` label or `role`. Core twin: `Account.personalVaultId`.
    */
   get personalVaultId(): string {
@@ -316,6 +316,7 @@ export class Account {
       const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, personalVaultId, vaultKeys);
       account.vaultRoles.set(personalVaultId, "owner");
       account.personalStatusValue = "confirmed";
+      account.personalWrapValue = request.personalWrap!;
       account.uvkWrappedVaults.add(personalVaultId);
       signingForCleanup = null; // owned by the returned Account now
       return { request, account, recoverySecret: recovery.recoverySecret };
@@ -750,39 +751,55 @@ export class Account {
    */
   applyPersonalWrap(wrap: PersonalWrap | null) {
     if (!wrap) {
-      if (this.personalStatusValue !== "confirmed") {
+      if (this.personalStatusValue !== "confirmed" && this.personalStatusValue !== "withheld") {
         this.personalStatusValue = "absent";
         this.personalVaultIdValue = "";
       }
       return;
     }
+    if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "confirmed";
+    else {
+      this.personalStatusValue = "unreadable";
+      this.personalVaultIdValue = "";
+    }
+  }
+
+  /**
+   * A5 review H-1: the server served NO wrap, but this device cached one it authenticated before (UVK-sealed,
+   * so caching is safe). Only while "absent"; success → "withheld" (an anomaly the UI surfaces; no question,
+   * no label); a cached blob that does not open → "unreadable". Core twin: `applyCachedPersonalWrap`.
+   */
+  applyCachedPersonalWrap(wrap: PersonalWrap) {
+    if (this.personalStatusValue !== "absent") return;
+    if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "withheld";
+    else {
+      this.personalStatusValue = "unreadable";
+      this.personalVaultIdValue = "";
+    }
+  }
+
+  /** The wrap that decided the personal vault (served or cached), for the device's local cache. */
+  get personalWrap(): PersonalWrap | null {
+    return this.personalWrapValue;
+  }
+
+  private personalWrapValue: PersonalWrap | null = null;
+
+  private openAndInstallPersonalWrap(wrap: PersonalWrap): boolean {
     let vk: Uint8Array | null = null;
     try {
       vk = open(this.uvk, fromB64(wrap.wrappedVk), adVkPersonal(wrap.vaultId, this.userId));
     } catch {
       vk = null;
     }
-    if (!vk || vk.length !== 32) {
-      this.personalStatusValue = "unreadable";
-      this.personalVaultIdValue = "";
-      return;
-    }
+    if (!vk || vk.length !== 32) return false;
     const held = this.vaultKeys.get(wrap.vaultId);
     if (held && !ctEquals(held, vk)) this.vkMismatchVaults.add(wrap.vaultId);
     this.vaultKeys.set(wrap.vaultId, vk);
     this.unreadableKeyVaults.delete(wrap.vaultId);
     this.uvkWrappedVaults.add(wrap.vaultId);
     this.personalVaultIdValue = wrap.vaultId;
-    this.personalStatusValue = "confirmed";
-  }
-
-  /** §8.5: adopt the migration's automatic pick for this session while its wrap is stored. Only a vault
-   *  keyed from our own UVK wrap; never over a confirmed or unreadable wrap. */
-  adoptMigrationPick(vaultId: string): boolean {
-    if (this.personalStatusValue === "confirmed" || this.personalStatusValue === "unreadable") return false;
-    if (!this.uvkWrappedVaults.has(vaultId) || !this.vaultKeys.has(vaultId)) return false;
-    this.personalVaultIdValue = vaultId;
-    this.personalStatusValue = "migrated-unstored";
+    this.personalWrapValue = wrap;
     return true;
   }
 

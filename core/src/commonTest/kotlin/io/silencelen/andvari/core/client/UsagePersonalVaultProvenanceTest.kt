@@ -89,7 +89,7 @@ class UsagePersonalVaultProvenanceTest {
         device.addGrant(memberGrant)
         assertTrue(device.hasVault(shared.vaultId), "the member grant is still honoured — the vault opens")
         assertTrue(device.keyArrivedByMemberGrant(shared.vaultId), "and its key is remembered as member-granted")
-        device.adoptMigrationPick(shared.vaultId)
+        runCatching { device.applyPersonalWrap(device.buildPersonalWrap(shared.vaultId)) }
 
         assertEquals("", device.personalVaultId, "a member-granted vault must never be adopted as personal")
         // Fail-closed, per the owner's decision: no personal vault means no ledger, which callers
@@ -99,7 +99,7 @@ class UsagePersonalVaultProvenanceTest {
         // The real personal row finally arrives (or the server stops lying): now it is adopted.
         device.addGrant(personalGrant(victim))
         assertFalse(device.keyArrivedByMemberGrant(victim.reg.personalVault.vaultId), "a personal grant is wrappedVk under our own UVK")
-        device.adoptMigrationPick(victim.reg.personalVault.vaultId)
+        runCatching { device.applyPersonalWrap(device.buildPersonalWrap(victim.reg.personalVault.vaultId)) }
         assertEquals(victim.reg.personalVault.vaultId, device.personalVaultId)
 
         // The point of the row: the co-member cannot open the ledger. `spy` stands in for any other
@@ -139,8 +139,8 @@ class UsagePersonalVaultProvenanceTest {
         val honest = Account.unlock(victim.reg.userId, password, victim.keys, crypto)
         honest.addGrant(personalGrant(victim))
         honest.addGrant(memberGrant)
-        honest.adoptMigrationPick(victim.reg.personalVault.vaultId)
-        honest.adoptMigrationPick(shared.vaultId)
+        runCatching { honest.applyPersonalWrap(honest.buildPersonalWrap(victim.reg.personalVault.vaultId)) }
+        runCatching { honest.applyPersonalWrap(honest.buildPersonalWrap(shared.vaultId)) }
         assertEquals(victim.reg.personalVault.vaultId, honest.personalVaultId)
 
         // Hostile ordering: the relabelled shared vault is offered FIRST and repeatedly. It is
@@ -149,10 +149,10 @@ class UsagePersonalVaultProvenanceTest {
         // only by accident of the isEmpty() check running second).
         val attacked = Account.unlock(victim.reg.userId, password, victim.keys, crypto)
         attacked.addGrant(memberGrant)
-        repeat(3) { attacked.adoptMigrationPick(shared.vaultId) }
+        repeat(3) { runCatching { attacked.applyPersonalWrap(attacked.buildPersonalWrap(shared.vaultId)) } }
         assertEquals("", attacked.personalVaultId)
         attacked.addGrant(personalGrant(victim))
-        attacked.adoptMigrationPick(victim.reg.personalVault.vaultId)
+        runCatching { attacked.applyPersonalWrap(attacked.buildPersonalWrap(victim.reg.personalVault.vaultId)) }
         assertEquals(victim.reg.personalVault.vaultId, attacked.personalVaultId)
         assertNotEquals(shared.vaultId, attacked.personalVaultId)
 

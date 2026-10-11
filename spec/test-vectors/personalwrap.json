@@ -2,7 +2,7 @@
   "comment": [
     "Security review 2026-10, root cause A §4.1 / §8.5 (branch A5). Hand-authored; every blob produced by an INDEPENDENT oracle (@noble/ciphers XChaCha20-Poly1305 + Node SHA-256, no libsodium, no andvari code) with fixed nonces.",
     "wrap: AccountKeys.personalWrap = Envelope(UVK, VK, Ad.vkPersonal(vaultId, userId)) with AD 'andvari/v1|vk-personal|{vaultId}|{userId}'. open rows MUST yield vkB64; reject rows MUST fail (cross-purpose: a personal wrap never opens as an owner wrap and the reverse; wrong vault; wrong user).",
-    "migration: the §8.5 decision. A candidate counts when labelledPersonal AND ownUvkWrap. auto iff exactly one counts, its name is exactly 'Personal', and lastUsed is null or equals it; otherwise ask, listing the counting candidates sorted by vaultId."
+    "migration: the §8.5 QUESTION as amended by the A5 review (H-1). There is NO automatic pick and the server label (labelledPersonal, kept in the rows only to prove it is ignored) neither filters nor orders: the choices are every candidate with ownUvkWrap (a key from a UVK wrap on our own grant row, no seal), the device's lastUsed first when it is one of them, then by vaultId. Rows never expect `auto`."
   ],
   "wrap": {
     "userId": "33333333-3333-4333-8333-333333333333",
@@ -52,7 +52,7 @@
   ],
   "migration": [
     {
-      "name": "honest-single-personal",
+      "name": "honest-single-personal-still-asks",
       "lastUsed": null,
       "candidates": [
         {
@@ -69,38 +69,24 @@
         }
       ],
       "expected": {
-        "auto": "a1111111-1111-4111-8111-111111111111"
-      }
-    },
-    {
-      "name": "relabelled-owner-shared-not-named-personal",
-      "lastUsed": null,
-      "candidates": [
-        {
-          "vaultId": "a2222222-2222-4222-8222-222222222222",
-          "labelledPersonal": true,
-          "ownUvkWrap": true,
-          "name": "Household"
-        }
-      ],
-      "expected": {
         "ask": [
+          "a1111111-1111-4111-8111-111111111111",
           "a2222222-2222-4222-8222-222222222222"
         ]
       }
     },
     {
-      "name": "two-labelled-candidates-asks",
+      "name": "h1-withheld-wrap-relabel-picks-nothing",
       "lastUsed": null,
       "candidates": [
         {
-          "vaultId": "a2222222-2222-4222-8222-222222222222",
-          "labelledPersonal": true,
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": false,
           "ownUvkWrap": true,
           "name": "Personal"
         },
         {
-          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
           "labelledPersonal": true,
           "ownUvkWrap": true,
           "name": "Personal"
@@ -114,7 +100,31 @@
       }
     },
     {
-      "name": "seal-delivered-vault-never-a-candidate",
+      "name": "label-does-not-order",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        },
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": false,
+          "ownUvkWrap": true,
+          "name": "Household"
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a1111111-1111-4111-8111-111111111111",
+          "a2222222-2222-4222-8222-222222222222"
+        ]
+      }
+    },
+    {
+      "name": "seal-delivered-vault-never-a-choice",
       "lastUsed": null,
       "candidates": [
         {
@@ -129,7 +139,7 @@
       }
     },
     {
-      "name": "seal-delivered-relabel-beside-real",
+      "name": "seal-delivered-beside-own",
       "lastUsed": null,
       "candidates": [
         {
@@ -146,13 +156,45 @@
         }
       ],
       "expected": {
-        "auto": "a1111111-1111-4111-8111-111111111111"
+        "ask": [
+          "a1111111-1111-4111-8111-111111111111"
+        ]
       }
     },
     {
-      "name": "real-personal-withheld-label",
-      "lastUsed": null,
+      "name": "last-used-first",
+      "lastUsed": "a2222222-2222-4222-8222-222222222222",
       "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        },
+        {
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
+          "labelledPersonal": false,
+          "ownUvkWrap": true,
+          "name": "Household"
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a2222222-2222-4222-8222-222222222222",
+          "a1111111-1111-4111-8111-111111111111"
+        ]
+      }
+    },
+    {
+      "name": "last-used-not-a-choice-is-ignored",
+      "lastUsed": "a3333333-3333-4333-8333-333333333333",
+      "candidates": [
+        {
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        },
         {
           "vaultId": "a1111111-1111-4111-8111-111111111111",
           "labelledPersonal": false,
@@ -161,60 +203,14 @@
         }
       ],
       "expected": {
-        "ask": []
-      }
-    },
-    {
-      "name": "last-used-matches",
-      "lastUsed": "a1111111-1111-4111-8111-111111111111",
-      "candidates": [
-        {
-          "vaultId": "a1111111-1111-4111-8111-111111111111",
-          "labelledPersonal": true,
-          "ownUvkWrap": true,
-          "name": "Personal"
-        }
-      ],
-      "expected": {
-        "auto": "a1111111-1111-4111-8111-111111111111"
-      }
-    },
-    {
-      "name": "last-used-differs-asks",
-      "lastUsed": "a2222222-2222-4222-8222-222222222222",
-      "candidates": [
-        {
-          "vaultId": "a1111111-1111-4111-8111-111111111111",
-          "labelledPersonal": true,
-          "ownUvkWrap": true,
-          "name": "Personal"
-        }
-      ],
-      "expected": {
         "ask": [
-          "a1111111-1111-4111-8111-111111111111"
+          "a1111111-1111-4111-8111-111111111111",
+          "a2222222-2222-4222-8222-222222222222"
         ]
       }
     },
     {
-      "name": "renamed-personal-asks",
-      "lastUsed": null,
-      "candidates": [
-        {
-          "vaultId": "a1111111-1111-4111-8111-111111111111",
-          "labelledPersonal": true,
-          "ownUvkWrap": true,
-          "name": "personal"
-        }
-      ],
-      "expected": {
-        "ask": [
-          "a1111111-1111-4111-8111-111111111111"
-        ]
-      }
-    },
-    {
-      "name": "undecryptable-name-asks",
+      "name": "undecryptable-name-still-offered",
       "lastUsed": null,
       "candidates": [
         {

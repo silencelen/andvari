@@ -135,7 +135,9 @@ export interface MergedAccountState {
  * wins (tie: the smaller identityPub string); tombstones union (max), a tombstone not older than a pin
  * removes it; orgRecoveryFp from the higher-seq document (local on a tie or a rollback); nonces union per
  * vault, newest {@link NONCE_CAP} kept; seq = max(local, served, highWater). A served seq below the
- * high-water mark, or a withheld blob once one was seen, is a ROLLBACK and the local copy wins.
+ * high-water mark, or a withheld blob once one was seen, is a ROLLBACK: the flag changes ONE field,
+ * `orgRecoveryFp`, which then comes from the local copy; contacts, tombstones and nonces are still the
+ * union of both (UVK-authenticated) copies, and seq stays at the high-water mark.
  */
 export function mergeAccountState(
   userId: string,

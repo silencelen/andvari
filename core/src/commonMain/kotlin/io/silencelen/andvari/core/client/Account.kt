@@ -312,21 +312,26 @@ class Account private constructor(
     /**
      * The personal vault (security review 2026-10, root cause A §4): the vault named by
      * `AccountKeys.personalWrap`, which only this user's UVK can mint ([applyPersonalWrap]), or the
-     * vault the §8.5 migration picked ([adoptMigrationPick]). Empty means "no personal vault": no
-     * default save destination, no usage ledger. NEVER set from a server `type` label or `role`.
+     * vault the human chose ([SyncEngine.designatePersonalVault]). Empty means "no personal vault": no
+     * default save destination, no usage ledger. NEVER set from a server `type` label or `role`, and
+     * never from an automatic pick: without a wrap the human chooses (review H-1).
      */
     var personalVaultId: String = personalVaultId
         private set
 
     /** Where [personalVaultId] came from (root cause A §4.3, §8.5). */
     enum class PersonalStatus {
-        /** A `personalWrap` opened under our UVK and names [personalVaultId]. */
+        /** A served `personalWrap` opened under our UVK and names [personalVaultId]. */
         CONFIRMED,
 
-        /** No wrap yet; the §8.5 auto rule picked [personalVaultId] and the wrap is not stored yet. */
-        MIGRATED_UNSTORED,
+        /**
+         * ANOMALY (A5 review H-1): the server served no wrap, but this device had already seen one and kept
+         * it (UVK-sealed, so caching it is safe). [personalVaultId] comes from that cached wrap; the
+         * migration question is NOT re-asked and no label is consulted.
+         */
+        WITHHELD,
 
-        /** No wrap: migration pending (or asking the user). [personalVaultId] is empty. */
+        /** No wrap served and none ever seen here: the human must choose. [personalVaultId] is empty. */
         ABSENT,
 
         /** A wrap was served and it does NOT open: an anomaly. [personalVaultId] is empty, and only a
@@ -530,6 +535,7 @@ class Account private constructor(
                     mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
                 )
                 account.personalStatus = PersonalStatus.CONFIRMED
+                account.personalWrap = req.personalWrap
                 account.uvkWrappedVaults.add(personalVaultId)
                 signingForCleanup = null // owned by the returned Account now
                 return EnrollResult(req, account, recovery.recoverySecret)
@@ -963,37 +969,48 @@ class Account private constructor(
      */
     fun applyPersonalWrap(wrap: PersonalWrap?) {
         if (wrap == null) {
-            if (personalStatus != PersonalStatus.CONFIRMED) {
+            if (personalStatus != PersonalStatus.CONFIRMED && personalStatus != PersonalStatus.WITHHELD) {
                 personalStatus = PersonalStatus.ABSENT
                 personalVaultId = ""
             }
             return
         }
-        val vk = runCatching { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }.getOrNull()
-        if (vk == null || vk.size != 32) {
+        if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.CONFIRMED
+        else {
             personalStatus = PersonalStatus.UNREADABLE
             personalVaultId = ""
-            return
         }
+    }
+
+    /**
+     * A5 review H-1: the server served NO wrap, but this device cached one it had authenticated before.
+     * Applies only while [personalStatus] is ABSENT; on success the status is [PersonalStatus.WITHHELD] (an
+     * anomaly the UI surfaces), and the migration question and every label stay out of it. A cached blob
+     * that does not open is [PersonalStatus.UNREADABLE].
+     */
+    fun applyCachedPersonalWrap(wrap: PersonalWrap) {
+        if (personalStatus != PersonalStatus.ABSENT) return
+        if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.WITHHELD
+        else {
+            personalStatus = PersonalStatus.UNREADABLE
+            personalVaultId = ""
+        }
+    }
+
+    /** The wrap that decided [personalVaultId] (served or cached), for the device's local cache. */
+    var personalWrap: PersonalWrap? = null
+        private set
+
+    private fun openAndInstallPersonalWrap(wrap: PersonalWrap): Boolean {
+        val vk = runCatching { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }.getOrNull()
+        if (vk == null || vk.size != 32) return false
         val held = vaultKeys[wrap.vaultId]
         if (held != null && !Bytes.ctEquals(held, vk)) vkMismatchVaults.add(wrap.vaultId)
         vaultKeys[wrap.vaultId] = vk
         unreadableKeyVaults.remove(wrap.vaultId)
         uvkWrappedVaults.add(wrap.vaultId)
         personalVaultId = wrap.vaultId
-        personalStatus = PersonalStatus.CONFIRMED
-    }
-
-    /**
-     * §8.5: adopt the migration's automatic pick for this session while its wrap is being stored. Only
-     * a vault whose key opened from our own UVK wrap qualifies; a CONFIRMED or UNREADABLE wrap is never
-     * overridden by a migration pick.
-     */
-    fun adoptMigrationPick(vaultId: String): Boolean {
-        if (personalStatus == PersonalStatus.CONFIRMED || personalStatus == PersonalStatus.UNREADABLE) return false
-        if (vaultId !in uvkWrappedVaults || !vaultKeys.containsKey(vaultId)) return false
-        personalVaultId = vaultId
-        personalStatus = PersonalStatus.MIGRATED_UNSTORED
+        personalWrap = wrap
         return true
     }
 

@@ -56,8 +56,7 @@ export interface WireItem {
 }
 export interface WireVault {
   vaultId: string;
-  type: string; // "personal" | "shared" — a server HINT, consulted only by the §8.5 migration (personalpick.ts)
-  metaBlob?: string;
+  type: string; // "personal" | "shared" — a server label; the extension decides NOTHING from it (A5 review H-1)
 }
 export interface SyncResponse {
   rev: number;

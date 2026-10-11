@@ -149,9 +149,12 @@ object AccountState {
      *  - nonces union per vault, newest [NONCE_CAP] kept;
      *  - seq = max(local, served, highWater).
      * Rollback: a served seq below this device's [highWater], or a withheld blob once one was seen,
-     * raises [Merged.rollback]; the local copy then wins every field the merge would otherwise take
-     * from the served one. Rolling back can only REMOVE pins, never add one, because only the UVK
-     * can produce a document at all.
+     * raises [Merged.rollback]. The flag changes ONE field: `orgRecoveryFp` is then taken from the local
+     * copy. Contacts, tombstones and nonces are still the union of BOTH copies (a served copy is
+     * UVK-authenticated, so it can only carry entries this account itself wrote; a pin the local copy
+     * holds survives, and an older served tombstone cannot outrank a newer local pin). seq stays at the
+     * high-water mark. Rolling back can only REMOVE pins, never add one, because only the UVK can
+     * produce a document at all.
      */
     fun merge(userId: String, local: AccountStateDoc?, served: AccountStateDoc?, highWater: Long): Merged {
         val rollback = (served == null && highWater > 0) || (served != null && served.seq < highWater)

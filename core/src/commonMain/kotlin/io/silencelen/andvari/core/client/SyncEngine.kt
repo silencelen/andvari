@@ -437,13 +437,16 @@ class SyncEngine(
      *  `AccountKeys` (an offline cold start then knows the personal vault without the network). */
     var onPersonalWrapStored: ((io.silencelen.andvari.core.model.PersonalWrap) -> Unit)? = null
 
-    /** Non-null while the §8.5 migration needs the human: "Which vault is your Personal vault?". */
+    /** Non-null while the human must answer "Which vault is your Personal vault?" (no wrap anywhere). */
     var personalVaultChoices: List<PersonalVaultMigration.Candidate>? = null
         private set
 
     private val lastPersonalKey = "personal.last"
+    private val wrapCacheKey = "personal.wrap"
+    private val wrapJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
-    /** The §8.5 candidates, built from the cached rows and this client's own key provenance. */
+    /** The question's choices, from the cached rows and this client's own key provenance. The server's
+     *  `type` label and `role` are not read. */
     fun personalCandidates(): List<PersonalVaultMigration.Candidate> {
         val grants = cache.grants().associateBy { it.vaultId }
         val counts = items().groupingBy { it.vaultId }.eachCount()
@@ -451,8 +454,7 @@ class SyncEngine(
             val g = grants[v.vaultId]
             PersonalVaultMigration.Candidate(
                 vaultId = v.vaultId,
-                labelledPersonal = v.type == "personal",
-                // Condition (2): our OWN row, key from our UVK wrap, and no seal anywhere on the row.
+                // Our OWN row, key from our UVK wrap, and no seal anywhere on the row.
                 ownUvkWrap = account.keyFromOwnUvkWrap(v.vaultId) && g != null && g.userId == account.userId &&
                     g.sealedVk.isNullOrEmpty(),
                 name = account.decryptVaultName(v.vaultId, v.metaBlob),
@@ -462,52 +464,33 @@ class SyncEngine(
     }
 
     /**
-     * Apply the §8.5 rule locally (no network): an automatic pick is adopted for this session; anything
-     * else leaves no personal vault and fills [personalVaultChoices]. Returns the automatic pick.
+     * Root cause A §4.3 as amended by the A5 review (H-1), local only, never minting:
+     *  - CONFIRMED (a served wrap opened): cache that wrap on this device (it is UVK-sealed) and remember it;
+     *  - ABSENT with a cached wrap: the server WITHHELD it — an anomaly; the cached wrap stands
+     *    ([Account.PersonalStatus.WITHHELD]); no question, no label;
+     *  - ABSENT with nothing cached: ask the human ([personalVaultChoices]); nothing is picked;
+     *  - UNREADABLE: no personal vault; only a re-designation (password reauth) replaces it.
      */
-    private fun decidePersonalLocally(): String? {
-        if (account.personalStatus == Account.PersonalStatus.CONFIRMED) {
-            personalVaultChoices = null
-            cache.setClientState(lastPersonalKey, account.personalVaultId)
-            return null
-        }
-        // An unreadable wrap is an anomaly the human resolves by re-designation (password reauth);
-        // a migration pick must never paper over it.
-        if (account.personalStatus == Account.PersonalStatus.UNREADABLE) {
-            personalVaultChoices = emptyList()
-            return null
-        }
-        return when (val d = PersonalVaultMigration.decide(personalCandidates(), cache.clientState(lastPersonalKey))) {
-            is PersonalVaultMigration.Decision.Auto -> {
+    private fun decidePersonalLocally() {
+        when (account.personalStatus) {
+            Account.PersonalStatus.CONFIRMED -> {
+                account.personalWrap?.let { cache.setClientState(wrapCacheKey, wrapJson.encodeToString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), it)) }
+                cache.setClientState(lastPersonalKey, account.personalVaultId)
                 personalVaultChoices = null
-                if (account.adoptMigrationPick(d.vaultId)) d.vaultId else null
             }
-            is PersonalVaultMigration.Decision.Ask -> {
-                personalVaultChoices = d.choices
-                null
+            Account.PersonalStatus.WITHHELD -> personalVaultChoices = null
+            Account.PersonalStatus.UNREADABLE -> personalVaultChoices = emptyList()
+            Account.PersonalStatus.ABSENT -> {
+                val cached = cache.clientState(wrapCacheKey)?.let {
+                    runCatching { wrapJson.decodeFromString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), it) }.getOrNull()
+                }
+                if (cached != null) {
+                    account.applyCachedPersonalWrap(cached)
+                    personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.WITHHELD) null else emptyList()
+                    return
+                }
+                personalVaultChoices = PersonalVaultMigration.choices(personalCandidates(), cache.clientState(lastPersonalKey))
             }
-        }
-    }
-
-    /** §8.5 with the network: store an automatic pick's wrap (best effort; retried next sync). */
-    private suspend fun reconcilePersonalVault() {
-        decidePersonalLocally()
-        if (account.personalStatus != Account.PersonalStatus.MIGRATED_UNSTORED) return
-        val wrap = account.buildPersonalWrap(account.personalVaultId)
-        try {
-            api.putPersonalWrap(io.silencelen.andvari.core.model.PersonalWrapPut(wrap.vaultId, wrap.wrappedVk))
-            account.applyPersonalWrap(wrap)
-            cache.setClientState(lastPersonalKey, wrap.vaultId)
-            onPersonalWrapStored?.invoke(wrap)
-        } catch (e: ApiException) {
-            if (e.code != "personal_wrap_exists") throw e
-            // Another device migrated first: adopt ITS wrap (it opens under our UVK or it is ignored).
-            val served = api.accountKeys().personalWrap
-            if (served != null) {
-                account.applyPersonalWrap(served)
-                if (account.personalStatus == Account.PersonalStatus.CONFIRMED) onPersonalWrapStored?.invoke(served)
-            }
-            decidePersonalLocally()
         }
     }
 
@@ -521,8 +504,7 @@ class SyncEngine(
         val wrap = account.buildPersonalWrap(vaultId)
         api.putPersonalWrap(io.silencelen.andvari.core.model.PersonalWrapPut(wrap.vaultId, wrap.wrappedVk, currentAuthKey))
         account.applyPersonalWrap(wrap)
-        cache.setClientState(lastPersonalKey, wrap.vaultId)
-        personalVaultChoices = null
+        decidePersonalLocally() // caches the new wrap and clears the question
         onPersonalWrapStored?.invoke(wrap)
     }
 
@@ -598,8 +580,8 @@ class SyncEngine(
         flushQueue()
         pull()
         surfaceStagedDenials()
-        // Root cause A §8.5 / §4.2: best effort, never fails the sync (an old server answers 404).
-        runCatching { reconcilePersonalVault() }
+        // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
+        decidePersonalLocally()
         runCatching { accountState.refresh() }
         // Member self-wrap (root cause A §3.2) is deliberately NOT posted here yet. The only key a
         // member can wrap today came from a v1 seal, which the server can mint: wrapping it under

@@ -209,15 +209,27 @@ fun PersonalVaultCard(vm: AndvariViewModel) {
 }
 
 /**
- * Vault banner while no personal vault is confirmed (§4.3): no default destination, usage paused. When the
- * §8.5 migration needs the human, it asks "Which vault is your Personal vault?" with the eligible vaults only.
+ * Vault banner while no personal vault is confirmed (§4.3): no default destination, usage paused. With no wrap
+ * anywhere it asks "Which vault is your Personal vault?", offering every vault on this account's own UVK wrap
+ * (the server label neither filters nor orders them; only the answer mints the wrap, A5 review H-1). A
+ * withheld wrap is reported as an anomaly instead.
  */
 @Composable
 fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
     val status = vm.personalStatus() ?: return
-    if (status == Account.PersonalStatus.CONFIRMED || status == Account.PersonalStatus.MIGRATED_UNSTORED) return
+    if (status == Account.PersonalStatus.CONFIRMED) return
     val scope = rememberCoroutineScope()
     var err by remember { mutableStateOf<String?>(null) }
+    if (status == Account.PersonalStatus.WITHHELD) {
+        // A5 review H-1: an anomaly, not "unmigrated": the device keeps the wrap it already authenticated.
+        Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            Column(Modifier.padding(12.dp)) {
+                Text("The server didn't send your personal-vault record this time.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
+                Text("This device kept the one it already had, so nothing changed. If this keeps happening, tell your admin.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        return
+    }
     Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Column(Modifier.padding(12.dp)) {
             Text("Your personal vault isn't confirmed yet.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)

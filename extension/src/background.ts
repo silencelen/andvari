@@ -2104,20 +2104,37 @@ function buildVaultKeys(
 
 /**
  * The personal vault (save target, and the VK the usage ledger is keyed from — crypto.ts `usageKey`).
- * Security review 2026-10, root cause A §4 / §8.5 (branch A5): decided by `AccountKeys.personalWrap`
- * (UVK AEAD, `vk-personal` purpose), never by the server's `type` label or a `role`; only while the wrap is
- * ABSENT does the strict §8.5 rule adopt (never mint) a vault. See personalpick.ts. "" = no personal vault:
- * the ledger paths treat that as "no ledger" and a save with no explicit vault fails loudly.
+ * Security review 2026-10, root cause A §4 (A5 review H-1): decided by `AccountKeys.personalWrap` alone, or —
+ * when the server withholds it — by the wrap THIS device cached the last time it saw one (UVK-sealed, so the
+ * cache is safe; flagged as an anomaly). Never by the server's `type` label or a `role`, and the extension
+ * never mints a wrap. "" = no personal vault: the ledger paths treat that as "no ledger" and a save with no
+ * explicit vault fails loudly. See personalpick.ts.
  */
-export function pickPersonalVaultId(
+export async function pickPersonalVaultId(
   wrap: PersonalWrapWire | null | undefined,
   uvk: Uint8Array,
   userId: string,
   vaultKeys: Map<string, Uint8Array>,
-  sync: SyncResponse,
-  memberGranted: Set<string>,
-): string {
-  return pickPersonal(wrap, uvk, userId, vaultKeys, sync.vaults, memberGranted).vaultId;
+): Promise<string> {
+  const key = nsk(`personalWrap:${userId}`);
+  let cached: PersonalWrapWire | null = null;
+  try {
+    const raw = (await chrome.storage.local.get(key))[key] as PersonalWrapWire | undefined;
+    if (raw && typeof raw.vaultId === "string" && typeof raw.wrappedVk === "string") cached = raw;
+  } catch {
+    cached = null; // storage unavailable: behaves like a device that never saw a wrap (no personal vault)
+  }
+  const pick = pickPersonal(wrap, uvk, userId, vaultKeys, { cached });
+  if (pick.source === "wrap" && wrap) {
+    try {
+      await chrome.storage.local.set({ [key]: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } }); // ciphertext only
+    } catch {
+      /* best effort */
+    }
+  }
+  if (pick.source === "withheld") console.warn("andvari: the server did not send the personal-vault record; using the one this device already authenticated");
+  if (pick.source === "unreadable") console.warn("andvari: the personal-vault record does not open; no personal vault this session");
+  return pick.vaultId;
 }
 
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
@@ -2296,8 +2313,8 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       api.setTokens(null, null); // a switch/lock landed during sync — drop the tokens, install nothing
       return { ok: false, code: "aborted" };
     }
-    const { vaultKeys, vaultRoles, memberGranted } = buildVaultKeys(sync, uvk, identity, s.userId);
-    const personalVaultId = pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys, sync, memberGranted);
+    const { vaultKeys, vaultRoles } = buildVaultKeys(sync, uvk, identity, s.userId);
+    const personalVaultId = await pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys);
     const items = decryptItems(sync, vaultKeys);
     // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
     // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
@@ -2542,8 +2559,8 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           const sync = await api.sync(0);
           await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
           if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
-          const { vaultKeys, vaultRoles, memberGranted } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
-          const personalVaultId = pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys, sync, memberGranted);
+          const { vaultKeys, vaultRoles } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
+          const personalVaultId = await pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys);
           const items = decryptItems(sync, vaultKeys);
           // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
           // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
