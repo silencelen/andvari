@@ -8,6 +8,7 @@ import { qrModules } from "../vendor/qrcode-generator";
 import { Account } from "../vault/account";
 import type { Contact } from "../vault/accountstate";
 import { composeIdentityQr, parseIdentityQr, pinFromQr, pinFromTyped } from "../vault/contacts";
+import type { PersonalChoiceInfo, PersonalVaultProposal } from "../vault/personalvault";
 import type { VaultStore } from "../vault/store";
 import { Busy } from "./Busy";
 import { UNREACHABLE } from "./errors";
@@ -293,23 +294,85 @@ export function HouseholdCard({ client, account, store }: { client: ApiClient; a
   );
 }
 
-/** Settings: which vault is personal, and the Q9 re-designation (fresh password reauth). */
+/**
+ * One line under each personal-vault option (A5b, M-2): who else holds it and where it came from, so the wrong
+ * vault is hard to pick. What the server reports; it informs the human and decides nothing.
+ */
+export function personalChoiceDetail(info: PersonalChoiceInfo | null | undefined): string {
+  if (!info) return "";
+  const origin = info.origin === "received" ? "Received from someone else by transfer" : "Created by this account";
+  const h = info.coHolders;
+  const holders = h === null ? "couldn't check who else holds it" : h.length === 0 ? "nobody else holds it" : `also held by ${h.map((c) => `${c.displayName} (${c.role})`).join(", ")}`;
+  return `${origin} · ${holders}${info.onThisDevice ? " · this device's personal vault" : ""}`;
+}
+
+/** The confirmation every designation goes through (A5b, M-2): it names the vault and everyone else on it. */
+function ConfirmPersonalText({ p }: { p: PersonalVaultProposal }) {
+  return (
+    <>
+      <div>New items, imports and usage history will go to <strong>{p.name ?? "this vault"}</strong> by default.</div>
+      {p.coHolders.length === 0 ? (
+        <div>The server reports nobody else on this vault.</div>
+      ) : (
+        <div>
+          <strong>These people can also read everything in it:</strong> {p.coHolders.map((c) => `${c.displayName} (${c.email})`).join(", ")}. Choose it only if that is what you want.
+        </div>
+      )}
+      {p.origin === "received" && <div>Someone else created this vault and transferred it to you.</div>}
+    </>
+  );
+}
+
+/** Settings: which vault is personal, and the Q9 re-designation (confirmed, with a fresh password reauth). */
 export function PersonalVaultCard({ client, account, store }: { client: ApiClient; account: Account; store: VaultStore }) {
   const [open, setOpen] = useState(false);
   const [choice, setChoice] = useState("");
+  const [proposal, setProposal] = useState<PersonalVaultProposal | null>(null);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [, setTick] = useState(0);
   const [msg, setMsg] = useState<{ kind: "err" | "info"; text: string } | null>(null);
   const choices = store.redesignationChoices();
   const current = store.vaults().find((v) => v.vaultId === account.personalVaultId);
+  const choiceKey = choices.map((v) => v.vaultId).join(",");
+
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void store.refreshPersonalChoiceDetails(choiceKey ? choiceKey.split(",") : []).then(() => live && setTick((t) => t + 1));
+    return () => {
+      live = false;
+    };
+  }, [open, choiceKey, store]);
+
+  const close = () => {
+    store.cancelPersonalProposal();
+    setProposal(null);
+    setPassword("");
+    setOpen(false);
+  };
+
+  const next = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      setProposal(await store.proposePersonalVault(choice));
+    } catch {
+      setMsg({ kind: "err", text: "Couldn't check who else holds that vault. Try again when you're connected." });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const save = async () => {
+    if (!proposal) return;
     setBusy(true);
     setMsg(null);
     try {
       const keys = await client.accountKeys();
       const authKey = await Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams);
-      await store.designatePersonalVault(choice, authKey);
+      await store.confirmPersonalVault(proposal, authKey);
+      setProposal(null);
       setOpen(false);
       setPassword("");
       setMsg({ kind: "info", text: "Saved. New items now go to this vault by default." });
@@ -327,40 +390,67 @@ export function PersonalVaultCard({ client, account, store }: { client: ApiClien
         {current ? <>Your personal vault is <strong>{current.name}</strong>. New items, imports and usage history go here.</> : "Your personal vault isn't confirmed yet."}
       </p>
       {msg && <Msg kind={msg.kind}>{msg.text}</Msg>}
-      {open ? (
+      {open && !proposal && (
         <div className="check-block">
-          <Field label="This is my personal vault">
-            <select value={choice} onChange={(e) => setChoice(e.target.value)}>
-              <option value="">Choose…</option>
-              {choices.map((v) => (
-                <option key={v.vaultId} value={v.vaultId}>{v.name}</option>
-              ))}
-            </select>
-          </Field>
+          <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+            <legend>This is my personal vault</legend>
+            {choices.map((v) => (
+              <label key={v.vaultId} style={{ display: "block", marginBottom: 6 }}>
+                <input type="radio" name="personal-vault" value={v.vaultId} checked={choice === v.vaultId} onChange={() => setChoice(v.vaultId)} /> {v.name}
+                <div className="muted" style={{ marginLeft: 24 }}>{personalChoiceDetail(store.personalChoiceInfo(v.vaultId))}</div>
+              </label>
+            ))}
+          </fieldset>
+          <button type="button" className="primary" disabled={busy || !choice} onClick={() => void next()}>{busy ? <Busy>Checking…</Busy> : "Next"}</button>{" "}
+          <button type="button" className="link" onClick={close}>Cancel</button>
+        </div>
+      )}
+      {open && proposal && (
+        <div className="check-block">
+          <h3 style={{ marginTop: 0 }}>Make {proposal.name ?? "this vault"} your personal vault?</h3>
+          <ConfirmPersonalText p={proposal} />
           <Field label="Master password (required to change this)">
             <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </Field>
-          <button type="button" className="primary" disabled={busy || !choice || !password} onClick={() => void save()}>{busy ? <Busy>Saving…</Busy> : "Save"}</button>{" "}
-          <button type="button" className="link" onClick={() => setOpen(false)}>Cancel</button>
+          <button type="button" className="primary" disabled={busy || !password} onClick={() => void save()}>{busy ? <Busy>Saving…</Busy> : "Yes, this is my personal vault"}</button>{" "}
+          <button type="button" className="link" onClick={close}>Cancel</button>
         </div>
-      ) : (
-        <button type="button" className="link" onClick={() => setOpen(true)}>Change which vault is personal…</button>
+      )}
+      {!open && (
+        <button type="button" className="link" onClick={() => { setChoice(""); setOpen(true); }}>Change which vault is personal…</button>
       )}
     </div>
   );
 }
 
 /**
- * Vault banner while the personal vault is not confirmed (§4.3): no default destination, usage paused.
- * With no wrap anywhere it asks "Which vault is your Personal vault?", listing every vault keyed from this
- * account's own UVK wrap; the server's label neither filters nor orders them, and only the answer mints the
- * wrap (A5 review H-1). A withheld wrap is reported as an anomaly instead.
+ * Vault banner while the personal vault needs attention (§4.3; A5 review H-1; A5b). With no wrap anywhere it asks
+ * "Which vault is your Personal vault?", listing every vault keyed from this account's own UVK wrap with who else
+ * holds it and where it came from; a choice goes through a confirmation naming the vault and its co-holders
+ * before anything is minted. A withheld or unreadable wrap with a good local copy is an anomaly; a served wrap
+ * naming another vault than this browser's is a change the human confirms, never a silent switch.
  */
 export function PersonalVaultBanner({ account, store, onChanged }: { account: Account; store: VaultStore; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  if (account.personalStatus === "confirmed") return null;
-  if (account.personalStatus === "withheld") {
+  const [proposal, setProposal] = useState<PersonalVaultProposal | null>(null);
+  const [, setTick] = useState(0);
+  const status = account.personalStatus;
+  const choices = status === "absent" ? (store.personalVaultChoices ?? []) : [];
+  const change = status === "changed" ? store.personalChange() : null;
+  const detailIds = change ? change.servedVaultId : choices.map((c) => c.vaultId).join(",");
+
+  useEffect(() => {
+    if (!detailIds) return;
+    let live = true;
+    void store.refreshPersonalChoiceDetails(detailIds.split(",")).then(() => live && setTick((t) => t + 1));
+    return () => {
+      live = false;
+    };
+  }, [detailIds, store]);
+
+  if (status === "confirmed") return null;
+  if (status === "withheld") {
     // A5 review H-1: an anomaly, not "unmigrated": the device keeps the wrap it already authenticated.
     return (
       <div className="msg err" style={{ display: "block" }} role="alert">
@@ -368,31 +458,94 @@ export function PersonalVaultBanner({ account, store, onChanged }: { account: Ac
       </div>
     );
   }
-  const choices = store.personalVaultChoices ?? [];
+  const nameOf = (id: string) => store.vaults().find((v) => v.vaultId === id)?.name ?? store.personalChoiceInfo(id).name ?? "another vault";
+  if (status === "unreadable-cached") {
+    // A5b L-1: junk from the server never discards the valid local copy.
+    const name = nameOf(account.personalVaultId);
+    return (
+      <div className="msg err" style={{ display: "block" }} role="alert">
+        <strong>The server sent a personal-vault record this account can't read.</strong> This device kept the one it already had ({name}), so nothing changed. To repair the server's copy, choose {name} again in Settings (it asks for your master password), and tell your admin.
+      </div>
+    );
+  }
+  if (change) {
+    // A5b M-2 / L-2: never a silent switch.
+    const newName = nameOf(change.servedVaultId);
+    const oldName = nameOf(change.currentVaultId);
+    const accept = () => {
+      setErr("");
+      try {
+        store.acceptPersonalChange();
+        onChanged();
+      } catch {
+        setErr("Couldn't switch. Try again.");
+      }
+    };
+    return (
+      <div className="msg err" style={{ display: "block" }} role="alert">
+        <strong>Your personal vault was changed to {newName}.</strong> Another of your devices changed it, or the server sent an older record. This device still uses {oldName} until you decide.
+        <div>{newName}: {personalChoiceDetail(store.personalChoiceInfo(change.servedVaultId))}</div>
+        <div style={{ marginTop: 6 }}>
+          <button type="button" className="ghost" onClick={accept}>Use {newName}</button>
+        </div>
+        <div>If you didn't do this, keep {oldName}: choose it again in Settings, Personal vault (it asks for your master password), and tell your admin.</div>
+        {err && <div>{err}</div>}
+      </div>
+    );
+  }
   const pick = async (vaultId: string) => {
     setBusy(true);
     setErr("");
     try {
-      await store.designatePersonalVault(vaultId);
+      setProposal(await store.proposePersonalVault(vaultId));
+    } catch {
+      setErr("Couldn't check who else holds that vault. Try again when you're connected.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const confirm = async () => {
+    if (!proposal) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await store.confirmPersonalVault(proposal);
+      setProposal(null);
       onChanged();
     } catch (e) {
+      setProposal(null);
       setErr(e instanceof ApiError && e.code === "personal_wrap_exists" ? "Another device already chose. Change it in Settings, with your master password." : "Couldn't save that. Try again.");
     } finally {
       setBusy(false);
     }
   };
+  const cancel = () => {
+    store.cancelPersonalProposal();
+    setProposal(null);
+  };
   return (
     <div className="msg err" style={{ display: "block" }} role="alert">
       <strong>Your personal vault isn't confirmed yet.</strong> Until it is, pick a vault every time you save or import, and usage history is paused.
-      {account.personalStatus === "unreadable" && <div>The server sent a personal-vault record this account can't read. Choose your personal vault in Settings (it asks for your master password), and tell your admin.</div>}
-      {account.personalStatus === "absent" && choices.length > 0 && (
+      {status === "unreadable" && <div>The server sent a personal-vault record this account can't read. Choose your personal vault in Settings (it asks for your master password), and tell your admin.</div>}
+      {status === "absent" && choices.length > 0 && !proposal && (
         <div style={{ marginTop: 6 }}>
-          Which vault is your Personal vault?{" "}
+          Which vault is your Personal vault?
           {choices.map((c) => (
-            <button key={c.vaultId} type="button" className="ghost" disabled={busy} onClick={() => void pick(c.vaultId)} style={{ marginRight: 6 }}>
-              {c.name ?? "(unnamed)"} · {c.itemCount} items
-            </button>
+            <div key={c.vaultId} style={{ marginTop: 4 }}>
+              <button type="button" className="ghost" disabled={busy} onClick={() => void pick(c.vaultId)}>
+                {c.name ?? "(unnamed)"} · {c.itemCount} items
+              </button>{" "}
+              <span className="muted">{personalChoiceDetail(store.personalChoiceInfo(c.vaultId))}</span>
+            </div>
           ))}
+        </div>
+      )}
+      {proposal && (
+        <div style={{ marginTop: 6 }}>
+          <strong>Make {proposal.name ?? "this vault"} your personal vault?</strong>
+          <ConfirmPersonalText p={proposal} />
+          <button type="button" className="primary" disabled={busy} onClick={() => void confirm()}>{busy ? <Busy>Saving…</Busy> : "Yes, this is my personal vault"}</button>{" "}
+          <button type="button" className="link" onClick={cancel}>Cancel</button>
         </div>
       )}
       {err && <div>{err}</div>}

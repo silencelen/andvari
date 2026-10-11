@@ -334,9 +334,24 @@ class Account private constructor(
         /** No wrap served and none ever seen here: the human must choose. [personalVaultId] is empty. */
         ABSENT,
 
-        /** A wrap was served and it does NOT open: an anomaly. [personalVaultId] is empty, and only a
-         *  re-designation (password reauth) can replace it. */
+        /** A wrap was served and it does NOT open, and this device had none of its own: an anomaly.
+         *  [personalVaultId] is empty, and only a re-designation (password reauth) can replace it. */
         UNREADABLE,
+
+        /**
+         * ANOMALY (A5 re-review L-1): a wrap was served and it does NOT open, but this device holds a cached wrap
+         * that does. The cached wrap stays in force ([personalVaultId] comes from it); junk from the server
+         * never discards a valid local copy. A re-designation (password reauth) repairs the server's copy.
+         */
+        UNREADABLE_CACHED,
+
+        /**
+         * A served wrap OPENS but names a different vault than the one this device cached (A5 re-review M-2,
+         * L-2): a re-designation on another device, or the server replaying an older wrap. The device does NOT
+         * switch: [personalVaultId] stays the cached vault until the human confirms the change
+         * ([acceptPersonalChange]) or re-designates the current one. [pendingPersonalChange] holds the served wrap.
+         */
+        CHANGED,
     }
 
     var personalStatus: PersonalStatus = PersonalStatus.ABSENT
@@ -969,33 +984,73 @@ class Account private constructor(
      */
     fun applyPersonalWrap(wrap: PersonalWrap?) {
         if (wrap == null) {
-            if (personalStatus != PersonalStatus.CONFIRMED && personalStatus != PersonalStatus.WITHHELD) {
+            if (personalStatus == PersonalStatus.ABSENT || personalStatus == PersonalStatus.UNREADABLE) {
                 personalStatus = PersonalStatus.ABSENT
                 personalVaultId = ""
             }
             return
         }
+        pendingPersonalChange = null
         if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.CONFIRMED
         else {
             personalStatus = PersonalStatus.UNREADABLE
             personalVaultId = ""
+            personalWrap = null
         }
     }
 
     /**
-     * A5 review H-1: the server served NO wrap, but this device cached one it had authenticated before.
-     * Applies only while [personalStatus] is ABSENT; on success the status is [PersonalStatus.WITHHELD] (an
-     * anomaly the UI surfaces), and the migration question and every label stay out of it. A cached blob
-     * that does not open is [PersonalStatus.UNREADABLE].
+     * The wrap THIS DEVICE cached the last time it authenticated one (UVK-sealed), applied after the served
+     * wrap was judged (A5 review H-1; A5 re-review L-1). Only while nothing usable was served:
+     *  - ABSENT (none served): success is [PersonalStatus.WITHHELD]; a cached blob that does not open is
+     *    [PersonalStatus.UNREADABLE];
+     *  - UNREADABLE (junk served): success is [PersonalStatus.UNREADABLE_CACHED], the cached wrap in force;
+     *    a cached blob that does not open changes nothing.
+     * The migration question and every server label stay out of it.
      */
     fun applyCachedPersonalWrap(wrap: PersonalWrap) {
-        if (personalStatus != PersonalStatus.ABSENT) return
-        if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.WITHHELD
-        else {
-            personalStatus = PersonalStatus.UNREADABLE
-            personalVaultId = ""
+        when (personalStatus) {
+            PersonalStatus.ABSENT ->
+                if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.WITHHELD
+                else {
+                    personalStatus = PersonalStatus.UNREADABLE
+                    personalVaultId = ""
+                }
+            PersonalStatus.UNREADABLE ->
+                if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.UNREADABLE_CACHED
+            else -> {}
         }
     }
+
+    /**
+     * A5 re-review M-2 / L-2: the served wrap opened ([PersonalStatus.CONFIRMED]) but this device's cached wrap
+     * names a DIFFERENT vault. If the cached wrap opens, it stays in force and the served one waits in
+     * [pendingPersonalChange] ([PersonalStatus.CHANGED]) until the human confirms. Returns false (nothing held)
+     * when the status is not CONFIRMED, the vaults agree, or the cached blob does not open (then the served
+     * wrap stands and the caller re-caches it).
+     */
+    fun holdPersonalChange(cached: PersonalWrap): Boolean {
+        val served = personalWrap ?: return false
+        if (personalStatus != PersonalStatus.CONFIRMED || cached.vaultId == served.vaultId) return false
+        if (!openAndInstallPersonalWrap(cached)) return false // openAndInstall mutates only on success
+        pendingPersonalChange = served
+        personalStatus = PersonalStatus.CHANGED
+        return true
+    }
+
+    /** The human confirmed a [PersonalStatus.CHANGED] notice: the served wrap (already authenticated under
+     *  our UVK) is now in force. Mints nothing. */
+    fun acceptPersonalChange() {
+        val served = pendingPersonalChange ?: throw IllegalStateException("no personal-vault change is pending")
+        check(personalStatus == PersonalStatus.CHANGED) { "no personal-vault change is pending" }
+        check(openAndInstallPersonalWrap(served)) { "the served personal wrap no longer opens" }
+        pendingPersonalChange = null
+        personalStatus = PersonalStatus.CONFIRMED
+    }
+
+    /** The served wrap waiting for the human while [personalStatus] is [PersonalStatus.CHANGED]. */
+    var pendingPersonalChange: PersonalWrap? = null
+        private set
 
     /** The wrap that decided [personalVaultId] (served or cached), for the device's local cache. */
     var personalWrap: PersonalWrap? = null

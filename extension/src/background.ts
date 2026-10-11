@@ -1726,6 +1726,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         lockNotice,
         quickUnlock: await quStateForStatus(),
         totpPending: tp ? { email: tp.email, expiresAt: tp.expiresAt } : null,
+        personalChange: session ? (await readPersonalChange(session.userId)) !== null : false,
       } satisfies Res<"status">;
     }
     case "lock": {
@@ -1768,6 +1769,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         !(sender.url ?? "").startsWith(chrome.runtime.getURL("")),
         purgeOriginNamespace,
       ) satisfies Promise<Res<"purgeServerData">>;
+    case "personalAcceptChange":
+      // A5b: only our own extension pages (the popup) may confirm a personal-vault change; a content
+      // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).
+      if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalAcceptChange">;
+      return acceptPersonalChange();
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
@@ -2125,16 +2131,56 @@ export async function pickPersonalVaultId(
     cached = null; // storage unavailable: behaves like a device that never saw a wrap (no personal vault)
   }
   const pick = pickPersonal(wrap, uvk, userId, vaultKeys, { cached });
-  if (pick.source === "wrap" && wrap) {
-    try {
+  const changeKey = nsk(`personalChange:${userId}`);
+  try {
+    if (pick.source === "wrap" && wrap) {
       await chrome.storage.local.set({ [key]: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } }); // ciphertext only
-    } catch {
-      /* best effort */
     }
+    // A5b M-2 / L-2: a served wrap naming another vault waits for the human (popup notice); the cache keeps
+    // the vault this device had. Anything else clears a stale pending change.
+    if (pick.source === "changed") await chrome.storage.local.set({ [changeKey]: pick.served });
+    else await chrome.storage.local.remove(changeKey);
+  } catch {
+    /* best effort */
   }
   if (pick.source === "withheld") console.warn("andvari: the server did not send the personal-vault record; using the one this device already authenticated");
   if (pick.source === "unreadable") console.warn("andvari: the personal-vault record does not open; no personal vault this session");
+  if (pick.source === "unreadable-cached") console.warn("andvari: the personal-vault record does not open; using the one this device already authenticated");
+  if (pick.source === "changed") console.warn("andvari: the personal-vault record names another vault than this device's; keeping this device's until you confirm");
   return pick.vaultId;
+}
+
+/** A5b M-2: the pending personal-vault change for the signed-in user (a served wrap, already authenticated
+ *  under the UVK when it was picked), or null. */
+async function readPersonalChange(userId: string): Promise<PersonalWrapWire | null> {
+  try {
+    const k = nsk(`personalChange:${userId}`);
+    const raw = (await chrome.storage.local.get(k))[k] as PersonalWrapWire | undefined;
+    return raw && typeof raw.vaultId === "string" && typeof raw.wrappedVk === "string" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A5b M-2: the human confirmed, in the popup, that the personal vault changed. The served wrap opened under
+ * the UVK when it was picked and its key is held; it now becomes this browser's cached wrap and the save
+ * target. Mints nothing. (Keeping the current vault instead is a re-designation in a full client.)
+ */
+async function acceptPersonalChange(): Promise<Res<"personalAcceptChange">> {
+  if (!session) return { ok: false, code: "locked" };
+  const served = await readPersonalChange(session.userId);
+  if (!served || !session.vaultKeys.has(served.vaultId)) return { ok: false, code: "none" };
+  const userId = session.userId;
+  try {
+    await chrome.storage.local.set({ [nsk(`personalWrap:${userId}`)]: served });
+    await chrome.storage.local.remove(nsk(`personalChange:${userId}`));
+  } catch {
+    return { ok: false, code: "storage" };
+  }
+  session.personalVaultId = served.vaultId;
+  await persistSession();
+  return { ok: true };
 }
 
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds

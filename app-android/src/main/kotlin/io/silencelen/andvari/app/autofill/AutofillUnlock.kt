@@ -6,6 +6,7 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.app.KdfReKey
 import io.silencelen.andvari.app.OfflineData
 import io.silencelen.andvari.app.OriginNamespace
+import io.silencelen.andvari.app.PersonalDeviceState
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
@@ -172,7 +173,8 @@ object AutofillUnlock {
                 OfflineData.deleteVaultCache(appContext.noBackupFilesDir, originKey, acct.userId)
                 InMemoryVaultCache()
             }
-            SyncEngine(api, acct, cache).also { it.hydrate() }
+            // A5b (M-1): the same durable personal-wrap memory as the main app (outside the cache).
+            SyncEngine(api, acct, cache, deviceState = PersonalDeviceState.open(appContext.noBackupFilesDir, originKey, acct.userId)).also { it.hydrate() }
         } catch (t: Throwable) {
             runCatching { cache?.close() }
             if (VaultSession.get()?.api !== api) api.close()

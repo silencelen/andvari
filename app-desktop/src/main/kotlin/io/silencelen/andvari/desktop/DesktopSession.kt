@@ -293,6 +293,19 @@ class DesktopSessionStore(
         if (!f.exists()) f.writeTextOwnerOnly(io.silencelen.andvari.core.client.SelfIdentityPin.encode(account))
     }
 
+    /**
+     * Security review 2026-10, root cause A, A5b (M-1): the personal wrap this device last authenticated
+     * (UVK-sealed) and the vault id it pinned, in [nsDir] beside the self-identity pin. Like the pin it is
+     * deliberately NOT removed by [deleteCacheDb] / [clearAccountKeys] / [clear] / a revocation purge: the
+     * desktop's offline cache is in memory by default, and a device that forgot the wrap would treat a server
+     * that withholds it as a new device and ask again instead of flagging the anomaly.
+     */
+    fun personalDeviceState(key: String, userId: String): io.silencelen.andvari.core.client.DeviceState {
+        val dir = nsDir(key, userId)
+        dir.mkdirsOwnerOnly()
+        return io.silencelen.andvari.core.client.FileDeviceState(dir)
+    }
+
     /** §4.2: per-origin — clearing keys for one origin never touches another's namespace. */
     fun clearAccountKeys(key: String, userId: String) { accountKeysFile(key, userId).delete() }
 

@@ -258,6 +258,9 @@ export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unloc
 
 export type Req =
   | { type: "status" }
+  /** A5b (security review 2026-10, root cause A): the popup confirms that the personal vault changed (a served
+   *  wrap named another vault than this browser's). Extension pages only; mints nothing. */
+  | { type: "personalAcceptChange" }
   | { type: "unlock"; email: string; password: string }
   /** Popup: finish a TOTP-gated sign-in with the authenticator code (0.16.3). Follows an `unlock`
    *  that answered `totp_required`; the SW holds the already-derived keys so no second KDF runs.
@@ -473,7 +476,12 @@ export type Res<T extends Req["type"]> = T extends "status"
        *  common case, since copying a code from an authenticator app closes it — re-renders the code
        *  field). Outranks the armed-PIN view. Null when there's no live challenge (or the SW evicted). */
       totpPending: { email: string; expiresAt: number } | null;
+      /** A5b: a served personal-vault record names another vault than this browser's; it keeps saving to its
+       *  own until the user confirms (popup notice). */
+      personalChange: boolean;
     }
+  : T extends "personalAcceptChange"
+    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" }
   : T extends "unlock"
     ? { ok: boolean; code?: UnlockCode; error?: string }
     : T extends "unlockTotp"

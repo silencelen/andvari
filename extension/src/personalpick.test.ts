@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { adVk, fromB64, seal, toB64 } from "./crypto.ts";
+import { adVk, adVkPersonal, fromB64, seal, toB64 } from "./crypto.ts";
 import { pickPersonal } from "./personalpick.ts";
 
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
@@ -41,4 +41,30 @@ test("H-1: a wrap withheld after this device saw one is an anomaly; the cached (
   assert.equal(toB64(keys.get(w.vaultId)!), w.vkB64);
   // A cached blob that does not open is not adopted either.
   assert.equal(pickPersonal(null, uvk, w.userId, new Map(), { cached: { vaultId: w.vaultId, wrappedVk: w.ownerWrapB64 } }).vaultId, "");
+});
+
+// ---- A5b (A5 re-review M-2, L-1, L-2): a different or junk served wrap never silently replaces the cached one ----
+
+/** A second GENUINE personal wrap, for another vault (what a designation on another device, or an older one, minted). */
+function otherWrap(): { vaultId: string; wrappedVk: string; vk: Uint8Array } {
+  const vaultId = "00000000-0000-4000-8000-0000000000b5";
+  const vk = new Uint8Array(32).fill(7);
+  return { vaultId, wrappedVk: toB64(seal(uvk, vk, adVkPersonal(vaultId, w.userId))), vk };
+}
+
+test("A5b M-2/L-2: a served wrap naming ANOTHER vault than the cached one does not switch; it is flagged as a change", () => {
+  const o = otherWrap();
+  const keys = new Map<string, Uint8Array>();
+  const p = pickPersonal({ vaultId: o.vaultId, wrappedVk: o.wrappedVk }, uvk, w.userId, keys, { cached: { vaultId: w.vaultId, wrappedVk: w.personalWrapB64 } });
+  assert.deepEqual(p, { vaultId: w.vaultId, source: "changed", served: { vaultId: o.vaultId, wrappedVk: o.wrappedVk } });
+  assert.equal(toB64(keys.get(w.vaultId)!), w.vkB64, "the cached personal vault stays in force");
+  // The same served wrap with nothing cached is simply the personal wrap (no device history to compare).
+  assert.deepEqual(pickPersonal({ vaultId: o.vaultId, wrappedVk: o.wrappedVk }, uvk, w.userId, new Map()), { vaultId: o.vaultId, source: "wrap" });
+});
+
+test("A5b L-1: a junk served wrap keeps the valid cached wrap (flagged), instead of leaving no personal vault", () => {
+  const keys = new Map<string, Uint8Array>();
+  const p = pickPersonal({ vaultId: w.vaultId, wrappedVk: w.ownerWrapB64 }, uvk, w.userId, keys, { cached: { vaultId: w.vaultId, wrappedVk: w.personalWrapB64 } });
+  assert.deepEqual(p, { vaultId: w.vaultId, source: "unreadable-cached" });
+  assert.equal(toB64(keys.get(w.vaultId)!), w.vkB64);
 });
