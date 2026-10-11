@@ -39,7 +39,9 @@ export interface WireGrant {
   userId: string;
   role: string;
   wrappedVk: string;
-  sealedVk?: string | null; // member grants (crypto_box_seal to identityPub)
+  sealedVk?: string | null; // member grants (crypto_box_seal to identityPub) — never opened here (Q8)
+  /** Grant v2 (root cause A §1.5): a signed, sealed grant. Never opened or verified by the extension (Q8). */
+  signedGrant?: string | null;
 }
 export interface WireItem {
   itemId: string;
@@ -57,6 +59,8 @@ export interface WireItem {
 export interface WireVault {
   vaultId: string;
   type: string; // "personal" | "shared" — a server label; the extension decides NOTHING from it (A5 review H-1)
+  /** Vault meta ciphertext under the VK (spec 02 §4); read only to NAME vaults in the change notice (A6). */
+  metaBlob?: string;
 }
 export interface SyncResponse {
   rev: number;

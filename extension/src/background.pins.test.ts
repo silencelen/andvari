@@ -258,9 +258,12 @@ test("A5 / H-1 — both session builds pick the personal vault from the wrap (or
   // when the server withholds it, the wrap this device cached stands. The SW never reads the server's label.
   assert.match(bg, /export async function pickPersonalVaultId\([\s\S]*?pickPersonal\(wrap, uvk, userId, vaultKeys, \{ cached \}\)/);
   assert.equal((bg.match(/type === "personal"/g) ?? []).length, 0, "no SW decision reads the server's personal label");
-  assert.equal((bg.match(/await pickPersonalVaultId\(s\.accountKeys\.personalWrap, uvk, s\.userId, vaultKeys\)/g) ?? []).length, 1, "the password unlock picks from the wrap");
-  assert.equal((bg.match(/await pickPersonalVaultId\(keys\.personalWrap, begin\.uvk, begin\.userId, vaultKeys\)/g) ?? []).length, 1, "the quick redeem picks from the wrap");
-  assert.match(bg, /memberGranted\.add\(g\.vaultId\)/, "buildVaultKeys still records sealedVk provenance (display)");
+  // A6: the sync's vault rows ride along only so a pending change can NAME both vaults (A5b LOW-3).
+  assert.equal((bg.match(/await pickPersonalVaultId\(s\.accountKeys\.personalWrap, uvk, s\.userId, vaultKeys, sync\.vaults\)/g) ?? []).length, 1, "the password unlock picks from the wrap");
+  assert.equal((bg.match(/await pickPersonalVaultId\(keys\.personalWrap, begin\.uvk, begin\.userId, vaultKeys, sync\.vaults\)/g) ?? []).length, 1, "the quick redeem picks from the wrap");
+  // A6 (Q8): key building moved to the UVK-wraps-only leaf, which still records member-grant provenance (display).
+  const leaf = readFileSync(new URL("./grantkeys.ts", import.meta.url), "utf-8");
+  assert.match(leaf, /memberGranted\.add\(g\.vaultId\)/, "the key builder still records member-grant provenance (display)");
 });
 
 // ---- H67 / R38 / R39: the damaged-account-keys terminal, wired in the SW ----
