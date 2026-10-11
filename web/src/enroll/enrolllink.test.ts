@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { initSodium } from "../crypto/sodium";
+import { enrollCheckCode, enrollCheckCodeMatches } from "./enrollcheck";
 import { composeEnrollLink, parseEnrollLink, type EnrollPayload } from "./enrolllink";
 
 // Consumes the SAME spec/test-vectors/enrolllink.json the Kotlin EnrollLinkVectorTest checks.
@@ -13,10 +15,11 @@ describe("enrolllink.json — round trips (link strings byte-frozen)", () => {
     for (const c of v.roundTrips) {
       // rfp (§F.2): rows with it must stamp it into the exact pinned link; rows without it must
       // compose byte-identically to a pre-rfp link (the 3-arg call and rfp=undefined agree).
-      expect(composeEnrollLink(c.o, c.t, c.e, c.rfp), `compose ${c.name}`).toBe(c.link);
-      const expected: EnrollPayload = c.rfp
-        ? { v: 1, o: c.o, t: c.t, e: c.e, rfp: c.rfp }
-        : { v: 1, o: c.o, t: c.t, e: c.e };
+      expect(composeEnrollLink(c.o, c.t, c.e, c.rfp, c.ifp, c.iu), `compose ${c.name}`).toBe(c.link);
+      const expected: EnrollPayload = { v: 1, o: c.o, t: c.t, e: c.e };
+      if (c.rfp) expected.rfp = c.rfp;
+      if (c.ifp) expected.ifp = c.ifp;
+      if (c.iu) expected.iu = c.iu;
       expect(parseEnrollLink(c.link), `parse ${c.name}`).toEqual(expected);
     }
   });
@@ -46,7 +49,24 @@ describe("enrolllink.json — composeRejects (ill-formed UTF-16)", () => {
     // JSON.parse passes them through unpaired. Without the rejection, JSON.stringify
     // would escape them (\udXXX) while the Kotlin twin U+FFFD-replaces — different links.
     for (const c of v.composeRejects) {
-      expect(composeEnrollLink(c.o, c.t, c.e), `compose '${c.name}' must reject`).toBeNull();
+      expect(composeEnrollLink(c.o, c.t, c.e, c.rfp, c.ifp, c.iu), `compose '${c.name}' must reject`).toBeNull();
+    }
+  });
+});
+
+describe("enrolllink.json — checkCodes (the in-person code, security review 2026-10 A5)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  it("matches the independent oracle, accepts the typed code, refuses a 16-hex prefix", async () => {
+    for (const c of v.checkCodes) {
+      const p: EnrollPayload = { v: 1, o: "https://vault.example", t: "t", e: "e", ...(c.rfp ? { rfp: c.rfp } : {}), ...(c.ifp ? { ifp: c.ifp, iu: c.iu } : {}) };
+      expect(await enrollCheckCode(p), `checkCode ${c.name}`).toBe(c.code);
+      if (c.code) {
+        const grouped = (c.code as string).match(/.{4}/g)!.join(" ").toUpperCase();
+        expect(await enrollCheckCodeMatches(p, grouped), `typed ${c.name}`).toBe(true);
+        expect(await enrollCheckCodeMatches(p, (c.code as string).slice(0, 16)), `16-hex ${c.name}`).toBe(false);
+      }
     }
   });
 });

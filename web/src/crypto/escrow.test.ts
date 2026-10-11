@@ -28,9 +28,9 @@ describe("escrow fingerprint short-form entry", () => {
     expect(shortFormMatches("z".repeat(32), full)).toBe(false); // non-hex
   });
 
-  it("shortFingerprint() stays the machine 16-hex recovery id; the human short form is 32 hex", async () => {
-    // Recovery short id (recovery-cli + the in-person-QR rfp machine path) stays 16 hex; the
-    // HUMAN typed/read short form moved to 32 (`shortFormMatches`). They are now distinct lengths.
+  it("shortFingerprint() is the legacy 16-hex id (vector-only); the human short form is 32 hex", async () => {
+    // Security review 2026-10 (A5): nothing compares or displays the 16-hex id any more (the in-person-QR
+    // rfp and the admin sheet-confirm are full 64-hex compares); it stays only because seal.json pins it.
     const pub = new Uint8Array(32).fill(7);
     const fp = await fingerprint(pub);
     expect(fp).toMatch(/^[0-9a-f]{64}$/);

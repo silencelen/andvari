@@ -1,4 +1,5 @@
 import { shortFormMatches } from "../crypto/escrow";
+import { matchesFull } from "../crypto/fingerprint";
 
 /**
  * The fingerprint-provenance model (design 2026-07-12 §F.1) as pure, unit-pinned decision functions —
@@ -21,6 +22,13 @@ export interface EscrowGate {
   /** Whether to seal org escrow at all. `false` ⇒ waived (per-member piece only) or a failed check. */
   seal: boolean;
   anchor: EscrowAnchor;
+  /**
+   * The FULL 64-hex fingerprint to seal against (`sealUvkV2`'s `verifiedRecoveryFp`) when `seal`: the
+   * human-anchored value, never `fingerprint(servedKey)`. required-affirm → the link's full `rfp` (the
+   * human vouched for it by typing the in-person code); required-typed → the advertised fingerprint the
+   * human's typed 32 hex matched. Security review 2026-10, root cause A (A4 carry-forward, closed in A5).
+   */
+  verifiedFp?: string;
 }
 
 /** Lowercase-hex-normalize a short fingerprint (drop separators), for comparing typed/scanned values. */
@@ -44,35 +52,37 @@ export function enrollPosture(linkRfp: string | undefined, memberHasSheet: boole
 
 /**
  * The escrow-seal gate — the concrete enforcement of "never auto-trust a server-sourced fingerprint".
- * The two server values (`serverFullFp` = policy.recoveryFingerprint, `pubShortFp` = the short
- * fingerprint of the fetched /recovery-pubkey) are only ever the thing CHECKED, never the anchor:
+ * The two server values (`serverFullFp` = policy.recoveryFingerprint, `pubFullFp` = the FULL fingerprint
+ * of the fetched /recovery-pubkey) are only ever the thing CHECKED, never the anchor:
  *  - waived           → seal NOTHING (there is no org pubkey to substitute);
- *  - required-affirm  → seal iff the scanned `linkRfp` equals the fetched pubkey's short fingerprint
- *                       (a mismatch = the server served a different key than the admin showed → fail
- *                       closed). The human anchor is the QR value.
- *  - required-typed   → seal iff the printed-sheet value the member TYPED matches the server's
- *                       advertised full fingerprint (the pre-rfp ceremony; the typed value is the
- *                       anchor, the server value the check).
+ *  - required-affirm  → seal iff the human typed the link's in-person code (`inPersonVerified`, the
+ *                       provenance a server-composed link cannot have) AND the link's `rfp` equals the
+ *                       fetched pubkey's fingerprint at FULL 64-hex length. The anchor is the link's
+ *                       `rfp`, which the admin's client minted full-length from the admin's own sheet
+ *                       check (security review 2026-10, root cause A, A5: was a 16-hex compare).
+ *  - required-typed   → seal iff the printed-sheet value the member TYPED (32 hex) matches the server's
+ *                       advertised full fingerprint, and the fetched pubkey hashes to that in full.
  */
 export function escrowGate(p: {
   posture: EnrollPosture;
   linkRfp?: string;
+  inPersonVerified: boolean;
   typedSheet: string;
   serverFullFp: string;
-  pubShortFp: string;
+  pubFullFp: string;
 }): EscrowGate {
   switch (p.posture) {
     case "waived":
       return { seal: false, anchor: "none" };
     case "required-affirm": {
-      const rfp = normalizeShortFp(p.linkRfp ?? "");
-      return rfp.length === 16 && rfp === p.pubShortFp
-        ? { seal: true, anchor: "in-person-qr" }
+      const rfp = p.linkRfp ?? "";
+      return p.inPersonVerified && matchesFull(rfp, p.pubFullFp)
+        ? { seal: true, anchor: "in-person-qr", verifiedFp: rfp }
         : { seal: false, anchor: "none" };
     }
     case "required-typed":
-      return shortFormMatches(p.typedSheet, p.serverFullFp)
-        ? { seal: true, anchor: "typed-sheet" }
+      return shortFormMatches(p.typedSheet, p.serverFullFp) && matchesFull(p.pubFullFp, p.serverFullFp)
+        ? { seal: true, anchor: "typed-sheet", verifiedFp: p.serverFullFp }
         : { seal: false, anchor: "none" };
   }
 }
