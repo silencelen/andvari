@@ -12,7 +12,7 @@ import { Account } from "./account";
 import { emptyAccountState } from "./accountstate";
 import { memoryClientState } from "./accountstatesync";
 import { IdbVaultCache, NullCache, type VaultCache } from "./idbcache";
-import { LEFT_UNPROVEN, REMOVAL_REPLAY, VaultStore } from "./store";
+import { ALREADY_RECORDED, LEFT_UNPROVEN, REMOVAL_REPLAY, REMOVED_LEGACY, VaultStore } from "./store";
 
 /**
  * Removal proofs v2 on the web store (security review 2026-10, root cause A §6, §8.6; branch A7; core
@@ -199,6 +199,7 @@ describe("§8.6 in-window rows", () => {
     const v1: RemovedGrantInfo = { vaultId: s.vaultId, reason: "removed", removeProof: await removeProof(s.key, s.vaultId, s.member.userId, nonce), removeNonce: nonce };
     await deliver(s, v1);
     expect(lastNotice(s).kind).toBe("removed");
+    expect(lastNotice(s).reason, "LOW-3: a legacy proof is qualified").toBe(REMOVED_LEGACY);
     expect(s.store.accountState.deviceConsumed()[s.vaultId]?.map(([n]) => n)).toEqual([nonce]);
     await reAdd(s);
     await deliver(s, v1);
@@ -267,7 +268,7 @@ describe("durability: restart, merge, never shrunk", () => {
     expect(second.accountState.doc.consumedNonces[s.vaultId]?.some(([n]) => n === info.removeNonce)).toBe(true);
   });
 
-  it("the account-state set alone denies a replay", async () => {
+  it("MEDIUM-2: a nonce only in account state is the calm 'already recorded', consumed here; a later replay is denied", async () => {
     const s = await seeded();
     const info = await removedV2(s);
     s.api.accountStateBlob = s.member.sealAccountState({
@@ -278,6 +279,12 @@ describe("durability: restart, merge, never shrunk", () => {
     s.api.accountSeq = 3;
     await s.store.accountState.refresh();
     expect(s.store.accountState.deviceConsumed()).toEqual({});
+    await deliver(s, info);
+    expect(lastNotice(s).kind).toBe("removed");
+    expect(lastNotice(s).reason).toBe(ALREADY_RECORDED);
+    expect(s.store.accountState.deviceConsumed()[s.vaultId]?.map(([n]) => n)).toEqual([info.removeNonce]);
+    expect(s.store.heldVaults().some((h) => h.vaultId === s.vaultId)).toBe(true);
+    await reAdd(s);
     await deliver(s, info);
     expect(lastNotice(s).kind).toBe("replay-denied");
   });
@@ -337,7 +344,7 @@ describe("the acting clients mint v2", () => {
     const body = s.api.leaves.at(-1)!.body!;
     expect(body.proofV).toBe(2);
     expect(isV2Nonce(body.nonce)).toBe(true);
-    const d = await decideRemoval({ lifecycleKey: s.key, vaultId: s.vaultId, myUserId: s.member.userId, reason: "left", proofV: body.proofV, proof: body.proof, nonce: body.nonce, issuedAt: body.issuedAt, consumed: new Set(), liveSince: body.issuedAt - 1, now: Date.now() });
+    const d = await decideRemoval({ lifecycleKey: s.key, vaultId: s.vaultId, myUserId: s.member.userId, reason: "left", proofV: body.proofV, proof: body.proof, nonce: body.nonce, issuedAt: body.issuedAt, consumed: new Set(), consumedAccount: new Set(), liveSince: body.issuedAt - 1, now: Date.now() });
     expect(d.verdict).toBe("valid");
   });
 
@@ -348,7 +355,7 @@ describe("the acting clients mint v2", () => {
     const r = s.api.removals.at(-1)!;
     expect(r.userId).toBe(s.member.userId);
     expect(r.body?.proofV).toBe(2);
-    const d = await decideRemoval({ lifecycleKey: s.key, vaultId: s.vaultId, myUserId: s.member.userId, reason: "removed", proofV: r.body!.proofV, proof: r.body!.proof, nonce: r.body!.nonce, issuedAt: r.body!.issuedAt, consumed: new Set(), liveSince: r.body!.issuedAt! - 1, now: Date.now() });
+    const d = await decideRemoval({ lifecycleKey: s.key, vaultId: s.vaultId, myUserId: s.member.userId, reason: "removed", proofV: r.body!.proofV, proof: r.body!.proof, nonce: r.body!.nonce, issuedAt: r.body!.issuedAt, consumed: new Set(), consumedAccount: new Set(), liveSince: r.body!.issuedAt! - 1, now: Date.now() });
     expect(d.verdict).toBe("valid");
   });
 });

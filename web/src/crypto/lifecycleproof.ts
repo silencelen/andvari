@@ -132,7 +132,7 @@ export function isV2Nonce(nonce: string): boolean {
 /** ±10 minutes of clock skew around liveSince and now (§6.3 step 6). */
 export const REMOVAL_SKEW_MS = 10 * 60 * 1000;
 
-export type RemovalVerdict = "valid" | "valid_legacy" | "left_unproven" | "anomaly" | "replay_denied";
+export type RemovalVerdict = "valid" | "valid_legacy" | "left_unproven" | "anomaly" | "replay_denied" | "already_recorded";
 
 export interface RemovalDecision {
   verdict: RemovalVerdict;
@@ -148,8 +148,9 @@ export interface RemovalDecision {
  * caller handles `deleted` and a self-initiated drop first. Steps in order, first failure wins: (3) a complete v2
  * proof, else the in-window legacy rows (a v1 remove proof whose MAC verifies and whose nonce is unconsumed is
  * "valid_legacy"; a proof-less `left` is "left_unproven"); (4) the MAC for the reason's domain, target = me;
- * (5) the nonce unconsumed (device ∪ account state) else "replay_denied"; (6) liveSince − 10 min ≤ issuedAt ≤
- * now + 10 min, liveSince being THIS device's own first sight (missing → fail closed).
+ * (5) the nonce not in THIS device's consumed set, else "replay_denied"; (6) liveSince − 10 min ≤ issuedAt ≤
+ * now + 10 min, liveSince being THIS device's own first sight (missing → fail closed); (6′, A7 review MEDIUM-2) a
+ * nonce found only in the account-state set is "already_recorded" (another of my devices consumed it; calm).
  */
 export async function decideRemoval(input: {
   lifecycleKey: Uint8Array;
@@ -161,10 +162,11 @@ export async function decideRemoval(input: {
   nonce?: string | null;
   issuedAt?: number | null;
   consumed: ReadonlySet<string>;
+  consumedAccount: ReadonlySet<string>;
   liveSince: number | null | undefined;
   now: number;
 }): Promise<RemovalDecision> {
-  const { lifecycleKey: key, vaultId, myUserId, reason, proof, nonce, issuedAt, consumed, liveSince, now } = input;
+  const { lifecycleKey: key, vaultId, myUserId, reason, proof, nonce, issuedAt, consumed, consumedAccount, liveSince, now } = input;
   const proofV = input.proofV ?? null;
   if (reason !== "removed" && reason !== "left") return { verdict: "anomaly", step: "reason" };
   if (proofV !== 2) {
@@ -181,6 +183,7 @@ export async function decideRemoval(input: {
     }
     if (!verifyProof(expected, proof)) return { verdict: "anomaly", step: "mac" };
     if (consumed.has(nonce)) return { verdict: "replay_denied", step: "nonce" };
+    if (consumedAccount.has(nonce)) return { verdict: "already_recorded", step: "recorded", consume: [nonce, now] };
     return { verdict: "valid_legacy", step: "legacy", consume: [nonce, now] };
   }
   if (!proof || nonce == null || issuedAt == null || !Number.isSafeInteger(issuedAt) || !isV2Nonce(nonce)) return { verdict: "anomaly", step: "fields" };
@@ -193,5 +196,6 @@ export async function decideRemoval(input: {
   if (!verifyProof(expected, proof)) return { verdict: "anomaly", step: "mac" };
   if (consumed.has(nonce)) return { verdict: "replay_denied", step: "nonce" };
   if (liveSince == null || issuedAt < liveSince - REMOVAL_SKEW_MS || issuedAt > now + REMOVAL_SKEW_MS) return { verdict: "anomaly", step: "window" };
+  if (consumedAccount.has(nonce)) return { verdict: "already_recorded", step: "recorded", consume: [nonce, issuedAt] };
   return { verdict: "valid", step: "valid", consume: [nonce, issuedAt] };
 }

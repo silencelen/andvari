@@ -3,12 +3,13 @@ import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
-import type { AccountKeys, PersonalWrap, PushResponse, SyncResponse, UserLookupResponse, VaultMemberAdd, VaultMemberSummary, WireGrant, WireItem, WireVault } from "../api/types";
+import type { AccountKeys, PersonalWrap, PushResponse, RemovedGrantInfo, SyncResponse, UserLookupResponse, VaultMemberAdd, VaultMemberSummary, WireGrant, WireItem, WireVault } from "../api/types";
 import { adIdkey, adUvk, adVk } from "../crypto/ad";
 import { fromB64, toB64 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import { masterKey, wrapKey, type KdfParams } from "../crypto/keys";
+import { newRemovalNonce, removeV2Proof } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes, sealTo, signKeypairFromSeed } from "../crypto/provider";
 import { openSharedGrant, sealSharedGrant } from "../crypto/sharedgrant";
 import { buildGrantFrame, openSignedGrant } from "../crypto/signedgrant";
@@ -80,10 +81,21 @@ class FakeServer {
   members: Record<string, VaultMemberSummary[]> = {};
   accountStateBlob: string | null = null;
   accountSeq = 0;
+  /** A7 review: answer the next delta pull with 410, forcing a since=0 resync. */
+  resyncOnce = false;
+  leaves: string[] = [];
   constructor(feed: SyncResponse) {
     this.feed = feed;
   }
+  async leaveVault(vaultId: string) {
+    this.leaves.push(vaultId);
+    return { rev: this.feed.rev + 1 };
+  }
   async sync(since: number): Promise<SyncResponse> {
+    if (this.resyncOnce && since > 0) {
+      this.resyncOnce = false;
+      throw new ApiError(410, "resync_required", "gone");
+    }
     if (since === 0) return this.feed;
     if (since < this.feed.rev) return { ...this.feed, full: false };
     return { rev: this.feed.rev, full: false, vaults: [], grants: [], items: [], removedGrants: [] };
@@ -1006,7 +1018,7 @@ describe("A7 — per-vault held-key memory (closes R15(g) on a device that held 
     });
   }
 
-  it("the memory is dropped with the vault", async () => {
+  it("the memory survives a server-driven removal (A7 review MEDIUM-1)", async () => {
     const w = await world();
     const local = memoryClientState();
     const server = new FakeServer(feed(w, 5, null));
@@ -1018,8 +1030,140 @@ describe("A7 — per-vault held-key memory (closes R15(g) on a device that held 
     expect(local.get(HELD_KEYS_KEY) ?? "").toContain(w.vaultId);
     server.feed = { ...feed(w, 12, null), full: false, removedGrants: [w.vaultId] };
     await store.sync();
+    expect(d.hasVault(w.vaultId)).toBe(false);
+    expect(local.get(HELD_KEYS_KEY) ?? "").toContain(w.vaultId);
+    expect(d.heldKeyTagsSnapshot().has(w.vaultId)).toBe(true);
+  });
+});
+
+describe("A7 review MEDIUM-1 / LOW-1: the held-key memory and the vouch survive every server-driven drop", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  async function adoptedV2(w: World): Promise<{ d: Account; store: VaultStore; server: FakeServer; local: ReturnType<typeof memoryClientState> }> {
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 5, null));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, local);
+    await store.sync();
+    await store.accountState.pin(pinOf(w.owner, "Owner"));
+    server.feed = feed(w, 9, memberRow(w, 9, null, await signedBy(w, w.owner, w.vk)));
+    await store.sync();
+    expect(d.keySource(w.vaultId)).toBe("signed-grant");
+    return { d, store, server, local };
+  }
+  const removalFeed = (w: World, rev: number, info: RemovedGrantInfo | null): SyncResponse => ({
+    ...feed(w, rev, null), full: false, removedGrants: [w.vaultId], removedGrantsInfo: info ? [info] : [],
+  });
+  async function validRemoval(w: World): Promise<RemovedGrantInfo> {
+    const nonce = newRemovalNonce();
+    const at = Date.now();
+    const key = await w.owner.account.lifecycleKeyFor(w.vaultId);
+    return { vaultId: w.vaultId, reason: "removed", removeProof: await removeV2Proof(key, w.vaultId, w.member.userId, nonce, at), removeNonce: nonce, proofV: 2, issuedAt: at };
+  }
+  async function assertReAddWithKPrimeRefused(w: World, d: Account, store: VaultStore, server: FakeServer, rev: number, label: string) {
+    const kPrime = randomBytes(32);
+    server.selfWraps = [];
+    server.feed = feed(w, rev, memberRow(w, rev, sealFor(w, kPrime), await signedBy(w, w.owner, kPrime)));
+    await store.sync();
+    expect(d.hasVault(w.vaultId) && d.legacyKeyTag(w.vaultId) === legacyTagOf(kPrime), `${label}: K' never adopted`).toBe(false);
+    expect(d.grantAnomalies().get(w.vaultId), `${label}: vk_mismatch`).toBe("vk_mismatch");
+    expect(server.selfWraps, `${label}: never self-wrapped`).toHaveLength(0);
+    expect(() => d.buildOwnerWrap(w.vaultId), `${label}: never owner-wrapped`).toThrow();
+  }
+
+  it("an anomaly removal, then a re-add with K': refused", async () => {
+    const w = await world();
+    const { d, store, server } = await adoptedV2(w);
+    server.feed = removalFeed(w, 12, null);
+    await store.sync();
+    expect(store.notices().filter((n) => n.vaultId === w.vaultId).at(-1)!.kind).toBe("anomaly");
+    await assertReAddWithKPrimeRefused(w, d, store, server, 15, "anomaly");
+  });
+
+  it("a replay-denied removal, then a re-add with K': refused", async () => {
+    const w = await world();
+    const { d, store, server } = await adoptedV2(w);
+    const info = await validRemoval(w);
+    server.feed = removalFeed(w, 12, info);
+    await store.sync();
+    server.feed = feed(w, 15, memberRow(w, 15, null, await signedBy(w, w.owner, w.vk)));
+    await store.sync();
+    expect(d.hasVault(w.vaultId)).toBe(true);
+    server.feed = removalFeed(w, 18, info);
+    await store.sync();
+    expect(store.notices().filter((n) => n.vaultId === w.vaultId).at(-1)!.kind).toBe("replay-denied");
+    await assertReAddWithKPrimeRefused(w, d, store, server, 21, "replay-denied");
+  });
+
+  it("a resync drop, then a re-add with K': refused", async () => {
+    const w = await world();
+    const { d, store, server } = await adoptedV2(w);
+    server.feed = { ...feed(w, 12, null), removedGrants: [w.vaultId] };
+    server.resyncOnce = true;
+    await store.sync();
+    expect(d.hasVault(w.vaultId), "the silent resync drop ran").toBe(false);
+    await assertReAddWithKPrimeRefused(w, d, store, server, 15, "resync");
+  });
+
+  it("a valid removal, then a re-add with the same K: works normally", async () => {
+    const w = await world();
+    const { d, store, server } = await adoptedV2(w);
+    server.feed = removalFeed(w, 12, await validRemoval(w));
+    await store.sync();
+    server.selfWraps = [];
+    server.feed = feed(w, 15, memberRow(w, 15, null, await signedBy(w, w.owner, w.vk)));
+    await store.sync();
+    expect(d.keySource(w.vaultId)).toBe("signed-grant");
+    expect(d.selfWrapAuthorized(w.vaultId), "self-wrap allowed again").toBe(true);
+    expect(d.grantAnomalies().has(w.vaultId)).toBe(false);
+  });
+
+  it("the user's own leave clears the memory: a re-add with a new key is adopted", async () => {
+    const w = await world();
+    const { d, store, server } = await adoptedV2(w);
+    server.feed = removalFeed(w, 12, { vaultId: w.vaultId, reason: "left" });
+    await store.leaveSharedVault(w.vaultId);
+    expect(server.leaves).toEqual([w.vaultId]);
+    expect(d.hasVault(w.vaultId)).toBe(false);
+    const k2 = randomBytes(32);
+    server.feed = feed(w, 15, memberRow(w, 15, null, await signedBy(w, w.owner, k2)));
+    await store.sync();
+    expect(d.legacyKeyTag(w.vaultId)).toBe(legacyTagOf(k2));
+    expect(d.keySource(w.vaultId)).toBe("signed-grant");
+  });
+
+  it("LOW-1: a server-chosen first seal does not block the genuine key", async () => {
+    const w = await world();
+    const ks = randomBytes(32);
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 9, memberRow(w, 9, sealFor(w, ks), null)));
+    const first = new VaultStore(server.asClient(), await unlock(w.member), undefined, local);
+    await first.sync();
+    await first.accountState.pin(pinOf(w.owner, "Owner"));
+    expect(local.get(HELD_KEYS_KEY) ?? "", "an unvouched seal records no tag").not.toContain(w.vaultId);
+    server.feed = feed(w, 12, memberRow(w, 12, null, await signedBy(w, w.owner, w.vk)));
+    const again = await unlock(w.member);
+    const reloaded = new VaultStore(server.asClient(), again, undefined, local);
+    await reloaded.sync();
+    expect(again.legacyKeyTag(w.vaultId), "K is adopted").toBe(legacyTagOf(w.vk));
+    expect(again.keySource(w.vaultId)).toBe("signed-grant");
+  });
+
+  it("LOW-1: a vouch records the held-key tag", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)));
+    const store = new VaultStore(server.asClient(), await unlock(w.member), undefined, local);
+    await store.sync();
     expect(local.get(HELD_KEYS_KEY) ?? "").not.toContain(w.vaultId);
-    expect(d.heldKeyTagsSnapshot().has(w.vaultId)).toBe(false);
+    await store.acceptLegacyVault(w.vaultId);
+    await store.sync();
+    expect(local.get(HELD_KEYS_KEY) ?? "").toContain(`${w.vaultId}|${legacyTagOf(w.vk)}`);
   });
 });
 
