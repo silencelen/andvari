@@ -179,7 +179,8 @@ cache OFF.
   baseSeq }` → `{ sealedState, seq }` or `409 stale_state` (root cause A §4.2). ONE opaque blob per
   user, `Envelope(UVK, JSON, "andvari/v1|account-state|{userId}")`, holding the verified contact
   pins (pairwise, owner decision Q4), the verified org recovery fingerprint and consumed lifecycle
-  nonces. `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
+  nonces (removal proofs v2, branch A7: each device's own durable consumed set merges in at the next
+  flush, and a served copy never shrinks it). `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
   lives inside the blob. Clients merge on every read and on a 409 (contacts union by userId, newest
   `verifiedAt` wins, a tombstone not older than a pin removes it; nonces unioned, newest 256 per
   vault) and keep a local high-water seq: a served seq below it, or a withheld blob after one was
@@ -252,14 +253,19 @@ cache OFF.
 - **`removedGrantsInfo`** (additive, spec 03 §11) is the companion detail for `removedGrants`
   (which remains the SOLE purge trigger for old clients): `{vaultId, reason:
   'removed'|'left'|'deleted', deletedAt?, purgeAt?, deleteId?, deleteProof?,
-  restoreProof?, removeProof?, removeNonce?}` (no `transferred` reason: ownership
+  restoreProof?, removeProof?, removeNonce?, proofV?, issuedAt?}` (no `transferred` reason: ownership
   transfer demotes the old owner to writer without revoking any grant, so it never
   produces a row here). `reason` derives from the caller's OWN grant's
   `revokedReason` (a member removed *before* a later vault delete sees `removed`, not
-  `deleted`). 0.5.0+ client duties: verify the proof under the still-held `lifecycleKey`
-  BEFORE any destructive local action; tri-state — *valid* → act with an attributed notice;
-  *invalid, or bare revocation of a locally-held vault* → move to the holding area + warn;
-  *unverifiable* (no VK / vault unknown locally) → silent no-op. Notices fire ONLY for
+  `deleted`). `removeProof`/`removeNonce` ride `removed` AND `left` rows; `proofV` (`2` for a v2
+  proof, absent for v1 or none) and `issuedAt` (the actor's clock bound into a v2 proof) are additive
+  (security review 2026-10, root cause A §6, branch A7). 0.5.0+ client duties: verify the proof under
+  the still-held `lifecycleKey` BEFORE any destructive local action; tri-state — *valid* → act with an
+  attributed notice; *invalid, or bare revocation of a locally-held vault* → move to the holding area
+  + warn; *unverifiable* (no VK / vault unknown locally) → silent no-op. For `removed` and `left` the
+  verification is the v2 order of spec 01 §6 ("Removal proofs v2"): fields, MAC for the reason's
+  domain addressed to the caller, nonce unconsumed (else the `replay-denied` notice), and the device's
+  own `liveSince` window; the valid nonce is consumed with the holding move. Notices fire ONLY for
   vaults present locally before the pull (no ghost banners on fresh devices / `since=0`).
   A denied-mutation failure MUST NOT abort the pull that delivers `removedGrants` (F21);
   denied mutations for in-grace vaults SHOULD be parked and replayed on restore. Clients
@@ -703,9 +709,14 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
 - `DELETE /api/v1/vaults/{vaultId}/members/{userId}` → `200`. Owner only; not self. Sets
   `revokedAt`, `revokedReason='member_remove'`, bumps the grant rev → the victim's next pull
   carries `removedGrants`; sync/push/attachment access stops immediately. **No VK rotation
-  in v1** (spec 01 §6 / spec 05 R7). Gains an **optional** body `{proof, nonce}` (removal
-  proof, §11) delivered to the victim via `removedGrantsInfo` so a 0.5.0 client can verify
-  the removal was a real owner action. Removing (or role-changing) the **pending transfer
+  in v1** (spec 01 §6 / spec 05 R7). Gains a body (removal proof, §11) delivered to the victim
+  via `removedGrantsInfo` so a 0.5.0 client can verify the removal was a real owner action:
+  v2 (sent by every A7+ client) `{proofV: 2, proof, nonce, issuedAt}` with a 16-byte base64url
+  nonce; v1 `{proof, nonce}` with a UUID nonce; absent → none. Malformed → `400 bad_proof` /
+  `bad_nonce` / `bad_issued_at` / `bad_proof_version`. The server stores the fields on the revoked
+  grant row (schema v15: `removeProofV`, `removeIssuedAt`) and refuses a nonce it already stored
+  for that vault, across re-adds (`409 nonce_reused`; table `removal_nonces`; hygiene only, the
+  clients' consumed sets are the defence). Removing (or role-changing) the **pending transfer
   target** clears the pending offer. Audited `vault_member_remove`.
 - All of them ring the WS dirty-bell for every affected member (the re-issue: the target member).
 
@@ -740,7 +751,13 @@ HMAC-SHA-256 value; `|`-joined UTF-8; integers decimal):
 - delete/restore: `andvari/v1|lifecycle|{delete,restore}|{vaultId}|{deleteId}`
 - offer: `andvari/v1|lifecycle|transfer|{vaultId}|{offerId}|{toUserId}|{expiresAt}|{seq}`
 - accept: `andvari/v1|lifecycle|transfer-accept|{vaultId}|{offerId}|{newOwnerUserId}|{seq}|{hexLower(sha256(utf8(wrappedVk)))}`
-- remove: `andvari/v1|lifecycle|remove|{vaultId}|{targetUserId}|{nonce}`
+- remove (v1, legacy reader only): `andvari/v1|lifecycle|remove|{vaultId}|{targetUserId}|{nonce}`
+- remove v2: `andvari/v1|lifecycle|remove-v2|{vaultId}|{targetUserId}|{nonce}|{issuedAt}`
+- leave: `andvari/v1|lifecycle|leave|{vaultId}|{userId}|{nonce}|{issuedAt}`
+
+(v2: `nonce` = 16 CSPRNG bytes, base64url unpadded; `issuedAt` = the actor's wall clock, ms,
+decimal. Verification order, the consumed set and `liveSince`: spec 01 §6, "Removal proofs v2".
+Owner decision Q11: delete, restore and transfer proofs stay MACs.)
 
 **Routes:**
 - `POST /vaults/{id}/delete {deleteId, proof}` → `200 {rev, purgeAt}`. Owner of a shared
@@ -756,9 +773,14 @@ HMAC-SHA-256 value; `|`-joined UTF-8; integers decimal):
   (consumes the deleteId — a later tombstone bearing it is stale/forged), bump revs.
 - `GET /vaults/deleted` → `200 [DeletedVaultSummary{vaultId, metaBlob, wrappedVk, deletedAt,
   purgeAt, deleteId}]` — the caller's own in-grace vaults (ciphertext they already owned).
-- `POST /vaults/{id}/leave {}` → `200 {rev}`. Any non-owner active member;
-  `owner → 400 owner_must_transfer_or_delete`. `revokedReason='member_leave'`; if caller ==
-  `pendingOwnerId`, clear the pending offer. Idempotent by reason.
+- `POST /vaults/{id}/leave {proofV: 2, proof, nonce, issuedAt}` → `200 {rev}`. Any non-owner
+  active member; `owner → 400 owner_must_transfer_or_delete`. `revokedReason='member_leave'`; if
+  caller == `pendingOwnerId`, clear the pending offer. Idempotent by reason. The body is the
+  leaving member's v2 leave proof (branch A7), stored on the revoked grant row and relayed on the
+  `left` row so the member's OTHER devices can verify it; required of v2 clients, while `{}` from an
+  older client is still accepted in the compatibility window (its `left` then carries no proof). A
+  present body that is not a complete v2 proof is `400 bad_proof_version` / `bad_proof` /
+  `bad_nonce` / `bad_issued_at`; a reused nonce is `409 nonce_reused`.
 - `POST /vaults/{id}/transfer {toUserId, offerId, expiresAt, proof}` → `201 {rev, expiresAt}`.
   Owner; target = an existing **active** member with an active grant, status active, ≠ self;
   one pending max (overwrite audits a cancel). `seq = transferSeq+1`. Stores pending fields +
@@ -785,7 +807,7 @@ HMAC-SHA-256 value; `|`-joined UTF-8; integers decimal):
 
 **Errors:** `vault_deleted, vault_gone, vault_state_changed, owner_must_transfer_or_delete,
 transfer_not_pending, not_transfer_target, stale_meta, no_grant, not_vault_owner,
-user_inactive, owner_wrap_immutable`. **Audit types** (ids only): `vault_delete, vault_restore, vault_purge,
+user_inactive, owner_wrap_immutable, bad_proof, bad_proof_version, bad_issued_at, nonce_reused`. **Audit types** (ids only): `vault_delete, vault_restore, vault_purge,
 vault_member_leave, vault_transfer_{offer,accept,cancel,expire}, vault_rename,
 vault_grant_self_wrap`; `push_denied`
 gains a `deleted:` meta prefix for tombstoned vaults (excludes routine lifecycle fallout
