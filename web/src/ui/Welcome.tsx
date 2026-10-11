@@ -3,6 +3,7 @@ import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
 import { fingerprint, shortFingerprint, shortFormMatches } from "../crypto/escrow";
+import { groupedShort } from "../crypto/fingerprint";
 import { confirmMatches, displayForm } from "../crypto/member-recovery";
 import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPayload } from "../enroll/enrolllink";
 import { enrollPosture, escrowGate, type EnrollPosture } from "../enroll/enrollposture";
@@ -667,7 +668,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   const [hasSheet, setHasSheet] = useState(false);
   const posture: EnrollPosture = enrollPosture(linkRfp, hasSheet);
   const [affirmConfirmed, setAffirmConfirmed] = useState(false); // required-affirm: eyeball the QR rfp
-  const [shortFp, setShortFp] = useState("");                    // required-typed: the sheet's 16 hex
+  const [shortFp, setShortFp] = useState("");                    // required-typed: the sheet's 32 hex (128-bit short form)
   const [fpConfirmed, setFpConfirmed] = useState(false);         // required-typed: checkbox gate
   const [waivedAck, setWaivedAck] = useState(false);             // waived: "no admin backstop" ack
   const [busy, setBusy] = useState(false);
@@ -860,6 +861,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       <RecoveryReveal
         secretRef={secretRef}
         clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
+        account={ready.account}
         onConfirmed={() => {
           if (settlingRef.current) return;
           settlingRef.current = true;
@@ -993,7 +995,7 @@ function FingerprintProvenance(p: {
         {p.fp ? (
           <>
             <Field
-              label="Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet"
+              label="Recovery check — type the FIRST 32 characters of the fingerprint on your printed recovery sheet"
               prompt
               hint={
                 <>
@@ -1066,13 +1068,32 @@ function RecoveryReveal({
   secretRef,
   clipboardClearSeconds,
   onConfirmed,
+  account,
 }: {
   secretRef: React.MutableRefObject<Uint8Array | null>;
   clipboardClearSeconds: number;
   onConfirmed: () => void;
+  account?: Account;
 }) {
   const [typed, setTyped] = useState("");
   const [copied, setCopied] = useState(false);
+  // spec 04 §6 / spec 01 §5: the sheet also carries this account's identity fingerprint, so it can
+  // anchor a household (admin) recovery later. Derived on this device from the seed, never a server value.
+  const [idShort, setIdShort] = useState("");
+  const [idFull, setIdFull] = useState("");
+  useEffect(() => {
+    if (!account) return;
+    let alive = true;
+    void Promise.all([account.identityFingerprintShort(), account.identityFingerprintFull()]).then(([s, f]) => {
+      if (alive) {
+        setIdShort(s);
+        setIdFull(f);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [account]);
   // Audit F05: the copy was refused / the auto-clear was refused. Both were silent before —
   // the first swallowed by a bare catch, the second by a `.catch(() => {})` on the wipe.
   const [copyErr, setCopyErr] = useState(false);
@@ -1129,6 +1150,15 @@ function RecoveryReveal({
         {/* Cut M (v2 #7): no Copy button here — it moved BELOW the type-back gate (see the
             post-confirm section) so a clipboard round-trip can't stand in for saving. */}
       </div>
+      {/* spec 04 §6 / spec 01 §5: the member's identity fingerprint also rides the sheet, so it can
+          anchor a household (admin) recovery later without a separate out-of-band step. */}
+      {idShort && (
+        <div className="field">
+          <div className="field-head">Your identity fingerprint (give this to your admin if you ever need a household recovery)</div>
+          <div className="mono print-keep" style={{ whiteSpace: "pre-line", userSelect: "all" }}>{groupedShort(idShort)}</div>
+          {idFull && <div className="mono muted" style={{ wordBreak: "break-all", userSelect: "all" }}>full: {idFull.replace(/(.{4})/g, "$1 ").trim()}</div>}
+        </div>
+      )}
       {/* Audit F10: `Field` associates the prompt with the box (the enrollment path's
           recovery-check twin already does). This gate is UN-SKIPPABLE and one-shot — a screen
           reader landing on an unnamed "edit, blank" here has nothing telling it what to type,
@@ -1284,6 +1314,7 @@ function RecoveryCaptureGate({
       <RecoveryReveal
         secretRef={secretRef}
         clipboardClearSeconds={clipboardClearSeconds}
+        account={account}
         onConfirmed={() => {
           if (settlingRef.current) return;
           settlingRef.current = true;

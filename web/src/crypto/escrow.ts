@@ -1,5 +1,6 @@
 import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "./bytes";
 import { requireJsonSafe } from "./canonicaljson";
+import { matchesShort } from "./fingerprint";
 import { sealOpen, sealTo, sha256 } from "./provider";
 import { CryptoError } from "./sodium";
 
@@ -73,16 +74,21 @@ export async function fingerprint(publicKey: Uint8Array): Promise<string> {
   return toHexLower(await sha256(publicKey));
 }
 
+/**
+ * The MACHINE short id of the org recovery key — first 16 hex. NOT the human short form (that moved
+ * to 32 hex, see {@link matchesShort}). Only the recovery-cli operator display and the in-person-QR
+ * `rfp` compare use it; the enrolling human types the 32-hex short form of the full fingerprint.
+ */
 export async function shortFingerprint(publicKey: Uint8Array): Promise<string> {
   return (await fingerprint(publicKey)).slice(0, 16);
 }
 
 /**
- * spec 04 §2(3): at enrollment the user must TYPE the first 16 hex chars of the org
- * recovery fingerprint from the PRINTED sheet (the UI deliberately does not display
- * them first). Separators/whitespace are tolerated; exactly 16 hex chars required.
+ * spec 04 §2(3): at enrollment the user must TYPE the first 32 hex chars (128 bits) of the org
+ * recovery fingerprint from the PRINTED sheet (the UI deliberately does not display them first).
+ * Separators/whitespace/case tolerated; exactly 32 hex chars required. One shared helper
+ * ({@link matchesShort}) backs both the recovery (here) and identity short forms.
  */
 export function shortFormMatches(entry: string, fullFingerprintHex: string): boolean {
-  const norm = entry.toLowerCase().replace(/[^0-9a-f]/g, "");
-  return norm.length === 16 && fullFingerprintHex.toLowerCase().slice(0, 16) === norm;
+  return matchesShort(entry, fullFingerprintHex);
 }

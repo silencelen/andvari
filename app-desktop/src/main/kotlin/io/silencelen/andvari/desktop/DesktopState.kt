@@ -1394,7 +1394,7 @@ class DesktopState(
         // itself, never ride an IllegalStateException's message through a generic mapper.)
         if (posture == EnrollPosture.RequiredTyped && !Escrow.shortFormMatches(typedShortFp, pol.recoveryFingerprint)) {
             busy = false
-            error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 16 characters."
+            error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters."
             return@op
         }
         val a = newApi()
@@ -2620,6 +2620,10 @@ class DesktopState(
 
     /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
     fun identityCode(): String? = account?.identityFingerprintShort()
+
+    /** Seed-derived identity FULL fingerprint (spec 01 §5, 64 hex) — printed on the recovery sheet
+     *  (spec 04 §6) beside the short form as the recovery CLI's identity anchor. */
+    fun identityCodeFull(): String? = account?.identityFingerprintFull()
 
     // ---- attachments ----
 

@@ -5,7 +5,8 @@ import { enrollPosture, escrowGate, normalizeShortFp } from "./enrollposture";
 // fingerprint become the escrow-seal anchor (reopening spec 05 T10) or seal escrow on a waived invite.
 
 const SERVER_FULL_FP = "b26efdd3eafc9dad0011223344556677889900aabbccddeeff00112233445566"; // 64 hex
-const RFP = "b26efdd3eafc9dad"; // the org SHORT fingerprint (first 16 hex of SERVER_FULL_FP)
+const RFP = "b26efdd3eafc9dad"; // the in-person-QR rfp: still the 16-hex short id (full-length widening is a later branch)
+const SHEET32 = "b26efdd3eafc9dad0011223344556677"; // the 128-bit TYPED-sheet short form (first 32 hex of SERVER_FULL_FP)
 
 describe("enrollPosture — posture from (link rfp, member-has-sheet)", () => {
   it("an rfp on the link ⇒ required-affirm (in-person QR)", () => {
@@ -45,20 +46,22 @@ describe("escrowGate — NEVER auto-trust a server-sourced fingerprint", () => {
   });
 
   it("required-typed seals ONLY when the TYPED sheet value matches the server's advertised fingerprint", () => {
-    // The human typed the correct first-16 from the printed sheet → the anchor validates the server key.
-    expect(escrowGate({ posture: "required-typed", typedSheet: RFP, serverFullFp: SERVER_FULL_FP, pubShortFp: RFP })).toEqual({
+    // The human typed the correct first-32 (128-bit) short form from the printed sheet → the anchor validates the server key.
+    expect(escrowGate({ posture: "required-typed", typedSheet: SHEET32, serverFullFp: SERVER_FULL_FP, pubShortFp: RFP })).toEqual({
       seal: true,
       anchor: "typed-sheet",
     });
+    // The old 16-hex prefix no longer seals (128-bit short form).
+    expect(escrowGate({ posture: "required-typed", typedSheet: RFP, serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }).seal).toBe(false);
     // Wrong typed value → fail closed (never trust the server value on its own).
-    expect(escrowGate({ posture: "required-typed", typedSheet: "ffffffffffffffff", serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }).seal).toBe(false);
+    expect(escrowGate({ posture: "required-typed", typedSheet: "f".repeat(32), serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }).seal).toBe(false);
   });
 
   it("the anchor is never the raw server value on any seal path (no auto-trust)", () => {
     for (const g of [
       escrowGate({ posture: "waived", typedSheet: "", serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }),
       escrowGate({ posture: "required-affirm", linkRfp: RFP, typedSheet: "", serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }),
-      escrowGate({ posture: "required-typed", typedSheet: RFP, serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }),
+      escrowGate({ posture: "required-typed", typedSheet: SHEET32, serverFullFp: SERVER_FULL_FP, pubShortFp: RFP }),
     ]) {
       expect(["none", "in-person-qr", "typed-sheet"]).toContain(g.anchor);
     }

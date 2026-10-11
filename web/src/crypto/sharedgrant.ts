@@ -1,5 +1,6 @@
 import { fromB64, fromUtf8, toB64, toHexLower, utf8 } from "./bytes";
 import { requireJsonSafe } from "./canonicaljson";
+import { shortForm } from "./fingerprint";
 import { sealOpen, sealTo, sha256 } from "./provider";
 import { CryptoError } from "./sodium";
 
@@ -58,6 +59,11 @@ export async function identityFingerprint(identityPub: Uint8Array): Promise<stri
   return toHexLower(await sha256(identityPub));
 }
 
+/**
+ * The HUMAN short form of the identity fingerprint — first 32 hex (128 bits), the same length a
+ * member types/reads elsewhere (security review 2026-10, §7). A display value read out when
+ * someone shares a vault; {@link shortForm} owns the length.
+ */
 export async function shortIdentityFingerprint(identityPub: Uint8Array): Promise<string> {
-  return (await identityFingerprint(identityPub)).slice(0, 16);
+  return shortForm(await identityFingerprint(identityPub));
 }

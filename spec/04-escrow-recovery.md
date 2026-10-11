@@ -12,7 +12,9 @@ account — the household accepts this because the holder is the admin/owner
   `tools/recovery-cli` on an **offline machine** — never the server, and never any
   always-on host that administers it.
 - **Fingerprint** = lowercase hex SHA-256 of the 32-byte public key, displayed
-  grouped in 4s; the **short form** is the first 16 hex chars. Sheets carry both.
+  grouped in 4s; the **short form** is the first **32 hex chars (128 bits)** — security
+  review 2026-10 widened it from 16, a grindable 64-bit truncated second preimage. Sheets
+  carry both the full fingerprint and the short form.
 - **Recovery sheet** (printed ×2 + one USB copy, stored separately — safe /
   fire box): seed as base64url AND as a QR code, pubkey base64url, full
   fingerprint, generation date, and the recovery one-liner ("run
@@ -30,7 +32,7 @@ The recovery **public key + fingerprint** are pinned in THREE places that must a
 2. Client builds/policy (`client-policy` carries the fingerprint; native clients read
    it from policy — they MAY additionally bake it at build time, not done as of 0.4.0).
 3. The printed sheet — at enrollment the user confirms the recovery key against the
-   sheet: the client requires **short-form entry** (type the first 16 hex chars from
+   sheet: the client requires **short-form entry** (type the first 32 hex chars from
    the sheet) plus a checkbox. To keep this an out-of-band comparison rather than
    transcription, a client SHOULD NOT display the fingerprint it is asking the user to
    type until after a correct entry (the web client reveals the full grouped
@@ -147,7 +149,11 @@ user-influenced — is load-bearing (spec 05 T8).
   `recoveryWrappedUvk`, and derives `recoveryAuthKey`; the register body carries
   `memberRecovery = { recoveryWrappedUvk, recoveryAuthKey }` (spec 03 §7). The secret is
   shown **once** as the same printable base64url sheet + QR the `recovery-cli` renders
-  (§1 form, zero new deps); the user types it back for a `ctEquals` confirm (confirmation
+  (§1 form, zero new deps). That sheet also prints the member's **identity fingerprint**
+  (spec 01 §5) — the 32-hex short form **and** the full form, labelled *"Your identity
+  fingerprint (give this to your admin if you ever need a household recovery)"* — so the
+  sheet can serve as the recovery CLI's identity anchor (security review 2026-10 §7)
+  without re-printing anything. The user types the SECRET back for a `ctEquals` confirm (confirmation
   only — never the KDF source, so a mistype fails the confirm rather than silently
   mis-keying), then it is dropped from memory. The shown-once web leak-vector discipline
   (no `type="password"`, no localStorage/session/IndexedDB, secret-clipboard auto-clear,
