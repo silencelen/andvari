@@ -1,0 +1,26 @@
+{
+    "_provenance": "hand-authored. The 128-bit (32-hex) HUMAN short-form fingerprint matcher + display grouping (security review 2026-10, root cause A §7). Consumed by core jvmTest (FingerprintTest) and web vitest (fingerprint.test.ts) off this one file. `full` is the EnrollCeremonyTest reference fingerprint so the short form lines up with that suite.",
+    "full": "b26efdd3eafc9dad3ba040a73900eb29d23827e0dabfa265222a8998d98d71de",
+    "shortForm": "b26efdd3eafc9dad3ba040a73900eb29",
+    "groupedShort": "b26e fdd3 eafc 9dad\n3ba0 40a7 3900 eb29",
+    "match": [
+        { "entry": "b26efdd3eafc9dad3ba040a73900eb29", "ok": true, "why": "exact 32 hex short form" },
+        { "entry": "b26e fdd3 eafc 9dad 3ba0 40a7 3900 eb29", "ok": true, "why": "8 groups of 4, spaced" },
+        { "entry": "B26E-FDD3-EAFC-9DAD-3BA0-40A7-3900-EB29", "ok": true, "why": "uppercase + dashes" },
+        { "entry": "  b26e fdd3 eafc 9dad 3ba0 40a7 3900 eb29  ", "ok": true, "why": "surrounding whitespace" },
+        { "entry": "b26efdd3eafc9dad", "ok": false, "why": "the old 16-hex (64-bit) prefix no longer matches — the A2 change" },
+        { "entry": "b26efdd3eafc9dad3ba040a73900eb2", "ok": false, "why": "31 hex (one short)" },
+        { "entry": "b26efdd3eafc9dad3ba040a73900eb290", "ok": false, "why": "33 hex (one long)" },
+        { "entry": "b26efdd3eafc9dad3ba040a73900eb2a", "ok": false, "why": "32 hex, last char wrong" },
+        { "entry": "", "ok": false, "why": "empty" },
+        { "entry": "zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz", "ok": false, "why": "non-hex" }
+    ],
+    "machineFullCompare": {
+        "_doc": "Demonstrates the HUMAN helper's short/full distinction: the 32-hex short form matches the human matchesShort helper but is not equal to the full 64-hex value. This vector does NOT by itself prove that a live machine path compares at full length. Account.resealEscrowFor does; the in-person-QR rfp and the admin sheet-confirm still use the 16-hex short id pending a later branch of this security review.",
+        "full": "b26efdd3eafc9dad3ba040a73900eb29d23827e0dabfa265222a8998d98d71de",
+        "short": "b26efdd3eafc9dad3ba040a73900eb29",
+        "fullEqualsFull": true,
+        "shortEqualsFull": false,
+        "shortMatchesHuman": true
+    }
+}

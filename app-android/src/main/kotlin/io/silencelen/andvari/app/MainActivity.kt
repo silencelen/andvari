@@ -78,6 +78,7 @@ import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ImportHelp
 import io.silencelen.andvari.core.client.ItemDoc
@@ -847,8 +848,8 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
     var fpOk by rememberSaveable { mutableStateOf(false) }
-    // spec 04 §2(3): the user TYPES the first 16 sheet chars; the short form is public
-    // (first 16 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
+    // spec 04 §2(3): the user TYPES the first 32 sheet chars (128-bit short form); the short form
+    // is public (first 32 of a served fingerprint), so rememberSaveable is fold-safe AND safe.
     var shortFp by rememberSaveable { mutableStateOf("") }
     // §F.1 posture (client-derived, web parity): WAIVED by default (frictionless, no admin
     // backstop), required-typed when the member declares a printed sheet. required-affirm is
@@ -994,7 +995,7 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     // Cut M (v2 #13): the printed sheet belongs to the ADMIN (required posture,
                     // handed over in person) — "your printed recovery sheet" sent an emailed
                     // enrollee hunting for a sheet that was never theirs.
-                    Text("Recovery check — type the FIRST 16 characters of the fingerprint on the printed recovery sheet your admin gave you", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Recovery check — type the FIRST 32 characters of the fingerprint on the printed recovery sheet your admin gave you", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true, onDone = submit)
                     if (shortFp.isNotBlank() && !shortOk) {
                         Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -1005,7 +1006,7 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     Row(
                         Modifier.padding(top = 8.dp)
                             .toggleable(value = fpOk, enabled = shortOk, role = Role.Checkbox, onValueChange = { fpOk = it })
-                            .semantics { if (!shortOk) stateDescription = "Type the 16 sheet characters above first" },
+                            .semantics { if (!shortOk) stateDescription = "Type the 32 sheet characters above first" },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Checkbox(fpOk, onCheckedChange = null, enabled = shortOk)
@@ -1202,6 +1203,21 @@ private fun RecoverySetupScreen(vm: AndvariViewModel, ui: UiState) {
                 ) { Text("Copy phrase") }
             }
         }
+        // spec 04 §6 / spec 01 §5: the sheet also carries this account's identity fingerprint, so it
+        // can anchor a household (admin) recovery later without a separate out-of-band step.
+        vm.identityCode()?.let { idShort ->
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Your identity fingerprint (give this to your admin if you ever need a household recovery):",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            SelectionContainer {
+                Text(Fingerprint.groupedShort(idShort), style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+            }
+            vm.identityCodeFull()?.let { idFull ->
+                Text("full: ${groupHex(idFull)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
+            }
+        }
         Spacer(Modifier.height(20.dp))
         Text("Type it back to confirm you saved it", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         // NOT a SecretField (no masking — §F.7: a recovery phrase must never be masked-then-
@@ -1327,14 +1343,14 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 6.dp),
                 )
-                Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true, onDone = { if (ok && !ui.busy) vm.resealEscrow(entry) })
+                Field("First 32 characters from your printed recovery sheet", entry, { entry = it }, mono = true, onDone = { if (ok && !ui.busy) vm.resealEscrow(entry) })
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     // a11yand-04 (AM-5): the ReSealCard has no verdict Text/checkbox — the only
                     // gate is this disabled button, so the "why disabled" hint rides its
                     // stateDescription (keeps the visible "Re-protect account" label intact).
                     PrimaryButton(
                         "Re-protect account", enabled = ok && !ui.busy, busy = ui.busy,
-                        modifier = Modifier.semantics { if (!ok) stateDescription = "Enter the 16 characters from your recovery sheet first" },
+                        modifier = Modifier.semantics { if (!ok) stateDescription = "Enter the 32 characters from your recovery sheet first" },
                     ) { vm.resealEscrow(entry) }
                     TextButton(
                         onClick = { open = false },
@@ -2698,8 +2714,9 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                         )
                         Spacer(Modifier.height(8.dp))
                         SelectionContainer {
+                            // 128-bit short form: 8 groups of 4 on two lines (Fingerprint.groupedShort).
                             Text(
-                                idCode.chunked(4).joinToString(" "),
+                                Fingerprint.groupedShort(idCode),
                                 style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace,
                             )
                         }

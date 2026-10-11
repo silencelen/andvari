@@ -903,9 +903,13 @@ class Account private constructor(
     fun wrapVkForMember(memberIdentityPub: ByteArray, vaultId: String): String =
         Bytes.toB64(SharedGrant.seal(crypto, memberIdentityPub, vaultId, vk(vaultId)))
 
-    /** Short identity fingerprint over the SEED-DERIVED pubkey (spec 01 §5) — what a
-     *  family member reads out when someone shares a vault with them. */
+    /** Short identity fingerprint (32 hex / 128 bits, spec 01 §5) over the SEED-DERIVED pubkey —
+     *  what a family member reads out when someone shares a vault with them. */
     fun identityFingerprintShort(): String = SharedGrant.shortFingerprint(crypto, identityPub)
+
+    /** Full identity fingerprint (64 hex, spec 01 §5) over the SEED-DERIVED pubkey — printed on the
+     *  per-member recovery sheet (spec 04 §6) beside the short form, as the CLI's recovery anchor. */
+    fun identityFingerprintFull(): String = SharedGrant.fingerprint(crypto, identityPub)
 
     /** Decrypt a vault's display name from its metaBlob (null when the VK is missing). */
     fun decryptVaultName(vaultId: String, metaBlob: String): String? = runCatching {
