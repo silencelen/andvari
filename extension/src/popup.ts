@@ -149,6 +149,7 @@ function showView(unlocked: boolean): void {
     stopTotp();
     el("must-change").hidden = true; // unlocked-session chrome — refresh() re-derives it
     el("personal-change").hidden = true; // A5b: likewise
+    el("personal-change-accept").hidden = true; // A6: re-offered only after a fresh co-holder lookup
     el("grants-waiting").hidden = true; // A6: likewise
     el("qu-offer").hidden = true; // quick-unlock offer/enroll are unlocked-only chrome (spec 01 §8.4)
     el("qu-enroll").hidden = true;
@@ -179,6 +180,11 @@ async function refresh(): Promise<void> {
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
   el("personal-change").hidden = !(s.unlocked && s.personalChange); // A5b M-2: never a silent switch
   if (s.unlocked && s.personalChangeText) el("personal-change-text").textContent = s.personalChangeText; // LOW-3: both vaults named
+  if (s.unlocked && s.personalChange) await renderPersonalChangeChoice();
+  else {
+    el("personal-change-accept").hidden = true;
+    el("personal-change-coholders").hidden = true;
+  }
   // A6 (§1.7, Q8): grants the extension will not open wait for a full client.
   const waiting = s.unlocked ? s.waitingGrants ?? 0 : 0;
   el("grants-waiting").hidden = waiting <= 0;
@@ -1449,11 +1455,24 @@ el("forgot").addEventListener("click", () => void openServerPage("/#recover"));
 // E1-6: the rescue-nudge strip IS the affordance — the extension can't change the master
 // password itself, so clicking anywhere on it opens the web vault (same action as open-vault).
 el("must-change").addEventListener("click", () => void openServerPage());
+/** A6 fix round (A5b LOW-1/LOW-2 parity): "Use new" is offered only once the co-holders of the NEW vault loaded,
+ *  shown as reported by the server; a failed lookup leaves only the keep-current guidance. */
+async function renderPersonalChangeChoice(): Promise<void> {
+  const d = await ask({ type: "personalDescribeChange" });
+  el("personal-change-accept").hidden = !(d?.ok === true);
+  const line = el("personal-change-coholders");
+  line.hidden = false;
+  line.textContent = d?.ok
+    ? d.coHoldersLine ?? ""
+    : "Can't check who else holds that vault right now, so switching to it isn't offered. Try again later.";
+}
+
 el("personal-change-accept").addEventListener("click", async () => {
   const r = await ask({ type: "personalAcceptChange" });
   // A5b LOW-4 (A6): the staged record is re-authenticated under the UVK, which a session woken from an eviction
   // does not hold; and a record that no longer opens is refused rather than trusted.
   if (r?.code === "need_full_unlock") showMsg("err", "To switch the personal vault, lock and unlock with your master password first.");
+  else if (r?.code === "coholders_not_loaded") showMsg("err", "Couldn't confirm who else holds the new vault, so nothing changed.");
   else if (r?.code === "unverified") showMsg("err", "The new personal-vault record could not be verified, so nothing changed. Tell your admin.");
   else if (!r?.ok) showMsg("err", "Couldn't switch the personal vault. Lock and unlock, then try again.");
   await refresh();

@@ -1,5 +1,5 @@
 import { pickPersonal, type PersonalWrapWire } from "./personalpick";
-import { buildVaultKeysFromWraps, personalChangeNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
+import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import type { BioReq, BioResult } from "./bioprotocol";
 import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
@@ -1372,6 +1372,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // pair waits — at most TEARDOWN_FLUSH_TIMEOUT_MS; a flush that outlives the bound is abandoned.
   const teardownFlush = flushUsageForTeardown();
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
+  personalChangeDescribed = null; // A6: a co-holder describe step never outlives the session it was shown in
   clearPendingUsage(); // behavioral records must not outlive the session that produced them
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
@@ -1784,6 +1785,9 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).
       if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalAcceptChange">;
       return acceptPersonalChange();
+    case "personalDescribeChange":
+      if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalDescribeChange">;
+      return describePersonalChange();
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
@@ -2128,6 +2132,34 @@ function warnKeyState(keyUnreadable: ReadonlySet<string>, waiting: ReadonlySet<s
 }
 
 /**
+ * The co-holder describe step for a pending personal-vault change, held in SW MEMORY only: an evicted SW, a lock or
+ * another account starts over. `acceptPersonalChange` refuses (`coholders_not_loaded`) unless it names the exact
+ * served vault and this account (A5b review LOW-1 parity, A6 fix round).
+ */
+let personalChangeDescribed: { vaultId: string; userId: string } | null = null;
+
+/**
+ * Load who the SERVER reports on the NEW personal vault (GET /vaults/{id}/members). Success records the describe
+ * step for that vaultId and returns the line the popup shows, labelled as server-reported (LOW-2). Failure clears
+ * it: the popup then offers only "keep current" and says it cannot check who else holds that vault.
+ */
+async function describePersonalChange(): Promise<Res<"personalDescribeChange">> {
+  personalChangeDescribed = null;
+  if (!session) return { ok: false, code: "locked" };
+  const userId = session.userId;
+  const staged = await readPersonalChange(userId);
+  if (!staged) return { ok: false, code: "none" };
+  try {
+    const members = await api.vaultMembers(staged.vaultId);
+    if (!session || session.userId !== userId) return { ok: false, code: "locked" };
+    personalChangeDescribed = { vaultId: staged.vaultId, userId };
+    return { ok: true, coHoldersLine: coHoldersLine(coHoldersOf(members, userId)) };
+  } catch {
+    return { ok: false, code: "coholders_unavailable" };
+  }
+}
+
+/**
  * A5b M-2: the human confirmed, in the popup, that the personal vault changed. Mints nothing. (Keeping the current
  * vault instead is a re-designation in a full client.)
  *
@@ -2142,6 +2174,9 @@ async function acceptPersonalChange(): Promise<Res<"personalAcceptChange">> {
   const staged = await readPersonalChange(session.userId);
   if (!staged) return { ok: false, code: "none" };
   const userId = session.userId;
+  // A5b LOW-1 parity (A6 fix round): only a vault whose co-holders the human was shown, in this SW lifetime.
+  const gate = acceptGate(personalChangeDescribed, staged.vaultId, userId);
+  if (gate) return { ok: false, code: gate };
   const r = reopenStagedPersonalWrap(staged, session.uvk, userId);
   if (!r.ok) return { ok: false, code: r.code };
   const served: PersonalWrapWire = { vaultId: staged.vaultId, wrappedVk: staged.wrappedVk };
@@ -2151,6 +2186,7 @@ async function acceptPersonalChange(): Promise<Res<"personalAcceptChange">> {
   } catch {
     return { ok: false, code: "storage" };
   }
+  personalChangeDescribed = null;
   session.vaultKeys.set(served.vaultId, r.vk);
   session.personalVaultId = served.vaultId;
   await persistSession();

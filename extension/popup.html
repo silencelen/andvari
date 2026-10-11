@@ -73,10 +73,13 @@
     <!-- A5b review LOW-3 (A6): the text names both vaults; it is set by popup.ts from status.personalChangeText
          (textContent only). The static copy below is the fallback when no names could be decrypted. -->
     <div id="personal-change" class="must-change-strip personal-change" role="alert" hidden>
-      <span id="personal-change-text">Your personal vault was changed on another device, or the server sent an older
-      record. This browser keeps saving to the vault it had until you confirm. To keep it, choose it again in the
-      web vault (Settings, Personal vault).</span>
-      <button id="personal-change-accept" class="ghost" type="button">Use the new personal vault</button>
+      <span id="personal-change-text">This browser keeps saving to the personal vault it had. To keep it, choose it
+      again in the web vault (Settings, Personal vault). The server says your personal vault was changed on another
+      device, or it sent an older record.</span>
+      <!-- A6 fix round (A5b LOW-1/LOW-2 parity): who else holds the NEW vault, as reported by the server; "Use new"
+           stays hidden until that lookup succeeded (the SW enforces the same gate). Keep-current guidance is first. -->
+      <span id="personal-change-coholders" class="personal-change-coholders" hidden></span>
+      <button id="personal-change-accept" class="ghost" type="button" hidden>Use the new personal vault</button>
     </div>
     <!-- Root cause A §1.7 (A6, owner decision Q8): the extension never opens a grant seal; shared vaults whose
          grant has no wrap yet wait for a full client to verify them. Unlocked-only chrome, re-derived by refresh(). -->
