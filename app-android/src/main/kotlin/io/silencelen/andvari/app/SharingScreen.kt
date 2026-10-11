@@ -94,6 +94,9 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // H03/H19: queued changes the server definitively refused and the drain dropped —
         // the canon lead sentence (web appends its revert tail; core has no optimistic apply).
         "write-rejected" -> Pair(HouseholdCopy.writeRejectedNotice(n.parkedCount ?: 0, name, n.reason), true)
+        // Root cause A §3.1 (security review 2026-10): canon in core HouseholdCopy, web pinned to it.
+        "vk-mismatch" -> Pair(HouseholdCopy.vkMismatchNotice(name), true)
+        "key-unreadable" -> Pair(HouseholdCopy.KEY_UNREADABLE_NOTICE, true)
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
                 "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +

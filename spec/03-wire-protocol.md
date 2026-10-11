@@ -710,11 +710,20 @@ HMAC-SHA-256 value; `|`-joined UTF-8; integers decimal):
 - `PUT /vaults/{id}/meta {metaBlob, baseVaultRev?}` → `200 {rev}`. Owner; shared vaults;
   not deleted; `≤4 KiB` b64. `baseVaultRev < vaults.rev → 409 stale_meta`. Rename only
   (name is ciphertext — server audits ids). Personal-vault rename deferred.
+- `PUT /vaults/{id}/grant/self-wrap {wrappedVk}` → `200 {rev}`. Member self-wrap (spec 01 §6,
+  security review 2026-10): the caller's OWN active grant only, and never an `owner` row
+  (`403 owner_wrap_immutable` — an owner's `wrappedVk` is bound into `acceptProof`); a
+  removed/left or absent grant is `403 no_grant`; `wrappedVk` is `≤1 KiB` b64. Stores
+  `wrappedVk`, keeps `sealedVk` and the role; bumps the grant rev so the caller's other devices
+  receive the row. An identical re-post is a read-only no-op. The server cannot check the wrap
+  (ciphertext under the member's UVK); a client that cannot open it treats the vault as "key
+  unreadable", never as a cue to use the seal. Audited `vault_grant_self_wrap`.
 
 **Errors:** `vault_deleted, vault_gone, vault_state_changed, owner_must_transfer_or_delete,
 transfer_not_pending, not_transfer_target, stale_meta, no_grant, not_vault_owner,
-user_inactive`. **Audit types** (ids only): `vault_delete, vault_restore, vault_purge,
-vault_member_leave, vault_transfer_{offer,accept,cancel,expire}, vault_rename`; `push_denied`
+user_inactive, owner_wrap_immutable`. **Audit types** (ids only): `vault_delete, vault_restore, vault_purge,
+vault_member_leave, vault_transfer_{offer,accept,cancel,expire}, vault_rename,
+vault_grant_self_wrap`; `push_denied`
 gains a `deleted:` meta prefix for tombstoned vaults (excludes routine lifecycle fallout
 from intrusion review). **Janitor** (daily 04:30 + delayed on-boot; log-only dry-run its
 first armed week): purge vaults past grace (spec 02 §7) and expire transfer offers past

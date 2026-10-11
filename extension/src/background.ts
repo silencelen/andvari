@@ -2015,46 +2015,90 @@ function verifyServerIdentity(localPub: Uint8Array, identityPubB64: string): voi
   }
 }
 
-/** Open every grant we hold a key for (owner via UVK, member via the identity-sealed box). Shared by
- *  the full unlock and the quick-unlock redeem — the redeem holding the UVK + identity again is what
- *  lets a brand-new shared-vault grant open on a quick unlock (design §1). */
+/** Constant-shape byte equality for two VKs (extension crypto.ts carries no ctEquals). */
+function sameKey(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a[i]! ^ b[i]!;
+  return d === 0;
+}
+
+/** Open every grant we hold a key for. Shared by the full unlock and the quick-unlock redeem — the
+ *  redeem holding the UVK + identity again is what lets a brand-new shared-vault grant open on a quick
+ *  unlock (design §1).
+ *
+ *  Canonical-key precedence (security review 2026-10, root cause A §3.1; core/web `openGrantVk`
+ *  twin): our own UVK wrap (`wrappedVk`) wins whenever the row carries one; a v1 `sealedVk` is used
+ *  only when there is no wrap. A seal on a row whose wrap opened is opened only to compare — a
+ *  DIFFERENT key is recorded in `vkMismatch` and refused (the server can mint a seal to our public
+ *  key; it cannot mint our wrap). A wrap that is present but does not open is recorded in
+ *  `keyUnreadable` and the vault stays keyless: never a fallback to the seal. */
 function buildVaultKeys(
   sync: SyncResponse,
   uvk: Uint8Array,
   identity: { publicKey: Uint8Array; privateKey: Uint8Array },
   userId: string,
-): { vaultKeys: Map<string, Uint8Array>; vaultRoles: Map<string, string>; memberGranted: Set<string> } {
+): {
+  vaultKeys: Map<string, Uint8Array>;
+  vaultRoles: Map<string, string>;
+  memberGranted: Set<string>;
+  vkMismatch: Set<string>;
+  keyUnreadable: Set<string>;
+} {
   const vaultKeys = new Map<string, Uint8Array>();
   const vaultRoles = new Map<string, string>();
-  // H64: which VKs arrived by MEMBER grant. See pickPersonalVaultId — a sealedVk is anonymous
-  // (anyone with our identity pubkey can mint one) and the key inside it is by construction one
-  // somebody else already holds, so it can never be evidence that a vault is ours alone.
+  // H64: which VKs belong to a vault somebody else can read. See pickPersonalVaultId — a sealedVk is
+  // anonymous (anyone with our identity pubkey can mint one) and the key inside it is by construction
+  // one somebody else already holds, so it can never be evidence that a vault is ours alone. Since the
+  // member self-wrap (root cause A §3.2) a member row can carry a wrappedVk too, so a row with ANY seal
+  // or a non-owner role also counts (core/web Account.addGrant parity).
   const memberGranted = new Set<string>();
-  for (const g of sync.grants) {
+  const vkMismatch = new Set<string>();
+  const keyUnreadable = new Set<string>();
+  const openSeal = (g: SyncResponse["grants"][number]): Uint8Array | null => {
     try {
-      let vk: Uint8Array;
-      if (g.sealedVk) {
-        // Member grant: crypto_box_seal to our identity key; payload {v,vaultId,vk} bound to the
-        // row. openSharedGrant (crypto.ts) is the vector-graded twin of core/web and THROWS on a
-        // reseated/forged grant or a non-32-byte VK (H93) — the catch below skips the grant, so a
-        // malformed one is refused here rather than accepted into vaultKeys and surfacing later
-        // as an empty vault.
-        vk = openSharedGrant(identity.publicKey, identity.privateKey, g.vaultId, fromB64(g.sealedVk));
-      } else if (g.wrappedVk) {
-        vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, userId)); // owner / personal
-      } else {
+      // openSharedGrant (crypto.ts) is the vector-graded twin of core/web and THROWS on a
+      // reseated/forged grant or a non-32-byte VK (H93).
+      return openSharedGrant(identity.publicKey, identity.privateKey, g.vaultId, fromB64(g.sealedVk!));
+    } catch {
+      return null;
+    }
+  };
+  for (const g of sync.grants) {
+    let vk: Uint8Array | null = null;
+    let viaSeal = false;
+    if (g.wrappedVk) {
+      try {
+        vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, userId)); // owner / personal / member self-wrap
+        if (vk.length !== 32) vk = null;
+      } catch {
+        vk = null;
+      }
+      if (vk === null) {
+        keyUnreadable.add(g.vaultId); // damaged or substituted wrap: NO seal fallback
         continue;
       }
-      vaultKeys.set(g.vaultId, vk);
-      if (g.sealedVk) memberGranted.add(g.vaultId);
-      // G21: record the grant's role beside the key — "reader" means the server denies every push
-      // to this vault, so the write paths must never target its items.
-      vaultRoles.set(g.vaultId, g.role);
-    } catch {
-      /* wrong key / not ours — skip */
+      if (g.sealedVk) {
+        const sealVk = openSeal(g);
+        if (sealVk !== null && !sameKey(sealVk, vk)) vkMismatch.add(g.vaultId);
+      }
+    } else if (g.sealedVk) {
+      vk = openSeal(g); // legacy v1 member grant; a malformed one is skipped, never accepted
+      viaSeal = true;
     }
+    if (vk === null) continue; // wrong key / not ours — skip
+    vaultKeys.set(g.vaultId, vk);
+    if (viaSeal || g.sealedVk || g.role !== "owner") memberGranted.add(g.vaultId);
+    // G21: record the grant's role beside the key — "reader" means the server denies every push
+    // to this vault, so the write paths must never target its items.
+    vaultRoles.set(g.vaultId, g.role);
   }
-  return { vaultKeys, vaultRoles, memberGranted };
+  if (vkMismatch.size > 0 || keyUnreadable.size > 0) {
+    // The vault page and the native apps raise the "server may be misbehaving" notice; here the key
+    // decision is what matters, and it has already been made in our favour.
+    console.warn(`andvari: refused server key material — mismatch ${vkMismatch.size}, unreadable ${keyUnreadable.size}`);
+  }
+  return { vaultKeys, vaultRoles, memberGranted, vkMismatch, keyUnreadable };
 }
 
 /**
