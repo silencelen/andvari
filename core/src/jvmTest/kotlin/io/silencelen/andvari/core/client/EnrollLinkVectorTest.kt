@@ -23,6 +23,8 @@ class EnrollLinkVectorTest {
         t = o.getValue("t").jsonPrimitive.content,
         e = o.getValue("e").jsonPrimitive.content,
         rfp = o["rfp"]?.jsonPrimitive?.content, // optional; absent ⇒ null (the safe typed-sheet fallback)
+        ifp = o["ifp"]?.jsonPrimitive?.content, // A5: the admin's full identity fp (in-person only)
+        iu = o["iu"]?.jsonPrimitive?.content,
     )
 
     @Test
@@ -33,11 +35,13 @@ class EnrollLinkVectorTest {
             val t = case.getValue("t").jsonPrimitive.content
             val e = case.getValue("e").jsonPrimitive.content
             val rfp = case["rfp"]?.jsonPrimitive?.content // optional; absent ⇒ null, byte-identical to a pre-rfp link
+            val ifp = case["ifp"]?.jsonPrimitive?.content
+            val iu = case["iu"]?.jsonPrimitive?.content
             val link = case.getValue("link").jsonPrimitive.content
             // The pinned link string is byte-exact: compose must reproduce it, and parse
-            // must carry o/t/e/rfp back verbatim (e and rfp in particular are NOT normalized).
-            assertEquals(link, EnrollLink.compose(o, t, e, rfp), "compose $name")
-            assertEquals(EnrollPayload(1, o, t, e, rfp), EnrollLink.parse(link), "parse $name")
+            // must carry o/t/e/rfp/ifp/iu back verbatim (e in particular is NOT normalized).
+            assertEquals(link, EnrollLink.compose(o, t, e, rfp, ifp, iu), "compose $name")
+            assertEquals(EnrollPayload(1, o, t, e, rfp, ifp, iu), EnrollLink.parse(link), "parse $name")
         }
     }
 
@@ -76,7 +80,27 @@ class EnrollLinkVectorTest {
             val o = case.getValue("o").jsonPrimitive.content
             val t = case.getValue("t").jsonPrimitive.content
             val e = case.getValue("e").jsonPrimitive.content
-            assertNull(EnrollLink.compose(o, t, e), "compose '$name' must reject ill-formed UTF-16")
+            val rfp = case["rfp"]?.jsonPrimitive?.content
+            val ifp = case["ifp"]?.jsonPrimitive?.content
+            val iu = case["iu"]?.jsonPrimitive?.content
+            assertNull(EnrollLink.compose(o, t, e, rfp, ifp, iu), "compose '$name' must reject")
+        }
+    }
+
+    /** Security review 2026-10, root cause A, A5: the in-person code, from an independent oracle. */
+    @Test
+    fun checkCodes() {
+        val crypto = io.silencelen.andvari.core.crypto.createCryptoProvider()
+        for (case in v.getValue("checkCodes").jsonArray.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val p = EnrollPayload(1, "https://vault.example", "t", "e", case["rfp"]?.jsonPrimitive?.content, case["ifp"]?.jsonPrimitive?.content, case["iu"]?.jsonPrimitive?.content)
+            val expected = case.getValue("code").let { if (it is JsonNull) null else it.jsonPrimitive.content }
+            assertEquals(expected, EnrollLink.checkCode(crypto, p), "checkCode $name")
+            if (expected != null) {
+                // The human types it, grouped or not; a 16-hex prefix of it is never enough.
+                kotlin.test.assertTrue(EnrollLink.checkCodeMatches(crypto, p, expected.chunked(4).joinToString(" ").uppercase()), "typed $name")
+                kotlin.test.assertFalse(EnrollLink.checkCodeMatches(crypto, p, expected.take(16)), "16-hex prefix $name")
+            }
         }
     }
 }

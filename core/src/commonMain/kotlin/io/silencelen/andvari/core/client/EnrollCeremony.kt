@@ -9,7 +9,7 @@ import io.silencelen.andvari.core.crypto.Escrow
  * typed). Mirrors web `Enroll`'s canSubmit exactly:
  *
  *  - F60: master password meets the strength floor (score >= 3), not a length check;
- *  - spec 04 §2(3): the user must TYPE the first 16 hex chars of the org recovery
+ *  - spec 04 §2(3): the user must TYPE the first 32 hex chars of the org recovery
  *    fingerprint from the PRINTED sheet — [Escrow.shortFormMatches] tolerates separators
  *    and is false whenever the server fingerprint is absent, so the "server has a
  *    recovery key" precondition rides the same leg;

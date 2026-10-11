@@ -79,6 +79,7 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
         fingerprint: String,
         includeEscrow: Boolean = true,
         includeMemberRecovery: Boolean = true,
+        includePersonalWrap: Boolean = false,
     ): RegisterRequest {
         userId = uuidV4()
         val wrappedUvk = Envelope.sealB64(crypto, wrapKey, uvk, Ad.uvk(userId))
@@ -101,8 +102,13 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
             memberRecovery = if (includeMemberRecovery) buildMemberRecovery() else null,
             personalVault = PersonalVaultUpload(personalVaultId, wrappedVk, metaBlob),
             device = DeviceInfo("test", "vc-${email.take(3)}"),
+            personalWrap = if (includePersonalWrap) personalWrap() else null,
         )
     }
+
+    /** Root cause A §4.1: the personal vault key under the UVK with the vk-personal purpose. */
+    fun personalWrap(vaultId: String = personalVaultId, key: ByteArray = vk): io.silencelen.andvari.core.model.PersonalWrap =
+        io.silencelen.andvari.core.model.PersonalWrap(vaultId, Envelope.sealB64(crypto, uvk, key, Ad.vkPersonal(vaultId, userId)))
 
     // ---- per-member self-service recovery (design 2026-07-12 §F) ----
 

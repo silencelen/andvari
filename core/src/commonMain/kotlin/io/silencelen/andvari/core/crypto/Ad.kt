@@ -26,6 +26,18 @@ object Ad {
 
     fun vk(vaultId: String, userId: String): ByteArray = join("vk", vaultId, userId)
 
+    /**
+     * Security review 2026-10, root cause A §4.1: the PERSONAL wrap of the personal vault key,
+     * `AccountKeys.personalWrap`. A distinct purpose from [vk], so an owner wrap of a shared vault can
+     * never open as a personal wrap (and the reverse): only this user's UVK can mint one, which is
+     * what makes "personal" a client-held, authenticated property instead of a server label.
+     */
+    fun vkPersonal(vaultId: String, userId: String): ByteArray = join("vk-personal", vaultId, userId)
+
+    /** Root cause A §4.2: the per-user account-state blob (contact pins, org fp, consumed nonces),
+     *  sealed under the UVK and bound to the userId so one member's blob never opens in another slot. */
+    fun accountState(userId: String): ByteArray = join("account-state", userId)
+
     fun vaultMeta(vaultId: String): ByteArray = join("vaultmeta", vaultId)
 
     /** spec 02 §8.2 (design 2026-08-22) — the per-user usage ledger envelope. Bound to the userId

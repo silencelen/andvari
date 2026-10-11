@@ -1,0 +1,1251 @@
+{
+  "comment": [
+    "Security review 2026-10, root cause A §4.2 (branch A5). Hand-authored: blobs from an INDEPENDENT oracle (@noble/ciphers XChaCha20-Poly1305, fixed nonces); merge expectations written from the spec text (core AccountState.merge / web mergeAccountState must equal them).",
+    "open: sampleBlob opens under uvkB64 with AD 'andvari/v1|account-state|{userId}' to the document `sample`. rejectOpen rows MUST fail to open for `userId` (another user's slot; another key = an injected blob).",
+    "rejectDecode: plaintexts that open fine but are NOT a v1 document for userId; every engine MUST refuse them.",
+    "merge(local, served, highWater) → {doc, rollback}: contacts union by userId, newest verifiedAt wins (tie: smaller identityPub string); tombstones union max, a tombstone >= verifiedAt removes the pin; orgRecoveryFp from the higher seq (local on tie/rollback); nonces union per vault keeping the max issuedAt, newest 256 by (issuedAt desc, nonce asc); seq = max(local, served, highWater, 0). rollback = served below highWater, or served withheld once highWater > 0. Contacts compared sorted by userId; maps compared as sets of entries."
+  ],
+  "userId": "33333333-3333-4333-8333-333333333333",
+  "uvkB64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "adUtf8": "andvari/v1|account-state|33333333-3333-4333-8333-333333333333",
+  "sample": {
+    "v": 1,
+    "userId": "33333333-3333-4333-8333-333333333333",
+    "seq": 5,
+    "contacts": [
+      {
+        "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        "label": "Alex",
+        "verifiedAt": 100,
+        "method": "qr"
+      },
+      {
+        "userId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+        "label": "Bea",
+        "verifiedAt": 200,
+        "method": "enrol"
+      }
+    ],
+    "contactTombstones": {
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc": 150
+    },
+    "orgRecoveryFp": "1111111111111111111111111111111111111111111111111111111111111111",
+    "consumedNonces": {
+      "55555555-5555-4555-8555-555555555555": [
+        ["n2", 20],
+        ["n1", 10]
+      ]
+    }
+  },
+  "sampleBlobB64": "AQFAQUJDREVGR0hJSktMTU5PUFFSU1RVVldBAxuLHFfR_QINikqtB8Af22b00OUkMXAHrPIcvQzkJrkYcp5E5s9sJsLGng3b_ijIyuhc1GKXvZRXtG1wGGk43RBbM_ufcD-k4dFxL1r-G_5ofdWfqJ8qZeVNjjQ8kbOGuf-Or0a09McQVEH7PDM5vHWNLcCZzUpPs_Z1w9FzU9Vqltervh4J0P4mvwgimC6iuEbpHvEmMr2tAUhx_ySK2ACshaHGAK0SDXBtv4q24xKRLpM0xOMUDyaVaqkVv7dRSGbeJ0Uu41UVR-5ix0j34vhLoWUcD_hSNFdbqeeLUYX4nHd7UgWZWr9-HG7tTAiYOhMgcQA-dTdl8zI6Gplx-FFkwdLmyiC4uoJhio_dGJOZXhPI17i0AtfVZjqp3bvaSX6AOMuURH8Q2Kq2-h5BId90GAbkha8maTyEj3vk6-2o81_Hl7e2XsVlWagSZtN5ZcFp3OI20hrEuMNye-d-2K4bLejY2_U6p0NT5pI_n0zEwjvMb3aAvCSezEEQeDMxkvgMiftS1bP-ET-RfMkuUhYuBKXDN2Duap47i_v6CTYVgWwB9tz9HxmNKAgQi5E8z3btFa0as5BlrgPbfNTBcZA1FDSL0eBMh87IfS-BXpwIg_oCOknWsRMPC6KR4hs1qj3n8vFSkxo5KvF7GGYYpTlTVvR23d8l6fZf03VL0iEPqpSSedbCuHZDtlTB42nCB06xnaqJAUyn-LH5FNuw5B9y2ofLRcUVxFORLj1d57QCL9n614L5u9Tzkwg6gCFrnKBVSpDCiD1EvSseScOhHaU9hvnRfUfnNvHUAcP4mQduiINr3wkmMuLQisNRIkiOPkN3uykeWXNf",
+  "rejectOpen": [
+    {
+      "name": "another-users-slot",
+      "blobB64": "AQFYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm_SPq6gYebyG-F2NCfWgpoA7tPzAmBqkQTg724H1vynBjGwrPwSLrMtMl2EB6hIreqycf_6-MrkKgop51oBtajehfvmilgN80E0zhh3_odmpbjzqkvgwp9UC-DlKl2ne2QABuExU4H9pmWXlz2m84ifdxy1NavV-E4sdHAO8zhJY9V1_ulgxcEdAbd7e2RUar2XWMgW2NPlkj1OIuSxbLox7r23QQSaIwGad-z-JIm-i7lV1blOTXm0gCaMfmtbmXxL0opCdGKLqJVd7GcfJo68J_7zi--LfHkhiWWqyHvtjj29ljzHPzTezU8w4XSJy33VrRycu12UIgRx2sYOoko2LVk7img9OWo5YUtFvPb2WQA3V0v9dVzCVlILw6inhuOVRPP-g2mBY5NdTYTtUnX93EbQ3zZQhfirz7TI_2bXWcebEtgd-s0TBMptaUmwGanhu8Lw-3FSGVqPpfzZNtWIxYajN90GX1_25o8LQ8NPZfD9ygHkXU4sSwyRxBXTFoXGp_t3Wq-H95quKbf9s_GWH_-SR6QPHVuJ4J6ITLz7VpwmxAH_0bz7kwJ0qQ4N0hrx2HUzcBN7Uk8AZI6q7r1arLeWgtxIr5S0slS8_HIP9TH2mEiPpNegv6c4iYXpHq7FSvPS0XHUJma3hUY-X5HErXATcpSWmVzYZrfRzxX9NBq7Mbqm3j5NoyvNoE9JPSVBb_5ae0uHeefoqZIIQGiS3xlbF7axK-hrC6r42A0NSXhzIpw_OzASp9TwPIrll03MvvUyMIGBFP3_LLnJxr3Ly0jDyxvyV1jya9FfGyj4axNwi2Hm5bklMG0qpdWQpU5732kW_9bZKlbl"
+    },
+    {
+      "name": "injected-under-another-key",
+      "blobB64": "AQFYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm-ER-lWNIyOMqUNfH8VgrQ_cxSFId3X7wVnmOqJFsqk2xmGde-SQMFp5CEU7aPObArIVPxoJ6-PBRB9cWa4Uq7gXj0WVPIJL66FNw9070pF8CNfHGaDXMlt49n7VCPptoUYBnC9wnKrORapAH8KG2hzeO_EYHUG7qPtmPxppYp_-pbbgiAqWYM3FCHy3u0ZhPXb6GLo3BVoaf5Q_P96u9YOH2LGYGKKbQj3Xs-3hnxrb73v4o19_TU_f3SoOvXhsTo8nGcCgZyjIZdzOCencOwTMkwpWjPkz9CjMjC1ZQ6MJmFs9ywR7aMypjqNUNPDzZp7PfBAMGrrPevncnnq-IGdsQxjxcxAJkAVIHsbipEuYskC_1DGTxnbV42PwWBt1HCQWCoRQZRCRiMQD406zv9L1fTspM46hdXgHY3OKD_-Lpxg1fUGO7eotYEatm2MQ3BSSPUSggGprbsDopdCDKvJj3sNoobPN27WSZwgrC97FHJC4Je8P1QMJAaQGTx2viyYAHwhGT0YuucLwa9Qmvw-XVn6yskijXGb4NB8eQ1NF8YgBKil8q0I7Sdusql-RAoo2JU-05Nusqv5z5ingEzxB-YW6Ad1WlgCZPkem_J1PJbWoP_amuJ8VUgMi7KRmEqcJ7sbSqqd5Sh23HZt5DQ6EdFzDy-K29CN_cr2zHC3YYEnW-Nq1tLafl1cXv9ZaJ8WbtXxEWnZVcE5HM-eK4RKN4Yo_9f7bF2hTBDYK2DDh3IEYSLI2fyhhho8_tJbj55xA-k8NIzhO7oM4VHcVZrYfRByiNbZcBy09tE3QAhldy7aScw0apG2VhLMUAUbVJWad2_slsll_kPt"
+    }
+  ],
+  "rejectDecode": [
+    {
+      "name": "version-2",
+      "plaintext": "{\"v\":2,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"Alex\",\"verifiedAt\":100,\"method\":\"qr\"},{\"userId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"identityPub\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"label\":\"Bea\",\"verifiedAt\":200,\"method\":\"enrol\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    },
+    {
+      "name": "another-user",
+      "plaintext": "{\"v\":1,\"userId\":\"44444444-4444-4444-8444-444444444444\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"Alex\",\"verifiedAt\":100,\"method\":\"qr\"},{\"userId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"identityPub\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"label\":\"Bea\",\"verifiedAt\":200,\"method\":\"enrol\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    },
+    {
+      "name": "unknown-top-key",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"Alex\",\"verifiedAt\":100,\"method\":\"qr\"},{\"userId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"identityPub\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"label\":\"Bea\",\"verifiedAt\":200,\"method\":\"enrol\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]},\"extra\":1}"
+    },
+    {
+      "name": "unknown-contact-method",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"member\",\"verifiedAt\":1,\"method\":\"auto\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    },
+    {
+      "name": "short-contact-key",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ\",\"label\":\"member\",\"verifiedAt\":1,\"method\":\"typed\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    },
+    {
+      "name": "duplicate-contact",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"member\",\"verifiedAt\":1,\"method\":\"typed\"},{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"label\":\"member\",\"verifiedAt\":2,\"method\":\"typed\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    },
+    {
+      "name": "short-org-fp",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"Alex\",\"verifiedAt\":100,\"method\":\"qr\"},{\"userId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"identityPub\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"label\":\"Bea\",\"verifiedAt\":200,\"method\":\"enrol\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"11111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    },
+    {
+      "name": "negative-seq",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":-1,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"Alex\",\"verifiedAt\":100,\"method\":\"qr\"},{\"userId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"identityPub\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"label\":\"Bea\",\"verifiedAt\":200,\"method\":\"enrol\"}],\"contactTombstones\":{\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\":150},\"orgRecoveryFp\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"consumedNonces\":{\"55555555-5555-4555-8555-555555555555\":[[\"n2\",20],[\"n1\",10]]}}"
+    }
+  ],
+  "merge": [
+    {
+      "name": "contact-union",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [
+          {
+            "userId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "label": "member",
+            "verifiedAt": 200,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 100,
+              "method": "typed"
+            },
+            {
+              "userId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "label": "member",
+              "verifiedAt": 200,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "newest-pin-wins",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "label": "member",
+            "verifiedAt": 150,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "label": "member",
+              "verifiedAt": 150,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "tie-smaller-key-string",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 3,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 100,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "newer-tombstone-removes",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 200
+        },
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [],
+          "contactTombstones": {
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 200
+          },
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "older-tombstone-keeps",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 50
+        },
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 100,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 50
+          },
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "same-ms-tombstone-removes",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 100
+        },
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [],
+          "contactTombstones": {
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 100
+          },
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "rollback-below-high-water-local-wins",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 7,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": "1111111111111111111111111111111111111111111111111111111111111111",
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 5,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": "2222222222222222222222222222222222222222222222222222222222222222",
+        "consumedNonces": {}
+      },
+      "highWater": 7,
+      "expected": {
+        "rollback": true,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 7,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 100,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": "1111111111111111111111111111111111111111111111111111111111111111",
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "withheld-after-seen-is-rollback",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": null,
+      "highWater": 4,
+      "expected": {
+        "rollback": true,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 100,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "fresh-device-nothing-anywhere",
+      "local": null,
+      "served": null,
+      "highWater": 0,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 0,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "fresh-device-adopts-served",
+      "local": null,
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 6,
+        "contacts": [
+          {
+            "userId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "label": "member",
+            "verifiedAt": 200,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": "2222222222222222222222222222222222222222222222222222222222222222",
+        "consumedNonces": {}
+      },
+      "highWater": 0,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 6,
+          "contacts": [
+            {
+              "userId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "identityPub": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "label": "member",
+              "verifiedAt": 200,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": "2222222222222222222222222222222222222222222222222222222222222222",
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "org-fp-from-higher-seq",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 2,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": "1111111111111111111111111111111111111111111111111111111111111111",
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": "2222222222222222222222222222222222222222222222222222222222222222",
+        "consumedNonces": {}
+      },
+      "highWater": 2,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 3,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": "2222222222222222222222222222222222222222222222222222222222222222",
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "nonce-union-max-and-cap-256",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {
+          "55555555-5555-4555-8555-555555555555": [
+            ["n000", 0],
+            ["n001", 1],
+            ["n002", 2],
+            ["n003", 3],
+            ["n004", 4],
+            ["n005", 5],
+            ["n006", 6],
+            ["n007", 7],
+            ["n008", 8],
+            ["n009", 9],
+            ["n010", 10],
+            ["n011", 11],
+            ["n012", 12],
+            ["n013", 13],
+            ["n014", 14],
+            ["n015", 15],
+            ["n016", 16],
+            ["n017", 17],
+            ["n018", 18],
+            ["n019", 19],
+            ["n020", 20],
+            ["n021", 21],
+            ["n022", 22],
+            ["n023", 23],
+            ["n024", 24],
+            ["n025", 25],
+            ["n026", 26],
+            ["n027", 27],
+            ["n028", 28],
+            ["n029", 29],
+            ["n030", 30],
+            ["n031", 31],
+            ["n032", 32],
+            ["n033", 33],
+            ["n034", 34],
+            ["n035", 35],
+            ["n036", 36],
+            ["n037", 37],
+            ["n038", 38],
+            ["n039", 39],
+            ["n040", 40],
+            ["n041", 41],
+            ["n042", 42],
+            ["n043", 43],
+            ["n044", 44],
+            ["n045", 45],
+            ["n046", 46],
+            ["n047", 47],
+            ["n048", 48],
+            ["n049", 49],
+            ["n050", 50],
+            ["n051", 51],
+            ["n052", 52],
+            ["n053", 53],
+            ["n054", 54],
+            ["n055", 55],
+            ["n056", 56],
+            ["n057", 57],
+            ["n058", 58],
+            ["n059", 59],
+            ["n060", 60],
+            ["n061", 61],
+            ["n062", 62],
+            ["n063", 63],
+            ["n064", 64],
+            ["n065", 65],
+            ["n066", 66],
+            ["n067", 67],
+            ["n068", 68],
+            ["n069", 69],
+            ["n070", 70],
+            ["n071", 71],
+            ["n072", 72],
+            ["n073", 73],
+            ["n074", 74],
+            ["n075", 75],
+            ["n076", 76],
+            ["n077", 77],
+            ["n078", 78],
+            ["n079", 79],
+            ["n080", 80],
+            ["n081", 81],
+            ["n082", 82],
+            ["n083", 83],
+            ["n084", 84],
+            ["n085", 85],
+            ["n086", 86],
+            ["n087", 87],
+            ["n088", 88],
+            ["n089", 89],
+            ["n090", 90],
+            ["n091", 91],
+            ["n092", 92],
+            ["n093", 93],
+            ["n094", 94],
+            ["n095", 95],
+            ["n096", 96],
+            ["n097", 97],
+            ["n098", 98],
+            ["n099", 99],
+            ["n100", 100],
+            ["n101", 101],
+            ["n102", 102],
+            ["n103", 103],
+            ["n104", 104],
+            ["n105", 105],
+            ["n106", 106],
+            ["n107", 107],
+            ["n108", 108],
+            ["n109", 109],
+            ["n110", 110],
+            ["n111", 111],
+            ["n112", 112],
+            ["n113", 113],
+            ["n114", 114],
+            ["n115", 115],
+            ["n116", 116],
+            ["n117", 117],
+            ["n118", 118],
+            ["n119", 119],
+            ["n120", 120],
+            ["n121", 121],
+            ["n122", 122],
+            ["n123", 123],
+            ["n124", 124],
+            ["n125", 125],
+            ["n126", 126],
+            ["n127", 127],
+            ["n128", 128],
+            ["n129", 129],
+            ["n130", 130],
+            ["n131", 131],
+            ["n132", 132],
+            ["n133", 133],
+            ["n134", 134],
+            ["n135", 135],
+            ["n136", 136],
+            ["n137", 137],
+            ["n138", 138],
+            ["n139", 139],
+            ["n140", 140],
+            ["n141", 141],
+            ["n142", 142],
+            ["n143", 143],
+            ["n144", 144],
+            ["n145", 145],
+            ["n146", 146],
+            ["n147", 147],
+            ["n148", 148],
+            ["n149", 149],
+            ["n150", 150],
+            ["n151", 151],
+            ["n152", 152],
+            ["n153", 153],
+            ["n154", 154],
+            ["n155", 155],
+            ["n156", 156],
+            ["n157", 157],
+            ["n158", 158],
+            ["n159", 159],
+            ["n160", 160],
+            ["n161", 161],
+            ["n162", 162],
+            ["n163", 163],
+            ["n164", 164],
+            ["n165", 165],
+            ["n166", 166],
+            ["n167", 167],
+            ["n168", 168],
+            ["n169", 169],
+            ["n170", 170],
+            ["n171", 171],
+            ["n172", 172],
+            ["n173", 173],
+            ["n174", 174],
+            ["n175", 175],
+            ["n176", 176],
+            ["n177", 177],
+            ["n178", 178],
+            ["n179", 179],
+            ["n180", 180],
+            ["n181", 181],
+            ["n182", 182],
+            ["n183", 183],
+            ["n184", 184],
+            ["n185", 185],
+            ["n186", 186],
+            ["n187", 187],
+            ["n188", 188],
+            ["n189", 189],
+            ["n190", 190],
+            ["n191", 191],
+            ["n192", 192],
+            ["n193", 193],
+            ["n194", 194],
+            ["n195", 195],
+            ["n196", 196],
+            ["n197", 197],
+            ["n198", 198],
+            ["n199", 199]
+          ]
+        }
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {
+          "55555555-5555-4555-8555-555555555555": [
+            ["n150", 1000],
+            ["n151", 151],
+            ["n152", 152],
+            ["n153", 153],
+            ["n154", 154],
+            ["n155", 155],
+            ["n156", 156],
+            ["n157", 157],
+            ["n158", 158],
+            ["n159", 159],
+            ["n160", 160],
+            ["n161", 161],
+            ["n162", 162],
+            ["n163", 163],
+            ["n164", 164],
+            ["n165", 165],
+            ["n166", 166],
+            ["n167", 167],
+            ["n168", 168],
+            ["n169", 169],
+            ["n170", 170],
+            ["n171", 171],
+            ["n172", 172],
+            ["n173", 173],
+            ["n174", 174],
+            ["n175", 175],
+            ["n176", 176],
+            ["n177", 177],
+            ["n178", 178],
+            ["n179", 179],
+            ["n180", 180],
+            ["n181", 181],
+            ["n182", 182],
+            ["n183", 183],
+            ["n184", 184],
+            ["n185", 185],
+            ["n186", 186],
+            ["n187", 187],
+            ["n188", 188],
+            ["n189", 189],
+            ["n190", 190],
+            ["n191", 191],
+            ["n192", 192],
+            ["n193", 193],
+            ["n194", 194],
+            ["n195", 195],
+            ["n196", 196],
+            ["n197", 197],
+            ["n198", 198],
+            ["n199", 199],
+            ["n200", 200],
+            ["n201", 201],
+            ["n202", 202],
+            ["n203", 203],
+            ["n204", 204],
+            ["n205", 205],
+            ["n206", 206],
+            ["n207", 207],
+            ["n208", 208],
+            ["n209", 209],
+            ["n210", 210],
+            ["n211", 211],
+            ["n212", 212],
+            ["n213", 213],
+            ["n214", 214],
+            ["n215", 215],
+            ["n216", 216],
+            ["n217", 217],
+            ["n218", 218],
+            ["n219", 219],
+            ["n220", 220],
+            ["n221", 221],
+            ["n222", 222],
+            ["n223", 223],
+            ["n224", 224],
+            ["n225", 225],
+            ["n226", 226],
+            ["n227", 227],
+            ["n228", 228],
+            ["n229", 229],
+            ["n230", 230],
+            ["n231", 231],
+            ["n232", 232],
+            ["n233", 233],
+            ["n234", 234],
+            ["n235", 235],
+            ["n236", 236],
+            ["n237", 237],
+            ["n238", 238],
+            ["n239", 239],
+            ["n240", 240],
+            ["n241", 241],
+            ["n242", 242],
+            ["n243", 243],
+            ["n244", 244],
+            ["n245", 245],
+            ["n246", 246],
+            ["n247", 247],
+            ["n248", 248],
+            ["n249", 249],
+            ["n250", 250],
+            ["n251", 251],
+            ["n252", 252],
+            ["n253", 253],
+            ["n254", 254],
+            ["n255", 255],
+            ["n256", 256],
+            ["n257", 257],
+            ["n258", 258],
+            ["n259", 259],
+            ["n260", 260],
+            ["n261", 261],
+            ["n262", 262],
+            ["n263", 263],
+            ["n264", 264],
+            ["n265", 265],
+            ["n266", 266],
+            ["n267", 267],
+            ["n268", 268],
+            ["n269", 269],
+            ["n270", 270],
+            ["n271", 271],
+            ["n272", 272],
+            ["n273", 273],
+            ["n274", 274],
+            ["n275", 275],
+            ["n276", 276],
+            ["n277", 277],
+            ["n278", 278],
+            ["n279", 279],
+            ["n280", 280],
+            ["n281", 281],
+            ["n282", 282],
+            ["n283", 283],
+            ["n284", 284],
+            ["n285", 285],
+            ["n286", 286],
+            ["n287", 287],
+            ["n288", 288],
+            ["n289", 289],
+            ["n290", 290],
+            ["n291", 291],
+            ["n292", 292],
+            ["n293", 293],
+            ["n294", 294],
+            ["n295", 295],
+            ["n296", 296],
+            ["n297", 297],
+            ["n298", 298],
+            ["n299", 299]
+          ]
+        }
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {
+            "55555555-5555-4555-8555-555555555555": [
+              ["n150", 1000],
+              ["n299", 299],
+              ["n298", 298],
+              ["n297", 297],
+              ["n296", 296],
+              ["n295", 295],
+              ["n294", 294],
+              ["n293", 293],
+              ["n292", 292],
+              ["n291", 291],
+              ["n290", 290],
+              ["n289", 289],
+              ["n288", 288],
+              ["n287", 287],
+              ["n286", 286],
+              ["n285", 285],
+              ["n284", 284],
+              ["n283", 283],
+              ["n282", 282],
+              ["n281", 281],
+              ["n280", 280],
+              ["n279", 279],
+              ["n278", 278],
+              ["n277", 277],
+              ["n276", 276],
+              ["n275", 275],
+              ["n274", 274],
+              ["n273", 273],
+              ["n272", 272],
+              ["n271", 271],
+              ["n270", 270],
+              ["n269", 269],
+              ["n268", 268],
+              ["n267", 267],
+              ["n266", 266],
+              ["n265", 265],
+              ["n264", 264],
+              ["n263", 263],
+              ["n262", 262],
+              ["n261", 261],
+              ["n260", 260],
+              ["n259", 259],
+              ["n258", 258],
+              ["n257", 257],
+              ["n256", 256],
+              ["n255", 255],
+              ["n254", 254],
+              ["n253", 253],
+              ["n252", 252],
+              ["n251", 251],
+              ["n250", 250],
+              ["n249", 249],
+              ["n248", 248],
+              ["n247", 247],
+              ["n246", 246],
+              ["n245", 245],
+              ["n244", 244],
+              ["n243", 243],
+              ["n242", 242],
+              ["n241", 241],
+              ["n240", 240],
+              ["n239", 239],
+              ["n238", 238],
+              ["n237", 237],
+              ["n236", 236],
+              ["n235", 235],
+              ["n234", 234],
+              ["n233", 233],
+              ["n232", 232],
+              ["n231", 231],
+              ["n230", 230],
+              ["n229", 229],
+              ["n228", 228],
+              ["n227", 227],
+              ["n226", 226],
+              ["n225", 225],
+              ["n224", 224],
+              ["n223", 223],
+              ["n222", 222],
+              ["n221", 221],
+              ["n220", 220],
+              ["n219", 219],
+              ["n218", 218],
+              ["n217", 217],
+              ["n216", 216],
+              ["n215", 215],
+              ["n214", 214],
+              ["n213", 213],
+              ["n212", 212],
+              ["n211", 211],
+              ["n210", 210],
+              ["n209", 209],
+              ["n208", 208],
+              ["n207", 207],
+              ["n206", 206],
+              ["n205", 205],
+              ["n204", 204],
+              ["n203", 203],
+              ["n202", 202],
+              ["n201", 201],
+              ["n200", 200],
+              ["n199", 199],
+              ["n198", 198],
+              ["n197", 197],
+              ["n196", 196],
+              ["n195", 195],
+              ["n194", 194],
+              ["n193", 193],
+              ["n192", 192],
+              ["n191", 191],
+              ["n190", 190],
+              ["n189", 189],
+              ["n188", 188],
+              ["n187", 187],
+              ["n186", 186],
+              ["n185", 185],
+              ["n184", 184],
+              ["n183", 183],
+              ["n182", 182],
+              ["n181", 181],
+              ["n180", 180],
+              ["n179", 179],
+              ["n178", 178],
+              ["n177", 177],
+              ["n176", 176],
+              ["n175", 175],
+              ["n174", 174],
+              ["n173", 173],
+              ["n172", 172],
+              ["n171", 171],
+              ["n170", 170],
+              ["n169", 169],
+              ["n168", 168],
+              ["n167", 167],
+              ["n166", 166],
+              ["n165", 165],
+              ["n164", 164],
+              ["n163", 163],
+              ["n162", 162],
+              ["n161", 161],
+              ["n160", 160],
+              ["n159", 159],
+              ["n158", 158],
+              ["n157", 157],
+              ["n156", 156],
+              ["n155", 155],
+              ["n154", 154],
+              ["n153", 153],
+              ["n152", 152],
+              ["n151", 151],
+              ["n149", 149],
+              ["n148", 148],
+              ["n147", 147],
+              ["n146", 146],
+              ["n145", 145],
+              ["n144", 144],
+              ["n143", 143],
+              ["n142", 142],
+              ["n141", 141],
+              ["n140", 140],
+              ["n139", 139],
+              ["n138", 138],
+              ["n137", 137],
+              ["n136", 136],
+              ["n135", 135],
+              ["n134", 134],
+              ["n133", 133],
+              ["n132", 132],
+              ["n131", 131],
+              ["n130", 130],
+              ["n129", 129],
+              ["n128", 128],
+              ["n127", 127],
+              ["n126", 126],
+              ["n125", 125],
+              ["n124", 124],
+              ["n123", 123],
+              ["n122", 122],
+              ["n121", 121],
+              ["n120", 120],
+              ["n119", 119],
+              ["n118", 118],
+              ["n117", 117],
+              ["n116", 116],
+              ["n115", 115],
+              ["n114", 114],
+              ["n113", 113],
+              ["n112", 112],
+              ["n111", 111],
+              ["n110", 110],
+              ["n109", 109],
+              ["n108", 108],
+              ["n107", 107],
+              ["n106", 106],
+              ["n105", 105],
+              ["n104", 104],
+              ["n103", 103],
+              ["n102", 102],
+              ["n101", 101],
+              ["n100", 100],
+              ["n099", 99],
+              ["n098", 98],
+              ["n097", 97],
+              ["n096", 96],
+              ["n095", 95],
+              ["n094", 94],
+              ["n093", 93],
+              ["n092", 92],
+              ["n091", 91],
+              ["n090", 90],
+              ["n089", 89],
+              ["n088", 88],
+              ["n087", 87],
+              ["n086", 86],
+              ["n085", 85],
+              ["n084", 84],
+              ["n083", 83],
+              ["n082", 82],
+              ["n081", 81],
+              ["n080", 80],
+              ["n079", 79],
+              ["n078", 78],
+              ["n077", 77],
+              ["n076", 76],
+              ["n075", 75],
+              ["n074", 74],
+              ["n073", 73],
+              ["n072", 72],
+              ["n071", 71],
+              ["n070", 70],
+              ["n069", 69],
+              ["n068", 68],
+              ["n067", 67],
+              ["n066", 66],
+              ["n065", 65],
+              ["n064", 64],
+              ["n063", 63],
+              ["n062", 62],
+              ["n061", 61],
+              ["n060", 60],
+              ["n059", 59],
+              ["n058", 58],
+              ["n057", 57],
+              ["n056", 56],
+              ["n055", 55],
+              ["n054", 54],
+              ["n053", 53],
+              ["n052", 52],
+              ["n051", 51],
+              ["n050", 50],
+              ["n049", 49],
+              ["n048", 48],
+              ["n047", 47],
+              ["n046", 46],
+              ["n045", 45],
+              ["n044", 44]
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
