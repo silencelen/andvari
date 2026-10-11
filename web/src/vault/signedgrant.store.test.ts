@@ -309,10 +309,17 @@ describe("A6 — signed grants (VaultStore)", () => {
     const itemId = w.owner.account.newItemId();
     const up = w.owner.account.encryptItem(w.vaultId, itemId, { type: "login", name: "wifi" });
     const item: WireItem = { itemId, vaultId: w.vaultId, rev: 4, createdAt: 1, updatedAt: 1, deleted: false, conflict: false, formatVersion: up.formatVersion, attachmentIds: [], blob: up.blob };
-    // What a pre-A6 browser left on disk: the v1 row and an item that decrypted under it.
-    const old = new FakeServer(feed(w, 4, memberRow(w, 4, v1Seal(w), null), [item]));
-    const oldStore = new VaultStore(old.asClient(), await unlock(w.member), (await openVaultCache(w.member.userId)) as IdbVaultCache, memoryClientState());
-    await oldStore.sync();
+    // What a pre-A6 browser left on disk: the v1 row and an item that decrypted under it, and NO freeze marker
+    // (an A6 store writes the marker into this cache before its first pull, so the rows are written directly).
+    const oldCache = (await openVaultCache(w.member.userId)) as IdbVaultCache;
+    await oldCache.applyPull((b) => {
+      b.upsertGrant(personalGrant(w.member));
+      b.upsertVault(personalRow(w.member));
+      b.upsertGrant(memberRow(w, 4, v1Seal(w), null));
+      b.upsertVault(sharedRow(w));
+      b.upsertItem(item);
+      b.setCursor(4);
+    });
 
     // A second shared vault that a v1 grant delivers only AFTER the upgrade.
     const later = w.owner.account.buildCreateSharedVault("Later");
@@ -359,7 +366,7 @@ describe("A6 — signed grants (VaultStore)", () => {
     expect(bAccount.hasVault(w.vaultId)).toBe(true);
   });
 
-  it("a pin added elsewhere after this device established its mark is current", async () => {
+  it("MED-1 (d): a pin added on another device is NOT current here until verified here", async () => {
     const w = await world();
     const server = new FakeServer(feed(w, 5, null));
     const b = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
@@ -369,6 +376,9 @@ describe("A6 — signed grants (VaultStore)", () => {
     await a.sync();
     await a.accountState.pin(pinOf(w.owner, "Owner"));
     await b.sync();
+    expect(b.accountState.doc.contacts.some((c) => c.userId === w.owner.userId)).toBe(true);
+    expect(b.accountState.currentPin(w.owner.userId)).toBeNull();
+    expect(await b.verifyMemberTyped(served(w.owner, "Owner"), await w.owner.account.identityFingerprintShort())).not.toBeNull();
     expect(b.accountState.currentPin(w.owner.userId)).not.toBeNull();
   });
 
@@ -469,6 +479,239 @@ describe("A5b review LOW-1 (carried into A6): Use new only after the co-holders 
     expect(d.servedCoHolders.map((c) => c.displayName)).toEqual(["Mate"]);
     store2.acceptPersonalChange();
     expect(again.personalVaultId).toBe(shared.vaultId);
+  });
+});
+
+// ---- A6 fix round (adversarial review): the vouch is bound to the key; pin currency is a per-device human
+// confirmation; a v2 grant never silently replaces a legacy-held key; a present-but-bad v2 field is an anomaly;
+// the freeze marker lives with the durable cache. ----
+
+async function signedFor(w: World, vk: Uint8Array): Promise<string> {
+  const signer = signKeypairFromSeed(await seedOf(w.owner));
+  const frame = buildGrantFrame(signer, {
+    purpose: "vault-grant", from: w.owner.userId, to: w.member.userId, toKey: fromB64(w.member.identityPub), vaultId: w.vaultId,
+    grantId: randomBytes(16), issuedAt: 1_791_590_400_000, vk,
+  });
+  return toB64(sealTo(fromB64(w.member.identityPub), frame));
+}
+const v1SealOf = (w: World, vk: Uint8Array) => toB64(sealSharedGrant(fromB64(w.member.identityPub), w.vaultId, vk));
+
+describe("A6 fix round", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  it("HIGH-1: a vouch covers only the key it was given for", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)));
+    const s1 = new VaultStore(server.asClient(), await unlock(w.member), undefined, local);
+    await s1.sync();
+    await s1.acceptLegacyVault(w.vaultId);
+    expect(server.selfWraps).toHaveLength(1);
+    const lines = (local.get("grant.legacy.authorized") ?? "").split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.split("|")).toEqual([w.vaultId, expect.stringMatching(/^[0-9a-f]{64}$/), "confirmed"]);
+
+    // A fresh store sharing the client state; the server now serves ANOTHER v1 key for the same vault.
+    const forgedVk = randomBytes(32);
+    const server2 = new FakeServer(feed(w, 9, memberRow(w, 9, v1SealOf(w, forgedVk), null)));
+    const d2 = await unlock(w.member);
+    const s2 = new VaultStore(server2.asClient(), d2, undefined, local);
+    await s2.sync();
+    expect(d2.hasVault(w.vaultId)).toBe(true);
+    expect(d2.isLegacyReadOnly(w.vaultId)).toBe(true);
+    expect(server2.selfWraps).toEqual([]);
+    expect(() => d2.encryptItem(w.vaultId, d2.newItemId(), { type: "login", name: "x" })).toThrow(VaultKeyNotVerifiedError);
+  });
+
+  it("HIGH-1: the vouch restores from persisted state on reload; a line with no tag is ignored", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)));
+    const s1 = new VaultStore(server.asClient(), await unlock(w.member), undefined, local);
+    await s1.sync();
+    await s1.acceptLegacyVault(w.vaultId);
+    const d2 = await unlock(w.member);
+    await new VaultStore(new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null))).asClient(), d2, undefined, local).sync();
+    expect(d2.isLegacyReadOnly(w.vaultId)).toBe(false);
+    expect(() => d2.encryptItem(w.vaultId, d2.newItemId(), { type: "login", name: "x" })).not.toThrow();
+
+    const bare = memoryClientState();
+    bare.set("grant.legacy.authorized", w.vaultId);
+    const d3 = await unlock(w.member);
+    await new VaultStore(new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null))).asClient(), d3, undefined, bare).sync();
+    expect(d3.isLegacyReadOnly(w.vaultId)).toBe(true);
+  });
+
+  it("LOW-3: the freeze vouches with kind frozen", async () => {
+    const w = await world();
+    const itemId = w.owner.account.newItemId();
+    const up = w.owner.account.encryptItem(w.vaultId, itemId, { type: "login", name: "wifi" });
+    const item: WireItem = { itemId, vaultId: w.vaultId, rev: 4, createdAt: 1, updatedAt: 1, deleted: false, conflict: false, formatVersion: up.formatVersion, attachmentIds: [], blob: up.blob };
+    // A pre-A6 browser's cache: written WITHOUT any freeze marker (simulated by the old rows alone).
+    const cache = (await openVaultCache(w.member.userId)) as IdbVaultCache;
+    await cache.applyPull((b) => {
+      b.upsertGrant(memberRow(w, 4, v1Seal(w), null));
+      b.upsertVault(sharedRow(w));
+      b.upsertItem(item);
+      b.setCursor(4);
+    });
+    const local = memoryClientState();
+    const server = new FakeServer({ rev: 4, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+    const store = new VaultStore(server.asClient(), await unlock(w.member), (await openVaultCache(w.member.userId)) as IdbVaultCache, local);
+    await store.hydrate();
+    await store.sync();
+    expect(server.selfWraps.map((x) => x.vaultId)).toEqual([w.vaultId]);
+    expect((local.get("grant.legacy.authorized") ?? "").split("|")[2]).toBe("frozen");
+  });
+
+  it("LOW-1: with the durable cache present and localStorage cleared, freeze evidence is not recomputed", async () => {
+    const w = await world();
+    const itemId = w.owner.account.newItemId();
+    const up = w.owner.account.encryptItem(w.vaultId, itemId, { type: "login", name: "wifi" });
+    const item: WireItem = { itemId, vaultId: w.vaultId, rev: 4, createdAt: 1, updatedAt: 1, deleted: false, conflict: false, formatVersion: up.formatVersion, attachmentIds: [], blob: up.blob };
+    // THIS release pulls the v1 grant (post-upgrade rows): never evidence.
+    const s1 = new VaultStore(new FakeServer(feed(w, 4, memberRow(w, 4, v1Seal(w), null), [item])).asClient(), await unlock(w.member), (await openVaultCache(w.member.userId)) as IdbVaultCache, memoryClientState());
+    await s1.hydrate();
+    await s1.sync();
+    // localStorage cleared (fresh client state); the IndexedDB cache survives.
+    const server = new FakeServer({ rev: 4, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
+    const d = await unlock(w.member);
+    const s2 = new VaultStore(server.asClient(), d, (await openVaultCache(w.member.userId)) as IdbVaultCache, memoryClientState());
+    await s2.hydrate();
+    await s2.sync();
+    expect(server.selfWraps).toEqual([]);
+    expect(d.isLegacyReadOnly(w.vaultId)).toBe(true);
+  });
+
+  it("MED-1 (a): an ascending replay of two older blobs that carry a later-tombstoned pin leaves it NOT current", async () => {
+    const w = await world();
+    const server = new FakeServer(feed(w, 5, null));
+    const a = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await a.sync();
+    await a.accountState.pin(pinOf(w.owner, "Owner"));
+    const blob1 = { s: server.accountStateBlob, q: server.accountSeq };
+    await a.accountState.pin({ userId: "55555555-5555-4555-8555-555555555555", identityPub: toB64(randomBytes(32)), label: "X", verifiedAt: 2, method: "typed" });
+    const blob2 = { s: server.accountStateBlob, q: server.accountSeq };
+    await a.accountState.unpin(w.owner.userId);
+
+    const b = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    server.accountStateBlob = blob1.s;
+    server.accountSeq = blob1.q;
+    await b.sync();
+    server.accountStateBlob = blob2.s;
+    server.accountSeq = blob2.q;
+    await b.sync();
+    expect(b.accountState.doc.contacts.some((c) => c.userId === w.owner.userId)).toBe(true);
+    expect(b.accountState.currentPin(w.owner.userId)).toBeNull();
+  });
+
+  it("MED-1 (b)/(c): a pin confirmed here is current; a confirmation of a DIFFERENT key for the same user is not", async () => {
+    const w = await world();
+    const server = new FakeServer(feed(w, 5, null));
+    const b = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await b.sync();
+    await b.accountState.pin(pinOf(w.owner, "Owner"));
+    expect(b.accountState.currentPin(w.owner.userId)).not.toBeNull();
+    // Another device re-pins the owner with ANOTHER key (newer); this device only confirmed the first one.
+    const a = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await a.sync();
+    await a.accountState.pin({ userId: w.owner.userId, identityPub: toB64(randomBytes(32)), label: "Owner?", verifiedAt: 5000, method: "typed" });
+    await b.sync();
+    expect(b.accountState.doc.contacts.find((c) => c.userId === w.owner.userId)!.identityPub).not.toBe(w.owner.identityPub);
+    expect(b.accountState.currentPin(w.owner.userId)).toBeNull();
+  });
+
+  it("MED-2: a vouched legacy key + a v2 grant with a DIFFERENT key → anomaly, held key kept, still writable", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 5, null));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, local);
+    await store.sync();
+    await store.accountState.pin(pinOf(w.owner, "Owner"));
+    server.feed = feed(w, 9, memberRow(w, 9, v1Seal(w), null));
+    await store.sync();
+    await store.acceptLegacyVault(w.vaultId);
+    server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), await signedFor(w, randomBytes(32))));
+    await store.sync();
+    expect(store.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["vk_mismatch"]);
+    expect(d.keySource(w.vaultId)).toBe("legacy-seal");
+    expect(d.decryptVaultName(w.vaultId, w.metaBlob)).toBe("Household");
+    expect(d.isLegacyReadOnly(w.vaultId)).toBe(false);
+  });
+
+  it("MED-2: an UNVOUCHED legacy key + a different-key v2 → anomaly, still read-only, key unchanged", async () => {
+    const w = await world();
+    const server = new FakeServer(feed(w, 5, null));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, memoryClientState());
+    await store.sync();
+    await store.accountState.pin(pinOf(w.owner, "Owner"));
+    server.feed = feed(w, 9, memberRow(w, 9, v1Seal(w), null));
+    await store.sync();
+    server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), await signedFor(w, randomBytes(32))));
+    await store.sync();
+    expect(store.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["vk_mismatch"]);
+    expect(d.keySource(w.vaultId)).toBe("legacy-seal");
+    expect(d.isLegacyReadOnly(w.vaultId)).toBe(true);
+    expect(d.decryptVaultName(w.vaultId, w.metaBlob)).toBe("Household");
+  });
+
+  it("MED-2: cold start with a vouch — the vouched v1 key wins over a different-key v2, flagged", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const s1 = new VaultStore(new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null))).asClient(), await unlock(w.member), undefined, local);
+    await s1.sync();
+    await s1.acceptLegacyVault(w.vaultId);
+    await s1.accountState.pin(pinOf(w.owner, "Owner"));
+    // Persist the pin server-side for the next device-state-sharing store: same client state, so it is confirmed.
+    const server = new FakeServer(feed(w, 12, memberRow(w, 12, v1Seal(w), await signedFor(w, randomBytes(32)))));
+    server.accountStateBlob = (s1 as unknown as { api: FakeServer }).api.accountStateBlob;
+    server.accountSeq = (s1 as unknown as { api: FakeServer }).api.accountSeq;
+    const d = await unlock(w.member);
+    const s2 = new VaultStore(server.asClient(), d, undefined, local);
+    await s2.sync();
+    expect(d.keySource(w.vaultId)).toBe("legacy-seal");
+    expect(d.decryptVaultName(w.vaultId, w.metaBlob)).toBe("Household");
+    expect(d.isLegacyReadOnly(w.vaultId)).toBe(false);
+    expect(s2.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["vk_mismatch"]);
+  });
+
+  it("LOW-2: a PRESENT but garbage v2 field is an anomaly with no v1 fallback and no review card", async () => {
+    const w = await world();
+    const garbage = toB64(randomBytes(200));
+    const server = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), garbage)));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, memoryClientState());
+    await store.sync();
+    expect(d.hasVault(w.vaultId)).toBe(false);
+    expect(store.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["unopenable"]);
+    expect(store.legacyReviewVaults()).toEqual([]);
+    await expect(store.acceptLegacyVault(w.vaultId)).rejects.toBeTruthy();
+    // An ABSENT field keeps the trust-on-first-use path.
+    const w2 = await world();
+    const s2 = new VaultStore(new FakeServer(feed(w2, 9, memberRow(w2, 9, v1Seal(w2), null))).asClient(), await unlock(w2.member), undefined, memoryClientState());
+    await s2.sync();
+    expect(s2.legacyReviewVaults().map((r) => r.vaultId)).toEqual([w2.vaultId]);
+  });
+
+  it("LOW-2: a garbage v2 arriving for a held legacy key is an anomaly and takes the vault off the review card", async () => {
+    const w = await world();
+    const server = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, memoryClientState());
+    await store.sync();
+    expect(store.legacyReviewVaults()).toHaveLength(1);
+    server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), toB64(randomBytes(200))));
+    await store.sync();
+    expect(store.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["unopenable"]);
+    expect(store.legacyReviewVaults()).toEqual([]);
+    await expect(store.acceptLegacyVault(w.vaultId)).rejects.toBeTruthy();
   });
 });
 

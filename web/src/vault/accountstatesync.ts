@@ -1,4 +1,6 @@
 import { ApiError, type ApiClient } from "../api/client";
+import { fromB64, toHexLower } from "../crypto/bytes";
+import { sha256Sync } from "../crypto/provider";
 import type { Account } from "./account";
 import {
   ACCOUNT_STATE_SEALED_MAX,
@@ -110,32 +112,34 @@ export class AccountStateSync {
     return this.doc.contacts;
   }
 
-  // ---- pin currency (security review 2026-10, root cause A, A5 review L-3; closed in A6; core twin) ----
-  // A fresh device has no high-water mark, so it accepts ANY authentic account-state blob the server serves,
-  // including an older one still carrying a pin this account later tombstoned. From A6 a pin skips the add-member
-  // check and auto-adopts grants, so it may do either only when it is CURRENT here: pins this browser read while it
-  // had no established mark are recorded "not current here" (userId + key + verifiedAt) and stay so; pins it made
-  // itself, or first saw after establishing a mark, are current; re-verifying writes a new pin. The mark and the
-  // record share one store, so losing one loses both: the failure direction is "verify again", never "trust".
+  // ---- pin currency (security review 2026-10, root cause A; A5 review L-3, A6 review MED-1; core twin) ----
+  // A pin may skip the add-member check or auto-adopt a grant only when a HUMAN confirmed it ON THIS DEVICE: made
+  // here through pin() (every verification ceremony goes through it), or re-verified here. The record is device-
+  // local and durable ("pins.confirmed": `${userId}|${hex sha256(identityPub)}`, in this account's client-state
+  // namespace, like the A5b personal-wrap cache). A blob the server serves, however authentic or new, never
+  // makes a pin current here: an older blob with a later-tombstoned pin cannot either (the replay case), and a
+  // tombstoned pin is absent from the doc, so the tombstone wins. A confirmation is bound to the KEY.
 
-  private static pinKey(c: Contact): string {
-    return `${c.userId}|${c.identityPub}|${c.verifiedAt}`;
+  private static confirmKey(userId: string, identityPub: string): string | null {
+    try {
+      return `${userId}|${toHexLower(sha256Sync(fromB64(identityPub)))}`;
+    } catch {
+      return null;
+    }
   }
 
-  private notCurrentHere(): Set<string> {
-    return new Set((this.local.get("acctstate.untrusted") ?? "").split("\n").filter((x) => x.length > 0));
+  private confirmedHere(): Set<string> {
+    return new Set((this.local.get("pins.confirmed") ?? "").split("\n").filter((x) => x.length > 0));
   }
 
-  private markNotCurrent(contacts: Contact[]): void {
-    if (contacts.length === 0) return;
-    const next = this.notCurrentHere();
-    for (const c of contacts) next.add(AccountStateSync.pinKey(c));
-    this.local.set("acctstate.untrusted", [...next].sort().join("\n"));
+  private saveConfirmed(set: Set<string>): void {
+    this.local.set("pins.confirmed", set.size === 0 ? null : [...set].sort().join("\n"));
   }
 
-  /** True when `c` may skip verification on THIS device. */
+  /** True when `c` (this userId with THIS key) was confirmed by a human on this device. */
   isCurrent(c: Contact): boolean {
-    return this.highWater() > 0 && !this.notCurrentHere().has(AccountStateSync.pinKey(c));
+    const k = AccountStateSync.confirmKey(c.userId, c.identityPub);
+    return k !== null && this.confirmedHere().has(k);
   }
 
   /** The pin for `userId` when it is current on this device; null when there is none or it is not current. */
@@ -145,13 +149,7 @@ export class AccountStateSync {
   }
 
   async refresh(): Promise<AccountStateDoc> {
-    const established = this.highWater() > 0;
-    try {
-      return await this.refreshInner();
-    } finally {
-      // A device with no mark of its own cannot tell a current blob from an older authentic one (L-3).
-      if (!established) this.markNotCurrent(this.doc.contacts);
-    }
+    return this.refreshInner();
   }
 
   private async refreshInner(): Promise<AccountStateDoc> {
@@ -225,7 +223,16 @@ export class AccountStateSync {
     if (this.readOnly) throw new Error("account state was written by a newer client");
     await this.refresh().catch(() => {});
     for (let i = 0; i < 3; i++) {
-      if (await this.write(withContact(this.doc, contact))) return;
+      if (await this.write(withContact(this.doc, contact))) {
+        // A human compared this key on THIS device: record it (after the write landed).
+        const k = AccountStateSync.confirmKey(contact.userId, contact.identityPub);
+        if (k) {
+          const set = this.confirmedHere();
+          set.add(k);
+          this.saveConfirmed(set);
+        }
+        return;
+      }
       await this.refresh();
     }
     throw new Error("account state kept changing; try again");
@@ -233,6 +240,7 @@ export class AccountStateSync {
 
   async unpin(userId: string): Promise<void> {
     if (this.readOnly) throw new Error("account state was written by a newer client");
+    this.saveConfirmed(new Set([...this.confirmedHere()].filter((k) => !k.startsWith(`${userId}|`))));
     await this.refresh().catch(() => {});
     for (let i = 0; i < 3; i++) {
       if (await this.write(withoutContact(this.doc, userId, this.clock()))) return;

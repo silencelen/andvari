@@ -248,7 +248,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     const member = await enroll("member@example.com");
     const { request, vaultId } = owner.buildCreateSharedVault("Family");
     const sealedVk = owner.wrapVkForMember(member.identityPub, vaultId);
-    member.authorizeLegacyKey(vaultId); // A6: a vouched-for legacy key (writable)
+    member.authorizeLegacyKey(vaultId, owner.legacyKeyTag(vaultId)!); // A6: a vouched-for legacy key (writable), bound to its key
     const itemId = owner.newItemId();
     const up = owner.encryptItem(vaultId, itemId, CARD_DOC);
     const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: request.metaBlob, createdAt: 0 };

@@ -227,7 +227,7 @@ async function scenario(role = "writer"): Promise<Scenario> {
   const sealedVk = owner.account.wrapVkForMember(member.account.identityPub, vaultId);
   // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
   // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
-  member.account.authorizeLegacyKey(vaultId);
+  member.account.authorizeLegacyKey(vaultId, owner.account.legacyKeyTag(vaultId)!); // bound to the vault key (A6 HIGH-1)
   const itemId = owner.account.newItemId();
   return {
     owner,
@@ -947,6 +947,9 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     // but its durable twin rides the queue row. Pre-fix, this ORDINARY flow (edit offline →
     // close → reopen → reconnect → denied) left the refused value on display indefinitely.
     const fresh = await relock(s.member);
+    // A6: the restarted device keeps its vouch for this legacy key (bound to the key). Before the A6 fix round this
+    // test passed only because the freeze marker lived in per-instance client state and was recomputed on reload.
+    fresh.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!);
     const api2 = new FakeApi();
     const cache2 = (await openVaultCache(fresh.userId)) as IdbVaultCache;
     const store2 = new VaultStore(api2.asClient(), fresh, cache2);
@@ -980,7 +983,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(store.get(s.itemId)).toBeUndefined();
 
     const fresh = await relock(s.member);
-    fresh.authorizeLegacyKey(s.vaultId); // A6: the restarted device keeps its vouched-for legacy key (the store persists it; this fixture sets it on the Account)
+    fresh.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!); // A6: the restarted device keeps its vouched-for legacy key (the store persists it; this fixture sets it on the Account)
     const api2 = new FakeApi();
     const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
@@ -994,7 +997,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // And on disk: a second fresh hydrate still shows it.
     const fresh2 = await relock(s.member);
-    fresh2.authorizeLegacyKey(s.vaultId);
+    fresh2.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!);
     const store3 = new VaultStore(new FakeApi().asClient(), fresh2, (await openVaultCache(fresh2.userId)) as IdbVaultCache);
     await store3.hydrate();
     expect(store3.get(s.itemId)?.doc.name).toBe(DOC.name);
