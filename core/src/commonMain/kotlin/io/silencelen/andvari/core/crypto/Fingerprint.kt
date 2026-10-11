@@ -9,11 +9,12 @@ package io.silencelen.andvari.core.crypto
  * by a hostile server; 128 bits is out of reach. The underlying construction is unchanged
  * (`SHA-256(pub)`); only the human-visible truncation length and the compare helper changed.
  *
- * **A prefix (short) match is intended ONLY for a human-typed entry** ([matchesShort]). Machine-
- * supplied values should be compared at full 64-hex length by their own callers, and
- * [Account.resealEscrowFor] does so today. NOT YET TRUE everywhere: the in-person-QR `rfp` value and
- * the admin sheet-confirm are still compared on a 16-hex short id ([Escrow.shortFingerprint]); moving
- * them to a full-length compare is tracked for a later branch of this security review.
+ * **A prefix (short) match is accepted ONLY from a human-typed entry** ([matchesShort]). Every
+ * machine-supplied value is compared at full 64-hex length with [matchesFull]: the in-person-QR `rfp`
+ * and `ifp` (minted full-length by the admin client and checked full-length by the invitee), the admin
+ * sheet-confirm (the typed 32 hex anchors a locally computed full fingerprint, which is what the QR
+ * stamps), the identity QR, and [Account.resealEscrowFor]. No path compares a 16-hex id any more
+ * (security review 2026-10, root cause A, branch A5).
  *
  * One helper, two engines: the web twin is `web/src/crypto/fingerprint.ts`.
  */
@@ -35,6 +36,18 @@ object Fingerprint {
         val norm = entry.lowercase().filter { it in "0123456789abcdef" }
         return norm.length == SHORT_HEX_LEN && shortForm(fullFingerprintHex) == norm
     }
+
+    /**
+     * True iff a MACHINE-supplied [value] (a QR payload, a link field, a file) is EXACTLY the 64
+     * lowercase hex [fullFingerprintHex]. No normalising and no prefix: a value that did not come from a
+     * human has no excuse to be short or differently cased, so anything else is a mismatch.
+     */
+    fun matchesFull(value: String, fullFingerprintHex: String): Boolean =
+        value.length == FULL_HEX_LEN && FULL_RE.matches(value) && value == fullFingerprintHex
+
+    /** Full fingerprint length in hex chars (256 bits). */
+    const val FULL_HEX_LEN = 64
+    private val FULL_RE = Regex("^[0-9a-f]{64}$")
 
     /**
      * Display grouping for the 32-hex short form: 8 groups of 4, split across two lines (4 groups

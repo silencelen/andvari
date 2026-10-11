@@ -266,6 +266,24 @@ class AndvariApi(
         if (!resp.status.isSuccess()) throw errorFrom(resp)
     }
 
+    // ---- account state + personal wrap + identity lookup (security review 2026-10, root cause A §4, A5) ----
+
+    /** The UVK-sealed account-state blob (contact pins etc.) and the server's CAS counter. */
+    suspend fun accountState(): io.silencelen.andvari.core.model.AccountStateResponse = call("GET", "/api/v1/account/state")
+
+    /** Replace the account-state blob; 409 `stale_state` when [put].baseSeq is not the current counter. */
+    suspend fun putAccountState(put: io.silencelen.andvari.core.model.AccountStatePut): io.silencelen.andvari.core.model.AccountStateResponse =
+        call("PUT", "/api/v1/account/state", put)
+
+    /** Store (first set) or replace (with a fresh `currentAuthKey`, Q9) the personal wrap. */
+    suspend fun putPersonalWrap(put: io.silencelen.andvari.core.model.PersonalWrapPut) {
+        val resp = request("PUT", "/api/v1/account/personal-wrap", body = put)
+        if (!resp.status.isSuccess()) throw errorFrom(resp)
+    }
+
+    /** The identity key the server holds for [userId]: UNTRUSTED until a human verifies it. */
+    suspend fun userIdentity(userId: String): UserLookupResponse = call("GET", "/api/v1/users/${pathSeg(userId)}/identity")
+
     // ---- per-member self-service recovery (design 2026-07-12 §F.3 + 2026-07-13 piece-binding) ----
     // Shared surface for the native recovery screens + the vault-entry capture gate. Web keeps its own
     // client.ts twins; these mirror them so android/desktop stop hand-rolling raw Ktor calls (which

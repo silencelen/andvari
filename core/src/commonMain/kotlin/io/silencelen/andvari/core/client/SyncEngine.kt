@@ -406,19 +406,169 @@ class SyncEngine(
         api.purgeItem(itemId)
     }
 
-    /** Vaults whose key we hold, personal first then shared by name (mirrors web vaults()). */
+    /**
+     * Vaults whose key we hold, personal first then shared by name (mirrors web vaults()).
+     *
+     * [VaultInfo.type] is DERIVED, not copied (security review 2026-10, root cause A §4.3): "personal"
+     * iff the vault is [Account.personalVaultId], which only the UVK-authenticated personal wrap (or the
+     * §8.5 migration) sets. The server's plaintext `type` label is ignored for every decision this feeds:
+     * the default destination, the "(shared)" tag, copy-to-Personal, the import target and the sort.
+     */
     fun vaultInfos(): List<VaultInfo> = cache.vaults()
         .filter { account.hasVault(it.vaultId) }
         .map { v ->
             val name = account.decryptVaultName(v.vaultId, v.metaBlob)
+            val personal = v.vaultId == account.personalVaultId
             VaultInfo(
                 vaultId = v.vaultId,
-                type = v.type,
-                name = if (!name.isNullOrEmpty() && name != VAULT_NAME_FALLBACK) name else if (v.type == "personal") "Personal" else "Shared",
+                type = if (personal) "personal" else "shared",
+                name = if (!name.isNullOrEmpty() && name != VAULT_NAME_FALLBACK) name else if (personal) "Personal" else "Shared",
                 role = account.roleFor(v.vaultId),
             )
         }
         .sortedWith(compareBy({ it.type != "personal" }, { it.name.lowercase() }))
+
+    // ---- personal vault identity + account state (security review 2026-10, root cause A §4, §8.5) ----
+
+    /** The account-state blob (contact pins). Refreshed best-effort on every [sync]. */
+    val accountState: AccountStateSync = AccountStateSync(api, account, cache)
+
+    /** Called after a personal wrap is stored server-side, so a native host can update its cached
+     *  `AccountKeys` (an offline cold start then knows the personal vault without the network). */
+    var onPersonalWrapStored: ((io.silencelen.andvari.core.model.PersonalWrap) -> Unit)? = null
+
+    /** Non-null while the §8.5 migration needs the human: "Which vault is your Personal vault?". */
+    var personalVaultChoices: List<PersonalVaultMigration.Candidate>? = null
+        private set
+
+    private val lastPersonalKey = "personal.last"
+
+    /** The §8.5 candidates, built from the cached rows and this client's own key provenance. */
+    fun personalCandidates(): List<PersonalVaultMigration.Candidate> {
+        val grants = cache.grants().associateBy { it.vaultId }
+        val counts = items().groupingBy { it.vaultId }.eachCount()
+        return cache.vaults().filter { account.hasVault(it.vaultId) }.map { v ->
+            val g = grants[v.vaultId]
+            PersonalVaultMigration.Candidate(
+                vaultId = v.vaultId,
+                labelledPersonal = v.type == "personal",
+                // Condition (2): our OWN row, key from our UVK wrap, and no seal anywhere on the row.
+                ownUvkWrap = account.keyFromOwnUvkWrap(v.vaultId) && g != null && g.userId == account.userId &&
+                    g.sealedVk.isNullOrEmpty(),
+                name = account.decryptVaultName(v.vaultId, v.metaBlob),
+                itemCount = counts[v.vaultId] ?: 0,
+            )
+        }
+    }
+
+    /**
+     * Apply the §8.5 rule locally (no network): an automatic pick is adopted for this session; anything
+     * else leaves no personal vault and fills [personalVaultChoices]. Returns the automatic pick.
+     */
+    private fun decidePersonalLocally(): String? {
+        if (account.personalStatus == Account.PersonalStatus.CONFIRMED) {
+            personalVaultChoices = null
+            cache.setClientState(lastPersonalKey, account.personalVaultId)
+            return null
+        }
+        // An unreadable wrap is an anomaly the human resolves by re-designation (password reauth);
+        // a migration pick must never paper over it.
+        if (account.personalStatus == Account.PersonalStatus.UNREADABLE) {
+            personalVaultChoices = emptyList()
+            return null
+        }
+        return when (val d = PersonalVaultMigration.decide(personalCandidates(), cache.clientState(lastPersonalKey))) {
+            is PersonalVaultMigration.Decision.Auto -> {
+                personalVaultChoices = null
+                if (account.adoptMigrationPick(d.vaultId)) d.vaultId else null
+            }
+            is PersonalVaultMigration.Decision.Ask -> {
+                personalVaultChoices = d.choices
+                null
+            }
+        }
+    }
+
+    /** §8.5 with the network: store an automatic pick's wrap (best effort; retried next sync). */
+    private suspend fun reconcilePersonalVault() {
+        decidePersonalLocally()
+        if (account.personalStatus != Account.PersonalStatus.MIGRATED_UNSTORED) return
+        val wrap = account.buildPersonalWrap(account.personalVaultId)
+        try {
+            api.putPersonalWrap(io.silencelen.andvari.core.model.PersonalWrapPut(wrap.vaultId, wrap.wrappedVk))
+            account.applyPersonalWrap(wrap)
+            cache.setClientState(lastPersonalKey, wrap.vaultId)
+            onPersonalWrapStored?.invoke(wrap)
+        } catch (e: ApiException) {
+            if (e.code != "personal_wrap_exists") throw e
+            // Another device migrated first: adopt ITS wrap (it opens under our UVK or it is ignored).
+            val served = api.accountKeys().personalWrap
+            if (served != null) {
+                account.applyPersonalWrap(served)
+                if (account.personalStatus == Account.PersonalStatus.CONFIRMED) onPersonalWrapStored?.invoke(served)
+            }
+            decidePersonalLocally()
+        }
+    }
+
+    /**
+     * The human's answer to "Which vault is your Personal vault?" (§8.5), or a Settings re-designation
+     * ("This is my personal vault", owner decision Q9). Only a vault whose VK opened under our own UVK
+     * is accepted. [currentAuthKey] (from a FRESH full-password entry) is required by the server to
+     * REPLACE an existing wrap; a first designation may omit it.
+     */
+    suspend fun designatePersonalVault(vaultId: String, currentAuthKey: String?) {
+        val wrap = account.buildPersonalWrap(vaultId)
+        api.putPersonalWrap(io.silencelen.andvari.core.model.PersonalWrapPut(wrap.vaultId, wrap.wrappedVk, currentAuthKey))
+        account.applyPersonalWrap(wrap)
+        cache.setClientState(lastPersonalKey, wrap.vaultId)
+        personalVaultChoices = null
+        onPersonalWrapStored?.invoke(wrap)
+    }
+
+    /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
+    fun redesignationChoices(): List<VaultInfo> = vaultInfos().filter { account.keyFromOwnUvkWrap(it.vaultId) }
+
+    /**
+     * Settings → "This is my personal vault" (owner decision Q9): re-designation with a FRESH master-password
+     * reauth. The authKey is derived here from [password] and the account's own salt/params, and the server
+     * refuses the replacement without it.
+     */
+    suspend fun redesignatePersonalVault(vaultId: String, password: String) {
+        val keys = api.accountKeys()
+        val authKey = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, account.cryptoProvider())
+        }
+        designatePersonalVault(vaultId, authKey)
+    }
+
+    // ---- "Verify a household member" (root cause A §7.2), shared by the native screens ----
+
+    /** This account's identity QR payload, over the SEED-DERIVED key (never a server value). */
+    fun identityQrPayload(): String = IdentityQr.compose(account.cryptoProvider(), account.userId, account.identityPub)
+
+    /** Find a member by email. The returned key is UNTRUSTED until [verifyMemberTyped]/[verifyMemberQr]. */
+    suspend fun lookupMember(email: String): io.silencelen.andvari.core.model.UserLookupResponse = api.lookupUser(email)
+
+    /**
+     * Pin [served] iff the human-typed [typed] (their 32 hex, read from THEIR screen) matches SHA-256 of the
+     * key the server serves for them. Null (nothing pinned) on a mismatch.
+     */
+    suspend fun verifyMemberTyped(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String): Contact? {
+        val c = ContactPin.fromTyped(account.cryptoProvider(), typed, ServedIdentity(served.userId, served.identityPub), served.displayName, nowMs()) ?: return null
+        accountState.pin(c)
+        return c
+    }
+
+    /** Pin [served] iff a scanned identity QR matches the served key at FULL length. */
+    suspend fun verifyMemberQr(served: io.silencelen.andvari.core.model.UserLookupResponse, qrPayload: String): Contact? {
+        val c = ContactPin.fromQr(account.cryptoProvider(), qrPayload, ServedIdentity(served.userId, served.identityPub), served.displayName, nowMs()) ?: return null
+        accountState.pin(c)
+        return c
+    }
+
+    /** Remove a pin (tombstoned). */
+    suspend fun unpinMember(userId: String) = accountState.unpin(userId)
 
     /**
      * Held envelopes this build cannot decrypt because their formatVersion is newer than
@@ -448,6 +598,9 @@ class SyncEngine(
         flushQueue()
         pull()
         surfaceStagedDenials()
+        // Root cause A §8.5 / §4.2: best effort, never fails the sync (an old server answers 404).
+        runCatching { reconcilePersonalVault() }
+        runCatching { accountState.refresh() }
         // Member self-wrap (root cause A §3.2) is deliberately NOT posted here yet. The only key a
         // member can wrap today came from a v1 seal, which the server can mint: wrapping it under
         // our UVK would launder a server-chosen key into the canonical slot for every device, and
@@ -466,13 +619,10 @@ class SyncEngine(
         for (g in cache.grants()) {
             runCatching { account.addGrant(g) } // role applies unconditionally; key opens if missing
         }
-        for (v in cache.vaults()) {
-            // `type` is a SERVER plaintext column bound into no AD, so this is a hint, not
-            // evidence; [Account.setPersonalVault] refuses a candidate whose VK arrived by
-            // member grant (audit H64). Grants are replayed above this loop precisely so the
-            // provenance is known by the time a candidate is offered.
-            if (v.type == "personal" && account.hasVault(v.vaultId)) account.setPersonalVault(v.vaultId)
-        }
+        // Root cause A §4.3: the personal vault came from the personal wrap at unlock. Only when there is
+        // none does the §8.5 migration rule run, offline here, over the replayed provenance; the server's
+        // `type` label is one of its inputs but never the decision.
+        decidePersonalLocally()
         for (w in cache.envelopes()) {
             if (w.deleted || !account.hasVault(w.vaultId)) continue
             runCatching {
@@ -646,9 +796,6 @@ class SyncEngine(
                 // regressed keeps the newer local blob (rev/lifecycle fields still apply).
                 val vault = keepNewerMeta(delivered)
                 cache.upsertVault(vault)
-                // Server-asserted label, unauthenticated (spec 02 §4): setPersonalVault refuses a
-                // member-granted vault so a hostile relabel cannot move the usage key (audit H64).
-                if (vault.type == "personal" && account.hasVault(vault.vaultId)) account.setPersonalVault(vault.vaultId)
                 // Consumed-deleteId marker (spec 03 §11): a live vault that WAS restored
                 // carries restoreProof over the deleteId it undid. Verifying it durably
                 // marks the deleteId consumed, so a later replayed old tombstone bearing it
@@ -683,7 +830,7 @@ class SyncEngine(
             for (vaultId in newlyAdded) {
                 if (vaultId in reinstatedIds || vaultId in addedNoticed) continue
                 val v = cache.vaults().find { it.vaultId == vaultId } ?: continue
-                if (v.type == "personal" || !account.hasVault(vaultId)) continue
+                if (vaultId == account.personalVaultId || !account.hasVault(vaultId)) continue
                 if (account.roleFor(vaultId) == "owner") continue
                 addedNoticed.add(vaultId)
                 val name = account.decryptVaultName(vaultId, v.metaBlob) ?: VAULT_NAME_FALLBACK

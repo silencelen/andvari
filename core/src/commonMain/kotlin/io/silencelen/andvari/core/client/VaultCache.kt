@@ -165,6 +165,15 @@ interface VaultCache {
     fun isConsumedDeleteId(deleteId: String): Boolean
 
     /** Highest transfer seq VERIFIED for a vault (offer/accept replay floor, design §3). */
+    /**
+     * Small per-account client state that must survive a restart and a resync [clear] (security review
+     * 2026-10, root cause A, A5): the account-state high-water seq and local copy (the copy is the
+     * UVK-sealed blob, never plaintext), and the personal vault id this device last used (§8.5).
+     * Defaults keep an implementation that persists nothing working: it then behaves like a new device.
+     */
+    fun clientState(key: String): String? = null
+    fun setClientState(key: String, value: String?) {}
+
     fun lastVerifiedTransferSeq(vaultId: String): Long
     fun setLastVerifiedTransferSeq(vaultId: String, seq: Long)
 }
@@ -205,6 +214,12 @@ class InMemoryVaultCache : VaultCache {
 
     override fun clear() {
         items.clear(); wire.clear(); grantRows.clear(); vaultRows.clear(); cursor = 0
+    }
+
+    private val clientStateMap = HashMap<String, String>()
+    override fun clientState(key: String): String? = clientStateMap[key]
+    override fun setClientState(key: String, value: String?) {
+        if (value == null) clientStateMap.remove(key) else clientStateMap[key] = value
     }
 
     override fun evictDecrypted() { items.clear() } // envelopes (wire) retained for re-decrypt

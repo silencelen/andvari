@@ -154,9 +154,15 @@ object Escrow {
      * [CryptoProvider.signKeypairFromSeed] over the identity seed) and sealed to [recoveryPub].
      *
      * REFUSES ([CryptoException]) unless `hex(SHA-256(recoveryPub)) == verifiedRecoveryFp` IN FULL
-     * (64 lowercase hex). [verifiedRecoveryFp] must come from a human (the typed 32-hex sheet check
-     * against it) or the build, never straight from a server response; a 32-hex short form is not
-     * enough here, because a machine compare is always full length (design §7.1).
+     * (64 lowercase hex). [verifiedRecoveryFp] is always a value a HUMAN anchored, never one the
+     * client took from a server response on its own. Two anchors exist (design §7.1, §7.2):
+     *  - typed sheet: the member typed the sheet's first 32 hex and it matched the server-advertised
+     *    full fingerprint, which is then the value passed here (the human vouched for 128 bits of it);
+     *  - in-person QR: the link's FULL 64-hex `rfp`, minted by the admin client from the admin's own
+     *    typed sheet check, and accepted by the invitee only after the human typed the in-person code
+     *    from the admin's screen ([io.silencelen.andvari.core.client.EnrollLink.checkCode]). That `rfp`
+     *    itself is passed here, so the served key must hash to it in full.
+     * A 32-hex short form is not enough here, because a machine compare is always full length.
      *
      * [identityPub] must be the key [signer] maps to; a mismatch is refused too, so a client can never
      * seal a statement its own anchor check would reject. The canary stays v1 ([sealCanary]).
@@ -375,11 +381,10 @@ object Escrow {
         Bytes.toHexLower(crypto.sha256(publicKey))
 
     /**
-     * The 16-hex (64-bit) short id of the org recovery key. NOT the 32-hex human short form used by
-     * the typed enrolment path ([shortFormMatches] / [Fingerprint]). It is STILL used, at 16 hex, by
-     * the recovery-cli operator display (read aloud), the admin sheet-confirm (typed), and the
-     * in-person-QR `rfp` compare. Those paths have not been widened yet; moving them to a full-length
-     * compare is tracked for a later branch of this security review.
+     * The legacy 16-hex (64-bit) short id of the org recovery key, kept ONLY because `seal.json` pins
+     * it. Nothing compares or displays it any more (security review 2026-10, root cause A, branch A5):
+     * the recovery-cli sheet prints the 32-hex human short form, the admin sheet-confirm and the
+     * in-person-QR `rfp` are full 64-hex compares ([Fingerprint.matchesFull]). Do not add a caller.
      */
     fun shortFingerprint(crypto: CryptoProvider, publicKey: ByteArray): String =
         fingerprint(crypto, publicKey).take(16)

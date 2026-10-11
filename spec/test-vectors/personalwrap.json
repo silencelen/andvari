@@ -1,0 +1,234 @@
+{
+  "comment": [
+    "Security review 2026-10, root cause A §4.1 / §8.5 (branch A5). Hand-authored; every blob produced by an INDEPENDENT oracle (@noble/ciphers XChaCha20-Poly1305 + Node SHA-256, no libsodium, no andvari code) with fixed nonces.",
+    "wrap: AccountKeys.personalWrap = Envelope(UVK, VK, Ad.vkPersonal(vaultId, userId)) with AD 'andvari/v1|vk-personal|{vaultId}|{userId}'. open rows MUST yield vkB64; reject rows MUST fail (cross-purpose: a personal wrap never opens as an owner wrap and the reverse; wrong vault; wrong user).",
+    "migration: the §8.5 decision. A candidate counts when labelledPersonal AND ownUvkWrap. auto iff exactly one counts, its name is exactly 'Personal', and lastUsed is null or equals it; otherwise ask, listing the counting candidates sorted by vaultId."
+  ],
+  "wrap": {
+    "userId": "33333333-3333-4333-8333-333333333333",
+    "vaultId": "55555555-5555-4555-8555-555555555555",
+    "uvkB64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+    "vkB64": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8",
+    "adPersonalUtf8": "andvari/v1|vk-personal|55555555-5555-4555-8555-555555555555|33333333-3333-4333-8333-333333333333",
+    "adOwnerUtf8": "andvari/v1|vk|55555555-5555-4555-8555-555555555555|33333333-3333-4333-8333-333333333333",
+    "personalWrapB64": "AQFAQUJDREVGR0hJSktMTU5PUFFSU1RVVle6oO8qouN7WP_3ZbNo7myqacRVcEKClNSsGFu0EqJXjQfC5QIdfyTs-_GXFkVbzeg",
+    "ownerWrapB64": "AQFYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm8pnVoB31JYvhyM294Taza1XHZVpcDLM6dMW8CoflUUrTeBXYRZwBkw07D5q1bKxMo"
+  },
+  "open": [
+    {
+      "name": "personal-wrap-under-vk-personal",
+      "wrap": "personal",
+      "adUtf8": "andvari/v1|vk-personal|55555555-5555-4555-8555-555555555555|33333333-3333-4333-8333-333333333333",
+      "vkB64": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8"
+    },
+    {
+      "name": "owner-wrap-under-vk",
+      "wrap": "owner",
+      "adUtf8": "andvari/v1|vk|55555555-5555-4555-8555-555555555555|33333333-3333-4333-8333-333333333333",
+      "vkB64": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8"
+    }
+  ],
+  "reject": [
+    {
+      "name": "personal-wrap-as-owner-wrap",
+      "wrap": "personal",
+      "adUtf8": "andvari/v1|vk|55555555-5555-4555-8555-555555555555|33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "name": "owner-wrap-as-personal-wrap",
+      "wrap": "owner",
+      "adUtf8": "andvari/v1|vk-personal|55555555-5555-4555-8555-555555555555|33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "name": "personal-wrap-other-vault",
+      "wrap": "personal",
+      "adUtf8": "andvari/v1|vk-personal|66666666-6666-4666-8666-666666666666|33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "name": "personal-wrap-other-user",
+      "wrap": "personal",
+      "adUtf8": "andvari/v1|vk-personal|55555555-5555-4555-8555-555555555555|44444444-4444-4444-8444-444444444444"
+    }
+  ],
+  "migration": [
+    {
+      "name": "honest-single-personal",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        },
+        {
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
+          "labelledPersonal": false,
+          "ownUvkWrap": true,
+          "name": "Household"
+        }
+      ],
+      "expected": {
+        "auto": "a1111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "relabelled-owner-shared-not-named-personal",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Household"
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a2222222-2222-4222-8222-222222222222"
+        ]
+      }
+    },
+    {
+      "name": "two-labelled-candidates-asks",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a2222222-2222-4222-8222-222222222222",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        },
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a1111111-1111-4111-8111-111111111111",
+          "a2222222-2222-4222-8222-222222222222"
+        ]
+      }
+    },
+    {
+      "name": "seal-delivered-vault-never-a-candidate",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a3333333-3333-4333-8333-333333333333",
+          "labelledPersonal": true,
+          "ownUvkWrap": false,
+          "name": "Personal"
+        }
+      ],
+      "expected": {
+        "ask": []
+      }
+    },
+    {
+      "name": "seal-delivered-relabel-beside-real",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        },
+        {
+          "vaultId": "a3333333-3333-4333-8333-333333333333",
+          "labelledPersonal": true,
+          "ownUvkWrap": false,
+          "name": "Personal"
+        }
+      ],
+      "expected": {
+        "auto": "a1111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "real-personal-withheld-label",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": false,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        }
+      ],
+      "expected": {
+        "ask": []
+      }
+    },
+    {
+      "name": "last-used-matches",
+      "lastUsed": "a1111111-1111-4111-8111-111111111111",
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        }
+      ],
+      "expected": {
+        "auto": "a1111111-1111-4111-8111-111111111111"
+      }
+    },
+    {
+      "name": "last-used-differs-asks",
+      "lastUsed": "a2222222-2222-4222-8222-222222222222",
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "Personal"
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a1111111-1111-4111-8111-111111111111"
+        ]
+      }
+    },
+    {
+      "name": "renamed-personal-asks",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": "personal"
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a1111111-1111-4111-8111-111111111111"
+        ]
+      }
+    },
+    {
+      "name": "undecryptable-name-asks",
+      "lastUsed": null,
+      "candidates": [
+        {
+          "vaultId": "a1111111-1111-4111-8111-111111111111",
+          "labelledPersonal": true,
+          "ownUvkWrap": true,
+          "name": null
+        }
+      ],
+      "expected": {
+        "ask": [
+          "a1111111-1111-4111-8111-111111111111"
+        ]
+      }
+    }
+  ]
+}

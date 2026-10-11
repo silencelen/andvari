@@ -517,5 +517,45 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 13) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Security review 2026-10, root cause A §4 (branch A5). Two per-user rows, both
+                    // OPAQUE to the server and both shaped like usage_ledger:
+                    //
+                    // account_state: the UVK-sealed account-state blob (contact pins, the verified org
+                    // fingerprint, consumed nonces). `seq` is a compare-and-set counter for
+                    // PUT /account/state only; the authenticated seq lives inside the blob, and a
+                    // server that rolls this back is caught by each device's high-water mark.
+                    //
+                    // personal_wrap: `AccountKeys.personalWrap`, the UVK wrap of the personal vault key
+                    // under the `vk-personal` AD purpose. It is what makes "personal" a client-held,
+                    // authenticated property; the `vaults.type` label stops mattering. Write-once except
+                    // through a password reauth (PUT /account/personal-wrap with currentAuthKey, owner
+                    // decision Q9), which guards against buggy clients, not against the server.
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE IF NOT EXISTS account_state(
+                          userId TEXT PRIMARY KEY REFERENCES users(userId),
+                          sealedState TEXT NOT NULL,
+                          seq INTEGER NOT NULL,
+                          updatedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate(
+                        """
+                        CREATE TABLE IF NOT EXISTS personal_wrap(
+                          userId TEXT PRIMARY KEY REFERENCES users(userId),
+                          vaultId TEXT NOT NULL,
+                          wrappedVk TEXT NOT NULL,
+                          updatedAt INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                    st.executeUpdate("UPDATE meta SET value='13' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }
