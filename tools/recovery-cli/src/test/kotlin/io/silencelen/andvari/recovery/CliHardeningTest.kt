@@ -55,6 +55,19 @@ class CliHardeningTest {
         assertTrue("canary verify" in sheet)
     }
 
+    /** Security review 2026-10, root cause A (A5): the sheet's short line is the 32-hex human form,
+     *  never the retired 16-hex (64-bit) id, and the full fingerprint is printed beside it. */
+    @Test
+    fun keygenSheet_printsThe32HexShortFormNotThe16HexId() {
+        val seed = ByteArray(32) { 1 }
+        val sheet = keygenSheet(seed, LocalDate.of(2026, 10, 10))
+        val crypto = io.silencelen.andvari.core.crypto.createCryptoProvider()
+        val fp = io.silencelen.andvari.core.crypto.Escrow.fingerprint(crypto, crypto.boxKeypairFromSeed(seed).publicKey)
+        val shortLine = sheet.lines().dropWhile { !it.startsWith("Short fingerprint") }.drop(1).first().trim()
+        assertEquals(fp.take(32), shortLine.replace(" ", ""), "32 hex, grouped")
+        assertTrue(fp in sheet, "the full fingerprint is on the sheet")
+    }
+
     /**
      * H60: the upload bundle carries `tempAuthKey` — the recovered member's live login credential
      * until the forced change — so it must be created owner-only (0600) BEFORE any byte lands,

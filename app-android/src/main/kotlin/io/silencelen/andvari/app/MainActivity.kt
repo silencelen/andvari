@@ -64,6 +64,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
+import io.silencelen.andvari.core.client.EnrollLink
+import io.silencelen.andvari.core.client.EnrollPayload
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
 import io.silencelen.andvari.core.client.DecryptedItemVersion
@@ -395,6 +397,8 @@ private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
         // Critical-direct — never collapsed.
         if ((ui.escrowStale || ui.escrowNeedsV2) && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
+        // Root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default destination; ask when needed.
+        PersonalVaultBanner(vm) { vm.refresh() }
         IncomingTransferCards(vm, ui)
         LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
         if (ui.needsUpdateCount > 0 && ui.items.isEmpty()) { // A2: the "vault looks empty" explanation
@@ -890,10 +894,16 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
     val shortOk = Escrow.shortFormMatches(shortFp, fp)
     // required-affirm: the scanned rfp must match THIS server's advertised recovery fingerprint —
     // the T10 anchor-redirect defense. enrollOp re-asserts it authoritatively before sealing.
-    val affirmMatches = !linkRfp.isNullOrEmpty() && Escrow.shortFormMatches(linkRfp, fp)
+    val affirmMatches = affirmRfpMatches(linkRfp, fp)
+    // A5: the in-person code from the admin's screen authenticates the link's rfp/ifp/iu (a link that
+    // reached this device any other way has no admin screen behind it). Unreachable today with the field's
+    // Typed provenance, like the rest of this leg.
+    var inPersonEntry by rememberSaveable { mutableStateOf("") }
+    val linkPayload = (parsed as? InviteFieldParse.Link)?.let { EnrollPayload(1, it.origin, it.token, it.email, linkRfp, it.ifp, it.iu) }
+    val inPersonOk = linkPayload != null && EnrollLink.checkCodeMatches(io.silencelen.andvari.core.crypto.createCryptoProvider(), linkPayload, inPersonEntry)
     // A foreign-origin link blocks submit until the gate repoints (foreign becomes null once we are
     // on its origin). Otherwise the per-posture ceremony legs decide readiness.
-    val ready = foreign == null && enrollReady(posture, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)
+    val ready = foreign == null && enrollReady(posture, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp, inPersonOk)
     // The form's ONE submit path — the Create-vault button and the fields' IME Done both call it.
     // It RE-EVALUATES the gate from the same live reads it submits: the button's enabled flag
     // reflects the last composition, so a same-frame edit + tap (or an IME Done on a field that
@@ -906,9 +916,14 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
         // path required-typed uses; enrollOp re-asserts it against the server's advertised
         // fingerprint (and Account.enroll refuses a mismatched served key) — the T10 defense —
         // before sealing escrow.
-        val typedFp = if (postureNow == EnrollPosture.RequiredAffirm) (linkRfp ?: "") else shortFp
-        if (foreign == null && !ui.busy && enrollReady(postureNow, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp)) {
-            vm.enroll(effToken.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived, typedShortFp = typedFp)
+        val affirming = postureNow == EnrollPosture.RequiredAffirm
+        if (foreign == null && !ui.busy && enrollReady(postureNow, effToken, email, password, confirm, shortFp, fpOk, waivedAck, affirmed, linkRfp, fp, inPersonOk)) {
+            vm.enroll(
+                effToken.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived,
+                typedShortFp = if (affirming) "" else shortFp,
+                affirmedRfp = if (affirming) linkRfp else null,
+                inPersonVerified = affirming && inPersonOk,
+            )
         }
     }
     Column(Modifier.fillMaxWidth()) {
@@ -959,6 +974,8 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     if (fp.isNotEmpty() && !affirmMatches) {
                         Text("doesn't match this server's recovery key — if you scanned it correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     }
+                    // A5: the in-person code (32 characters beside the QR on the admin's screen).
+                    Field("In-person code from your admin's screen", inPersonEntry, { inPersonEntry = it }, mono = true, imeAction = ImeAction.Next)
                     Row(
                         Modifier.padding(top = 8.dp)
                             .toggleable(value = affirmed, role = Role.Checkbox, onValueChange = { affirmed = it }),
@@ -1114,11 +1131,15 @@ internal fun enrollReady(
     affirmed: Boolean,
     linkRfp: String?,
     fp: String,
+    inPersonOk: Boolean = false,
 ): Boolean = when (posture) {
     EnrollPosture.Waived ->
         invite.isNotBlank() && email.isNotBlank() && Strength.meetsMasterPasswordFloor(password) && password == confirm && waivedAck
     EnrollPosture.RequiredAffirm ->
-        invite.isNotBlank() && email.isNotBlank() && Strength.meetsMasterPasswordFloor(password) && password == confirm && affirmed && !linkRfp.isNullOrEmpty()
+        // A5: the rfp must equal the server's advertised fingerprint at FULL length, and the human must have
+        // typed the in-person code; a prefix (16 or 32 hex) never passes a machine compare.
+        invite.isNotBlank() && email.isNotBlank() && Strength.meetsMasterPasswordFloor(password) && password == confirm && affirmed &&
+            affirmRfpMatches(linkRfp, fp) && inPersonOk
     EnrollPosture.RequiredTyped ->
         EnrollCeremony.ready(invite, email, password, confirm, shortFp, fpOk, fp)
 }
@@ -2740,6 +2761,10 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                     Text("Sign out to connect to a different server.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            Spacer(Modifier.height(16.dp))
+            HouseholdCard(vm)
+            Spacer(Modifier.height(16.dp))
+            PersonalVaultCard(vm)
             Spacer(Modifier.height(16.dp))
             AppearanceCard()
             Spacer(Modifier.height(16.dp))

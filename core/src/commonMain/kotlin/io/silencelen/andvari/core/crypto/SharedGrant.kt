@@ -74,7 +74,7 @@ object SharedGrant {
      * The HUMAN short form of the identity fingerprint — first 32 hex (128 bits), the same length
      * a member TYPES/reads elsewhere (security review 2026-10, §7). This is a display value a
      * household member reads out when someone shares a vault with them; [Fingerprint] owns the
-     * length. (The recovery short id, [Escrow.shortFingerprint], is a separate 16-hex machine value.)
+     * length. (The legacy 16-hex recovery id, [Escrow.shortFingerprint], is vector-only and compared nowhere.)
      */
     fun shortFingerprint(crypto: CryptoProvider, identityPub: ByteArray): String =
         Fingerprint.shortForm(fingerprint(crypto, identityPub))

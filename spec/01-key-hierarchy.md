@@ -279,6 +279,21 @@ key signs only through the flows that need it (today: escrow v2).
   Vault Key `VK`. Items encrypt under VK (spec 02), never directly under UVK.
 - **Personal vault** (`type=personal`, one per user, created at enrollment):
   `wrappedVk = Envelope(key = UVK, plaintext = VK, ad = "andvari/v1|vk|{vaultId}|{userId}")`.
+- **Personal wrap (NORMATIVE; security review 2026-10, root cause A §4).** Which vault is
+  "personal" is a UVK-authenticated property of the account, never the server's `type` label or a
+  grant `role`: `AccountKeys.personalWrap = { vaultId, wrappedVk = Envelope(key = UVK, plaintext =
+  VK_personal, ad = "andvari/v1|vk-personal|{vaultId}|{userId}") }`. The `vk-personal` purpose is
+  distinct from `vk`, so an owner wrap of a shared vault never opens as a personal wrap and the
+  reverse. Only the user's UVK can mint one, so the server can only withhold it. It is sent with
+  the register (additive; the legacy `vk` grant row stays), delivered in every `AccountKeys`, and
+  replaced only by `PUT /account/personal-wrap` with a fresh password reauth (re-designation, owner
+  decision Q9). Client rules: the personal vault is the wrap's `vaultId` iff the wrap opens, and its
+  VK is THE key for that vault (precedence rule 1: held before any grant row is applied, so a row
+  can only be compared against it); absent while this device cached a wrap before → the server
+  WITHHELD it, an anomaly, and the cached (UVK-sealed) wrap stands; absent and never seen → no
+  personal vault until the HUMAN answers the designation question (spec 02 §4; never an automatic
+  pick); present but unopenable → no personal vault, an anomaly, and no label fallback. "No personal vault" means no default save/import destination and no usage ledger.
+  Vectors: `spec/test-vectors/personalwrap.json`.
 - **Shared vault** (`type=shared`): the creator generates `vaultId`, `VK`, `metaBlob`.
   - The **creator's own grant** uses `wrappedVk = Envelope(key = UVK, plaintext = VK,
     ad = "andvari/v1|vk|{vaultId}|{userId}")` — identical to the personal-vault wrap. The
@@ -322,9 +337,9 @@ key signs only through the flows that need it (today: escrow v2).
     `sealedVk`: the seal is server-mintable, and wrapping it would make a server-chosen key the
     canonical one on every device. Clients therefore do not post a self-wrap yet; it follows
     verification of an authenticated (v2) grant or an explicit legacy confirmation. Because a member row can now carry a `wrappedVk`, the
-    personal-vault refusal of spec 02 §4 (audit H64) treats a row as member-granted when the
-    key came from a seal, when the row carries any `sealedVk`, or when its role is not
-    `owner`.
+    "member-granted" display bit (audit H64) treats a row as member-granted when the key came from
+    a seal, when the row carries any `sealedVk`, or when its role is not `owner`. Since the
+    personal wrap (above) it decides nothing about which vault is personal.
   - Roles: `owner` (exactly one per vault at every instant; reassignable ONLY via the
     two-phase offer/accept transfer of spec 03 §11, in which the new owner's client
     re-wraps VK under its own UVK and the old owner demotes to `writer`, retaining VK —

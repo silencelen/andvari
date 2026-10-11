@@ -39,15 +39,21 @@
  */
 
 /**
- * `rfp` (design 2026-07-12 §F.2) is the org recovery SHORT fingerprint (16 hex) an admin's IN-PERSON
- * QR carries so the invitee can eyeball-confirm it (§F.1). Twin rules, vector-pinned:
- *  - absent OR explicit JSON `null` ⇒ the field is OMITTED from the parsed payload (safe fallback:
- *    the invitee client falls back to the typed-sheet ceremony, never auto-trusts the server key);
- *  - a present NON-EMPTY string ⇒ carried verbatim;
- *  - an empty string, a non-string, or a duplicate `rfp` key ⇒ the whole parse REJECTS (null).
- * compose OMITS `rfp` when null/absent, so a waived/emailed link is BYTE-IDENTICAL to a pre-rfp link.
+ * The three OPTIONAL in-person fields (security review 2026-10, root cause A, A5; twin rules, vector-pinned):
+ *  - `rfp`: the org recovery fingerprint, FULL 64 lowercase hex (design 2026-07-12 §F.2; was 16 hex);
+ *  - `ifp`: the minting admin's FULL identity fingerprint, 64 lowercase hex (root cause A §7.2);
+ *  - `iu`: the minting admin's userId (lowercase uuid). `ifp` and `iu` travel together or not at all.
+ * Absent OR explicit JSON `null` ⇒ OMITTED from the parsed payload. Any other shape (a 16- or 32-hex rfp
+ * included) REJECTS the whole parse: these are machine values compared at full length. compose OMITS
+ * absent fields, so a waived/emailed link is BYTE-IDENTICAL to a pre-rfp link.
+ *
+ * None of them is an anchor by itself: the server can compose a link too. They are honoured only after
+ * the human typed the in-person code shown on the admin's screen (`enrollCheckCode`, enrollcheck.ts).
  */
-export type EnrollPayload = { v: number; o: string; t: string; e: string; rfp?: string };
+export type EnrollPayload = { v: number; o: string; t: string; e: string; rfp?: string; ifp?: string; iu?: string };
+
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const PREFIX = "a1.";
 const MAX_LEN = 8192;
@@ -90,15 +96,31 @@ function b64urlDecode(body: string): Uint8Array | null {
  * origin simply produces a link parseEnrollLink refuses). JSON.stringify emits the
  * pinned compact key order v,o,t,e.
  */
-export function composeEnrollLink(origin: string, token: string, email: string, rfp?: string | null): string | null {
-  // An in-person-QR admin may stamp `rfp` (§F.1/§F.2); a waived/emailed/typed-sheet invite passes
-  // none, and the link is then byte-identical to a pre-rfp link (the empty/null branch OMITS the key
-  // — JSON.stringify would emit "rfp":null otherwise, minting a link parseEnrollLink refuses).
+export function composeEnrollLink(
+  origin: string,
+  token: string,
+  email: string,
+  rfp?: string | null,
+  ifp?: string | null,
+  iu?: string | null,
+): string | null {
+  // An in-person-QR admin may stamp `rfp` (§F.1/§F.2) and `ifp`/`iu` (root cause A §7.2); a
+  // waived/emailed/typed-sheet invite passes none, and the link is then byte-identical to a pre-rfp link
+  // (absent fields are OMITTED — JSON.stringify would emit "rfp":null otherwise).
   const stamped = rfp != null && rfp.length > 0 ? rfp : null;
-  const scan = stamped === null ? [origin, token, email] : [origin, token, email, stamped];
-  for (const s of scan) if (!WELL_FORMED_UTF16_RE.test(s)) return null;
+  const admin = ifp != null && ifp.length > 0 ? ifp : null;
+  const adminId = iu != null && iu.length > 0 ? iu : null;
+  // Machine values, one exact shape each: never mint a link parse would refuse.
+  if (stamped !== null && !HEX64_RE.test(stamped)) return null;
+  if (admin !== null && !HEX64_RE.test(admin)) return null;
+  if (adminId !== null && !UUID_RE.test(adminId)) return null;
+  if ((admin === null) !== (adminId === null)) return null;
+  for (const s of [origin, token, email]) if (!WELL_FORMED_UTF16_RE.test(s)) return null;
   const obj: Record<string, unknown> = { v: 1, o: origin, t: token, e: email };
-  if (stamped !== null) obj.rfp = stamped; // insertion order pins the compact key order v,o,t,e,rfp
+  // insertion order pins the compact key order v,o,t,e,rfp,ifp,iu
+  if (stamped !== null) obj.rfp = stamped;
+  if (admin !== null) obj.ifp = admin;
+  if (adminId !== null) obj.iu = adminId;
   const payload = JSON.stringify(obj);
   return `${origin}/enroll#${PREFIX}${b64urlEncode(new TextEncoder().encode(payload))}`;
 }
@@ -146,12 +168,18 @@ function parseInner(input: string): EnrollPayload | null {
   if (typeof r.o !== "string" || !ORIGIN_RE.test(r.o)) return null;
   if (typeof r.t !== "string" || r.t.length === 0) return null;
   if (typeof r.e !== "string" || r.e.length === 0) return null;
-  // rfp (§F.2, fail-SAFE): absent/explicit-null ⇒ OMIT (fall back to the typed ceremony, never
-  // auto-trust); a present non-empty string ⇒ carry verbatim; empty/non-string ⇒ reject the whole
-  // payload (a duplicate rfp key was already rejected by hasHostileTopLevelKeys above).
-  if (r.rfp === undefined || r.rfp === null) return { v: 1, o: r.o, t: r.t, e: r.e };
-  if (typeof r.rfp !== "string" || r.rfp.length === 0) return null;
-  return { v: 1, o: r.o, t: r.t, e: r.e, rfp: r.rfp };
+  // rfp / ifp / iu (§F.2; security review 2026-10 A5): absent/explicit-null ⇒ OMIT; a present value must
+  // have its exact machine shape (64 lowercase hex, or a lowercase uuid) or the whole payload rejects (a
+  // duplicate key was already rejected by hasHostileTopLevelKeys above). ifp and iu come together.
+  const out: EnrollPayload = { v: 1, o: r.o, t: r.t, e: r.e };
+  for (const [key, re] of [["rfp", HEX64_RE], ["ifp", HEX64_RE], ["iu", UUID_RE]] as const) {
+    const val = r[key];
+    if (val === undefined || val === null) continue;
+    if (typeof val !== "string" || !re.test(val)) return null;
+    out[key] = val;
+  }
+  if ((out.ifp === undefined) !== (out.iu === undefined)) return null;
+  return out;
 }
 
 /**

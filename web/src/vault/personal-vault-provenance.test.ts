@@ -109,7 +109,7 @@ describe("H64 — the personal vault is never a server-relabelled member grant",
     device.addGrant(memberGrant);
     expect(device.hasVault(shared.vaultId)).toBe(true); // a refusal to ADOPT, not to join
     expect(device.keyArrivedByMemberGrant(shared.vaultId)).toBe(true);
-    device.setPersonalVault(shared.vaultId);
+    try { device.applyPersonalWrap(device.buildPersonalWrap(shared.vaultId)); } catch { /* refused */ }
 
     expect(device.personalVaultId).toBe("");
     // Fail-closed per the owner's decision: no personal vault means no ledger, which callers
@@ -119,7 +119,7 @@ describe("H64 — the personal vault is never a server-relabelled member grant",
     // The real personal row finally arrives: now it is adopted.
     device.addGrant(personalGrant(victim));
     expect(device.keyArrivedByMemberGrant(victim.personalVaultId)).toBe(false);
-    device.setPersonalVault(victim.personalVaultId);
+    try { device.applyPersonalWrap(device.buildPersonalWrap(victim.personalVaultId)); } catch { /* refused */ }
     expect(device.personalVaultId).toBe(victim.personalVaultId);
 
     // The point of the row: a co-member holding the shared VK cannot open the victim's ledger.
@@ -158,20 +158,20 @@ describe("H64 — the personal vault is never a server-relabelled member grant",
     const honest = await Account.unlock(victim.userId, victim.password, victim.keys);
     honest.addGrant(personalGrant(victim));
     honest.addGrant(memberGrant);
-    honest.setPersonalVault(victim.personalVaultId);
-    honest.setPersonalVault(shared.vaultId);
+    try { honest.applyPersonalWrap(honest.buildPersonalWrap(victim.personalVaultId)); } catch { /* refused */ }
+    try { honest.applyPersonalWrap(honest.buildPersonalWrap(shared.vaultId)); } catch { /* refused */ }
     expect(honest.personalVaultId).toBe(victim.personalVaultId);
 
     // Hostile ordering: the relabelled vault is offered first and repeatedly. Refused every time,
     // and the real vault is still adoptable afterwards — the refusal must not burn the one-shot slot.
     const attacked = await Account.unlock(victim.userId, victim.password, victim.keys);
     attacked.addGrant(memberGrant);
-    attacked.setPersonalVault(shared.vaultId);
-    attacked.setPersonalVault(shared.vaultId);
-    attacked.setPersonalVault(shared.vaultId);
+    try { attacked.applyPersonalWrap(attacked.buildPersonalWrap(shared.vaultId)); } catch { /* refused */ }
+    try { attacked.applyPersonalWrap(attacked.buildPersonalWrap(shared.vaultId)); } catch { /* refused */ }
+    try { attacked.applyPersonalWrap(attacked.buildPersonalWrap(shared.vaultId)); } catch { /* refused */ }
     expect(attacked.personalVaultId).toBe("");
     attacked.addGrant(personalGrant(victim));
-    attacked.setPersonalVault(victim.personalVaultId);
+    try { attacked.applyPersonalWrap(attacked.buildPersonalWrap(victim.personalVaultId)); } catch { /* refused */ }
     expect(attacked.personalVaultId).toBe(victim.personalVaultId);
 
     // Revocation forgets the provenance with the key it describes.

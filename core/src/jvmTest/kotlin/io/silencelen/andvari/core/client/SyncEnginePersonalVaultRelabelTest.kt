@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
 /**
  * Audit H64, engine leg: the refusal must hold on the path a real client actually takes — a full
  * `sync()` and then a cold-start `hydrate()` off the durable cache — not only when
- * [Account.setPersonalVault] is called directly. Both call sites read the server's plaintext
+ * the personal-vault decision is made directly. Both call sites used to read the server's plaintext
  * `Vault.type`, which is bound into no AD, so the feed below is exactly what a T1 server can
  * serve today: the victim's real personal row withheld, and the household's SHARED vault (whose
  * key reached the victim as a `sealedVk` member grant) relabelled `type="personal"`.

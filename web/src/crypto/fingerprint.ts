@@ -7,11 +7,12 @@
  * second preimage; 128 bits is out of reach. The construction (`SHA-256(pub)`) is unchanged — only
  * the human-visible truncation length and the compare helper.
  *
- * A prefix (short) match is intended ONLY for a human-typed entry ({@link matchesShort}). Machine
- * values should be compared at full 64-hex length by their own callers, and `Account.resealEscrowFor`
- * does so today. NOT YET TRUE everywhere: the in-person-QR `rfp` value and the admin sheet-confirm
- * still use the 16-hex short id (`shortFingerprint` in escrow.ts); moving them to a full-length compare
- * is tracked for a later branch of this security review.
+ * A prefix (short) match is accepted ONLY from a human-typed entry ({@link matchesShort}). Every
+ * machine-supplied value is compared at full 64-hex length with {@link matchesFull}: the in-person-QR
+ * `rfp` and `ifp` (minted full-length by the admin client, checked full-length by the invitee), the admin
+ * sheet-confirm (the typed 32 hex anchors a locally computed full fingerprint, which is what the QR
+ * stamps), the identity QR, and the escrow re-seal. No path compares a 16-hex id any more (security
+ * review 2026-10, root cause A, branch A5).
  */
 
 /** Human short-form length in hex chars (128 bits). */
@@ -39,4 +40,17 @@ export function matchesShort(entry: string, fullFingerprintHex: string): boolean
 export function groupedShort(fullOrShortHex: string): string {
   const groups = (shortForm(fullOrShortHex).match(/.{1,4}/g) ?? []);
   return `${groups.slice(0, 4).join(" ")}\n${groups.slice(4).join(" ")}`;
+}
+
+/** Full fingerprint length in hex chars (256 bits). */
+export const FULL_HEX_LEN = 64;
+const FULL_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * True iff a MACHINE-supplied `value` (a QR payload, a link field, a file) is EXACTLY the 64 lowercase hex
+ * `fullFingerprintHex`. No normalising, no prefix: a value that did not come from a human has no excuse
+ * to be short or differently cased. Twin of core `Fingerprint.matchesFull`.
+ */
+export function matchesFull(value: string, fullFingerprintHex: string): boolean {
+  return value.length === FULL_HEX_LEN && FULL_RE.test(value) && value === fullFingerprintHex;
 }

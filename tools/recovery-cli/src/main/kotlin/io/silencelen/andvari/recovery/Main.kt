@@ -6,6 +6,7 @@ import io.silencelen.andvari.core.crypto.Ad
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.PasswordGenerator
@@ -109,7 +110,9 @@ private fun keygen() {
 internal fun keygenSheet(seed: ByteArray, generatedOn: LocalDate = LocalDate.now()): String = buildString {
     val kp = crypto.boxKeypairFromSeed(seed)
     val fp = Escrow.fingerprint(crypto, kp.publicKey)
-    val short = Escrow.shortFingerprint(crypto, kp.publicKey)
+    // Security review 2026-10, root cause A (A5): the human short form is 32 hex (128 bits), never the
+    // legacy 16-hex id, and every machine compare (the in-person QR rfp included) is the full value above.
+    val short = Fingerprint.groupedShort(fp).replace("\n", " ")
 
     appendLine("=".repeat(64))
     appendLine("  andvari ORG RECOVERY KEY — PRINT THIS SHEET x2, COPY SEED TO USB")
@@ -128,7 +131,7 @@ internal fun keygenSheet(seed: ByteArray, generatedOn: LocalDate = LocalDate.now
     appendLine()
     appendLine("Fingerprint (ANDVARI_RECOVERY_FINGERPRINT):")
     appendLine("    $fp")
-    appendLine("Short fingerprint (say this aloud when confirming at enrollment):")
+    appendLine("Short fingerprint (the first 32 characters: type these when confirming at enrollment or an invite):")
     appendLine("    $short")
     appendLine()
     appendLine("Seed QR (scan back to verify the print is readable):")
@@ -151,7 +154,7 @@ private fun fingerprint(pubB64: String) {
     val pub = Bytes.fromB64(pubB64)
     require(pub.size == 32) { "public key must be 32 bytes" }
     println("fingerprint: ${Escrow.fingerprint(crypto, pub)}")
-    println("short:       ${Escrow.shortFingerprint(crypto, pub)}")
+    println("short:       ${Fingerprint.groupedShort(Escrow.fingerprint(crypto, pub)).replace("\n", " ")}")
 }
 
 private fun canaryMake(pubB64: String) {
@@ -187,7 +190,7 @@ private fun verifyDump(seedFile: String, dumpFile: String) {
     if (rows.isEmpty()) die("no escrow rows in $dumpFile — export with: sqlite3 -json <db> \"${EscrowVerify.DUMP_SQL}\"")
 
     val kp = crypto.boxKeypairFromSeed(seed)
-    println("Escrow fleet verify — recovery key ${Escrow.shortFingerprint(crypto, kp.publicKey)} (${rows.size} blob(s))")
+    println("Escrow fleet verify — recovery key ${Fingerprint.shortForm(Escrow.fingerprint(crypto, kp.publicKey))} (${rows.size} blob(s))")
     println()
     val results = EscrowVerify.verify(crypto, seed, rows)
     println("%-38s %-6s %s".format("userId", "result", "detail"))

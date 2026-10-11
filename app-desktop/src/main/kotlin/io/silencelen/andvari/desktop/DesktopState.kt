@@ -2636,6 +2636,42 @@ class DesktopState(
     /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
     fun identityCode(): String? = account?.identityFingerprintShort()
 
+    // ---- household verification + personal vault (security review 2026-10, root cause A §4, §7.2; A5) ----
+    // Thin seams over the shared core (SyncEngine): no pin and no personal-vault decision is made here.
+
+    fun householdContacts(): List<io.silencelen.andvari.core.client.Contact> = engine?.accountState?.contacts().orEmpty()
+
+    fun householdAnomaly(): io.silencelen.andvari.core.client.AccountStateSync.Anomaly? = engine?.accountState?.anomaly
+
+    suspend fun refreshHousehold() {
+        runCatching { engine?.accountState?.refresh() }
+    }
+
+    suspend fun lookupHouseholdMember(email: String): io.silencelen.andvari.core.model.UserLookupResponse =
+        requireNotNull(engine) { "locked" }.lookupMember(email)
+
+    /** Pins ONLY when the typed 32 hex match the served key; null = mismatch, nothing pinned. */
+    suspend fun verifyHouseholdMember(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String): io.silencelen.andvari.core.client.Contact? =
+        requireNotNull(engine) { "locked" }.verifyMemberTyped(served, typed)
+
+    suspend fun unpinHouseholdMember(userId: String) {
+        requireNotNull(engine) { "locked" }.unpinMember(userId)
+    }
+
+    fun personalStatus(): Account.PersonalStatus? = account?.personalStatus
+
+    fun personalVaultChoices(): List<io.silencelen.andvari.core.client.PersonalVaultMigration.Candidate>? = engine?.personalVaultChoices
+
+    fun personalRedesignationChoices(): List<io.silencelen.andvari.core.client.VaultInfo> = engine?.redesignationChoices().orEmpty()
+
+    suspend fun designatePersonalVault(vaultId: String) {
+        requireNotNull(engine) { "locked" }.designatePersonalVault(vaultId, null)
+    }
+
+    suspend fun redesignatePersonalVault(vaultId: String, password: String) {
+        requireNotNull(engine) { "locked" }.redesignatePersonalVault(vaultId, password)
+    }
+
     /** Seed-derived identity FULL fingerprint (spec 01 §5, 64 hex) — printed on the recovery sheet
      *  (spec 04 §6) beside the short form as the recovery CLI's identity anchor. */
     fun identityCodeFull(): String? = account?.identityFingerprintFull()
@@ -3354,7 +3390,14 @@ class DesktopState(
         // interpolation-free, the §F.7 discipline).
         engine = SyncEngine(a, acct, newCache, log = CoreLog { event, _ ->
             if (event == CoreLog.EVENT_VAULT_META_REPLAY) notice = META_REPLAY_NOTICE
-        }).also { it.hydrate() }
+        }).also {
+            // Root cause A §8.5 (A5): carry a freshly stored personal wrap into the cached account keys, so
+            // an offline cold start knows the personal vault without the network.
+            it.onPersonalWrapStored = { w ->
+                store.loadAccountKeys(originKey(baseUrl), acct.userId)?.let { k -> persistAccountKeys(acct.userId, k.copy(personalWrap = w)) }
+            }
+            it.hydrate()
+        }
     }
 
     /** Sync + record the wall-clock time of the last SUCCESS — the timestamp the spec 07

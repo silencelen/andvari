@@ -160,14 +160,18 @@ class PureGatesTest {
     }
 
     @Test
-    fun requiredAffirmNeedsBothTheAffirmationAndAScannedFingerprint() {
-        fun ready(affirmed: Boolean, linkRfp: String?) = enrollReady(
-            EnrollPosture.RequiredAffirm, "inv", "a@example.org", strong, strong, "", false, false, affirmed, linkRfp, serverFp,
+    fun requiredAffirmNeedsTheAffirmationTheInPersonCodeAndTheFullFingerprint() {
+        fun ready(affirmed: Boolean, linkRfp: String?, inPersonOk: Boolean = true) = enrollReady(
+            EnrollPosture.RequiredAffirm, "inv", "a@example.org", strong, strong, "", false, false, affirmed, linkRfp, serverFp, inPersonOk,
         )
-        assertFalse(ready(affirmed = false, linkRfp = shortFp))
+        assertFalse(ready(affirmed = false, linkRfp = serverFp))
         assertFalse(ready(affirmed = true, linkRfp = null))
         assertFalse(ready(affirmed = true, linkRfp = ""))
-        assertTrue(ready(affirmed = true, linkRfp = shortFp))
+        // Security review 2026-10, A5: the rfp is a machine value compared at FULL length; the 32-hex human
+        // form (what this leg used to accept) no longer passes, and the in-person code is required.
+        assertFalse(ready(affirmed = true, linkRfp = shortFp))
+        assertFalse(ready(affirmed = true, linkRfp = serverFp, inPersonOk = false))
+        assertTrue(ready(affirmed = true, linkRfp = serverFp))
     }
 
     @Test
@@ -184,13 +188,14 @@ class PureGatesTest {
 
     @Test
     fun everyEnrollPostureStillRefusesABlankInviteOrAWeakOrMismatchedPassword() {
+        // A5: the affirm leg's rfp is the FULL fingerprint and it needs the typed in-person code.
         for (posture in EnrollPosture.entries) {
-            val ok = enrollReady(posture, "inv", "a@example.org", strong, strong, shortFp, true, true, true, shortFp, serverFp)
+            val ok = enrollReady(posture, "inv", "a@example.org", strong, strong, shortFp, true, true, true, serverFp, serverFp, true)
             assertTrue(ok, "$posture should be ready with every leg satisfied")
-            assertFalse(enrollReady(posture, "", "a@example.org", strong, strong, shortFp, true, true, true, shortFp, serverFp), "$posture: blank invite")
-            assertFalse(enrollReady(posture, "inv", "", strong, strong, shortFp, true, true, true, shortFp, serverFp), "$posture: blank email")
-            assertFalse(enrollReady(posture, "inv", "a@example.org", "short", "short", shortFp, true, true, true, shortFp, serverFp), "$posture: below the F60 floor")
-            assertFalse(enrollReady(posture, "inv", "a@example.org", strong, strong + "x", shortFp, true, true, true, shortFp, serverFp), "$posture: confirm mismatch")
+            assertFalse(enrollReady(posture, "", "a@example.org", strong, strong, shortFp, true, true, true, serverFp, serverFp, true), "$posture: blank invite")
+            assertFalse(enrollReady(posture, "inv", "", strong, strong, shortFp, true, true, true, serverFp, serverFp, true), "$posture: blank email")
+            assertFalse(enrollReady(posture, "inv", "a@example.org", "short", "short", shortFp, true, true, true, serverFp, serverFp, true), "$posture: below the F60 floor")
+            assertFalse(enrollReady(posture, "inv", "a@example.org", strong, strong + "x", shortFp, true, true, true, serverFp, serverFp, true), "$posture: confirm mismatch")
         }
     }
 

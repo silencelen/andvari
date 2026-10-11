@@ -8,7 +8,12 @@ import type {
   ClientPolicy,
   InviteResponse,
 } from "../api/types";
-import { composeEnrollLink } from "../enroll/enrolllink";
+import { composeEnrollLink, parseEnrollLink } from "../enroll/enrolllink";
+import { enrollCheckCode } from "../enroll/enrollcheck";
+import { fingerprint as recoveryFingerprintOf, shortFormMatches } from "../crypto/escrow";
+import { fromB64 } from "../crypto/bytes";
+import { groupedShort } from "../crypto/fingerprint";
+import type { Account } from "../vault/account";
 import { Busy } from "./Busy";
 import { Empty } from "./Empty";
 import { writeClipboard } from "./clipboard";
@@ -27,7 +32,7 @@ type Tab = "users" | "audit" | "policy" | "status";
 /** `policy` is the pre-login-fetched, per-origin-resolved ClientPolicy (App.loadPolicy) — the QR
  *  gate reads its `signupMode` (design 2026-07-15 §5.4.5; null = fetch failed, treated per §2.3's
  *  conservative default as "invite-only"). */
-export function Admin({ client, policy }: { client: ApiClient; policy: ClientPolicy | null }) {
+export function Admin({ client, policy, account }: { client: ApiClient; policy: ClientPolicy | null; account?: Account }) {
   const [tab, setTab] = useState<Tab>("users");
   return (
     <div>
@@ -39,7 +44,7 @@ export function Admin({ client, policy }: { client: ApiClient; policy: ClientPol
           </button>
         ))}
       </div>
-      {tab === "users" && <UsersTab client={client} signupMode={policy?.signupMode} />}
+      {tab === "users" && <UsersTab client={client} signupMode={policy?.signupMode} account={account} />}
       {tab === "audit" && <AuditTab client={client} />}
       {tab === "policy" && <PolicyTab client={client} />}
       {tab === "status" && <StatusTab client={client} />}
@@ -69,7 +74,7 @@ function shortId(id: string | null): string {
 
 // ---- Users ----
 
-function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: string | undefined }) {
+function UsersTab({ client, signupMode, account }: { client: ApiClient; signupMode: string | undefined; account?: Account }) {
   const [users, setUsers] = useState<AdminUserSummary[] | null>(null);
   const [devices, setDevices] = useState<Record<string, AdminDeviceSummary[]>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -127,7 +132,7 @@ function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: strin
   return (
     <div>
       {err && <Msg kind="err">{err}</Msg>}
-      <InviteForm client={client} signupMode={signupMode} onInvited={load} />
+      <InviteForm client={client} signupMode={signupMode} account={account} onInvited={load} />
       {!users ? (
         <p className="muted"><Busy>Loading…</Busy></p>
       ) : (
@@ -499,18 +504,34 @@ export function inviteResultView(qrAvailable: boolean, linkComposed: boolean, mo
 // design §F.1/§F.2 — the admin's per-invite recovery posture and the rfp it stamps.
 export type EscrowPolicy = "required" | "waived";
 
-/** The rfp an invite stamps into its QR (§F.2). ONLY a `required` invite whose org short-fingerprint
- *  the admin type-confirmed against their PRINTED sheet stamps one — never a server-fetched value
- *  (`/admin/status`). A waived invite, or a required invite the admin declined to confirm, stamps
- *  NONE, and the invitee falls back to the typed-sheet ceremony (safe). Pure + exported so a refactor
- *  that stamps an unconfirmed/ server-sourced rfp trips a test. */
+/** The rfp an invite stamps into its QR (§F.2). ONLY a `required` invite whose org fingerprint the admin
+ *  confirmed against their PRINTED sheet stamps one, and it is the FULL 64-hex fingerprint
+ *  ({@link confirmOrgFingerprint}), never a short id and never a bare server value. Anything else stamps
+ *  NONE, and the invitee falls back to the typed-sheet ceremony (safe). Security review 2026-10, root cause
+ *  A (A5): was a 16-hex id, compared at 16 hex by the invitee. Pure + exported so a refactor that stamps a
+ *  short or unconfirmed rfp trips a test. */
 export function stampedRfp(escrowPolicy: EscrowPolicy, confirmedOrgFp: string | null): string | undefined {
-  return escrowPolicy === "required" && confirmedOrgFp ? confirmedOrgFp : undefined;
+  return escrowPolicy === "required" && confirmedOrgFp && FULL_FP_RE.test(confirmedOrgFp) ? confirmedOrgFp : undefined;
 }
 
-/** Normalize a typed org short-fingerprint (lowercase, drop separators); valid iff exactly 16 hex. */
+const FULL_FP_RE = /^[0-9a-f]{64}$/;
+
+/** Normalize a typed org short-fingerprint (lowercase, drop separators). */
 export function normalizeOrgFp(entry: string): string {
   return entry.toLowerCase().replace(/[^0-9a-f]/g, "");
+}
+
+/**
+ * The admin sheet-confirm (security review 2026-10, root cause A, A5): the admin TYPES the sheet's first 32
+ * hex (the A2 human-only prefix rule), which must match the FULL fingerprint this browser computes from the
+ * served recovery public key. On a match the confirmed value is that full 64-hex fingerprint: the human
+ * vouched for 128 bits of it and the rest is the hash of the key the invitee will be served, so the
+ * invitee compares the stamped `rfp` at full length. Null on any mismatch.
+ */
+export async function confirmOrgFingerprint(typed: string, recoveryPub: Uint8Array): Promise<string | null> {
+  if (recoveryPub.length !== 32) return null;
+  const full = await recoveryFingerprintOf(recoveryPub);
+  return shortFormMatches(typed, full) ? full : null;
 }
 
 /** design §F.9 reconciliation: how a user's recovery posture renders in the admin list. Keyed on the
@@ -556,7 +577,7 @@ export function escrowPostureLabel(
 // the admin confirms it against their printed sheet ONCE per session, not per invite (§F.1).
 let sessionOrgFp: string | null = null;
 
-function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; signupMode: string | undefined; onInvited: () => void }) {
+function InviteForm({ client, signupMode, account, onInvited }: { client: ApiClient; signupMode: string | undefined; account?: Account; onInvited: () => void }) {
   const [email, setEmail] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
   const [ttl, setTtl] = useState<InviteTtl>(INVITE_TTL_DEFAULT);
@@ -572,22 +593,40 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
   // design §F.2: the invite's recovery posture. Default "required" (admin backstop); emailed invites
   // are frictionless "waived" (a server-composed link can't carry an authoritative rfp anyway, §F.1).
   const [escrowPolicy, setEscrowPolicy] = useState<EscrowPolicy>("required");
-  // §F.1: the admin confirms their PRINTED recovery sheet's first 16 hex ONCE per session; that
-  // human-anchored value (never a /admin/status fetch) is what a required QR invite stamps as rfp.
+  // §F.1: the admin confirms their PRINTED recovery sheet's first 32 hex ONCE per session against the
+  // full fingerprint this browser computes from the served key; that full value (never a /admin/status
+  // fetch, never a short id) is what a required QR invite stamps as rfp (security review 2026-10, A5).
   const [orgFpInput, setOrgFpInput] = useState("");
   const [confirmedOrgFp, setConfirmedOrgFp] = useState<string | null>(sessionOrgFp);
   const [orgFpErr, setOrgFpErr] = useState("");
   // The posture the LAST minted invite actually used (sendEmail resets after mint, so read it here).
   const [resultPolicy, setResultPolicy] = useState<EscrowPolicy>("required");
 
-  const confirmOrgFp = () => {
+  const confirmOrgFp = async () => {
     const norm = normalizeOrgFp(orgFpInput);
-    if (norm.length !== 16) return setOrgFpErr("Type the FIRST 16 characters (hex) from your printed recovery sheet.");
-    sessionOrgFp = norm; // cache for the session (§F.1: confirm once, not per invite)
-    setConfirmedOrgFp(norm);
+    if (norm.length !== 32) return setOrgFpErr("Type the FIRST 32 characters (hex) from your printed recovery sheet.");
+    let full: string | null = null;
+    try {
+      full = await confirmOrgFingerprint(norm, fromB64((await client.recoveryPubkey()).trim()));
+    } catch {
+      return setOrgFpErr("Couldn't fetch this server's recovery key — try again.");
+    }
+    if (!full) return setOrgFpErr("That does not match the recovery key this server offers. Check the sheet; if it is right, STOP: the server may be offering a different key.");
+    sessionOrgFp = full; // cache for the session (§F.1: confirm once, not per invite)
+    setConfirmedOrgFp(full);
     setOrgFpErr("");
     setOrgFpInput("");
   };
+  // Root cause A §7.2 (A5): a QR invite also carries THIS admin's full identity fingerprint and userId, so
+  // the invitee pins the admin (after typing the in-person code below) — one in-person enrolment, a mutual
+  // pin. Computed from the seed-derived key this session holds, never a server value.
+  const [adminIdentity, setAdminIdentity] = useState<{ ifp: string; iu: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (account) void account.identityFingerprintFull().then((ifp) => { if (live) setAdminIdentity({ ifp, iu: account.userId }); });
+    return () => { live = false; };
+  }, [account]);
+  const [inPersonCode, setInPersonCode] = useState<string | null>(null);
   // The enroll link embeds location.origin verbatim (§3: on a single-origin instance that IS the
   // canonical origin). Where the per-origin-resolved policy answers signupMode="closed" — the
   // break-glass twin — register is server-refused, so the QR path simply doesn't exist there; the
@@ -609,6 +648,7 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
     setErr("");
     setResult(null);
     setResultLink(null);
+    setInPersonCode(null);
     try {
       // The effective posture: emailed invites are always waived (§F.1). Read server-side from the
       // invite row too — the client value is only advisory to the register gate.
@@ -623,7 +663,12 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
         // Invite button to retry with anymore, so NEVER clear the result.
         // §F.2: stamp the admin's type-confirmed org fingerprint as rfp ONLY on a required invite —
         // never a server-fetched value; a waived/unconfirmed invite carries no rfp (typed-sheet fallback).
-        setResultLink(composeEnrollLink(window.location.origin, r.inviteToken, r.email, stampedRfp(effectivePolicy, confirmedOrgFp)));
+        const link = composeEnrollLink(window.location.origin, r.inviteToken, r.email, stampedRfp(effectivePolicy, confirmedOrgFp), adminIdentity?.ifp, adminIdentity?.iu);
+        setResultLink(link);
+        // The IN-PERSON CODE (A5): shown beside the QR, typed by the invitee. It authenticates the link's
+        // rfp/ifp/iu; a server-composed link (an emailed one) has no admin screen to read it from.
+        const parsed = link ? parseEnrollLink(link) : null;
+        setInPersonCode(parsed ? await enrollCheckCode(parsed) : null);
       }
       setEmail("");
       setIsAdmin(false);
@@ -722,10 +767,10 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
           ) : (
             <>
               <div className="secret-row" style={{ alignItems: "flex-end" }}>
-                <Field label="Confirm your recovery sheet (first 16 characters) to stamp a scannable code into the QR" prompt style={{ flex: 1, marginBottom: 0 }}>
+                <Field label="Confirm your recovery sheet (first 32 characters) to stamp a scannable code into the QR" prompt style={{ flex: 1, marginBottom: 0 }}>
                   <input className="mono" value={orgFpInput} onChange={(e) => setOrgFpInput(e.target.value)} placeholder="from your printed sheet, not the server" />
                 </Field>
-                <button type="button" className="ghost" onClick={confirmOrgFp}>Confirm</button>
+                <button type="button" className="ghost" onClick={() => void confirmOrgFp()}>Confirm</button>
               </div>
               {orgFpErr && <div style={{ color: "var(--danger)", marginTop: 4 }}>{orgFpErr}</div>}
               <div style={{ marginTop: 4 }}>Skip this and the invitee will type your recovery sheet's fingerprint themselves.</div>
@@ -766,6 +811,12 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
               ) : (
                 <div className="msg info" style={{ display: "block" }}>QR too dense to render — use the link below instead.</div>
               )}
+              {inPersonCode && (
+                <div className="msg info" style={{ display: "block", marginTop: 8 }}>
+                  <div><strong>In-person code</strong> — read this to the invitee (or let them read it here). They type it after scanning; it is what proves the QR came from you, in person.</div>
+                  <div className="mono" style={{ whiteSpace: "pre-line", fontSize: "1.1em", marginTop: 4 }} data-testid="in-person-code">{groupedShort(inPersonCode)}</div>
+                </div>
+              )}
               <div className="secret-row" style={{ marginTop: 8 }}>
                 <input readOnly aria-label="Enrollment link" className="mono token" value={resultLink} onFocus={(e) => e.target.select()} />
                 <button type="button" className="ghost" onClick={() => void copy(resultLink, true)}>{copiedLink ? "Copied ✓" : "Copy link"}</button>
@@ -773,7 +824,7 @@ function InviteForm({ client, signupMode, onInvited }: { client: ApiClient; sign
               <div className="muted" style={{ marginTop: 8 }}>
                 Expires {fmtDate(result.expiresAt)}. They scan this with their phone camera (or open the link) — it points at this page's address, so mint it from an address the invitee's device can reach. <strong>Anyone who photographs this can use it until it expires — it can't be revoked</strong>, so keep the window short.
                 {resultPolicy === "required" && (
-                  <> {" "}This is an <strong>admin-backstop</strong> invite: show your <strong>printed recovery sheet</strong> to the invitee in person so they can eyeball-confirm the code.</>
+                  <> {" "}This is an <strong>admin-backstop</strong> invite: the invitee types the in-person code above, and their app checks the recovery key against your sheet at full length.</>
                 )}
               </div>
             </div>

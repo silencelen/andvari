@@ -2,7 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
-import { fingerprint, shortFingerprint, shortFormMatches } from "../crypto/escrow";
+import { fingerprint, shortFormMatches } from "../crypto/escrow";
+import { enrollCheckCodeMatches } from "../enroll/enrollcheck";
+import { pinFromEnrolLink } from "../vault/contacts";
+import { MyIdentityCard } from "./Household";
 import { groupedShort } from "../crypto/fingerprint";
 import { confirmMatches, displayForm } from "../crypto/member-recovery";
 import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPayload } from "../enroll/enrolllink";
@@ -658,9 +661,29 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // by payload.o, so a mismatch means a redirect or a hand-mangled link; fall through to manual
   // entry rather than silently enrolling against the wrong server.
   const linkValid = !!prefill && prefill.o === window.location.origin;
-  // §F.1: an `rfp` on the link means the invitee scanned an IN-PERSON QR off the admin's screen (a
-  // server-composed emailed link is contractually rfp=null) — the sole human channel we may anchor on.
-  const linkRfp = linkValid ? prefill!.rfp : undefined;
+  // §F.1: an `rfp` on the link CLAIMS an in-person QR off the admin's screen. Security review 2026-10,
+  // root cause A (A5): a navigated link is not proof of that (the server composes /enroll links too: it
+  // emails invites), so the claim is honoured only after the human TYPES the in-person code the admin's
+  // screen shows beside the QR (enrollCheckCode). The same code authenticates `ifp`/`iu`, the admin's
+  // identity, which this enrolment then pins (the §7.2 mutual pin).
+  const linkPayload = linkValid ? prefill! : null;
+  const linkRfp = linkPayload?.rfp;
+  const inPersonLink = !!linkPayload && (!!linkPayload.rfp || !!linkPayload.ifp);
+  const [inPersonEntry, setInPersonEntry] = useState("");
+  const [inPersonOk, setInPersonOk] = useState(false);
+  useEffect(() => {
+    let live = true;
+    if (!linkPayload || !inPersonLink) {
+      setInPersonOk(false);
+      return;
+    }
+    void enrollCheckCodeMatches(linkPayload, inPersonEntry).then((ok) => { if (live) setInPersonOk(ok); });
+    return () => { live = false; };
+  }, [linkPayload, inPersonLink, inPersonEntry]);
+  // After a successful in-person enrolment: show THIS member's identity QR so the admin's client pins
+  // them back (the other half of the mutual pin), then hand over to the vault.
+  const [showIdentity, setShowIdentity] = useState<{ account: Account; store: VaultStore; meta: LoginMeta; adminPinned: boolean } | null>(null);
+  const [adminPinned, setAdminPinned] = useState(false);
 
   const [invite, setInvite] = useState(linkValid ? prefill!.t : "");
   const [email, setEmail] = useState(linkValid ? prefill!.e : "");
@@ -750,7 +773,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
     posture === "waived"
       ? waivedAck
       : posture === "required-affirm"
-        ? affirmConfirmed && !!linkRfp
+        ? affirmConfirmed && !!linkRfp && inPersonOk
         : !!fp && shortOk && fpConfirmed;
   const canSubmit = !!invite && !!email && pwStrongEnough && password === confirm && postureOk;
 
@@ -775,15 +798,17 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         // enrollment path, only on the re-seal one. It works unauthenticated: raw() simply omits
         // the Authorization header when no tokens are held.
         const pub = fromB64((await net(client.recoveryPubkey())).trim());
-        const pubShortFp = await shortFingerprint(pub);
-        const gate = escrowGate({ posture, linkRfp, typedSheet: shortFp, serverFullFp: fp, pubShortFp });
-        if (!gate.seal) {
+        // Re-check the in-person code at submit (the effect above may lag a keystroke).
+        const inPersonVerified = !!linkPayload && (await enrollCheckCodeMatches(linkPayload, inPersonEntry));
+        const gate = escrowGate({ posture, linkRfp, inPersonVerified, typedSheet: shortFp, serverFullFp: fp, pubFullFp: await fingerprint(pub) });
+        if (!gate.seal || !gate.verifiedFp) {
           return setErr("The recovery key this server offers does not match the code your admin gave you. STOP and contact your admin.");
         }
         recoveryPublicKey = pub;
-        // required-affirm anchored on the human-scanned short rfp; record the fetched pubkey's FULL
-        // fingerprint. required-typed keeps the pre-rfp binding to the policy fingerprint.
-        recoveryFingerprint = posture === "required-affirm" ? await fingerprint(pub) : fp;
+        // A4 carry-forward closed (A5): the seal's verified fingerprint is the HUMAN-anchored value, the
+        // link's full rfp (affirm) or the advertised fingerprint the typed 32 hex matched (typed), never
+        // fingerprint(servedKey) anchored by a short prefix.
+        recoveryFingerprint = gate.verifiedFp;
       }
 
       const { request, account, recoverySecret } = await Account.enroll({
@@ -815,6 +840,21 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       });
       const store = new VaultStore(client, account);
       await store.sync().catch(() => {});
+      // Root cause A §7.2 (A5): the enrolment pin of the admin. Only for an in-person link whose code the
+      // human typed, and only when the key the server serves for `iu` hashes to the link's `ifp` in full;
+      // anything else pins nothing (the member can verify their admin later from Settings).
+      if (linkPayload?.ifp && linkPayload.iu && (await enrollCheckCodeMatches(linkPayload, inPersonEntry))) {
+        try {
+          const served = await client.userIdentity(linkPayload.iu);
+          const c = await pinFromEnrolLink(linkPayload, true, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
+          if (c) {
+            await store.accountState.pin(c);
+            setAdminPinned(true);
+          }
+        } catch {
+          /* best effort: no pin, never a failed enrolment */
+        }
+      }
       // Do NOT go straight to the vault — render the un-skippable recovery-phrase reveal first (§F.7).
       // `recoveryPieceId` is register-only (design 2026-07-13); an old server omits it ⇒ unbound confirm.
       setReady({ account, store, meta: { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint }, pieceId: s.recoveryPieceId ?? null });
@@ -883,11 +923,36 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
             onProceed: () => {
               if (!aliveRef.current) return;
               setReady(null);
-              onReady(r.account, r.store, r.meta);
+              // An in-person enrolment ends on this member's identity QR for the admin to scan (A5).
+              if (inPersonLink) setShowIdentity({ account: r.account, store: r.store, meta: r.meta, adminPinned });
+              else onReady(r.account, r.store, r.meta);
             },
           });
         }}
       />
+    );
+  }
+
+  // Root cause A §7.2 (A5): the last enrolment screen of an in-person enrolment — the admin's client scans
+  // this (or the admin types the code) on "Verify a household member", which pins this member.
+  if (showIdentity) {
+    return (
+      <div>
+        <h2>Let your admin verify you</h2>
+        {showIdentity.adminPinned && <Msg kind="info">Your admin is now a verified household member on this account.</Msg>}
+        <MyIdentityCard account={showIdentity.account} intro="Show this to your admin. They scan the QR, or type the code, under Settings → Verify a household member." />
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            const r = showIdentity;
+            setShowIdentity(null);
+            onReady(r.account, r.store, r.meta);
+          }}
+        >
+          Done
+        </button>
+      </div>
     );
   }
 
@@ -923,6 +988,24 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       >
         <input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
       </Field>
+
+      {inPersonLink && (
+        <Field
+          label="In-person code — type the 32 characters your admin's screen shows beside the QR"
+          prompt
+          hint={
+            <span className="muted">
+              {inPersonOk
+                ? "matches"
+                : posture === "required-affirm"
+                  ? "required: it proves this invite came from your admin in person. Got this link any other way (email, chat)? Stop and ask your admin."
+                  : "optional: lets this app verify your admin's identity now."}
+            </span>
+          }
+        >
+          <input className="mono" value={inPersonEntry} onChange={(e) => setInPersonEntry(e.target.value)} placeholder="from your admin's screen, not this one" />
+        </Field>
+      )}
 
       <FingerprintProvenance
         posture={posture}
@@ -976,17 +1059,17 @@ function FingerprintProvenance(p: {
   onWaivedAck: (v: boolean) => void;
 }) {
   if (p.posture === "required-affirm") {
-    // The rfp arrived via the human QR channel — show it so the invitee can eyeball it against the
-    // admin's screen. This is the one place a value is shown first, because it is NOT server-sourced.
+    // Security review 2026-10 (A5): the link's recovery fingerprint is NOT shown for eyeballing any more.
+    // The human types the in-person code from the admin's screen (field above), which authenticates the
+    // link's full 64-hex rfp; the app then compares the served recovery key with it at full length.
     return (
       <div className="check-block">
         <div className="msg info" style={{ display: "block" }}>
-          Your admin is showing a <strong>recovery code</strong> on their screen. Check it matches this:
-          <div className="mono fingerprint" style={{ marginTop: 6 }}>{groupHex(p.linkRfp ?? "")}</div>
+          This invite sets up an <strong>admin backstop</strong>. Your app checks the recovery key against your admin's sheet once you type the in-person code.
         </div>
         <label className="check">
           <input type="checkbox" checked={p.affirmConfirmed} onChange={(e) => p.onAffirm(e.target.checked)} />
-          <span>I scanned this from my admin's screen <strong>in person</strong>, and the code above matches what they're showing.</span>
+          <span>I scanned this QR from my admin's screen <strong>in person</strong>, and typed the code they showed me.</span>
         </label>
       </div>
     );

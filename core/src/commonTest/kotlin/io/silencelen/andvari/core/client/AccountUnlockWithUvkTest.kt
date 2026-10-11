@@ -79,7 +79,7 @@ class AccountUnlockWithUvkTest {
         // Vault keys hydrate through the SAME addGrant path as unlock(): the personal wrappedVk
         // opens under the UVK we now hold, and the account can seal/open items in it.
         unlocked.addGrant(personalGrant(e))
-        unlocked.setPersonalVault(e.reg.personalVault.vaultId)
+        unlocked.applyPersonalWrap(e.reg.personalWrap)
         val doc = ItemDoc(type = "login", name = "secret", login = LoginData(username = "u", password = "p"))
         val upload = unlocked.encryptItem(e.reg.personalVault.vaultId, "item-1", doc)
         val roundTrip = unlocked.decryptItem(

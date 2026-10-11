@@ -23,6 +23,7 @@ import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.ItemVersion
 import io.silencelen.andvari.core.model.MemberRecoveryBlock
 import io.silencelen.andvari.core.model.PersonalVaultUpload
+import io.silencelen.andvari.core.model.PersonalWrap
 import io.silencelen.andvari.core.model.RecoveryCommitRequest
 import io.silencelen.andvari.core.model.RecoverySelfSetupRequest
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
@@ -304,10 +305,47 @@ class Account private constructor(
      */
     val signPub: ByteArray,
     private val signSecret: ByteArray,
-    var personalVaultId: String,
+    personalVaultId: String,
     private val vaultKeys: MutableMap<String, ByteArray>,
     private val vaultRoles: MutableMap<String, String> = mutableMapOf(),
 ) {
+    /**
+     * The personal vault (security review 2026-10, root cause A §4): the vault named by
+     * `AccountKeys.personalWrap`, which only this user's UVK can mint ([applyPersonalWrap]), or the
+     * vault the human chose ([SyncEngine.designatePersonalVault]). Empty means "no personal vault": no
+     * default save destination, no usage ledger. NEVER set from a server `type` label or `role`, and
+     * never from an automatic pick: without a wrap the human chooses (review H-1).
+     */
+    var personalVaultId: String = personalVaultId
+        private set
+
+    /** Where [personalVaultId] came from (root cause A §4.3, §8.5). */
+    enum class PersonalStatus {
+        /** A served `personalWrap` opened under our UVK and names [personalVaultId]. */
+        CONFIRMED,
+
+        /**
+         * ANOMALY (A5 review H-1): the server served no wrap, but this device had already seen one and kept
+         * it (UVK-sealed, so caching it is safe). [personalVaultId] comes from that cached wrap; the
+         * migration question is NOT re-asked and no label is consulted.
+         */
+        WITHHELD,
+
+        /** No wrap served and none ever seen here: the human must choose. [personalVaultId] is empty. */
+        ABSENT,
+
+        /** A wrap was served and it does NOT open: an anomaly. [personalVaultId] is empty, and only a
+         *  re-designation (password reauth) can replace it. */
+        UNREADABLE,
+    }
+
+    var personalStatus: PersonalStatus = PersonalStatus.ABSENT
+        private set
+
+    /** Vaults whose key opened from a UVK wrap of OURS (our own grant row's `wrappedVk`, or the
+     *  personal wrap), never from a seal: the only vaults a personal wrap may be minted for (§4.3). */
+    internal val uvkWrappedVaults: MutableSet<String> = mutableSetOf()
+
     /**
      * Vaults whose VK arrived by MEMBER grant (`sealedVk`) rather than wrapped under our own
      * UVK — see [keyArrivedByMemberGrant]. In-memory only, like the keys it annotates, and
@@ -489,11 +527,16 @@ class Account private constructor(
                         metaBlob = Envelope.sealB64(crypto, vk, """{"name":"Personal"}""".encodeToByteArray(), Ad.vaultMeta(personalVaultId)),
                     ),
                     device = DeviceInfo(platform, deviceName),
+                    // Root cause A §4.1: "personal" is this UVK-authenticated wrap from day one.
+                    personalWrap = PersonalWrap(personalVaultId, Envelope.sealB64(crypto, uvk, vk, Ad.vkPersonal(personalVaultId, userId))),
                 )
                 val account = Account(
                     crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, personalVaultId,
                     mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
                 )
+                account.personalStatus = PersonalStatus.CONFIRMED
+                account.personalWrap = req.personalWrap
+                account.uvkWrappedVaults.add(personalVaultId)
                 signingForCleanup = null // owned by the returned Account now
                 return EnrollResult(req, account, recovery.recoverySecret)
             } finally {
@@ -723,7 +766,10 @@ class Account private constructor(
                 identity.privateKey.fill(0)
                 throw CryptoException(IDENTITY_MISMATCH_MESSAGE)
             }
-            return Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, "", mutableMapOf())
+            val account = Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, "", mutableMapOf())
+            // Root cause A §4.3: the personal vault comes from the UVK-authenticated wrap and nothing else.
+            account.applyPersonalWrap(keys.personalWrap)
+            return account
         }
 
         /** spec 01 §5 security-fault copy, shared by the server-identityPub check and the §2.4 backstop. */
@@ -780,17 +826,15 @@ class Account private constructor(
         vaultKeys[grant.vaultId] = vk
         unreadableKeyVaults.remove(grant.vaultId)
         if (opened.sealMismatch) vkMismatchVaults.add(grant.vaultId)
+        if (!opened.viaSeal && grant.userId == userId) uvkWrappedVaults.add(grant.vaultId)
         // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and NOT
         // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
         // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer
         // separates "shared" from "mine alone". A row is member-granted when the key came from a
         // seal, OR the row carries any seal at all (a member row, or a post-transfer owner row
         // that retains one), OR its role is not owner (a member self-wrap whose seal the server
-        // dropped). Only an owner row with a bare UVK wrap and no seal is a personal candidate,
-        // which is exactly what enrolment mints. The residue is unchanged and documented on
-        // [setPersonalVault]: those three signals are server plaintext, so a server that strips
-        // the seal AND relabels the role can still present a shared vault as an owner row,
-        // until the personal-vault identity of root cause A §4 lands.
+        // dropped). Since root cause A §4 this bit no longer decides "personal" (the personal wrap
+        // does); it feeds only the display and the §8.5 migration's candidate filter.
         if (opened.viaSeal || !grant.sealedVk.isNullOrEmpty() || grant.role != "owner") {
             memberGrantedVaults.add(grant.vaultId)
         }
@@ -804,7 +848,9 @@ class Account private constructor(
      * Canonical-key precedence (security review 2026-10, root cause A §3.1). The VK comes from
      * the FIRST of these that the row carries:
      *
-     *  1. the personal wrap (§4): not yet built, it lands with the personal-vault identity branch;
+     *  1. the personal wrap (§4): applied at unlock by [applyPersonalWrap], so its key is already
+     *     held when the grant row arrives and the row can only be compared against it (a different
+     *     key is the [vkMismatch] anomaly);
      *  2. our own UVK wrap, `wrappedVk` = `Envelope(UVK, VK, Ad.vk(vaultId, userId))`: the owner
      *     wrap, the post-transfer new-owner wrap and the member self-wrap (§3.2);
      *  3. a v2 signed grant (§1.4): not yet built, the hook for the signed-grants branch;
@@ -906,40 +952,104 @@ class Account private constructor(
     fun keyArrivedByMemberGrant(vaultId: String): Boolean = vaultId in memberGrantedVaults
 
     /**
-     * Adopt [vaultId] as this account's personal vault — the vault the usage ledger is keyed
-     * from ([sealUsage]) and the default destination for new items. First writer wins; the
-     * value survives for the life of the unlocked account.
+     * Root cause A §4.3: adopt the personal vault from `AccountKeys.personalWrap`, the ONLY
+     * authenticated statement of which vault is ours alone. `Envelope(UVK, VK, Ad.vkPersonal(vaultId,
+     * userId))` opens only under this user's UVK and only for that purpose, so the server can neither
+     * relabel nor forge it, only withhold it.
      *
-     * REFUSES a vault whose VK arrived by member grant (audit H64). `type == "personal"` is a
-     * server plaintext column (spec 02 §4) bound into no AD, and after enrollment nothing the
-     * client holds authenticates WHICH vault is its own: `personalVaultId` is rebuilt on every
-     * unlock from the first row the server labels personal whose key we happen to hold. A
-     * hostile server could therefore withhold the real personal row and relabel a SHARED vault
-     * the victim is merely a member of; `usageKey = HKDF(VK, "andvari/v1|usage")` would then be
-     * computable by every other member of that vault, and `Ad.usage(userId)` is public — so a
-     * colluding co-member could read the victim's per-item behavioural log, the one thing the
-     * single-blob ledger design (spec 02 §8.2) exists to keep private. The same label also
-     * steers where new items are saved by default.
+     *  - null (absent): [PersonalStatus.ABSENT], no personal vault until the §8.5 migration resolves.
+     *  - present and opens: [PersonalStatus.CONFIRMED]; its VK is held FIRST (precedence rule 1), so a
+     *    grant row for the same vault can only be compared against it.
+     *  - present and does not open: [PersonalStatus.UNREADABLE] (an anomaly), no personal vault, and no
+     *    fallback to any label.
      *
-     * The refusal is cheap and total because the honest case never needs it: a personal vault
-     * is minted locally at enrollment and its grant is ALWAYS an owner row with a bare
-     * `wrappedVk` under our own UVK and no seal. So "member-granted" (see [addGrant]) and "is
-     * my personal vault" are disjoint by construction, and this costs a legitimate account nothing.
-     *
-     * Fail-closed on purpose: when every held candidate is member-granted we keep
-     * `personalVaultId` empty rather than pick one. Empty means "no personal vault", which
-     * [sealUsage]/[openUsage] already surface as "no ledger" (render "—", never error) and
-     * which makes a save with no explicit vault fail loudly instead of silently filing the
-     * user's new logins into somebody else's shared vault.
-     *
-     * NOT the whole story, and the residue is deliberate: an OWNER-created SHARED vault's
-     * grant is also `wrappedVk`, so this rule cannot tell it from a personal one. Closing that
-     * needs `"type":"personal"` inside the authenticated vaultMeta plaintext, which is a spec
-     * 02 §4 wire change deferred to a spec revision (recorded there, same audit row).
+     * Replaces the pre-A5 `setPersonalVault(label candidate)`, which trusted the server's `type` label
+     * plus a provenance heuristic (audit H64) and could be fooled by a server that stripped a seal and
+     * relabelled `role=owner`. A server `type` label or `role` never reaches this decision.
      */
-    fun setPersonalVault(vaultId: String) {
-        if (keyArrivedByMemberGrant(vaultId)) return
-        if (personalVaultId.isEmpty()) personalVaultId = vaultId
+    fun applyPersonalWrap(wrap: PersonalWrap?) {
+        if (wrap == null) {
+            if (personalStatus != PersonalStatus.CONFIRMED && personalStatus != PersonalStatus.WITHHELD) {
+                personalStatus = PersonalStatus.ABSENT
+                personalVaultId = ""
+            }
+            return
+        }
+        if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.CONFIRMED
+        else {
+            personalStatus = PersonalStatus.UNREADABLE
+            personalVaultId = ""
+        }
+    }
+
+    /**
+     * A5 review H-1: the server served NO wrap, but this device cached one it had authenticated before.
+     * Applies only while [personalStatus] is ABSENT; on success the status is [PersonalStatus.WITHHELD] (an
+     * anomaly the UI surfaces), and the migration question and every label stay out of it. A cached blob
+     * that does not open is [PersonalStatus.UNREADABLE].
+     */
+    fun applyCachedPersonalWrap(wrap: PersonalWrap) {
+        if (personalStatus != PersonalStatus.ABSENT) return
+        if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.WITHHELD
+        else {
+            personalStatus = PersonalStatus.UNREADABLE
+            personalVaultId = ""
+        }
+    }
+
+    /** The wrap that decided [personalVaultId] (served or cached), for the device's local cache. */
+    var personalWrap: PersonalWrap? = null
+        private set
+
+    private fun openAndInstallPersonalWrap(wrap: PersonalWrap): Boolean {
+        val vk = runCatching { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }.getOrNull()
+        if (vk == null || vk.size != 32) return false
+        val held = vaultKeys[wrap.vaultId]
+        if (held != null && !Bytes.ctEquals(held, vk)) vkMismatchVaults.add(wrap.vaultId)
+        vaultKeys[wrap.vaultId] = vk
+        unreadableKeyVaults.remove(wrap.vaultId)
+        uvkWrappedVaults.add(wrap.vaultId)
+        personalVaultId = wrap.vaultId
+        personalWrap = wrap
+        return true
+    }
+
+    /** True when this vault's key opened from a UVK wrap of ours (never a seal): a vault the
+     *  re-designation may offer (§4.3, "offers only vaults whose VK opens under the user's UVK"). */
+    fun keyFromOwnUvkWrap(vaultId: String): Boolean = vaultId in uvkWrappedVaults && vaultKeys.containsKey(vaultId)
+
+    /** Vault ids [keyFromOwnUvkWrap] answers true for. */
+    fun ownUvkWrappedVaultIds(): Set<String> = uvkWrappedVaults.filter { vaultKeys.containsKey(it) }.toSet()
+
+    /**
+     * Mint the personal wrap for [vaultId] (§4.1): its held VK under our UVK with `Ad.vkPersonal`,
+     * round-trip verified. Refuses a vault whose key did not open from our own UVK wrap, so a key a
+     * server-mintable seal delivered can never be laundered into "personal".
+     */
+    fun buildPersonalWrap(vaultId: String): PersonalWrap {
+        if (!keyFromOwnUvkWrap(vaultId)) throw CryptoException("vault $vaultId is not wrapped under this account's key")
+        val vk = vk(vaultId)
+        val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vkPersonal(vaultId, userId))
+        if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vkPersonal(vaultId, userId)).contentEquals(vk)) {
+            throw CryptoException("personal wrap failed round-trip verification")
+        }
+        return PersonalWrap(vaultId, wrapped)
+    }
+
+    /** Seal an account-state document (root cause A §4.2) under the UVK, bound to this userId. */
+    fun sealAccountState(doc: AccountStateDoc): String {
+        require(doc.userId == userId) { "account state belongs to another user" }
+        return Envelope.sealB64(crypto, uvk, AccountState.encode(doc).encodeToByteArray(), Ad.accountState(userId))
+    }
+
+    /**
+     * Open an account-state blob. Throws [CryptoException] when it does not open under our UVK with this
+     * user's AD (a substituted or injected blob) and [AccountStateException] when it opens but is not a
+     * v1 document for this user.
+     */
+    fun openAccountState(sealed: String): AccountStateDoc {
+        val plain = Envelope.openB64(crypto, uvk, sealed, Ad.accountState(userId)).decodeToString()
+        return AccountState.decode(userId, plain)
     }
 
     fun hasVault(vaultId: String): Boolean = vaultKeys.containsKey(vaultId)
@@ -952,6 +1062,7 @@ class Account private constructor(
         vaultKeys.remove(vaultId)
         vaultRoles.remove(vaultId)
         memberGrantedVaults.remove(vaultId) // provenance dies with the key it describes (H64)
+        uvkWrappedVaults.remove(vaultId)
         vkMismatchVaults.remove(vaultId)
         unreadableKeyVaults.remove(vaultId)
     }
@@ -972,6 +1083,7 @@ class Account private constructor(
         )
         vaultKeys[vaultId] = svk
         vaultRoles[vaultId] = "owner"
+        uvkWrappedVaults.add(vaultId)
         return NewSharedVault(req, vaultId)
     }
 
