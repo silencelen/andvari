@@ -51,26 +51,21 @@ class PersonalWrapVectorTest {
     }
 
     @Test
-    fun migrationDecisions() {
+    fun migrationChoices() {
         for (r in v.getValue("migration").jsonArray.map { it.jsonObject }) {
             val name = r.getValue("name").jsonPrimitive.content
+            // The rows carry the server label too; the decision must not read it.
             val cands = r.getValue("candidates").jsonArray.map { it.jsonObject }.map { c ->
                 PersonalVaultMigration.Candidate(
                     vaultId = c.getValue("vaultId").jsonPrimitive.content,
-                    labelledPersonal = c.getValue("labelledPersonal").jsonPrimitive.boolean,
                     ownUvkWrap = c.getValue("ownUvkWrap").jsonPrimitive.boolean,
                     name = c.getValue("name").let { if (it is JsonNull) null else it.jsonPrimitive.content },
                 )
             }
             val last = r.getValue("lastUsed").let { if (it is JsonNull) null else it.jsonPrimitive.content }
             val exp = r.getValue("expected").jsonObject
-            val d = PersonalVaultMigration.decide(cands, last)
-            if ("auto" in exp) {
-                assertEquals(PersonalVaultMigration.Decision.Auto(exp.getValue("auto").jsonPrimitive.content), d, name)
-            } else {
-                assertTrue(d is PersonalVaultMigration.Decision.Ask, name)
-                assertEquals(exp.getValue("ask").jsonArray.map { it.jsonPrimitive.content }, d.choices.map { it.vaultId }, name)
-            }
+            assertTrue("auto" !in exp, "$name: there is no automatic pick any more")
+            assertEquals(exp.getValue("ask").jsonArray.map { it.jsonPrimitive.content }, PersonalVaultMigration.choices(cands, last).map { it.vaultId }, name)
         }
     }
 }

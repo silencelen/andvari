@@ -10,8 +10,8 @@ import io.silencelen.andvari.core.model.AccountStatePut
  * injected or substituted blob does not open ([anomaly] = UNREADABLE, the local copy wins and is written
  * back). What the server CAN do is withhold it or serve an older one; this device keeps a high-water seq
  * and its own sealed copy (in [VaultCache.clientState], which survives a resync), so a served seq below the
- * high-water mark, or a withheld blob after one was seen, is a ROLLBACK ([anomaly]): the local copy wins
- * the merge and is written back. Rollback and withholding can only remove pins, never add one.
+ * high-water mark, or a withheld blob after one was seen, is a ROLLBACK ([anomaly]): the merge keeps every
+ * pin the local copy holds (and the local `orgRecoveryFp`) and the result is written back. Rollback and withholding can only remove pins, never add one.
  *
  * Pins are added ONLY through [pin] with a [Contact] that [ContactPin] built from a human comparison.
  * Nothing in this class, or in [SyncEngine], pins a key the server served.

@@ -253,15 +253,14 @@ test("H03 — saveFailure maps the server's `rejected` verdict to its own rung, 
 
 // ---- H64: the personal vault (and so the usage key) never follows a server label alone ----
 
-test("A5 — both session builds pick the personal vault through personalpick.ts, never a server label on its own", () => {
-  // Security review 2026-10, root cause A §4: "personal" is AccountKeys.personalWrap (UVK AEAD under the
-  // vk-personal purpose). The SW itself reads no server label; personalpick.ts consults it only for the
-  // strict §8.5 migration while the wrap is absent (graded in personalpick.test.ts).
-  assert.match(bg, /export function pickPersonalVaultId\([\s\S]*?return pickPersonal\(wrap, uvk, userId, vaultKeys, sync\.vaults, memberGranted\)\.vaultId;/);
+test("A5 / H-1 — both session builds pick the personal vault from the wrap (or this device's cached wrap), never a label", () => {
+  // Security review 2026-10, root cause A §4 and the A5 review's H-1: "personal" is AccountKeys.personalWrap;
+  // when the server withholds it, the wrap this device cached stands. The SW never reads the server's label.
+  assert.match(bg, /export async function pickPersonalVaultId\([\s\S]*?pickPersonal\(wrap, uvk, userId, vaultKeys, \{ cached \}\)/);
   assert.equal((bg.match(/type === "personal"/g) ?? []).length, 0, "no SW decision reads the server's personal label");
-  assert.equal((bg.match(/pickPersonalVaultId\(s\.accountKeys\.personalWrap, uvk, s\.userId, vaultKeys, sync, memberGranted\)/g) ?? []).length, 1, "the password unlock picks from the wrap");
-  assert.equal((bg.match(/pickPersonalVaultId\(keys\.personalWrap, begin\.uvk, begin\.userId, vaultKeys, sync, memberGranted\)/g) ?? []).length, 1, "the quick redeem picks from the wrap");
-  assert.match(bg, /memberGranted\.add\(g\.vaultId\)/, "buildVaultKeys still records sealedVk provenance");
+  assert.equal((bg.match(/await pickPersonalVaultId\(s\.accountKeys\.personalWrap, uvk, s\.userId, vaultKeys\)/g) ?? []).length, 1, "the password unlock picks from the wrap");
+  assert.equal((bg.match(/await pickPersonalVaultId\(keys\.personalWrap, begin\.uvk, begin\.userId, vaultKeys\)/g) ?? []).length, 1, "the quick redeem picks from the wrap");
+  assert.match(bg, /memberGranted\.add\(g\.vaultId\)/, "buildVaultKeys still records sealedVk provenance (display)");
 });
 
 // ---- H67 / R38 / R39: the damaged-account-keys terminal, wired in the SW ----

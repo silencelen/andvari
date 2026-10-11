@@ -10,6 +10,7 @@ import { deleteProof, offerProof } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
+import { memoryClientState } from "./accountstatesync";
 import { IdbVaultCache, openVaultCache } from "./idbcache";
 import { SyncIntegrityError, VaultStore } from "./store";
 
@@ -378,7 +379,9 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     // Device session A: a real sync populates the cache.
     const apiA = new FakeApi();
     const cache = (await openVaultCache(s.member.account.userId)) as IdbVaultCache;
-    const storeA = new VaultStore(apiA.asClient(), s.member.account, cache);
+    // The device's own client state (localStorage in a browser) survives the restart with the cache.
+    const local = memoryClientState();
+    const storeA = new VaultStore(apiA.asClient(), s.member.account, cache, local);
     apiA.queue.push(pull);
     await storeA.sync();
 
@@ -386,7 +389,7 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     const fresh = await relock(s.member);
     expect(fresh.hasVault(s.vaultId)).toBe(false);
     expect(fresh.personalVaultId).toBe("");
-    const storeB = new VaultStore(deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const storeB = new VaultStore(deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache, local);
     await storeB.hydrate();
 
     // The exact tri-state, byte for byte against the synced twin.
@@ -396,7 +399,9 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(storeB.undecryptable().map((u) => u.itemId).sort()).toEqual([fv3Id, foreignId].sort());
     expect(storeB.needsUpdateCount()).toBe(1); // the fv=3 held-key item — retried, still newer
     expect(storeB.vaults()).toEqual(storeA.vaults());
-    expect(fresh.personalVaultId).toBe(s.member.account.personalVaultId); // rediscovered from the cached row
+    // A5 review H-1: the fixture's keys carry no wrap, so it comes from this device's cached (UVK-sealed)
+    // wrap and is flagged "withheld"; never from the cached row's server label.
+    expect(fresh.personalVaultId).toBe(s.member.account.personalVaultId);
     expect(fresh.roleFor(s.vaultId)).toBe("writer"); // grant re-opened, role applied
     expect(storeB.lastSyncAt).toBe(storeA.lastSyncAt); // the honest "vault as of last sync <t>" stamp
   });

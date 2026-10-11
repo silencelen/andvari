@@ -376,17 +376,21 @@ copy-to-Personal, the import target, the "(shared)" tag (now `vaultId != persona
 sort order. An account with no openable wrap has no personal vault (no default destination, usage
 paused, a banner saying so).
 
-**Once-per-account migration (root cause A §8.5).** An account created before the wrap existed mints
-it AUTOMATICALLY only when exactly one held vault (1) is labelled `personal` by the server and (2)
-has a VK that opened from a UVK wrap on the caller's OWN grant row and from no seal, AND its
-decrypted name is exactly `Personal` (the enrolment value), AND, when the device remembers the
-personal vault it last used, it is that vault; the wrap is then stored with `PUT
-/account/personal-wrap` (no reauth needed while none is stored). Otherwise the client asks "Which
-vault is your Personal vault?", listing only vaults passing (1) and (2). This is the one step where
-the server's pre-upgrade label still matters (a server already hostile before the upgrade could
-have relabelled); the strict rule plus re-designation (`PUT /account/personal-wrap` with
-`currentAuthKey`, owner decision Q9) bound it. Vectors: `spec/test-vectors/personalwrap.json`
-(`migration`).
+**Once-per-account designation (root cause A §8.5, as amended by the A5 review, H-1).** There is NO
+automatic pick. A client keeps the wrap it last authenticated in its own local state (it is UVK-sealed,
+so caching it is safe). When the server serves no wrap:
+- and the device has a cached wrap: the wrap was WITHHELD — an anomaly the client surfaces; the cached
+  wrap stands, and no question is asked and no label consulted;
+- and the device has none: the client asks "Which vault is your Personal vault?", offering EVERY held
+  vault whose VK opened from a UVK wrap on the caller's own grant row (no seal on the row), with the
+  vault this device last used first and the rest by `vaultId`. The server's label and role neither
+  filter nor order the choices, and only the human's answer mints the wrap (`PUT
+  /account/personal-wrap`, no reauth while none is stored; `409 personal_wrap_exists` sends the human to
+  the reauthed re-designation).
+The design's original auto rule ("one vault labelled personal, own wrap, named Personal") was removed:
+whenever the server withheld the wrap it let the label decide again, and the client then minted a
+genuine wrap for that pick. Re-designation (`PUT /account/personal-wrap` with `currentAuthKey`, owner
+decision Q9) repairs a wrong answer. Vectors: `spec/test-vectors/personalwrap.json` (`migration`).
 
 **Historical (2026-09-13 amendment, audit H64), kept for the record.** `type` is plaintext in the vault row and is bound into no AD — the
 vaultMeta AD is `andvari/v1|vaultmeta|{vaultId}` and nothing else — so after enrollment nothing a

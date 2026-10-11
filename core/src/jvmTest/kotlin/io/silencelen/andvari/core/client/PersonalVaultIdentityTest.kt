@@ -173,10 +173,11 @@ class PersonalVaultIdentityTest {
         assertTrue(server.personalWrapPuts.isEmpty(), "no automatic re-mint over an unreadable wrap")
     }
 
-    /** §8.5 honest migration: one vault labelled personal, our own bare UVK wrap, named "Personal" → minted
-     *  automatically, stored, and the stored wrap opens under vk-personal to that vault's key. */
+    /** §8.5 as amended by the A5 review (H-1): even the honest single "Personal" vault is NOT picked
+     *  automatically. The client asks; the human's answer mints the wrap, which then opens under
+     *  vk-personal to that vault's key and is cached on the device. */
     @Test
-    fun theMigrationPicksTheRightVaultAndStoresItsWrap() = runBlocking<Unit> {
+    fun theMigrationAsksAndOnlyTheHumansAnswerMintsTheWrap() = runBlocking<Unit> {
         val victim = enroll("migrate@example.com")
         val other = victim.account.buildCreateSharedVault("Household")
         val server = FakeServer(
@@ -190,17 +191,23 @@ class PersonalVaultIdentityTest {
         val account = Account.unlock(victim.reg.userId, password, victim.keys, crypto) // pre-A5 account: no wrap
         assertEquals(Account.PersonalStatus.ABSENT, account.personalStatus)
         val stored = mutableListOf<PersonalWrap>()
-        val engine = SyncEngine(api(server), account, InMemoryVaultCache()).also { it.onPersonalWrapStored = { w -> stored.add(w) } }
+        val cache = InMemoryVaultCache()
+        val engine = SyncEngine(api(server), account, cache).also { it.onPersonalWrapStored = { w -> stored.add(w) } }
         engine.sync()
+        assertEquals("", account.personalVaultId, "no automatic pick")
+        assertTrue(server.personalWrapPuts.isEmpty(), "nothing minted without the human")
+        assertEquals(setOf(victim.reg.personalVault.vaultId, other.vaultId), engine.personalVaultChoices!!.map { it.vaultId }.toSet())
+
+        engine.designatePersonalVault(victim.reg.personalVault.vaultId, null)
         assertEquals(victim.reg.personalVault.vaultId, account.personalVaultId)
         assertEquals(Account.PersonalStatus.CONFIRMED, account.personalStatus)
         val put = json.decodeFromString(PersonalWrapPut.serializer(), server.personalWrapPuts.single())
-        assertEquals(victim.reg.personalVault.vaultId, put.vaultId)
         assertNull(put.currentAuthKey, "a first set needs no reauth")
         val vk = Envelope.openB64(crypto, victim.account.uvkCopyForPlatformWrap(), put.wrappedVk, Ad.vkPersonal(put.vaultId, victim.reg.userId))
         val ownerVk = Envelope.openB64(crypto, victim.account.uvkCopyForPlatformWrap(), victim.reg.personalVault.wrappedVk, Ad.vk(put.vaultId, victim.reg.userId))
         assertTrue(vk.contentEquals(ownerVk))
         assertEquals(1, stored.size)
+        assertTrue(cache.clientState("personal.wrap")!!.contains(put.vaultId), "the device caches the wrap it now holds")
     }
 
     /** Ambiguity asks; the answer and a later re-designation (Q9) only accept a vault keyed from our own UVK
@@ -253,5 +260,66 @@ class PersonalVaultIdentityTest {
         assertEquals(Account.PersonalStatus.CONFIRMED, account.personalStatus)
         assertEquals(pw.vaultId, account.personalVaultId)
         assertEquals(Account.PersonalStatus.CONFIRMED, e.account.personalStatus)
+    }
+
+    // ---- H-1 (A5 review): a WITHHELD wrap must never hand "personal" back to the server's label ----
+
+    /**
+     * The hostile feed of H-1: the wrap is withheld, the real personal vault is relabelled `shared`, and a
+     * housemate's vault NAMED "Personal" reaches the victim as a bare UVK self-wrap on an owner-labelled row
+     * whose seal the server stripped, labelled `personal`. Every pre-fix §8.5 condition holds for it.
+     */
+    private class H1Feed(val victim: Enrolled, val decoyId: String, val feed: SyncResponse)
+
+    private fun h1Feed(): H1Feed {
+        val victim = enroll("h1-victim-${crypto.randomBytes(4).joinToString("") { (it.toInt() and 0xff).toString(16) }}@example.com")
+        val mate = enroll("h1-mate-${crypto.randomBytes(4).joinToString("") { (it.toInt() and 0xff).toString(16) }}@example.com")
+        val decoy = mate.account.buildCreateSharedVault("Personal")
+        val decoyVk = Envelope.openB64(crypto, mate.account.uvkCopyForPlatformWrap(), decoy.request.wrappedVk, Ad.vk(decoy.vaultId, mate.reg.userId))
+        val selfWrap = Envelope.sealB64(crypto, victim.account.uvkCopyForPlatformWrap(), decoyVk, Ad.vk(decoy.vaultId, victim.reg.userId))
+        val feed = SyncResponse(
+            rev = 9, full = true,
+            vaults = listOf(personalRow(victim, type = "shared"), WireVault(decoy.vaultId, "personal", 5, decoy.request.metaBlob, 0)),
+            grants = listOf(personalGrant(victim), WireGrant(decoy.vaultId, victim.reg.userId, "owner", selfWrap, 5, null)),
+            items = emptyList(), removedGrants = emptyList(),
+        )
+        return H1Feed(victim, decoy.vaultId, feed)
+    }
+
+    @Test
+    fun h1_freshDevice_aWithheldWrapNeverLetsTheLabelPickOrMintAWrap() = runBlocking<Unit> {
+        val h = h1Feed()
+        val server = FakeServer(h.feed)
+        val account = Account.unlock(h.victim.reg.userId, password, h.victim.keys, crypto) // wrap withheld
+        val engine = SyncEngine(api(server), account, InMemoryVaultCache())
+        engine.sync()
+        assertNotEquals(h.decoyId, account.personalVaultId, "the server's label must not choose personal")
+        assertEquals("", account.personalVaultId, "a fresh device with no wrap ASKS")
+        assertTrue(server.personalWrapPuts.isEmpty(), "no wrap is minted without an explicit human choice")
+        // The question offers every vault on our own UVK wrap, label or not.
+        assertEquals(setOf(h.victim.reg.personalVault.vaultId, h.decoyId), engine.personalVaultChoices!!.map { it.vaultId }.toSet())
+        engine.hydrate()
+        assertEquals("", account.personalVaultId)
+    }
+
+    @Test
+    fun h1_existingDevice_aWithheldWrapIsAnAnomalyAndKeepsTheCachedPersonal() = runBlocking<Unit> {
+        val h = h1Feed()
+        val cache = InMemoryVaultCache()
+        // Earlier session: the wrap was served, so this device has seen it.
+        val first = Account.unlock(h.victim.reg.userId, password, h.victim.keys.copy(personalWrap = h.victim.reg.personalWrap), crypto)
+        SyncEngine(api(FakeServer(h.feed)), first, cache).sync()
+        assertEquals(h.victim.reg.personalVault.vaultId, first.personalVaultId)
+
+        // Now the server withholds it and serves the hostile labels (as a delta: the cursor has moved).
+        val server = FakeServer(h.feed.copy(rev = 10, full = false))
+        val again = Account.unlock(h.victim.reg.userId, password, h.victim.keys, crypto)
+        val engine = SyncEngine(api(server), again, cache)
+        engine.hydrate()
+        engine.sync()
+        assertEquals("WITHHELD", again.personalStatus.name, "an absent wrap after one was seen is an anomaly, not 'unmigrated'")
+        assertEquals(h.victim.reg.personalVault.vaultId, again.personalVaultId, "the device keeps the wrap it already authenticated")
+        assertTrue(server.personalWrapPuts.isEmpty())
+        assertNull(engine.personalVaultChoices, "no migration question over a withheld wrap")
     }
 }

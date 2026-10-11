@@ -189,11 +189,11 @@ remain recoverable indefinitely (Q3), but only through the mandatory identity ch
 branch A5).** "Personal" is the UVK-authenticated `personalWrap` (spec 01 §6), so a server can no longer
 make a shared vault personal by relabelling it (or by stripping a seal and relabelling `role=owner`, the
 A1 residue); it can only withhold the wrap, which fails closed (no default destination, no usage
-ledger). Residuals accepted: (a) **migration-time TOFU** (spec 02 §4): an account that predates the wrap
-mints it once from the server's pre-upgrade label under a strict rule (one labelled candidate, own UVK
-wrap and no seal, named `Personal`, matching the device's last-used vault), so a server that was ALREADY
-hostile and had already relabelled before the upgrade can bias that single pick; re-designation (fresh
-password reauth, owner decision Q9) repairs it. (b) **account-state availability**: the account-state
+ledger). Residuals accepted: (a) **designation is a human choice** (spec 02 §4, A5 review H-1): an account that
+predates the wrap, or a fresh device the server withholds the wrap from, is ASKED which vault is personal;
+the server's label never picks or orders the choices and nothing is minted without the answer. A human who
+picks a vault co-members can read gets exactly that; re-designation (fresh password reauth, Q9) repairs it.
+A device that cached a wrap reports a withheld one as an anomaly and keeps its cache. (b) **account-state availability**: the account-state
 blob (contact pins, the verified org fingerprint, consumed nonces) is UVK-sealed, so the server cannot
 add to it, but it can withhold it or roll it back; each device keeps a high-water seq and its own sealed
 copy and refuses the rollback, but a device that never held a newer copy cannot tell, and loses pins

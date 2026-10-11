@@ -183,7 +183,8 @@ cache OFF.
   lives inside the blob. Clients merge on every read and on a 409 (contacts union by userId, newest
   `verifiedAt` wins, a tombstone not older than a pin removes it; nonces unioned, newest 256 per
   vault) and keep a local high-water seq: a served seq below it, or a withheld blob after one was
-  seen, is a rollback and the local copy wins. The server can withhold or roll back (both only
+  seen, is a rollback: the merge keeps every pin the local copy holds (contacts, tombstones and nonces
+  are always the union of both copies; only `orgRecoveryFp` follows the rollback flag to the local copy). The server can withhold or roll back (both only
   REMOVE pins, failing safe) but cannot add a pin. Capped at 64 KiB (`bad_account_state`),
   version-pinned, NOT audited. Vectors: `spec/test-vectors/accountstate.json`.
 - `PUT /account/password { currentAuthKey, newAuthKey, newKdfSalt, newKdfParams,

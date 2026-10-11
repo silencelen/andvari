@@ -352,13 +352,22 @@ export function PersonalVaultCard({ client, account, store }: { client: ApiClien
 
 /**
  * Vault banner while the personal vault is not confirmed (§4.3): no default destination, usage paused.
- * When the §8.5 migration needs the human, it asks "Which vault is your Personal vault?", listing only
- * vaults keyed from this account's own wrap that the server labels personal.
+ * With no wrap anywhere it asks "Which vault is your Personal vault?", listing every vault keyed from this
+ * account's own UVK wrap; the server's label neither filters nor orders them, and only the answer mints the
+ * wrap (A5 review H-1). A withheld wrap is reported as an anomaly instead.
  */
 export function PersonalVaultBanner({ account, store, onChanged }: { account: Account; store: VaultStore; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  if (account.personalStatus === "confirmed" || account.personalStatus === "migrated-unstored") return null;
+  if (account.personalStatus === "confirmed") return null;
+  if (account.personalStatus === "withheld") {
+    // A5 review H-1: an anomaly, not "unmigrated": the device keeps the wrap it already authenticated.
+    return (
+      <div className="msg err" style={{ display: "block" }} role="alert">
+        <strong>The server didn't send your personal-vault record this time.</strong> This device kept the one it already had, so nothing changed. If this keeps happening, tell your admin.
+      </div>
+    );
+  }
   const choices = store.personalVaultChoices ?? [];
   const pick = async (vaultId: string) => {
     setBusy(true);

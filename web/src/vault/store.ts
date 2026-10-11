@@ -5,6 +5,7 @@ import type {
   ItemDoc,
   Mutation,
   PendingTransfer,
+  PersonalWrap,
   PushResponse,
   RemovedGrantInfo,
   WireGrant,
@@ -26,7 +27,7 @@ import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
-import { decidePersonalVault, type PersonalCandidate } from "./personalvault";
+import { type PersonalCandidate, personalVaultChoices } from "./personalvault";
 import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
 
 /**
@@ -457,7 +458,8 @@ export class VaultStore {
   /** Non-null while the §8.5 migration needs the human: "Which vault is your Personal vault?". */
   personalVaultChoices: PersonalCandidate[] | null = null;
 
-  /** The §8.5 candidates, from the synced rows and this client's own key provenance. */
+  /** The question's choices, from the synced rows and this client's own key provenance. The server's
+   *  `type` label and `role` are not read (A5 review H-1). */
   personalCandidates(): PersonalCandidate[] {
     const counts = new Map<string, number>();
     for (const it of this.itemsById.values()) counts.set(it.vaultId, (counts.get(it.vaultId) ?? 0) + 1);
@@ -467,7 +469,6 @@ export class VaultStore {
       const g = this.grantWireByVault.get(v.vaultId);
       out.push({
         vaultId: v.vaultId,
-        labelledPersonal: v.type === "personal",
         ownUvkWrap: this.account.keyFromOwnUvkWrap(v.vaultId) && !!g && g.userId === this.account.userId && !g.sealedVk,
         name: this.account.decryptVaultName(v.vaultId, v.metaBlob),
         itemCount: counts.get(v.vaultId) ?? 0,
@@ -476,40 +477,42 @@ export class VaultStore {
     return out;
   }
 
-  private decidePersonalLocally(): string | null {
-    const status = this.account.personalStatus;
-    if (status === "confirmed") {
-      this.personalVaultChoices = null;
-      this.clientState.set("personal.last", this.account.personalVaultId);
-      return null;
-    }
-    if (status === "unreadable") {
-      this.personalVaultChoices = [];
-      return null;
-    }
-    const d = decidePersonalVault(this.personalCandidates(), this.clientState.get("personal.last"));
-    if (d.kind === "auto") {
-      this.personalVaultChoices = null;
-      return this.account.adoptMigrationPick(d.vaultId) ? d.vaultId : null;
-    }
-    this.personalVaultChoices = d.choices;
-    return null;
-  }
-
-  private async reconcilePersonalVault(): Promise<void> {
-    this.decidePersonalLocally();
-    if (this.account.personalStatus !== "migrated-unstored") return;
-    const wrap = this.account.buildPersonalWrap(this.account.personalVaultId);
-    try {
-      await this.api.putPersonalWrap(wrap);
-      this.account.applyPersonalWrap(wrap);
-      this.clientState.set("personal.last", wrap.vaultId);
-    } catch (e) {
-      if (!(e instanceof ApiError) || e.code !== "personal_wrap_exists") throw e;
-      // Another device migrated first: adopt ITS wrap (it opens under our UVK or it is refused).
-      const served = (await this.api.accountKeys()).personalWrap ?? null;
-      if (served) this.account.applyPersonalWrap(served);
-      this.decidePersonalLocally();
+  /**
+   * Root cause A §4.3 as amended by the A5 review (H-1), local only, never minting (core twin):
+   * confirmed → cache the wrap on this device; absent + cached → "withheld" (anomaly, the cached wrap
+   * stands, no question, no label); absent + nothing cached → ask; unreadable → only a re-designation.
+   */
+  private decidePersonalLocally(): void {
+    switch (this.account.personalStatus) {
+      case "confirmed": {
+        const w = this.account.personalWrap;
+        if (w) this.clientState.set("personal.wrap", JSON.stringify({ vaultId: w.vaultId, wrappedVk: w.wrappedVk }));
+        this.clientState.set("personal.last", this.account.personalVaultId);
+        this.personalVaultChoices = null;
+        return;
+      }
+      case "withheld":
+        this.personalVaultChoices = null;
+        return;
+      case "unreadable":
+        this.personalVaultChoices = [];
+        return;
+      case "absent": {
+        let cached: PersonalWrap | null = null;
+        try {
+          const raw = this.clientState.get("personal.wrap");
+          const o = raw ? (JSON.parse(raw) as Partial<PersonalWrap>) : null;
+          if (o && typeof o.vaultId === "string" && typeof o.wrappedVk === "string") cached = { vaultId: o.vaultId, wrappedVk: o.wrappedVk };
+        } catch {
+          cached = null;
+        }
+        if (cached) {
+          this.account.applyCachedPersonalWrap(cached);
+          this.personalVaultChoices = (this.account.personalStatus as string) === "withheld" ? null : [];
+          return;
+        }
+        this.personalVaultChoices = personalVaultChoices(this.personalCandidates(), this.clientState.get("personal.last"));
+      }
     }
   }
 
@@ -522,8 +525,7 @@ export class VaultStore {
     const wrap = this.account.buildPersonalWrap(vaultId);
     await this.api.putPersonalWrap(wrap, currentAuthKey);
     this.account.applyPersonalWrap(wrap);
-    this.clientState.set("personal.last", wrap.vaultId);
-    this.personalVaultChoices = null;
+    this.decidePersonalLocally(); // caches the new wrap and clears the question
   }
 
   /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
@@ -654,8 +656,8 @@ export class VaultStore {
     // one has settled). Bounded: one extra pull per sync; a bell landing during THIS pull is
     // caught by its own syncNow's comparison after it joins.
     if (this.bellRev > this.cursor) await this.pull();
-    // Root cause A §8.5 / §4.2 (core SyncEngine.sync twin): best effort, never fails the sync.
-    await this.reconcilePersonalVault().catch(() => {});
+    // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
+    this.decidePersonalLocally();
     await this.accountState.refresh().catch(() => {});
     // Member self-wrap (root cause A §3.2) is deliberately NOT posted yet (core SyncEngine.sync
     // twin): the only key a member can wrap today came from a server-mintable v1 seal, and wrapping

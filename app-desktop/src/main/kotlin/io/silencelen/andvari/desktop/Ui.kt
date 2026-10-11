@@ -2012,7 +2012,7 @@ private fun UnopenableVaultWarning(count: Int) {
  */
 @Composable
 private fun AttentionArea(state: DesktopState) {
-    val personalUnconfirmed = state.personalStatus().let { it != null && it != io.silencelen.andvari.core.client.Account.PersonalStatus.CONFIRMED && it != io.silencelen.andvari.core.client.Account.PersonalStatus.MIGRATED_UNSTORED }
+    val personalUnconfirmed = state.personalStatus().let { it != null && it != io.silencelen.andvari.core.client.Account.PersonalStatus.CONFIRMED }
     val hasAnything = ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ||
         state.incomingTransfers.isNotEmpty() || state.lifecycleNotices.isNotEmpty() ||
         state.undecryptableSharedVaultCount > 0 || personalUnconfirmed
