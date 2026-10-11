@@ -171,6 +171,14 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   `encryptedIdentitySeed = Envelope(key = UVK, plaintext = identitySeed,
   ad = "andvari/v1|idkey|{userId}")`.
 - Used to receive shared-vault key grants (§6) and nothing else in v1.
+- **Joint signing key (security review 2026-10, root cause A; owner decision: joint, not a
+  separate HKDF key).** `(signPub, signSecret) = crypto_sign_seed_keypair(identitySeed)`, the
+  same seed. Both libsodium functions take the clamped low half of SHA-512(seed) as the scalar,
+  so `crypto_sign_ed25519_pk_to_curve25519(signPub) == identityPub` for every account, existing
+  ones included. **No identity fingerprint changes and the server stores no new key**: the
+  fingerprint over `identityPub` authenticates `signPub` too, through that mapping. The signing
+  secret is derived at unlock from the UVK-sealed seed, the seed is wiped right after, and the
+  secret is held for the session like `identityPriv` and never persisted. Its only use is §5.1.
 - **Identity fingerprint** = lowercase-hex `SHA-256(identityPub)` (same construction as
   the recovery fingerprint, spec 04 §1); short form = first **32 hex chars (128 bits)**,
   displayed as 8 groups of 4 on two lines `xxxx xxxx xxxx xxxx / xxxx xxxx xxxx xxxx`
@@ -186,6 +194,60 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   member, the member reads their short fingerprint from their own client and the owner
   confirms it over an out-of-band channel (in person / phone). This closes the
   pubkey-substitution attack; it is only sound because the fingerprint is seed-derived.
+
+### 5.1 Signed statements (`SignedStatement`, format v2)
+
+A v2 signed statement is the plaintext a later step seals with `crypto_box_seal`. Its layout:
+
+```
+offset  len  field
+0       4    magic        61 76 73 02   ("avs" + version 0x02)
+4       1    purposeCode  0x01 vault-grant | 0x02 escrow-uvk   (others reserved)
+5       32   signerPub    Ed25519 public key (the sender's joint key)
+37      64   signature    Ed25519 detached signature over M
+101     N    statement    canonical JSON, printable ASCII, 2 <= N <= 1024
+
+M = "andvari/v2|signed-statement" || 0x00 || bytes[0..5) || signerPub || statement
+```
+
+The first plaintext byte `{` means a v1 JSON payload. The four magic bytes mean v2. Anything
+else is unknown and is refused.
+
+**Canonical statement.** Exact key order, no whitespace, built from one template on every engine.
+Every value comes from a closed grammar that never needs escaping: `uuid` = lowercase
+`8-4-4-4-12` hex; `b64_16` / `b64_32` = unpadded base64url of exactly 22 / 43 chars that decodes
+to 16 / 32 bytes and re-encodes identically; `hex64` = 64 lowercase hex; `ms` = a decimal integer
+`1 <= x < 2^53` with no sign and no leading zero.
+
+```
+vault-grant: {"v":2,"purpose":"vault-grant","from":<uuid>,"to":<uuid>,"toKey":<b64_32>,"vaultId":<uuid>,"grantId":<b64_16>,"issuedAt":<ms>,"vk":<b64_32>}
+escrow-uvk:  {"v":2,"purpose":"escrow-uvk","userId":<uuid>,"identityKey":<b64_32>,"recoveryFp":<hex64>,"issuedAt":<ms>,"key":<b64_32>}
+```
+
+**Strict parse (every engine, in this order; the first failure decides the verdict).**
+
+1. The frame: shorter than 4 bytes → `bad_frame`. Wrong magic, including another version byte →
+   `unknown_format`. Total length outside `103..1125` or a reserved purpose code → `bad_frame`.
+2. Every statement byte is printable ASCII (`0x20..0x7E`), or `non_canonical`.
+3. The platform JSON parser yields an object with exactly the purpose's key set, or `non_canonical`.
+4. Every value is in its grammar, or `non_canonical`.
+5. Re-encode the parsed values through the template and byte-compare with the input, or
+   `non_canonical`. This step shuts out parser differences between engines: whitespace, key order,
+   duplicate keys, escapes and number forms all fail here.
+6. `v == 2`, the purpose literal matches the purpose code, and a grant has `from != to`, or
+   `bad_statement`. A v2 statement is closed: a future field set means a new magic.
+
+**Signer-key binding (one helper, `SignedStatement.verify` / `verifySignedStatement`).** It is the
+only way to get a verified statement. It takes the frame, the purpose the caller expects, and the
+signer's identityPub **pinned out of band** (never a value the server served). It runs the frame
+check and requires the expected purpose (`bad_frame`), then the strict parse above. It then checks
+`ed25519_pk_to_curve25519(signerPub) == pinned identityPub` (`signer_not_pinned_key`; a key with no
+curve image counts too). Last comes `crypto_sign_verify_detached` over M (`bad_signature`). `A` and
+`−A` have the same Montgomery image, so the mapping alone proves nothing; the signature check that
+follows it does. Field checks that depend on the caller (`to` is me, `vaultId` is this row,
+held-key compare) come after the helper returns. The extension does not verify signed statements.
+`spec/test-vectors/signedstatement.json` pins the layout, the mapping for the `sharedgrant.json`
+member seed, and every rejection rule.
 
 ## 6. Vault keys — everything is a vault
 
