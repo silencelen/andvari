@@ -646,6 +646,9 @@ internal sealed interface InviteFieldParse {
         val email: String,
         val rfp: String?,
         val gate: Boolean,
+        // A5: the admin's identity (in-person QR only); with rfp, what the in-person code authenticates.
+        val ifp: String? = null,
+        val iu: String? = null,
     ) : InviteFieldParse
 }
 
@@ -654,7 +657,7 @@ internal sealed interface InviteFieldParse {
 internal fun parseInviteField(raw: String, currentBaseUrl: String): InviteFieldParse {
     val p = EnrollLink.parse(raw) ?: return InviteFieldParse.Token(raw.trim())
     val gate = OriginNamespace.canonicalOrigin(p.o) != OriginNamespace.canonicalOrigin(currentBaseUrl)
-    return InviteFieldParse.Link(token = p.t, origin = p.o, email = p.e, rfp = p.rfp, gate = gate)
+    return InviteFieldParse.Link(token = p.t, origin = p.o, email = p.e, rfp = p.rfp, gate = gate, ifp = p.ifp, iu = p.iu)
 }
 
 /**
@@ -696,6 +699,15 @@ internal enum class InviteProvenance {
  */
 internal fun affirmableRfp(rfp: String?, provenance: InviteProvenance): String? =
     if (provenance == InviteProvenance.Typed) null else rfp?.takeIf { it.isNotEmpty() }
+
+/**
+ * The required-affirm CHECKER (security review 2026-10, root cause A, A5 — the A2 carry-forward): the link's
+ * rfp is a MACHINE value and must equal the server's advertised recovery fingerprint at FULL 64-hex length.
+ * Before A5 this leg ran the rfp through the 32-hex HUMAN helper ([Escrow.shortFormMatches]), so a 32-hex
+ * prefix passed; a prefix is accepted only from a human. Web twin: enrollposture.ts `escrowGate`.
+ */
+internal fun affirmRfpMatches(rfp: String?, serverFullFp: String): Boolean =
+    !rfp.isNullOrEmpty() && io.silencelen.andvari.core.crypto.Fingerprint.matchesFull(rfp, serverFullFp)
 
 /**
  * The anti-phishing Trust Gate's render decision (design 2026-07-15 §4.3) — pure so the IDN /
@@ -1708,7 +1720,17 @@ class AndvariViewModel(
         } else toVault()
     }
 
-    fun enroll(invite: String, email: String, name: String, password: String, waived: Boolean, typedShortFp: String) {
+    fun enroll(
+        invite: String,
+        email: String,
+        name: String,
+        password: String,
+        waived: Boolean,
+        typedShortFp: String,
+        // A5: the required-affirm leg — the link's FULL rfp and whether the human typed the in-person code.
+        affirmedRfp: String? = null,
+        inPersonVerified: Boolean = false,
+    ) {
         // State-layer re-assert (the S2-review race class: a Compose enabled flag lags a
         // frame while onClick reads live fields). Busy first — op() sets busy but never
         // checks it, so a same-frame double-tap would run two registers (second dies
@@ -1725,7 +1747,7 @@ class AndvariViewModel(
         // (setBaseUrl re-probe, Activity-recreation re-probe under the rememberSaveable-preserved
         // form). Threading the gate-time snapshot makes the typed-fingerprint re-assert and the
         // escrow seal bind to the SAME policy — the desktop DesktopState.enrollOp guarantee.
-        enrollOp(invite, email, name, password, waived, typedShortFp, _ui.value.policy)
+        enrollOp(invite, email, name, password, waived, typedShortFp, _ui.value.policy, affirmedRfp, inPersonVerified)
     }
 
     // F26: the enroll surface's mapper, NOT op()'s default. Register is the one call whose
@@ -1735,7 +1757,17 @@ class AndvariViewModel(
     // first device to "try again, and update andvari if it keeps happening", which is false twice
     // over and leaves them permanently stuck. The rows themselves live in the shared canon
     // ([HouseholdCopy.forEnrollError]) so this can't fork from web/desktop a second time.
-    private fun enrollOp(invite: String, email: String, name: String, password: String, waived: Boolean, typedShortFp: String, gatePolicy: ClientPolicy?) = op(mapError = HouseholdCopy::forEnrollError) {
+    private fun enrollOp(
+        invite: String,
+        email: String,
+        name: String,
+        password: String,
+        waived: Boolean,
+        typedShortFp: String,
+        gatePolicy: ClientPolicy?,
+        affirmedRfp: String? = null,
+        inPersonVerified: Boolean = false,
+    ) = op(mapError = HouseholdCopy::forEnrollError) {
         // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
         // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
         // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).
@@ -1756,7 +1788,11 @@ class AndvariViewModel(
         // bind to the org being enrolled into. required-typed only — waived (`waived == true`)
         // seals NO org escrow, so there is no fingerprint to attest. An explicit curated error
         // write (not check()) so the sentence reaches the user itself, never via a generic mapper.
-        if (!waived && !Escrow.shortFormMatches(typedShortFp, policy.recoveryFingerprint)) {
+        // A5: the required-affirm leg compares the link's rfp at FULL length (a machine value), and only
+        // after the human typed the in-person code; the typed-sheet leg keeps the 32-hex human compare.
+        val anchorOk = if (affirmedRfp != null) inPersonVerified && affirmRfpMatches(affirmedRfp, policy.recoveryFingerprint)
+        else Escrow.shortFormMatches(typedShortFp, policy.recoveryFingerprint)
+        if (!waived && !anchorOk) {
             _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters.")
             return@op
         }
@@ -1783,7 +1819,10 @@ class AndvariViewModel(
                     inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
                     password = password, params = policy.kdfParams,
                     recoveryPublicKey = recoveryPub,
-                    recoveryFingerprint = if (waived) null else policy.recoveryFingerprint,
+                    // The seal's verified fingerprint is the human-anchored value: the in-person link's full rfp,
+                    // or the advertised fingerprint the typed 32 hex matched. Account.enroll refuses a served
+                    // key whose fingerprint differs from it in full (A4 binding, A5 anchor).
+                    recoveryFingerprint = if (waived) null else (affirmedRfp ?: policy.recoveryFingerprint),
                     deviceName = android.os.Build.MODEL ?: "android",
                 )
             }
@@ -2917,6 +2956,49 @@ class AndvariViewModel(
     /** Seed-derived identity short code (spec 01 §5, 32 hex) — read out during sharing verification. */
     fun identityCode(): String? = account?.identityFingerprintShort()
 
+    // ---- household verification + personal vault (security review 2026-10, root cause A §4, §7.2; A5) ----
+    // Thin seams over the shared core (SyncEngine): no pin and no personal-vault decision is made here.
+
+    /** The verified household members (pairwise pins, owner decision Q4). */
+    fun householdContacts(): List<io.silencelen.andvari.core.client.Contact> = engine?.accountState?.contacts().orEmpty()
+
+    /** Rollback / unreadable anomaly from the last account-state read (display once). */
+    fun householdAnomaly(): io.silencelen.andvari.core.client.AccountStateSync.Anomaly? = engine?.accountState?.anomaly
+
+    suspend fun refreshHousehold() {
+        runCatching { engine?.accountState?.refresh() }
+    }
+
+    /** My identity QR payload over the seed-derived key. */
+    fun identityQrPayload(): String? = engine?.identityQrPayload()
+
+    suspend fun lookupHouseholdMember(email: String): io.silencelen.andvari.core.model.UserLookupResponse =
+        requireNotNull(engine) { "locked" }.lookupMember(email)
+
+    /** Pins ONLY when the typed 32 hex match the served key; null = mismatch, nothing pinned. */
+    suspend fun verifyHouseholdMember(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String): io.silencelen.andvari.core.client.Contact? =
+        requireNotNull(engine) { "locked" }.verifyMemberTyped(served, typed)
+
+    suspend fun unpinHouseholdMember(userId: String) {
+        requireNotNull(engine) { "locked" }.unpinMember(userId)
+    }
+
+    fun personalStatus(): Account.PersonalStatus? = account?.personalStatus
+
+    fun personalVaultChoices(): List<io.silencelen.andvari.core.client.PersonalVaultMigration.Candidate>? = engine?.personalVaultChoices
+
+    fun personalRedesignationChoices(): List<io.silencelen.andvari.core.client.VaultInfo> = engine?.redesignationChoices().orEmpty()
+
+    /** The §8.5 answer (first designation; no reauth needed while no wrap is stored). */
+    suspend fun designatePersonalVault(vaultId: String) {
+        requireNotNull(engine) { "locked" }.designatePersonalVault(vaultId, null)
+    }
+
+    /** Settings re-designation (Q9): replaces the stored wrap with a fresh master-password reauth. */
+    suspend fun redesignatePersonalVault(vaultId: String, password: String) {
+        requireNotNull(engine) { "locked" }.redesignatePersonalVault(vaultId, password)
+    }
+
     /** Seed-derived identity FULL fingerprint (spec 01 §5, 64 hex) — printed on the recovery sheet
      *  (spec 04 §6) beside the short form as the recovery CLI's identity anchor. */
     fun identityCodeFull(): String? = account?.identityFingerprintFull()
@@ -3960,6 +4042,9 @@ class AndvariViewModel(
             deleteCache(originKey, acct.userId); InMemoryVaultCache()
         }
         val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
+        // Root cause A §8.5 (A5): once the migration stores the personal wrap, carry it into the cached
+        // account keys so an offline cold start knows the personal vault without the network.
+        newEngine.onPersonalWrapStored = { w -> store.loadAccountKeys()?.let { persistAccountKeys(it.copy(personalWrap = w)) } }
         // VaultSession closes any previously-bound engine/api (defensive: never two conns).
         VaultSession.bind(a, acct, newEngine, provenance)
         // §7.1: the ONE place a full-password unlock completes with a session bound, so the

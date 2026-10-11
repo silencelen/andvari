@@ -43,6 +43,7 @@ import { Sharing } from "./Sharing";
 import { Empty } from "./Empty";
 import { estimateStrength } from "./strength";
 import { windowRange, type WindowRange } from "./virtual";
+import { PersonalVaultBanner } from "./Household";
 
 type View = "vault" | "sharing" | "health" | "settings" | "admin" | "trash";
 
@@ -623,6 +624,10 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
       {(escrowStale || escrowNeedsV2) && escrowFingerprint && <ReSealBanner account={account} client={client} escrowFingerprint={escrowFingerprint} migration={!escrowStale} />}
 
+      {/* Security review 2026-10, root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default
+          destination, usage paused, and (when the migration needs the human) "Which vault is your Personal vault?". */}
+      <PersonalVaultBanner account={account} store={store} onChanged={refresh} />
+
       {/* §C6 (design 2026-07-13-web-offline-cache): an OFFLINE unlock with cached
           recoveryConfirmed !== true PROCEEDS with this persistent, non-dismissable REMINDER —
           deliberately reminder-not-error copy (the vault + account are fine; it also covers a
@@ -692,7 +697,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             onCsv={() => { setView("vault"); closeLayers(); setExportMode("csv"); }}
           />
         ) : view === "admin" && isAdmin ? (
-          <Admin client={client} policy={policy} />
+          <Admin client={client} policy={policy} account={account} />
         ) : exportMode ? (
           <ExportPanel
             mode={exportMode}

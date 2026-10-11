@@ -38,8 +38,12 @@ class RegisterRefusalCoverageTest {
      * same generator — and take the same answer for the same reason. This set grew exactly the
      * way its KDoc promises: the server added the refusals, this pin failed, and the decision
      * that they are honest-generic is recorded here rather than shipped as a silent default.
+     *
+     * `bad_personal_wrap` (security review 2026-10, root cause A, A5) is the same class again: the
+     * personal wrap is minted by `Account.enroll` beside the personal vault id, so a malformed or
+     * mismatched one is a broken build, never a user action, and "update andvari" is the advice.
      */
-    private val GENERIC_400_IS_HONEST = setOf("bad_user_id", "user_id_taken", "bad_vault_id", "vault_id_taken")
+    private val GENERIC_400_IS_HONEST = setOf("bad_user_id", "user_id_taken", "bad_vault_id", "vault_id_taken", "bad_personal_wrap")
 
     /** The generic 400 row — a code that still renders THIS is uncurated by definition. */
     private val generic400 = HouseholdCopy.forError(ApiException(400, "definitely_not_a_real_code", "raw"))

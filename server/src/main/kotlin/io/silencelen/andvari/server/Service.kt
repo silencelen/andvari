@@ -306,6 +306,12 @@ class Service(
         if (!UUID_RE.matches(req.personalVault.vaultId)) throw BadRequest("bad_vault_id")
         requireB64(req.personalVault.metaBlob, 4096, "meta_blob")
         requireB64(req.personalVault.wrappedVk, 1024, "wrapped_vk")
+        // Root cause A §4.1 (A5): the personal wrap, when sent, must name the vault being created; the
+        // server cannot check the AEAD (it holds no UVK), only the shape.
+        req.personalWrap?.let { pw ->
+            if (pw.vaultId != req.personalVault.vaultId) throw BadRequest("bad_personal_wrap")
+            requireB64(pw.wrappedVk, 1024, "personal_wrap")
+        }
         requireB64(req.wrappedUvk, 1024, "wrapped_uvk")
         requireB64(req.identityPub, 64, "identity_pub")
         requireB64(req.encryptedIdentitySeed, 1024, "encrypted_identity_seed")
@@ -376,6 +382,9 @@ class Service(
                 "INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES(?,?, 'owner', ?, ?)",
                 req.personalVault.vaultId, userId, req.personalVault.wrappedVk, grantRev,
             )
+            req.personalWrap?.let { pw ->
+                c.exec("INSERT INTO personal_wrap(userId,vaultId,wrappedVk,updatedAt) VALUES(?,?,?,?)", userId, pw.vaultId, pw.wrappedVk, t)
+            }
             c.exec("UPDATE invites SET usedAt=? WHERE tokenHash=?", t, tokenHash)
 
             val session = issueSession(c, userId, req.device.platform, req.device.name, clientVersion)
@@ -936,7 +945,89 @@ class Service(
         // §F.9: read straight off the users row; a fresh register reads back false (capture not yet
         // confirmed), driving the client's capture-and-confirm gate on first vault entry.
         recoveryConfirmed = repo.isRecoveryConfirmed(u.userId),
+        personalWrap = personalWrap(u.userId),
     )
+
+    // ---- account state + personal wrap (security review 2026-10, root cause A §4, branch A5) ----
+
+    private fun personalWrap(userId: String): io.silencelen.andvari.core.model.PersonalWrap? = repo.db.read { c ->
+        c.queryOne("SELECT vaultId, wrappedVk FROM personal_wrap WHERE userId=?", userId) { rs ->
+            io.silencelen.andvari.core.model.PersonalWrap(rs.getString(1), rs.getString(2))
+        }
+    }
+
+    /** GET /account/state: the opaque blob and the CAS counter (seq 0 + null = never written). */
+    fun accountState(userId: String): io.silencelen.andvari.core.model.AccountStateResponse = repo.db.read { c ->
+        c.queryOne("SELECT sealedState, seq FROM account_state WHERE userId=?", userId) { rs ->
+            io.silencelen.andvari.core.model.AccountStateResponse(rs.getString(1), rs.getLong(2))
+        }
+    } ?: io.silencelen.andvari.core.model.AccountStateResponse(null, 0)
+
+    /**
+     * PUT /account/state: compare-and-set on the server counter. 409 `stale_state` when [put].baseSeq is
+     * not the current counter (the client re-reads, merges and retries). Not audited: like the usage
+     * ledger it is written on a routine cadence and grants nothing; size-capped like every blob.
+     */
+    fun putAccountState(p: Principal, put: io.silencelen.andvari.core.model.AccountStatePut): io.silencelen.andvari.core.model.AccountStateResponse {
+        if (!isB64(put.sealedState, ACCOUNT_STATE_SEALED_MAX * 3 / 4) || put.sealedState.length > ACCOUNT_STATE_SEALED_MAX) {
+            throw BadRequest("bad_account_state")
+        }
+        if (put.baseSeq < 0) throw BadRequest("bad_base_seq")
+        return repo.db.tx { c ->
+            val cur = c.queryOne("SELECT seq FROM account_state WHERE userId=?", p.userId) { it.getLong(1) } ?: 0L
+            if (cur != put.baseSeq) throw Conflict("stale_state")
+            val next = cur + 1
+            c.exec(
+                "INSERT INTO account_state(userId,sealedState,seq,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET sealedState=excluded.sealedState, seq=excluded.seq, updatedAt=excluded.updatedAt",
+                p.userId, put.sealedState, next, now(),
+            )
+            io.silencelen.andvari.core.model.AccountStateResponse(put.sealedState, next)
+        }
+    }
+
+    /**
+     * PUT /account/personal-wrap (root cause A §4.3). A FIRST set (the §8.5 migration) needs only a session;
+     * REPLACING an existing wrap (owner decision Q9, re-designation) needs a fresh master-password reauth
+     * ([io.silencelen.andvari.core.model.PersonalWrapPut.currentAuthKey], verified like changePassword) and
+     * gets `409 personal_wrap_exists` without one. The caller must hold an active grant on the vault. The
+     * server cannot check the AEAD; the guard is against buggy clients, never against the server itself.
+     */
+    fun putPersonalWrap(p: Principal, put: io.silencelen.andvari.core.model.PersonalWrapPut, ip: String) {
+        if (!UUID_RE.matches(put.vaultId)) throw BadRequest("bad_vault_id")
+        requireB64(put.wrappedVk, 1024, "personal_wrap")
+        val u = repo.userById(p.userId) ?: throw Unauthorized()
+        val reauthed = put.currentAuthKey?.let { key ->
+            if (!ServerCrypto.verify(u.verifier, key)) {
+                repo.audit("personal_wrap_reauth_fail", p.userId, p.deviceId, ip)
+                throw Unauthorized()
+            }
+            true
+        } ?: false
+        repo.db.tx { c ->
+            if (repo.grantRole(c, p.userId, put.vaultId) == null) throw Forbidden("no_grant")
+            val existing = c.queryOne("SELECT vaultId FROM personal_wrap WHERE userId=?", p.userId) { it.getString(1) }
+            if (existing != null && !reauthed) throw Conflict("personal_wrap_exists")
+            c.exec(
+                "INSERT INTO personal_wrap(userId,vaultId,wrappedVk,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET vaultId=excluded.vaultId, wrappedVk=excluded.wrappedVk, updatedAt=excluded.updatedAt",
+                p.userId, put.vaultId, put.wrappedVk, now(),
+            )
+            repo.auditOn(c, if (existing == null) "personal_wrap_set" else "personal_wrap_redesignate", p.userId, p.deviceId, ip, put.vaultId)
+        }
+    }
+
+    /**
+     * GET /users/{userId}/identity: the identity key the server holds for an ACTIVE user. Served for a human
+     * to verify (root cause A §7.2: the enrolment pin of the admin, a QR scan); a client never pins it on
+     * its own. Audited like the email lookup.
+     */
+    fun userIdentity(p: Principal, userId: String, ip: String): UserLookupResponse {
+        val u = repo.userById(userId)?.takeIf { it.status == "active" } ?: run {
+            repo.audit("user_identity_lookup", p.userId, p.deviceId, ip)
+            throw NotFound("no_such_user")
+        }
+        repo.audit("user_identity_lookup", p.userId, p.deviceId, ip, u.userId)
+        return UserLookupResponse(u.userId, u.displayName, u.identityPub)
+    }
 
     /**
      * F57: true when the account has an escrow blob sealed to a SUPERSEDED org recovery key (a

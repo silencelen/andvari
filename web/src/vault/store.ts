@@ -5,6 +5,7 @@ import type {
   ItemDoc,
   Mutation,
   PendingTransfer,
+  PersonalWrap,
   PushResponse,
   RemovedGrantInfo,
   WireGrant,
@@ -25,6 +26,8 @@ import {
 import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
+import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
+import { type PersonalCandidate, personalVaultChoices } from "./personalvault";
 import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
 
 /**
@@ -446,6 +449,90 @@ export class VaultStore {
     return pending.length + staged.length;
   }
 
+  // ---- personal vault identity + account state (security review 2026-10, root cause A §4, §8.5) ----
+
+  /** The account-state blob (contact pins). Refreshed best-effort on every sync. */
+  readonly accountState: AccountStateSync;
+  private readonly clientState: ClientStateStore;
+
+  /** Non-null while the §8.5 migration needs the human: "Which vault is your Personal vault?". */
+  personalVaultChoices: PersonalCandidate[] | null = null;
+
+  /** The question's choices, from the synced rows and this client's own key provenance. The server's
+   *  `type` label and `role` are not read (A5 review H-1). */
+  personalCandidates(): PersonalCandidate[] {
+    const counts = new Map<string, number>();
+    for (const it of this.itemsById.values()) counts.set(it.vaultId, (counts.get(it.vaultId) ?? 0) + 1);
+    const out: PersonalCandidate[] = [];
+    for (const v of this.vaultsById.values()) {
+      if (!this.account.hasVault(v.vaultId)) continue;
+      const g = this.grantWireByVault.get(v.vaultId);
+      out.push({
+        vaultId: v.vaultId,
+        ownUvkWrap: this.account.keyFromOwnUvkWrap(v.vaultId) && !!g && g.userId === this.account.userId && !g.sealedVk,
+        name: this.account.decryptVaultName(v.vaultId, v.metaBlob),
+        itemCount: counts.get(v.vaultId) ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Root cause A §4.3 as amended by the A5 review (H-1), local only, never minting (core twin):
+   * confirmed → cache the wrap on this device; absent + cached → "withheld" (anomaly, the cached wrap
+   * stands, no question, no label); absent + nothing cached → ask; unreadable → only a re-designation.
+   */
+  private decidePersonalLocally(): void {
+    switch (this.account.personalStatus) {
+      case "confirmed": {
+        const w = this.account.personalWrap;
+        if (w) this.clientState.set("personal.wrap", JSON.stringify({ vaultId: w.vaultId, wrappedVk: w.wrappedVk }));
+        this.clientState.set("personal.last", this.account.personalVaultId);
+        this.personalVaultChoices = null;
+        return;
+      }
+      case "withheld":
+        this.personalVaultChoices = null;
+        return;
+      case "unreadable":
+        this.personalVaultChoices = [];
+        return;
+      case "absent": {
+        let cached: PersonalWrap | null = null;
+        try {
+          const raw = this.clientState.get("personal.wrap");
+          const o = raw ? (JSON.parse(raw) as Partial<PersonalWrap>) : null;
+          if (o && typeof o.vaultId === "string" && typeof o.wrappedVk === "string") cached = { vaultId: o.vaultId, wrappedVk: o.wrappedVk };
+        } catch {
+          cached = null;
+        }
+        if (cached) {
+          this.account.applyCachedPersonalWrap(cached);
+          this.personalVaultChoices = (this.account.personalStatus as string) === "withheld" ? null : [];
+          return;
+        }
+        this.personalVaultChoices = personalVaultChoices(this.personalCandidates(), this.clientState.get("personal.last"));
+      }
+    }
+  }
+
+  /**
+   * The human's answer to "Which vault is your Personal vault?" (§8.5), or a Settings re-designation
+   * (owner decision Q9). Only a vault keyed from our own UVK wrap. `currentAuthKey` (a FRESH password
+   * entry) is required by the server to REPLACE an existing wrap.
+   */
+  async designatePersonalVault(vaultId: string, currentAuthKey?: string): Promise<void> {
+    const wrap = this.account.buildPersonalWrap(vaultId);
+    await this.api.putPersonalWrap(wrap, currentAuthKey);
+    this.account.applyPersonalWrap(wrap);
+    this.decidePersonalLocally(); // caches the new wrap and clears the question
+  }
+
+  /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
+  redesignationChoices(): VaultInfo[] {
+    return this.vaults().filter((v) => this.account.keyFromOwnUvkWrap(v.vaultId));
+  }
+
   constructor(
     private api: ApiClient,
     private account: Account,
@@ -456,7 +543,10 @@ export class VaultStore {
      *  through `this.cache` unconditionally; NullCache no-ops). The cross-tab lock name
      *  derives from `account.userId` (§D.5). */
     private cache: VaultCache = new NullCache(),
+    clientState?: ClientStateStore,
   ) {
+    this.clientState = clientState ?? localClientState(account.userId);
+    this.accountState = new AccountStateSync(api, account, this.clientState);
     // CR-01 (compliance 2026-07-15): the moment this cache's IndexedDB connection closes out
     // from under us — a browser-forced close (eviction/corruption) or a sibling tab / session-
     // level wipe firing deleteDatabase → versionchange — idbcache invokes onClosed. Demote to
@@ -521,16 +611,23 @@ export class VaultStore {
     return n;
   }
 
-  /** Vaults whose key we hold, personal first then shared by name. */
+  /**
+   * Vaults whose key we hold, personal first then shared by name.
+   *
+   * `type` is DERIVED, not copied (security review 2026-10, root cause A §4.3; core vaultInfos twin):
+   * "personal" iff the vault is `account.personalVaultId`, which only the UVK-authenticated personal wrap
+   * (or the §8.5 migration) sets. The server's `type` label is ignored for every decision this feeds.
+   */
   vaults(): VaultInfo[] {
     const out: VaultInfo[] = [];
     for (const v of this.vaultsById.values()) {
       if (!this.account.hasVault(v.vaultId)) continue; // no key → nothing usable
       const name = this.account.decryptVaultName(v.vaultId, v.metaBlob);
+      const personal = v.vaultId === this.account.personalVaultId;
       out.push({
         vaultId: v.vaultId,
-        type: v.type,
-        name: name && name !== "(vault)" ? name : v.type === "personal" ? "Personal" : "Shared",
+        type: personal ? "personal" : "shared",
+        name: name && name !== "(vault)" ? name : personal ? "Personal" : "Shared",
         role: this.account.roleFor(v.vaultId),
       });
     }
@@ -559,6 +656,9 @@ export class VaultStore {
     // one has settled). Bounded: one extra pull per sync; a bell landing during THIS pull is
     // caught by its own syncNow's comparison after it joins.
     if (this.bellRev > this.cursor) await this.pull();
+    // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
+    this.decidePersonalLocally();
+    await this.accountState.refresh().catch(() => {});
     // Member self-wrap (root cause A §3.2) is deliberately NOT posted yet (core SyncEngine.sync
     // twin): the only key a member can wrap today came from a server-mintable v1 seal, and wrapping
     // it would launder a server-chosen key into the canonical slot. Waits for v2 verification.
@@ -729,14 +829,6 @@ export class VaultStore {
       const vault = this.keepNewerMeta(delivered);
       this.vaultsById.set(vault.vaultId, vault);
       ops.push((b) => b.upsertVault(vault)); // the merged keepNewerMeta row — disk mirrors memory
-      // Discover the personal vault so save()/encrypt default to it. `type` is a SERVER
-      // plaintext column bound into no AD, so this is a hint, not evidence: setPersonalVault
-      // refuses a candidate whose VK arrived by member grant, which is what stops a hostile
-      // relabel from moving the usage key (audit H64). Grants are applied above this loop
-      // precisely so the provenance is known by the time a candidate is offered.
-      if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
-        this.account.setPersonalVault(vault.vaultId);
-      }
       // Consumed-deleteId marker (spec 03 §11 / #4): a live vault that WAS restored carries
       // restoreProof over the deleteId it undid. Verifying it durably marks the deleteId
       // consumed so a later replayed old tombstone bearing it is recognized as stale — even
@@ -767,7 +859,7 @@ export class VaultStore {
     for (const vaultId of newlyAdded) {
       if (reinstated.has(vaultId) || this.addedNoticed.has(vaultId)) continue;
       const v = this.vaultsById.get(vaultId);
-      if (!v || v.type === "personal" || !this.account.hasVault(vaultId)) continue;
+      if (!v || vaultId === this.account.personalVaultId || !this.account.hasVault(vaultId)) continue;
       // An owner grant is our OWN wrappedVk (opened under the UVK), so a second active device sees
       // a vault THIS account just created as a brand-new grant. "You were added to X" would be a
       // lie there. Ownership handed TO us arrives on a vault we already held (promotion), so it is
@@ -1269,13 +1361,10 @@ export class VaultStore {
     }
     for (const vault of await this.cache.vaults()) {
       this.vaultsById.set(vault.vaultId, vault);
-      // Discover the personal vault so save()/encrypt default to it (pull parity — including
-      // the H64 member-grant refusal inside setPersonalVault; the grant replay above rebuilds
-      // the provenance this cold-start path depends on).
-      if (vault.type === "personal" && this.account.hasVault(vault.vaultId)) {
-        this.account.setPersonalVault(vault.vaultId);
-      }
     }
+    // Root cause A §4.3: the personal vault came from the personal wrap at unlock; only without one does
+    // the §8.5 rule run, offline, over the replayed provenance (core hydrate parity).
+    this.decidePersonalLocally();
     for (const item of await this.cache.envelopes()) this.applyWireItem(item);
     for (const rec of await this.cache.heldVaults()) {
       this.holding.set(rec.vault.vaultId, { ...rec, cachedName: this.peekHeldName(rec) });

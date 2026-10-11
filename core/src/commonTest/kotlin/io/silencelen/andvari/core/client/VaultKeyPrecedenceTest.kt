@@ -190,9 +190,9 @@ class VaultKeyPrecedenceTest {
         second.addGrant(wrappedOnly)
         assertEquals("Household", second.decryptVaultName(shared.vaultId, shared.request.metaBlob))
         assertFalse(second.needsSelfWrap(wrappedOnly))
-        // H64 still holds without the seal: a non-owner row is a shared vault, never a personal candidate.
+        // H64 still holds without the seal: a non-owner row is a shared vault. Since root cause A §4 (A5)
+        // "personal" comes only from the personal wrap, so nothing here can make it personal.
         assertTrue(second.keyArrivedByMemberGrant(shared.vaultId))
-        second.setPersonalVault(shared.vaultId)
         assertEquals("", second.personalVaultId)
 
         // And the seal is no longer load-bearing: with both present, a swapped seal changes nothing.

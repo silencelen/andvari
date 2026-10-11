@@ -52,7 +52,7 @@ describe("H49 — the caption caps are scoped OUT of sentence-length labels", ()
       "Vault.tsx: Type the FIRST 32 characters of the fingerprint on your printed recovery sheet",
       "Welcome.tsx: Recovery check — type the FIRST 32 characters of the fingerprint on your printed recovery sheet",
       "Welcome.tsx: Type your recovery phrase back to confirm you saved it",
-      "Admin.tsx: Confirm your recovery sheet (first 16 characters) to stamp a scannable code into the QR",
+      "Admin.tsx: Confirm your recovery sheet (first 32 characters) to stamp a scannable code into the QR",
       "Admin.tsx: KDF (read-only — changing it requires a coordinated re-enrollment)",
     ]) {
       expect(found, known).toContain(known);

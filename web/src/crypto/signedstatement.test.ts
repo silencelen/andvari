@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Account } from "../vault/account";
 import { fromB64, toB64 } from "./bytes";
 import type { KdfParams } from "./keys";
@@ -14,12 +14,28 @@ import {
   type Statement,
   SignedStatementError,
   signedMessage,
-  verifyEscrowStatement,
   verifySignedStatement,
+  type EscrowStatementVerifier,
 } from "./signedstatement";
 import { fingerprint as orgFingerprint } from "./escrow";
 import { sealOpen } from "./provider";
 import { CryptoError, initSodium } from "./sodium";
+
+/**
+ * The anchored escrow verifier is module-private (security review 2026-10, A5): escrow.ts claims it once.
+ * This suite grades it in an ISOLATED module registry (fresh signedstatement + sodium instances) where no
+ * escrow.ts has claimed it yet. Verdicts are read duck-typed, since the fresh SignedStatementError is a
+ * different class object.
+ */
+let verifyEscrowStatement: EscrowStatementVerifier;
+async function claimIsolatedEscrowVerifier(): Promise<EscrowStatementVerifier> {
+  vi.resetModules();
+  const sodium = await import("./sodium");
+  await sodium.initSodium();
+  const mod = await import("./signedstatement");
+  return mod.claimEscrowVerifier();
+}
+
 
 /**
  * SignedStatement v2 + the joint Ed25519 signing key (security review 2026-10, root cause A §1.1–§1.3),
@@ -59,6 +75,7 @@ function verdictOf(fn: () => unknown): string {
     fn();
   } catch (e) {
     if (e instanceof SignedStatementError) return e.verdict;
+    if (e && typeof (e as { verdict?: unknown }).verdict === "string") return (e as { verdict: string }).verdict;
     throw e;
   }
   return "ACCEPTED";
@@ -67,6 +84,7 @@ function verdictOf(fn: () => unknown): string {
 describe("signedstatement.json — joint key + SignedStatement v2", () => {
   beforeAll(async () => {
     await initSodium();
+    verifyEscrowStatement ??= await claimIsolatedEscrowVerifier();
   });
 
   it("the joint signing key maps to the EXISTING identityPub (sharedgrant.json member)", () => {
@@ -180,6 +198,7 @@ describe("Account — joint signing key (owner decision: joint key)", () => {
   const PASSWORD = "correct horse battery staple";
   beforeAll(async () => {
     await initSodium();
+    verifyEscrowStatement ??= await claimIsolatedEscrowVerifier();
   });
 
   it("is derived at enrol and unlock and maps to identityPub; its statements verify only under its own pin", async () => {

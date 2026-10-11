@@ -1,4 +1,5 @@
-import { adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk } from "../crypto/ad";
+import { adAccountState, adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk, adVkPersonal } from "../crypto/ad";
+import { type AccountStateDoc, decodeAccountState, encodeAccountState } from "./accountstate";
 import { usageKey } from "../crypto/usagekey";
 import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open, seal, structuralRefusal } from "../crypto/envelope";
@@ -16,6 +17,7 @@ import type {
   EscrowUpload,
   ItemDoc,
   ItemVersion,
+  PersonalWrap,
   RecoveryCommitRequest,
   RecoverySelfSetupRequest,
   RecoveryVerifyResponse,
@@ -23,6 +25,9 @@ import type {
   WireGrant,
   WireItem,
 } from "../api/types";
+
+/** Where the personal vault came from (security review 2026-10, root cause A §4.3, §8.5). */
+export type PersonalStatus = "confirmed" | "withheld" | "absent" | "unreadable";
 
 /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed; core parity). */
 export const ITEM_FORMAT_VERSION = 2;
@@ -174,9 +179,33 @@ export class Account {
      */
     readonly signPub: Uint8Array,
     private readonly signSecret: Uint8Array,
-    public personalVaultId: string, // "" until discovered from the personal-vault grant on first sync
+    personalVaultId: string,
     private readonly vaultKeys: Map<string, Uint8Array>,
-  ) {}
+  ) {
+    this.personalVaultIdValue = personalVaultId;
+  }
+
+  /**
+   * The personal vault (security review 2026-10, root cause A §4): named by `AccountKeys.personalWrap`
+   * (only this user's UVK can mint it, {@link applyPersonalWrap}) or picked by the §8.5 migration
+   * (the human's answer, never an automatic pick: A5 review H-1). "" = no personal vault: no default destination, no usage ledger.
+   * NEVER set from a server `type` label or `role`. Core twin: `Account.personalVaultId`.
+   */
+  get personalVaultId(): string {
+    return this.personalVaultIdValue;
+  }
+
+  private personalVaultIdValue: string;
+
+  /** Where the personal vault came from (core `PersonalStatus` twin). */
+  get personalStatus(): PersonalStatus {
+    return this.personalStatusValue;
+  }
+
+  private personalStatusValue: PersonalStatus = "absent";
+
+  /** Vaults whose key opened from a UVK wrap of OURS (own grant row or the personal wrap), never a seal. */
+  private readonly uvkWrappedVaults = new Set<string>();
 
   /**
    * Enrollment (spec 01/04, design 2026-07-12 §F.4): generate all keys client-side, CONDITIONALLY
@@ -279,11 +308,16 @@ export class Account {
         memberRecovery: { recoveryWrappedUvk: recovery.recoveryWrappedUvk, recoveryAuthKey: recovery.recoveryAuthKey },
         personalVault: { vaultId: personalVaultId, wrappedVk: toB64(wrappedVk), metaBlob: toB64(metaBlob) },
         device: { platform: "web", name: deviceName(), installId: params.installId },
+        // Root cause A §4.1: "personal" is this UVK-authenticated wrap from day one.
+        personalWrap: { vaultId: personalVaultId, wrappedVk: toB64(seal(uvk, vk, adVkPersonal(personalVaultId, userId))) },
       };
 
       const vaultKeys = new Map([[personalVaultId, vk]]);
       const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, personalVaultId, vaultKeys);
       account.vaultRoles.set(personalVaultId, "owner");
+      account.personalStatusValue = "confirmed";
+      account.personalWrapValue = request.personalWrap!;
+      account.uvkWrappedVaults.add(personalVaultId);
       signingForCleanup = null; // owned by the returned Account now
       return { request, account, recoverySecret: recovery.recoverySecret };
     } finally {
@@ -481,7 +515,10 @@ export class Account {
       identity.privateKey.fill(0);
       throw new IdentityMismatchError();
     }
-    return new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, "", new Map());
+    const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, "", new Map());
+    // Root cause A §4.3: the personal vault comes from the UVK-authenticated wrap and nothing else.
+    account.applyPersonalWrap(keys.personalWrap ?? null);
+    return account;
   }
 
   /**
@@ -512,19 +549,21 @@ export class Account {
     this.vaultKeys.set(grant.vaultId, opened.vk);
     this.unreadableKeyVaults.delete(grant.vaultId);
     if (opened.sealMismatch) this.vkMismatchVaults.add(grant.vaultId);
+    if (!opened.viaSeal && grant.userId === this.userId) this.uvkWrappedVaults.add(grant.vaultId);
     // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and never
     // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
     // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer separates
     // shared from mine-alone: a row is member-granted when the key came from a seal, OR it carries
     // any seal, OR its role is not owner. Only an owner row with a bare UVK wrap and no seal is a
-    // personal candidate, which is what enrolment mints. Residue (unchanged, see setPersonalVault):
-    // those signals are server plaintext until the personal-vault identity of §4 lands.
+    // personal candidate, which is what enrolment mints. Since root cause A §4 this bit no longer
+    // decides "personal" (the personal wrap does); it feeds display and the §8.5 candidate filter.
     if (opened.viaSeal || !!grant.sealedVk || grant.role !== "owner") this.memberGrantedVaults.add(grant.vaultId);
   }
 
   /**
    * Canonical-key precedence (security review 2026-10, root cause A §3.1) — core `openGrantVk` twin.
-   * The VK comes from the FIRST of: (1) the personal wrap (§4, not yet built); (2) our own UVK wrap
+   * The VK comes from the FIRST of: (1) the personal wrap (§4, applied at unlock, so a row for that vault
+   * is only compared against it); (2) our own UVK wrap
    * `wrappedVk` (owner wrap, post-transfer new-owner wrap, member self-wrap §3.2); (3) a v2 signed
    * grant (§1.4, not yet built); (4) a v1 `sealedVk`, legacy only. A seal is never preferred over a
    * UVK wrap: when the wrap opens, a seal on the same row is opened only to compare (same → silent,
@@ -652,6 +691,7 @@ export class Account {
     this.vaultKeys.delete(vaultId);
     this.vaultRoles.delete(vaultId);
     this.memberGrantedVaults.delete(vaultId); // provenance dies with the key it describes (H64)
+    this.uvkWrappedVaults.delete(vaultId);
     this.vkMismatchVaults.delete(vaultId);
     this.unreadableKeyVaults.delete(vaultId);
   }
@@ -681,6 +721,7 @@ export class Account {
     };
     this.vaultKeys.set(vaultId, vk);
     this.vaultRoles.set(vaultId, "owner");
+    this.uvkWrappedVaults.add(vaultId);
     return { request, vaultId };
   }
 
@@ -701,38 +742,92 @@ export class Account {
   }
 
   /**
-   * The store calls this when it sees the personal vault among synced vaults. First writer
-   * wins; the value survives for the life of the unlocked account, and it is what
-   * {@link sealUsage} keys the usage ledger from and what save() defaults to.
-   *
-   * REFUSES a vault whose VK arrived by member grant (audit H64). `type === "personal"` is a
-   * server plaintext column (spec 02 §4) bound into no AD, and after enrollment nothing the
-   * client holds authenticates WHICH vault is its own: `personalVaultId` is rebuilt on every
-   * unlock from the first row the server labels personal whose key we happen to hold. A
-   * hostile server could therefore withhold the real personal row and relabel a SHARED vault
-   * the user is merely a member of; `usageKey = HKDF(VK, "andvari/v1|usage")` would then be
-   * computable by every other member of that vault, and `adUsage(userId)` is public — so a
-   * colluding co-member could read the victim's per-item behavioural log, the one thing the
-   * single-blob ledger design (spec 02 §8.2) exists to keep private.
-   *
-   * The refusal costs an honest account nothing: a personal vault is minted locally at
-   * enrollment and its grant is ALWAYS an owner row with a bare `wrappedVk` under our own UVK and no
-   * seal, so "member-granted" (see addGrant) and "is my personal vault" are disjoint by construction.
-   *
-   * Fail-closed on purpose: when every held candidate is member-granted, `personalVaultId`
-   * stays empty rather than pick one. Empty means "no personal vault", which sealUsage/
-   * openUsage already surface as "no ledger" (render "—", never error) and which makes a save
-   * with no explicit vault fail loudly instead of silently filing new logins into somebody
-   * else's shared vault.
-   *
-   * Residue, deliberate: an OWNER-created SHARED vault's grant is also `wrappedVk`, so this
-   * rule cannot tell it from a personal one. Closing that needs `"type":"personal"` inside the
-   * authenticated vaultMeta plaintext — a spec 02 §4 wire change deferred to a spec revision.
-   * Kotlin twin: `Account.setPersonalVault`.
+   * Root cause A §4.3 (core `Account.applyPersonalWrap` twin): adopt the personal vault from
+   * `AccountKeys.personalWrap`, `Envelope(UVK, VK, adVkPersonal(vaultId, userId))`. Absent → "absent"
+   * (no personal vault until the §8.5 migration resolves). Opens → "confirmed", its VK held FIRST.
+   * Does not open → "unreadable" (an anomaly), no personal vault, and no fallback to any label.
+   * Replaces the pre-A5 `setPersonalVault(label candidate)`: a server `type` label or `role` never
+   * reaches this decision any more.
    */
-  setPersonalVault(vaultId: string) {
-    if (this.keyArrivedByMemberGrant(vaultId)) return;
-    if (!this.personalVaultId) this.personalVaultId = vaultId;
+  applyPersonalWrap(wrap: PersonalWrap | null) {
+    if (!wrap) {
+      if (this.personalStatusValue !== "confirmed" && this.personalStatusValue !== "withheld") {
+        this.personalStatusValue = "absent";
+        this.personalVaultIdValue = "";
+      }
+      return;
+    }
+    if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "confirmed";
+    else {
+      this.personalStatusValue = "unreadable";
+      this.personalVaultIdValue = "";
+    }
+  }
+
+  /**
+   * A5 review H-1: the server served NO wrap, but this device cached one it authenticated before (UVK-sealed,
+   * so caching is safe). Only while "absent"; success → "withheld" (an anomaly the UI surfaces; no question,
+   * no label); a cached blob that does not open → "unreadable". Core twin: `applyCachedPersonalWrap`.
+   */
+  applyCachedPersonalWrap(wrap: PersonalWrap) {
+    if (this.personalStatusValue !== "absent") return;
+    if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "withheld";
+    else {
+      this.personalStatusValue = "unreadable";
+      this.personalVaultIdValue = "";
+    }
+  }
+
+  /** The wrap that decided the personal vault (served or cached), for the device's local cache. */
+  get personalWrap(): PersonalWrap | null {
+    return this.personalWrapValue;
+  }
+
+  private personalWrapValue: PersonalWrap | null = null;
+
+  private openAndInstallPersonalWrap(wrap: PersonalWrap): boolean {
+    let vk: Uint8Array | null = null;
+    try {
+      vk = open(this.uvk, fromB64(wrap.wrappedVk), adVkPersonal(wrap.vaultId, this.userId));
+    } catch {
+      vk = null;
+    }
+    if (!vk || vk.length !== 32) return false;
+    const held = this.vaultKeys.get(wrap.vaultId);
+    if (held && !ctEquals(held, vk)) this.vkMismatchVaults.add(wrap.vaultId);
+    this.vaultKeys.set(wrap.vaultId, vk);
+    this.unreadableKeyVaults.delete(wrap.vaultId);
+    this.uvkWrappedVaults.add(wrap.vaultId);
+    this.personalVaultIdValue = wrap.vaultId;
+    this.personalWrapValue = wrap;
+    return true;
+  }
+
+  /** True when this vault's key opened from a UVK wrap of ours (never a seal): re-designation may offer it. */
+  keyFromOwnUvkWrap(vaultId: string): boolean {
+    return this.uvkWrappedVaults.has(vaultId) && this.vaultKeys.has(vaultId);
+  }
+
+  /** Mint the personal wrap for `vaultId` (§4.1), round-trip verified. Refuses a vault whose key did not
+   *  open from our own UVK wrap, so a seal-delivered key is never laundered into "personal". */
+  buildPersonalWrap(vaultId: string): PersonalWrap {
+    if (!this.keyFromOwnUvkWrap(vaultId)) throw new CryptoError(`vault ${vaultId} is not wrapped under this account's key`);
+    const vk = this.vk(vaultId);
+    const wrapped = seal(this.uvk, vk, adVkPersonal(vaultId, this.userId));
+    if (!ctEquals(open(this.uvk, wrapped, adVkPersonal(vaultId, this.userId)), vk)) throw new CryptoError("personal wrap failed round-trip verification");
+    return { vaultId, wrappedVk: toB64(wrapped) };
+  }
+
+  /** Seal an account-state document (root cause A §4.2) under the UVK, bound to this userId. */
+  sealAccountState(doc: AccountStateDoc): string {
+    if (doc.userId !== this.userId) throw new CryptoError("account state belongs to another user");
+    return toB64(seal(this.uvk, utf8(encodeAccountState(doc)), adAccountState(this.userId)));
+  }
+
+  /** Open an account-state blob: CryptoError when it does not open under our UVK/AD (substituted or
+   *  injected), AccountStateError when it opens but is not a v1 document for this user. */
+  openAccountState(sealed: string): AccountStateDoc {
+    return decodeAccountState(this.userId, fromUtf8(open(this.uvk, fromB64(sealed), adAccountState(this.userId))));
   }
 
   hasVault(vaultId: string): boolean {

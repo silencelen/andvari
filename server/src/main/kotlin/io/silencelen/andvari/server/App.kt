@@ -169,6 +169,10 @@ internal const val STATIC_CACHE_NOSTORE = "no-store"
  *  row as free storage. */
 const val USAGE_SEALED_MAX = 512 * 1024
 
+/** Ceiling on the account-state blob (security review 2026-10, root cause A §4.2: "size-capped (64 KiB)"),
+ *  in base64 characters. Contact pins and the newest 256 nonces per vault fit with a wide margin. */
+const val ACCOUNT_STATE_SEALED_MAX = 64 * 1024
+
 fun requireEscrowBlob(sealedB64: String) {
     val bytes = try {
         Bytes.fromB64(sealedB64)
@@ -616,6 +620,26 @@ fun Application.andvariModule(services: Services) {
             val p = requirePrincipal(call, service)
             call.respond(service.accountKeys(p.userId))
         }
+        // ---- account state + personal wrap (security review 2026-10, root cause A §4, branch A5) ----
+        get("/api/v1/account/state") {
+            val p = requirePrincipal(call, service)
+            call.respond(service.accountState(p.userId))
+        }
+        put("/api/v1/account/state") {
+            val p = requirePrincipal(call, service)
+            // Client-produced ciphertext, so version-pinned like /usage (H07).
+            enforceVersion(call, service)
+            if (!limiter.allow("account_state:${p.userId}", 60, 60_000)) throw RateLimited()
+            call.respond(service.putAccountState(p, call.receive()))
+        }
+        put("/api/v1/account/personal-wrap") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            // A reauth here is a memory-hard verify: the password-change bucket shape.
+            if (!limiter.allow("personal_wrap:${p.userId}", 5, 60_000)) throw RateLimited()
+            service.putPersonalWrap(p, call.receive(), call.clientIp(config))
+            call.respondText("ok")
+        }
         put("/api/v1/account/password") {
             val p = requirePrincipal(call, service)
             // H07 (audit 2026-09-13): version-pinned like /sync/push and /items/{id}/restore. A
@@ -809,6 +833,13 @@ fun Application.andvariModule(services: Services) {
             val p = sharingPrincipal(config, service)
             if (!limiter.allow("lookup:${p.userId}", 20, 60_000)) throw RateLimited()
             call.respond(service.lookupUser(p, call.receive<io.silencelen.andvari.core.model.UserLookupRequest>().email, call.clientIp(config)))
+        }
+        get("/api/v1/users/{userId}/identity") {
+            // Root cause A §7.2: a served key for a HUMAN to verify (QR scan, enrolment pin). Same
+            // preamble and bucket as the email lookup.
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("lookup:${p.userId}", 20, 60_000)) throw RateLimited()
+            call.respond(service.userIdentity(p, requireUuid(call.parameters["userId"], "user_id"), call.clientIp(config)))
         }
         get("/api/v1/vaults/{vaultId}/members") {
             // F23: this GET had drifted past the public-origin refusal — now it rides the

@@ -162,7 +162,7 @@ describe("canonical-key precedence — Account", () => {
     second.addGrant({ ...row, wrappedVk: wrap, sealedVk: null, rev: 5 });
     expect(second.decryptVaultName(vaultId, request.metaBlob)).toBe("Household");
     expect(second.keyArrivedByMemberGrant(vaultId)).toBe(true); // H64 holds without the seal
-    second.setPersonalVault(vaultId);
+    // Root cause A §4 (A5): "personal" comes only from the personal wrap; no grant row can make it so.
     expect(second.personalVaultId).toBe("");
 
     const third = await device(member);

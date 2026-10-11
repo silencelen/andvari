@@ -28,6 +28,7 @@ import {
 import { meetsMasterPasswordFloor } from "./strength";
 import { useThemePref, type ThemePref } from "./useTheme";
 import { ViewHeader } from "./ViewHeader";
+import { HouseholdCard, PersonalVaultCard } from "./Household";
 
 interface Props {
   client: ApiClient;
@@ -61,6 +62,8 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
     <div>
       <ViewHeader title="Settings" />
       <IdentityCard account={account} />
+      <HouseholdCard client={client} account={account} store={store} />
+      <PersonalVaultCard client={client} account={account} store={store} />
       <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
       <OfflineCopyCard store={store} userId={account.userId} />
       <TotpCard client={client} policy={policy} />

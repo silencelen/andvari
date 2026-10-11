@@ -81,6 +81,9 @@ data class RegisterRequest(
     val memberRecovery: MemberRecoveryBlock? = null,
     val personalVault: PersonalVaultUpload,
     val device: DeviceInfo,
+    // Root cause A §4.1: new enrolments send the personal wrap with the register (additive; an old
+    // server ignores it and the client migrates on the next sync, §8.5).
+    val personalWrap: PersonalWrap? = null,
 )
 
 @Serializable
@@ -120,7 +123,34 @@ data class AccountKeys(
     // A server HINT only: a lie costs availability of the migration prompt, never a key (v1 stays
     // recoverable under the identity check, Q3). Additive, defaulted false for old servers/clients.
     val escrowNeedsV2: Boolean = false,
+    // Security review 2026-10, root cause A §4.1: the personal vault's key wrapped under the UVK with
+    // its own AD purpose (`Ad.vkPersonal`). The ONLY thing that decides which vault is "personal": the
+    // server cannot mint or relabel it, only withhold it (fail closed, §4.3). Additive, null when the
+    // account has not migrated yet (§8.5) or the server is older.
+    val personalWrap: PersonalWrap? = null,
 )
+
+/**
+ * Root cause A §4.1: `{vaultId, wrappedVk = Envelope(UVK, VK_personal, Ad.vkPersonal(vaultId, userId))}`.
+ * Delivered in [AccountKeys], sent once in [RegisterRequest], replaced only by `PUT /account/personal-wrap`
+ * (re-designation with a fresh password reauth, owner decision Q9).
+ */
+@Serializable
+data class PersonalWrap(val vaultId: String, val wrappedVk: String)
+
+/** `PUT /account/personal-wrap` (root cause A §4.3). [currentAuthKey] is required to REPLACE an
+ *  existing wrap (Q9 re-designation); a first set (migration §8.5) may omit it. */
+@Serializable
+data class PersonalWrapPut(val vaultId: String, val wrappedVk: String, val currentAuthKey: String? = null)
+
+/** `GET /account/state` (root cause A §4.2): one opaque UVK-sealed blob per user plus the server's
+ *  compare-and-set counter. [seq] is a CAS token only; the authenticated seq lives inside the blob. */
+@Serializable
+data class AccountStateResponse(val sealedState: String? = null, val seq: Long = 0)
+
+/** `PUT /account/state`: 409 `stale_state` unless [baseSeq] equals the server's current counter. */
+@Serializable
+data class AccountStatePut(val sealedState: String, val baseSeq: Long)
 
 @Serializable
 data class SessionResponse(

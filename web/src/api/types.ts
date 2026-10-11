@@ -44,6 +44,22 @@ export interface AccountKeys {
    *  for a waived account) is caught on the next unlock, on ANY device. Additive/defaulted: an old
    *  server omits it ⇒ treated as unconfirmed ⇒ the gate re-nudges (harmless; escrow backstop intact). */
   recoveryConfirmed?: boolean;
+  /** Security review 2026-10, root cause A §4.1: the personal vault key under the UVK with the
+   *  `vk-personal` AD purpose. The ONLY thing that decides which vault is personal. Absent until the
+   *  account migrates (§8.5) or on an older server. Twin of core `AccountKeys.personalWrap`. */
+  personalWrap?: PersonalWrap | null;
+}
+
+/** Root cause A §4.1: `{vaultId, wrappedVk = Envelope(UVK, VK, adVkPersonal(vaultId, userId))}`. */
+export interface PersonalWrap {
+  vaultId: string;
+  wrappedVk: string;
+}
+
+/** `GET /account/state` (root cause A §4.2). `seq` is the server's CAS counter only. */
+export interface AccountStateResponse {
+  sealedState: string | null;
+  seq: number;
 }
 
 /**
@@ -380,6 +396,8 @@ export interface RegisterRequest {
    *  account can never be created with neither recovery path. */
   memberRecovery: MemberRecoveryBlock;
   personalVault: { vaultId: string; wrappedVk: string; metaBlob: string };
+  /** Root cause A §4.1: new enrolments send the personal wrap (additive). */
+  personalWrap?: PersonalWrap;
   /** installId (F28) is web-additive: a stable per-browser id the server currently
    *  ignores (DeviceInfo has only platform+name; its Json is ignoreUnknownKeys) —
    *  the intended upsert key once the server stops inserting a device row per login. */

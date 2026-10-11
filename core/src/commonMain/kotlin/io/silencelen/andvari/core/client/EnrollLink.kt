@@ -9,14 +9,27 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * The parsed one-scan enroll link payload (design 2026-07-10 one-scan onboarding).
- * Carries NO key material — exactly {v, o, t, e} plus the OPTIONAL org recovery short-fingerprint
- * [rfp] (design 2026-07-12 §F.1). [e] and [rfp] are verbatim (no case/unicode normalization here;
- * the server does the case-insensitive bind). [rfp] is null when the link omits it — the fail-safe
- * fallback to the typed-sheet ceremony; a present [rfp] is honored ONLY via the in-person QR
- * affirmation, and a server-composed emailed link MUST carry no rfp (the server can force "missing"
- * but can never force silent auto-trust of a fingerprint it controls).
+ * Carries NO key material — exactly {v, o, t, e} plus three OPTIONAL in-person fields:
+ *  - [rfp]: the org recovery fingerprint, FULL 64 lowercase hex (design 2026-07-12 §F.1; widened from
+ *    16 hex by security review 2026-10, root cause A, branch A5);
+ *  - [ifp]: the minting admin's FULL identity fingerprint, 64 lowercase hex (root cause A §7.2);
+ *  - [iu]: the minting admin's userId (lowercase uuid). [ifp] and [iu] travel together or not at all.
+ * [e] is verbatim (the server does the case-insensitive bind). An absent field is null.
+ *
+ * None of these is an anchor on its own: the server can compose a link too (it emails invites), so a
+ * link field is honoured ONLY after the human typed the in-person code ([EnrollLink.checkCode]) shown
+ * under the QR on the admin's screen. Without that, [rfp] falls back to the typed-sheet ceremony and
+ * [ifp]/[iu] pin nothing.
  */
-data class EnrollPayload(val v: Int, val o: String, val t: String, val e: String, val rfp: String? = null)
+data class EnrollPayload(
+    val v: Int,
+    val o: String,
+    val t: String,
+    val e: String,
+    val rfp: String? = null,
+    val ifp: String? = null,
+    val iu: String? = null,
+)
 
 /**
  * Enroll-link compose/parse — one of two byte-identical twins (the other is
@@ -68,7 +81,15 @@ object EnrollLink {
      * `"rfp":"…"` last.
      */
     @Serializable
-    private data class WireOut(val v: Int, val o: String, val t: String, val e: String, val rfp: String? = null)
+    private data class WireOut(
+        val v: Int,
+        val o: String,
+        val t: String,
+        val e: String,
+        val rfp: String? = null,
+        val ifp: String? = null,
+        val iu: String? = null,
+    )
 
     /**
      * Wire shape for parse — v as JsonPrimitive so quoted-vs-bare and 1-vs-1.0 are checked
@@ -77,7 +98,18 @@ object EnrollLink {
      * explicitly rather than coerced.
      */
     @Serializable
-    private data class WireIn(val v: JsonPrimitive, val o: String, val t: String, val e: String, val rfp: JsonElement? = null)
+    private data class WireIn(
+        val v: JsonPrimitive,
+        val o: String,
+        val t: String,
+        val e: String,
+        val rfp: JsonElement? = null,
+        val ifp: JsonElement? = null,
+        val iu: JsonElement? = null,
+    )
+
+    private val HEX64 = Regex("^[0-9a-f]{64}$")
+    private val UUID = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
     /**
      * Build `<origin>/enroll#a1.<b64url(payload)>`, or null when any input carries
@@ -87,8 +119,18 @@ object EnrollLink {
      * minting client's `location.origin` equivalent (a non-canonical origin simply
      * produces a link [parse] refuses).
      */
-    fun compose(origin: String, token: String, email: String, rfp: String? = null): String? {
-        val payload = json.encodeToString(WireOut.serializer(), WireOut(1, origin, token, email, rfp))
+    fun compose(origin: String, token: String, email: String, rfp: String? = null, ifp: String? = null, iu: String? = null): String? {
+        // Empty = absent (web twin parity: a waived invite passes "" or null and mints a pre-rfp link).
+        @Suppress("NAME_SHADOWING") val rfp = rfp?.takeIf { it.isNotEmpty() }
+        @Suppress("NAME_SHADOWING") val ifp = ifp?.takeIf { it.isNotEmpty() }
+        @Suppress("NAME_SHADOWING") val iu = iu?.takeIf { it.isNotEmpty() }
+        // The in-person fields are machine values with one exact shape each; compose refuses to mint a
+        // link parse would refuse (a short rfp is exactly the 64-bit compare A5 retired).
+        if (rfp != null && !HEX64.matches(rfp)) return null
+        if (ifp != null && !HEX64.matches(ifp)) return null
+        if (iu != null && !UUID.matches(iu)) return null
+        if ((ifp == null) != (iu == null)) return null
+        val payload = json.encodeToString(WireOut.serializer(), WireOut(1, origin, token, email, rfp, ifp, iu))
         // kotlinx writes surrogates through raw, so a lone one in ANY input survives into
         // [payload] and trips the strict encoder here (the sibling decode in parseInner
         // uses the same flag).
@@ -143,13 +185,45 @@ object EnrollLink {
         // fallback — matches JS where both `undefined` and `null` read as "no rfp"). Present ⇒ a
         // NON-EMPTY string, carried VERBATIM like e; a present number/bool/empty rejects the whole
         // link (fail-safe). The duplicate-/escaped-key gate already covers a repeated `rfp` key.
-        val rfpEl = w.rfp
-        val rfp: String? = when {
-            rfpEl == null || rfpEl is JsonNull -> null
-            rfpEl is JsonPrimitive && rfpEl.isString && rfpEl.content.isNotEmpty() -> rfpEl.content
-            else -> return null
-        }
-        return EnrollPayload(1, w.o, w.t, w.e, rfp)
+        //
+        // Security review 2026-10 (root cause A, A5): a present rfp/ifp must be EXACTLY 64 lowercase hex
+        // and iu a lowercase uuid; anything else (a 16- or 32-hex rfp from an old minter included)
+        // rejects the whole link, because these are machine values compared at full length.
+        val rfp = optional(w.rfp, HEX64) ?: return null
+        val ifp = optional(w.ifp, HEX64) ?: return null
+        val iu = optional(w.iu, UUID) ?: return null
+        if ((ifp.value == null) != (iu.value == null)) return null
+        return EnrollPayload(1, w.o, w.t, w.e, rfp.value, ifp.value, iu.value)
+    }
+
+    /** A parsed optional field: [value] null = absent. The wrapper itself is null on a malformed field. */
+    private class Opt(val value: String?)
+
+    private fun optional(el: JsonElement?, shape: Regex): Opt? = when {
+        el == null || el is JsonNull -> Opt(null)
+        el is JsonPrimitive && el.isString && shape.matches(el.content) -> Opt(el.content)
+        else -> null
+    }
+
+    /**
+     * The IN-PERSON CODE for a link's security fields (root cause A, A5): the first 32 lowercase hex of
+     * `SHA-256(UTF-8("andvari/v1|enroll-check|" + (rfp ?: "-") + "|" + (ifp ?: "-") + "|" + (iu ?: "-")))`.
+     * The admin's screen shows it under the QR; the invitee TYPES it. That typed match is the in-person
+     * provenance the server cannot produce: a server-composed link (an emailed invite, a forwarded one)
+     * carries the server's values, and the person reading it has no admin screen to read the code from.
+     * One 128-bit code authenticates [EnrollPayload.rfp], [EnrollPayload.ifp] and [EnrollPayload.iu]
+     * together. Null when the link carries none of them (nothing to authenticate).
+     */
+    fun checkCode(crypto: io.silencelen.andvari.core.crypto.CryptoProvider, payload: EnrollPayload): String? {
+        if (payload.rfp == null && payload.ifp == null) return null
+        val text = "andvari/v1|enroll-check|${payload.rfp ?: "-"}|${payload.ifp ?: "-"}|${payload.iu ?: "-"}"
+        return io.silencelen.andvari.core.crypto.Fingerprint.shortForm(Bytes.toHexLower(crypto.sha256(text.encodeToByteArray())))
+    }
+
+    /** True iff the human-typed [entry] is the link's in-person code (32 hex, separators tolerated). */
+    fun checkCodeMatches(crypto: io.silencelen.andvari.core.crypto.CryptoProvider, payload: EnrollPayload, entry: String): Boolean {
+        val code = checkCode(crypto, payload) ?: return false
+        return io.silencelen.andvari.core.crypto.Fingerprint.matchesShort(entry, code)
     }
 
     /**

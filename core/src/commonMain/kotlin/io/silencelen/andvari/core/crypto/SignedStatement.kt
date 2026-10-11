@@ -395,8 +395,13 @@ object SignedStatement {
      * 4. AFTER the signature: the verified `userId`, `identityKey` and `recoveryFp` must EQUAL the
      *    anchor (`user_mismatch` / `identity_mismatch` / `recovery_fp_mismatch`). A member who signs a
      *    statement naming some OTHER identity key is refused here even though the signature is valid.
+     *
+     * INTERNAL (security review 2026-10, root cause A, A4 review carry-forward closed in A5): the only
+     * caller is the escrow open path, [Escrow.open], which supplies the out-of-band anchor. No app or tool
+     * module can call it, so nobody can derive a pin from a public [parseFrame] `signerPub` and verify an
+     * escrow statement against itself (a self-pin). Web twin: module-private, claimed once by escrow.ts.
      */
-    fun verifyEscrow(
+    internal fun verifyEscrow(
         crypto: CryptoProvider,
         frame: ByteArray,
         expectedUserId: String,

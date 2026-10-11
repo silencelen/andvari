@@ -33,6 +33,8 @@ import type {
   Mutation,
   AccountKeys,
   UserLookupResponse,
+  AccountStateResponse,
+  PersonalWrap,
   VaultDeleteRequest,
   VaultDeleteResponse,
   VaultMemberAdd,
@@ -435,6 +437,28 @@ export class ApiClient {
 
   createVault(req: CreateVaultRequest) {
     return this.json<CreateVaultResponse>("POST", "/api/v1/vaults", req);
+  }
+
+  // ---- account state + personal wrap + identity (security review 2026-10, root cause A §4, A5) ----
+
+  /** The UVK-sealed account-state blob and the server's CAS counter. */
+  accountState() {
+    return this.json<AccountStateResponse>("GET", "/api/v1/account/state");
+  }
+
+  /** Replace the blob; ApiError 409 `stale_state` when `baseSeq` is not the current counter. */
+  putAccountState(sealedState: string, baseSeq: number) {
+    return this.json<AccountStateResponse>("PUT", "/api/v1/account/state", { sealedState, baseSeq });
+  }
+
+  /** First set (migration) or replace (with a fresh `currentAuthKey`, owner decision Q9). */
+  async putPersonalWrap(wrap: PersonalWrap, currentAuthKey?: string) {
+    await this.text("PUT", "/api/v1/account/personal-wrap", { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk, ...(currentAuthKey ? { currentAuthKey } : {}) });
+  }
+
+  /** The identity key the server holds for `userId`: UNTRUSTED until a human verifies it. */
+  userIdentity(userId: string) {
+    return this.json<UserLookupResponse>("GET", `/api/v1/users/${pathSeg(userId)}/identity`);
   }
 
   lookupUser(email: string) {

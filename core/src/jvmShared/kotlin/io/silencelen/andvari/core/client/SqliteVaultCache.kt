@@ -110,6 +110,16 @@ class SqliteVaultCache(private val db: SqlBox, private val accountUserId: String
 
     override fun cursor(): Long = lock.withLock { kv("cursor")?.toLongOrNull() ?: 0L }
 
+    // Root cause A, A5: client state rides the same kv table under a "cs:" prefix. clear() resets only
+    // the cursor, so a resync keeps the account-state high-water mark (a rollback guard that a resync
+    // could wipe would be no guard).
+    override fun clientState(key: String): String? = lock.withLock { kv("cs:$key") }
+
+    override fun setClientState(key: String, value: String?): Unit = lock.withLock {
+        if (value == null) db.exec("DELETE FROM kv WHERE key=?", "cs:$key")
+        else db.exec("INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)", "cs:$key", value)
+    }
+
     override fun setCursor(rev: Long): Unit = lock.withLock {
         db.exec("INSERT OR REPLACE INTO kv(key,value) VALUES('cursor',?)", rev.toString())
     }
