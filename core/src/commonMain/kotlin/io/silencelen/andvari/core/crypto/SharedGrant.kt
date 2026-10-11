@@ -39,8 +39,11 @@ object SharedGrant {
     /**
      * Open a sealed grant and return the 32-byte VK. The recipient MUST bind the sealed
      * payload to the grant row it arrived on: [expectedVaultId] must equal the payload's
-     * vaultId (a malicious server cannot forge the seal, but this rejects a seal replayed
-     * onto the wrong grant row).
+     * vaultId. NOTE (security review 2026-10): a v1 seal is an anonymous sealed box, so a
+     * hostile server that holds the member's identity pubkey CAN forge one; this check only
+     * rejects a replay onto the wrong row. A v1 seal is therefore never preferred over the
+     * UVK-wrapped VK and yields a legacy-read-only key (see the VK precedence rule); sender
+     * authentication arrives with the v2 signed grant.
      */
     fun open(
         crypto: CryptoProvider,
