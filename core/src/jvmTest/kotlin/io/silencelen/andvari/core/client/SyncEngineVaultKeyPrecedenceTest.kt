@@ -31,8 +31,8 @@ import kotlin.test.assertTrue
  * must hold on the path a real client takes, a `sync()` and then a cold-start `hydrate()` off the
  * durable cache, and it must be SURFACED: a seal that disagrees with our own wrap raises the
  * "vault key mismatch" notice, and a damaged wrap raises "key unreadable" instead of quietly
- * opening the seal. [VaultKeyPrecedenceTest] pins the Account rule; this pins the wiring, plus the
- * member self-wrap post that makes the seal stop being load-bearing.
+ * opening the seal. [VaultKeyPrecedenceTest] pins the Account rule; this pins the wiring, and that a
+ * key from a server-mintable v1 seal is never auto-wrapped under the UVK.
  */
 class SyncEngineVaultKeyPrecedenceTest {
 
@@ -144,8 +144,14 @@ class SyncEngineVaultKeyPrecedenceTest {
         assertTrue(server.selfWraps.isEmpty(), "nothing is self-wrapped from a key we never adopted")
     }
 
+    /**
+     * The laundering guard: a key that arrived by a v1 seal (server-mintable) is NOT self-wrapped
+     * automatically. Wrapping it under our UVK would turn a possibly server-chosen key into the
+     * canonical one on every device, and make a later genuine seal read as the "mismatch". The
+     * read side still works: a row that does carry our wrap is read from the wrap, seal absent.
+     */
     @Test
-    fun aMemberPostsASelfWrapAndASecondDeviceReadsTheKeyFromIt() = runBlocking<Unit> {
+    fun aV1SealIsNotAutoSelfWrappedButAWrapOnTheRowIsReadFirst() = runBlocking<Unit> {
         val owner = enroll("engine-sw-owner@example.com")
         val member = enroll("engine-sw-member@example.com")
         val shared = owner.account.buildCreateSharedVault("Household")
@@ -162,13 +168,12 @@ class SyncEngineVaultKeyPrecedenceTest {
         val first = Account.unlock(member.reg.userId, password, member.keys, crypto)
         val firstEngine = SyncEngine(api(server), first, InMemoryVaultCache())
         firstEngine.sync()
-        assertTrue(first.hasVault(shared.vaultId), "v1 seal still adopted for a vault with no wrap (legacy)")
-        val (postedVault, wrap) = server.selfWraps.single()
-        assertEquals(shared.vaultId, postedVault)
         firstEngine.sync()
-        assertEquals(1, server.selfWraps.size, "posted once per session, not every sync")
+        assertTrue(first.hasVault(shared.vaultId), "v1 seal still adopted for a vault with no wrap (legacy)")
+        assertTrue(server.selfWraps.isEmpty(), "a seal-derived key must never be auto-wrapped under the UVK")
 
-        // The server now holds the wrap; serve it with the seal ABSENT to a brand-new device.
+        // A row that carries our wrap (as A6 will post once the grant is verified): read from it, seal absent.
+        val wrap = first.buildSelfWrap(shared.vaultId)
         server.feed = server.feed.copy(
             rev = 8,
             grants = listOf(WireGrant(shared.vaultId, member.reg.userId, "writer", wrap, 8, null)),
@@ -177,7 +182,7 @@ class SyncEngineVaultKeyPrecedenceTest {
         val secondEngine = SyncEngine(api(server), second, InMemoryVaultCache())
         secondEngine.sync()
         assertEquals("Household", second.decryptVaultName(shared.vaultId, shared.request.metaBlob), "VK read from the UVK wrap")
-        assertEquals(1, server.selfWraps.size, "a row that already carries our wrap is not re-posted")
+        assertTrue(server.selfWraps.isEmpty())
         assertTrue(secondEngine.notices().none { it.vaultId == shared.vaultId })
     }
 }
