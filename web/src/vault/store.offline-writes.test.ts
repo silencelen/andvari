@@ -225,6 +225,9 @@ async function scenario(role = "writer"): Promise<Scenario> {
   const member = await enroll("member@example.com");
   const { request, vaultId } = owner.account.buildCreateSharedVault("Family");
   const sealedVk = owner.account.wrapVkForMember(member.account.identityPub, vaultId);
+  // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
+  // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
+  member.account.authorizeLegacyKey(vaultId);
   const itemId = owner.account.newItemId();
   return {
     owner,
@@ -977,6 +980,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(store.get(s.itemId)).toBeUndefined();
 
     const fresh = await relock(s.member);
+    fresh.authorizeLegacyKey(s.vaultId); // A6: the restarted device keeps its vouched-for legacy key (the store persists it; this fixture sets it on the Account)
     const api2 = new FakeApi();
     const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
@@ -990,6 +994,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // And on disk: a second fresh hydrate still shows it.
     const fresh2 = await relock(s.member);
+    fresh2.authorizeLegacyKey(s.vaultId);
     const store3 = new VaultStore(new FakeApi().asClient(), fresh2, (await openVaultCache(fresh2.userId)) as IdbVaultCache);
     await store3.hydrate();
     expect(store3.get(s.itemId)?.doc.name).toBe(DOC.name);

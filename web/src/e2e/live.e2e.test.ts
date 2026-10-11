@@ -290,8 +290,12 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(lookedUp.userId).toBe(sessionC.userId);
     // The fingerprint the owner verifies must equal what the member's own client shows.
     expect(await accountC2.identityFingerprintShort()).toBe(await shortIdentityFingerprint(fromB64(lookedUp.identityPub)));
-    const sealedVk = account.wrapVkForMember(fromB64(lookedUp.identityPub), share.vaultId);
-    await clientA.addVaultMember(share.vaultId, { userId: sessionC.userId, role: "writer", sealedVk });
+    // Root cause A (A6): each side verifies the other ONCE (the household ceremony: typed 32-hex code from the
+    // other person's screen), then the owner's store signs a v2 grant to the PINNED key and dual-sends the v1 seal.
+    expect(await storeA.verifyMemberTyped(lookedUp, await accountC2.identityFingerprintShort()), "owner pins the invitee").not.toBeNull();
+    const ownerServed = await clientC2.userIdentity(account.userId);
+    expect(await storeC2.verifyMemberTyped(ownerServed, await account.identityFingerprintShort()), "invitee pins the owner").not.toBeNull();
+    await storeA.addVaultMember(share.vaultId, sessionC.userId, "writer");
 
     let shareBell = 0;
     let cOpen = false;
@@ -308,6 +312,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     await storeC2.sync();
     expect(storeC2.list().some((i) => i.doc.name === "shared-wifi"), "invitee decrypted the owner's shared item").toBe(true);
     expect(accountC2.roleFor(share.vaultId), "invitee holds the writer role").toBe("writer");
+    expect(accountC2.keySource(share.vaultId), "the key came from a VERIFIED v2 grant, not the v1 seal").toBe("signed-grant");
 
     // H06: the owner's store mints the spec 03 §11 removal proof; a bodyless client call here
     // would pin the proofless shape the production Sharing screen used to send.
