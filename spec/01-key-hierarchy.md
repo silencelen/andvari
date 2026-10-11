@@ -343,13 +343,17 @@ key signs only through the flows that need it (today: escrow v2).
     VERIFIED statement's fields are used afterwards, and its `from`, `to`, `toKey` and `vaultId`
     are checked again against the chosen pin, this account and the row. Steps 5, 6, 8, 9 and 11
     are anomalies (the "the server may be misbehaving" notice); an anomaly refuses the whole row,
-    so the v1 seal beside it is not a fallback either. Accepting a pending invitation runs the
+    so the v1 seal beside it is not a fallback either. A `signedGrant` that is PRESENT but fails steps
+    1–4 is surfaced the same way (never ignored in favour of the v1 seal, and never offered for
+    "Accept"); only an ABSENT field leaves the row to the legacy rule. Accepting a pending invitation runs the
     verification ceremony for `from` and then re-runs the check from step 7; declining hides it
-    on that device by `grantId`. A pin is CURRENT on a device when the device made it (or
-    re-verified it), or first saw it after it had established its own account-state high-water
-    mark; a pin a device only read while it had no mark of its own (a fresh device, which cannot
-    tell a current blob from an older authentic one carrying a pin later removed) is not current
-    there until re-verified. A grant from a pinned, current contact is adopted with the notice
+    on that device by `grantId`. A pin is CURRENT on a device only when a human made it or
+    re-confirmed it (the verification ceremony) ON THAT DEVICE: the device keeps a durable local
+    record of `userId` + SHA-256 of the confirmed identity key, so a confirmation of another key does
+    not count, and a tombstone in the merged account state still removes the pin. A pin that only
+    arrived by sync is not current there (its grants go pending and the add-member check runs)
+    until re-confirmed. (A high-water rule was rejected: a server can step a fresh device's mark up
+    by serving older authentic blobs in ascending order.) A grant from a pinned, current contact is adopted with the notice
     "You were added to <vault> by <contact>" (owner decision Q5). Vectors:
     `spec/test-vectors/sharedgrant-v2.json`.
   - **Legacy (v1-only) keys (NORMATIVE in the compatibility window; root cause A §8.2, §8.6).**
@@ -358,13 +362,16 @@ key signs only through the flows that need it (today: escrow v2).
     capture/update targets), and every write path treats the vault as `reader`. It stops being
     read-only only when (a) a verified v2 grant for the same vault arrives (the owner's re-issue,
     `PUT /vaults/{id}/members/{userId}/grant`, carries the SAME key; a verified grant carrying a
-    different key replaces the unauthenticated one and raises the mismatch notice), or (b) this
+    DIFFERENT key never replaces a held legacy key: it is the `vk_mismatch` anomaly and the held key,
+    read-only or vouched, stays), or (b) this
     device FROZE it: once per cache, on the first run of a release with this rule, a vault whose
     grant row AND at least one item that decrypted under its key were already in this device's
     durable cache counts as pre-upgrade evidence, or (c) the human accepts it on the "Review your
     shared vaults" card (trust on first use; owner decision Q7: "Accept anyway" is allowed for a
     vault this device does not hold yet, and the copy says the sender cannot be confirmed). A
-    removed vault forgets (b)/(c). After the window closes (branch A8) a v1-only key for a vault
+    vouch from (b) or (c) is bound to SHA-256 of the exact key vouched for, so a different v1 key
+    served later for the same vault is read-only again; a removed vault forgets it. The decision is
+    the graded function of `legacyMode` (window, evidence for this key, confirmation of this key). After the window closes (branch A8) a v1-only key for a vault
     with no evidence is refused. Pinned as `sharedgrant.json` → `legacyMode`.
   - **Canonical-key precedence (NORMATIVE; security review 2026-10).** A `sealedVk` is an
     anonymous `crypto_box_seal` to the member's PUBLIC key, so anyone holding that key,
