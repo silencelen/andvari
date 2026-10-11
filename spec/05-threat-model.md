@@ -65,7 +65,16 @@ existing vaults are member-verifiable — the server never holds VK and cannot m
 can still WITHHOLD, delay, or serve stale state (availability-class, accepted). Replay is
 bounded by expiry+seq binding and by soft-hide-until-purgeAt; residuals: a device offline
 since before the newest verified seq may be shown stale-but-genuine older state; proofs are
-keyholder-forgeable (server authz is the gate). Grant injection for NEW vaults (F16) is closed for
+keyholder-forgeable (server authz is the gate). **Forged or replayed removal attribution** (the removal
+half of F16; security review 2026-10, root cause A §6, review A-6: a removal proof replayed after a
+re-add, or a `left` the server simply asserted, suppressed the "server may be misbehaving" warning) is
+closed by removal proofs v2 (branch A7; spec 01 §6): every removal and leave carries a MAC over a
+16-byte nonce and the actor's clock, each device of the target consumes the nonce (device set ∪
+account state) and checks it against its OWN `liveSince` window, and neither the window nor the
+consumed set ever comes from the server. It remains open, as a bounded residual, only through the
+compatibility window's legacy rows (a v1 removal proof is "valid (legacy)" iff its nonce is unconsumed;
+a `left` with no proof is shown as "You left" plus "Didn't do this? Tell your admin"); branch A8
+retires both with the window. Grant injection for NEW vaults (F16) is closed for
 v2 grants by owner-signed grants (security review 2026-10, root cause A, branch A6; spec 01 §6): a
 key is adopted only from a grant signed by the identity this account PINNED for the sender it names,
 and "You were added to <vault> by <contact>" names that verified contact. It remains open, as a
@@ -236,12 +245,48 @@ current on that device, sealed to the pinned key, so a wrong hint costs a redund
 one. (f) **grant authority is not bound to the vault**: a verified grant proves which PINNED contact signed
 it, not that the signer owns or may share the vault; any pinned household member who holds a vault's key can
 grant it. A verified grant naming a different key than a held one is refused as `vk_mismatch` (never a silent
-switch); binding grants to the vault's owner is an open design follow-up. (g) **no per-vault key memory after
-a self-wrap**: a vault adopted from a verified v2 grant and then self-wrapped keeps no device-local record of its
-key (the vouch tags of §8.2 cover only legacy keys). A server that strips the self-wrap and colludes with a
-pinned contact can therefore have that contact sign a grant for a different key, which the device adopts as a
-fresh v2 grant. Closing it needs per-vault key memory, which interacts with key rotation (branch A7); it is an
-owner / A7 design item.
+switch); binding grants to the vault's owner is an open design follow-up. (g) **per-vault key memory —
+CLOSED on any device that held the vault (branch A7)**: every device now records SHA-256 of the first key it
+adopted for each vault, by any rule, beside the §8.2 vouches (spec 01 §6, "Held-key memory"), and a later
+different key for that vault meets the vouch gate (never adopted, promoted, self-wrapped, owner-wrapped or
+signed onward; the caller's own UVK wrap is still used but flagged). No step of root cause A re-keys a vault,
+so no legitimate path changes a held key. The memory (and the §8.2 vouch) survives EVERY server-driven drop
+— any removal verdict, the resync drop, holding expiry — so a server cannot reset it and re-add the vault
+under a key it chose (A7 review MEDIUM-1); only the user's own leave or delete on that device clears it,
+which is the recovery path for a `vk_mismatch` ("leave it and ask its owner to add you again"). Only
+trusted sources record a tag (own UVK wrap, verified v2 grant, a vouched legacy key, a vault the device
+created; never an unvouched read-only v1 seal, A7 review LOW-1), so a server-forged seal served first does
+not block the genuine key. Residuals: a **fresh device** (or one whose client state was wiped) has no
+memory and adopts whatever verified key it is served first, which is the R15(f) authority question again;
+the first TRUSTED key a device adopted is trusted on first use; and a future VK rotation (P6) must move the
+tag in the same step that installs the new key.
+
+**R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
+(a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
+delete, restore, transfer, remove and leave proofs as MACs, not signatures): a co-member who holds the
+vault key can mint a valid removal or leave proof for anyone, and the server can deliver it. Server-side
+owner authorisation stays the real gate; signing them is revisited with VK rotation. (b) **a device
+offline across the whole remove → re-add → replay cycle**, when no other device of that user consumed
+the nonce, never saw the vault go not-live, so its `liveSince` predates the proof and the replayed
+proof verifies: the existing stale-but-genuine residual. It changes only the banner's wording, never the
+data handling (holding area, 30 days, either way). (c) **another of the user's devices consumed it first**
+(A7 review MEDIUM-2, a refinement of design §6.3 step 5): a nonce found only in the account-state set, with
+an `issuedAt` inside THIS device's window, is shown calmly as "already recorded on another of your devices"
+rather than as a replay (only this device's own consumed set raises `replay-denied`). The window is checked
+first, so a proof replayed after a re-add this device saw still fails as an anomaly; a replay this device
+did not see the re-add for is the (b) residual, now worded calmly when another device recorded the nonce.
+(d) **older clients in the window — OWNER REVIEW ITEM for the A8 checkpoint**: removals and leaves are sent
+v2-ONLY, with no v1 dual-send (a deviation from design §8.3, decided because a replayable v1 proof with no
+time window would be a downgrade). An N−1 member's client cannot read a v2 proof and shows the anomaly
+warning for every genuine removal or leave during the window; an N client shows "Didn't do this? Tell your
+admin" for a leave an N−1 device made (it carried no proof). Both resolve as the household upgrades. An N
+client that accepts a v1 proof in-window shows it qualified, "(sent by an older app version)" (A7 review
+LOW-3): MAC-verified and single-use, but with no time window. (e) The server's `removal_nonces` refusal is hygiene for an
+honest server only; a hostile server ignores it, which is why the clients' consumed sets decide. (f) **a
+device's first `liveSince` is set at upgrade** (A7 review LOW-4): a device that held a vault before running
+a release with removal proofs v2 stamps `liveSince` at its first run of that release, so a genuine v2 removal
+issued while that device was offline before its upgrade (more than 10 minutes before the upgrade) shows the
+anomaly warning instead of the attributed notice. Wording only, fail-closed.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 

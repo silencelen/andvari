@@ -78,6 +78,9 @@ const STORE_QUEUE = "queue";
 const STORE_HELD = "held";
 const STORE_CONSUMED = "consumedDeleteIds";
 const STORE_TRANSFER = "transferSeq";
+/** Root cause A, branch A7: kv-row prefixes (no new object store, so DB_VERSION stays 1). */
+const KV_CONSUMED_NONCE = "consumedNonce:";
+const KV_LIVE_SINCE = "liveSince:";
 
 /** Every §B.2 store — all created in version 1, all spanned by the pull tx. */
 const ALL_STORES = [
@@ -167,6 +170,10 @@ export interface PullBatch {
   removeHeld(vaultId: string): void;
   addConsumedDeleteId(deleteId: string): void;
   setLastVerifiedTransferSeq(vaultId: string, seq: number): void;
+  /** Root cause A §6.2 (branch A7): one consumed removal nonce, in the SAME tx as the holding move. */
+  addConsumedNonce(vaultId: string, nonce: string, issuedAt: number): void;
+  /** Root cause A §6.3 (branch A7): this device's liveSince for a vault (null clears it). */
+  setLiveSince(vaultId: string, at: number | null): void;
 }
 
 /**
@@ -257,6 +264,10 @@ export interface VaultCache {
   setLastVerifiedTransferSeq(vaultId: string, seq: number): Promise<void>;
   /** §D.4 hydrate enumerator (web-only). */
   transferSeqs(): Promise<{ vaultId: string; seq: number }[]>;
+  /** Root cause A §6.2/§6.3 (branch A7): the durable consumed removal nonces and liveSince stamps, kv rows that
+   *  survive a resync `clear()` (which enumerates items/grants/vaults + kv:cursor only). Never server values. */
+  consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]>;
+  liveSinces(): Promise<{ vaultId: string; at: number }[]>;
 
   /** Cached server accountKeys payload (§A row 6) — the offline-unlock input.
    *  Returned RAW: the C3 read-time `assertServerKdfParams` gate belongs to
@@ -749,6 +760,15 @@ export class IdbVaultCache implements VaultCache {
         ops.push((tx) => {
           tx.objectStore(STORE_TRANSFER).put({ vaultId, seq });
         }),
+      addConsumedNonce: (vaultId, nonce, issuedAt) =>
+        ops.push((tx) => {
+          tx.objectStore(STORE_KV).put({ key: `${KV_CONSUMED_NONCE}${vaultId}|${nonce}`, value: issuedAt } satisfies KvRow);
+        }),
+      setLiveSince: (vaultId, at) =>
+        ops.push((tx) => {
+          if (at === null) tx.objectStore(STORE_KV).delete(`${KV_LIVE_SINCE}${vaultId}`);
+          else tx.objectStore(STORE_KV).put({ key: `${KV_LIVE_SINCE}${vaultId}`, value: at } satisfies KvRow);
+        }),
     };
     fn(batch); // pure buffering — a throw here commits nothing and is not a storage strike
     if (this.closed) return; // §D.2a
@@ -878,6 +898,28 @@ export class IdbVaultCache implements VaultCache {
     return this.read([STORE_TRANSFER], [], async (tx) => (await req(tx.objectStore(STORE_TRANSFER).getAll())) as { vaultId: string; seq: number }[]);
   }
 
+  consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]> {
+    return this.read([STORE_KV], [], async (tx) => {
+      const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
+      const out: { vaultId: string; nonce: string; issuedAt: number }[] = [];
+      for (const r of rows) {
+        if (!r.key.startsWith(KV_CONSUMED_NONCE) || typeof r.value !== "number") continue;
+        const [vaultId, nonce] = r.key.slice(KV_CONSUMED_NONCE.length).split("|");
+        if (vaultId && nonce) out.push({ vaultId, nonce, issuedAt: r.value });
+      }
+      return out;
+    });
+  }
+
+  liveSinces(): Promise<{ vaultId: string; at: number }[]> {
+    return this.read([STORE_KV], [], async (tx) => {
+      const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
+      return rows
+        .filter((r) => r.key.startsWith(KV_LIVE_SINCE) && typeof r.value === "number")
+        .map((r) => ({ vaultId: r.key.slice(KV_LIVE_SINCE.length), at: r.value as number }));
+    });
+  }
+
   // -- web-only accountKeys + policy (§A rows 6+8, design D5) --
 
   accountKeys(): Promise<AccountKeys | null> {
@@ -962,6 +1004,8 @@ const NOOP_BATCH: PullBatch = {
   removeHeld: () => {},
   addConsumedDeleteId: () => {},
   setLastVerifiedTransferSeq: () => {},
+  addConsumedNonce: () => {},
+  setLiveSince: () => {},
 };
 
 /**
@@ -1048,6 +1092,12 @@ export class NullCache implements VaultCache {
   }
   async setLastVerifiedTransferSeq(_vaultId: string, _seq: number): Promise<void> {}
   async transferSeqs(): Promise<{ vaultId: string; seq: number }[]> {
+    return [];
+  }
+  async consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]> {
+    return [];
+  }
+  async liveSinces(): Promise<{ vaultId: string; at: number }[]> {
     return [];
   }
 

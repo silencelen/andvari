@@ -399,9 +399,10 @@ class AndvariApi(
 
     /**
      * [removal] is the removal proof (spec 03 §10/§11): minted by the removing owner's unlocked
-     * client — `nonce = fresh UUID`, `proof = LifecycleProof.remove(lifecycleKeyFor(vaultId),
-     * vaultId, userId, nonce)` — and relayed to the victim via removedGrantsInfo so a 0.5.0+
-     * client can verify the removal as a real owner action.
+     * client. Since branch A7 (security review 2026-10, root cause A §6) it is v2 —
+     * `{proofV: 2, nonce = 16 random bytes, issuedAt = now, proof = LifecycleProof.removeV2(...)}`,
+     * minted by [SyncEngine.removeVaultMember] — and relayed to the victim via removedGrantsInfo so
+     * the victim's devices can attribute the removal and refuse a replay.
      *
      * The body is OPTIONAL on the wire but NOT in practice (audit H06): both sync engines
      * ([SyncEngine.verifyRemoval], web store.ts) classify a removal WITHOUT a proof as an
@@ -427,8 +428,11 @@ class AndvariApi(
 
     suspend fun deletedVaults(): List<DeletedVaultSummary> = call("GET", "/api/v1/vaults/deleted")
 
-    suspend fun leaveVault(vaultId: String): CreateVaultResponse =
-        call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/leave")
+    /** [proof] is the v2 leave proof (root cause A §6.2, branch A7), minted by [SyncEngine.leaveSharedVault]; the
+     *  `null` default (empty body) is the pre-A7 shape the server still accepts in the compatibility window. */
+    suspend fun leaveVault(vaultId: String, proof: io.silencelen.andvari.core.model.VaultLeaveRequest? = null): CreateVaultResponse =
+        if (proof == null) call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/leave")
+        else call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/leave", proof)
 
     suspend fun offerTransfer(vaultId: String, req: TransferOfferRequest): TransferOfferResponse =
         call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/transfer", req)

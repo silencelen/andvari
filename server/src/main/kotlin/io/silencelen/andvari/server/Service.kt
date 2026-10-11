@@ -1525,8 +1525,8 @@ class Service(
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
             // Insert, or resurrect a previously-revoked row (PRIMARY KEY(vaultId,userId)).
             c.exec(
-                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,signedGrant,rev,revokedAt,revokedReason,removeProof,removeNonce,addedAt) VALUES(?,?,?,'',?,?,?,NULL,NULL,NULL,NULL,?)
-                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, signedGrant=excluded.signedGrant, rev=excluded.rev, revokedAt=NULL, revokedReason=NULL, removeProof=NULL, removeNonce=NULL, addedAt=excluded.addedAt""",
+                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,signedGrant,rev,revokedAt,revokedReason,removeProof,removeNonce,removeProofV,removeIssuedAt,addedAt) VALUES(?,?,?,'',?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?)
+                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, signedGrant=excluded.signedGrant, rev=excluded.rev, revokedAt=NULL, revokedReason=NULL, removeProof=NULL, removeNonce=NULL, removeProofV=NULL, removeIssuedAt=NULL, addedAt=excluded.addedAt""",
                 vaultId, req.userId, req.role, req.sealedVk, req.signedGrant, grantRev, now(),
             )
             repo.auditOn(c, "vault_member_add", p.userId, p.deviceId, ip, "$vaultId:${req.userId}:${req.role}")
@@ -1590,10 +1590,12 @@ class Service(
         // removal was a real owner action. The server cannot verify it (no VK).
         proof: String? = null,
         nonce: String? = null,
+        // Removal proofs v2 (root cause A §6.2, branch A7): `2` with a 16-byte nonce and the owner's clock.
+        proofV: Int? = null,
+        issuedAt: Long? = null,
     ): CreateVaultResponse {
         if (targetUserId == p.userId) throw BadRequest("cannot_target_self")
-        if (proof != null) requireB64(proof, 64, "proof")
-        if (nonce != null && !UUID_RE.matches(nonce)) throw BadRequest("bad_nonce")
+        validateRemovalProof(proofV, proof, nonce, issuedAt, requireProof = false)
         val (rev, notify) = repo.db.tx { c ->
             requireOwnerOfShared(c, p, vaultId)
             if (repo.grantRole(c, targetUserId, vaultId) == null) throw NotFound("not_a_member")
@@ -1601,10 +1603,13 @@ class Service(
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
             // Store the removal proof/nonce ON the revoked grant row (durable relay — spec
             // 03 §3/§5); NULLs when the owner's client sent none (→ victim retain-and-warn).
-            c.exec(
-                "UPDATE grants SET revokedAt=?, revokedReason='member_remove', removeProof=?, removeNonce=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
-                now(), proof, nonce, grantRev, vaultId, targetUserId,
+            val revoked = c.exec(
+                "UPDATE grants SET revokedAt=?, revokedReason='member_remove', removeProof=?, removeNonce=?, removeProofV=?, removeIssuedAt=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
+                now(), proof, nonce, if (proof != null) (proofV ?: 1) else null, issuedAt, grantRev, vaultId, targetUserId,
             )
+            // A7 review LOW-5: the nonce is claimed only when this call actually revoked a grant.
+            if (revoked == 0) throw NotFound("not_a_member")
+            if (nonce != null) claimRemovalNonce(c, vaultId, nonce)
             // Removing the pending transfer target cancels the offer (spec 03 §11).
             if (v.pendingOfferId != null && v.pendingOwnerId == targetUserId) {
                 clearPendingTransfer(c, vaultId, "target_removed", p, ip, bumpVaultRev = true)
@@ -1615,6 +1620,36 @@ class Service(
         }
         onChange(notify, rev)
         return CreateVaultResponse(rev)
+    }
+
+    /**
+     * Shape check for a relayed removal/leave proof (spec 03 §10/§11; root cause A §6.2, branch A7). The server cannot
+     * verify a proof (no VK); this only keeps the stored fields well-formed. v1 (`proofV` absent or 1): a UUID nonce
+     * and no `issuedAt`. v2: a 32-byte base64url MAC, a 16-byte base64url nonce, and a positive `issuedAt`.
+     */
+    private fun validateRemovalProof(proofV: Int?, proof: String?, nonce: String?, issuedAt: Long?, requireProof: Boolean) {
+        when (proofV) {
+            null, 1 -> {
+                if (requireProof) throw BadRequest("bad_proof_version")
+                if (proof != null) requireB64(proof, 64, "proof")
+                if (nonce != null && !UUID_RE.matches(nonce)) throw BadRequest("bad_nonce")
+                if (issuedAt != null) throw BadRequest("bad_issued_at")
+            }
+            2 -> {
+                if (proof == null || nonce == null || issuedAt == null) throw BadRequest("bad_proof")
+                requireB64(proof, 64, "proof")
+                if (!V2_NONCE_RE.matches(nonce)) throw BadRequest("bad_nonce")
+                if (issuedAt <= 0) throw BadRequest("bad_issued_at")
+            }
+            else -> throw BadRequest("bad_proof_version")
+        }
+    }
+
+    /** Hygiene (honest server only): a vault never stores the same removal nonce twice, across re-adds. */
+    private fun claimRemovalNonce(c: Connection, vaultId: String, nonce: String) {
+        val used = c.queryOne("SELECT 1 FROM removal_nonces WHERE vaultId=? AND nonce=?", vaultId, nonce) { 1 }
+        if (used != null) throw Conflict("nonce_reused")
+        c.exec("INSERT INTO removal_nonces(vaultId,nonce,usedAt) VALUES(?,?,?)", vaultId, nonce, now())
     }
 
     // ---- vault lifecycle (spec 03 §11; design 2026-07-07 skipti §4) ----
@@ -1757,7 +1792,19 @@ class Service(
      * `revokedReason='member_leave'`; keys kept so a re-add resurrects. Owner cannot leave.
      * Idempotent by reason.
      */
-    suspend fun leaveVault(p: Principal, vaultId: String, ip: String): CreateVaultResponse {
+    suspend fun leaveVault(
+        p: Principal,
+        vaultId: String,
+        ip: String,
+        // The leaving member's v2 leave proof (root cause A §6.2, branch A7), relayed on the `left` row so the
+        // member's OTHER devices can verify it. Optional while the compatibility window is open (older clients).
+        leave: io.silencelen.andvari.core.model.VaultLeaveRequest? = null,
+    ): CreateVaultResponse {
+        val body = leave?.takeIf { it.proofV != null || it.proof != null || it.nonce != null || it.issuedAt != null }
+        if (body != null) {
+            if (body.proofV != 2) throw BadRequest("bad_proof_version")
+            validateRemovalProof(body.proofV, body.proof, body.nonce, body.issuedAt, requireProof = true)
+        }
         val (rev, notify, changed) = repo.db.tx { c ->
             val g = repo.grantRowAny(c, p.userId, vaultId) ?: throw Forbidden("no_grant")
             if (g.revokedAt != null) {
@@ -1774,10 +1821,12 @@ class Service(
             // Pre-capture: remaining members + the leaver (their own pull delivers removedGrants).
             val members = vaultMemberIds(c, vaultId)
             val gr = repo.nextRev(c, "grant", vaultId, vaultId)
-            c.exec(
-                "UPDATE grants SET revokedAt=?, revokedReason='member_leave', rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
-                now(), gr, vaultId, p.userId,
+            val revoked = c.exec(
+                "UPDATE grants SET revokedAt=?, revokedReason='member_leave', removeProof=?, removeNonce=?, removeProofV=?, removeIssuedAt=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL",
+                now(), body?.proof, body?.nonce, body?.proofV, body?.issuedAt, gr, vaultId, p.userId,
             )
+            // A7 review LOW-5: claim the nonce only when a grant was actually revoked.
+            if (revoked > 0) body?.nonce?.let { claimRemovalNonce(c, vaultId, it) }
             // Leaving while pending-transfer-target auto-cancels the offer (spec 03 §11).
             if (v.pendingOfferId != null && v.pendingOwnerId == p.userId) {
                 clearPendingTransfer(c, vaultId, "target_left", p, ip, bumpVaultRev = true)

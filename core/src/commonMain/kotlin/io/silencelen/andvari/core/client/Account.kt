@@ -436,6 +436,41 @@ class Account private constructor(
     /** A §8.2 vouch: the tag of the exact key, and whether it came from pre-upgrade evidence or the human. */
     class LegacyVouch(val tag: String, val frozen: Boolean)
 
+    /**
+     * Per-vault held-key memory (security review 2026-10, root cause A, branch A7; closes A6 residual R15(g) on any
+     * device that held the vault): vaultId → SHA-256 (hex) of the FIRST key this device adopted for that vault, by
+     * any rule (personal-wrap installs aside). No step of root cause A re-keys a vault (design §8.7), so a shared
+     * vault's key never legitimately changes; a later, different key is the vk_mismatch anomaly through
+     * [vouchGate], exactly like a §8.2 vouch. The host persists it beside the vouches ([heldKeyTagsSnapshot],
+     * [rememberHeldKey]) and it is dropped with the vault ([removeVault]). Unlike a vouch it vouches for nothing:
+     * it never lifts a legacy key's read-only state and never makes a seal key acceptable on its own.
+     */
+    private val heldKeyTags: MutableMap<String, String> = mutableMapOf()
+
+    /** Restore a persisted held-key tag (the host's durable record wins over an in-memory one). */
+    fun rememberHeldKey(vaultId: String, tag: String) {
+        if (Regex("^[0-9a-f]{64}$").matches(tag)) heldKeyTags[vaultId] = tag
+    }
+
+    /** The held-key tags to persist. */
+    fun heldKeyTagsSnapshot(): Map<String, String> = heldKeyTags.toMap()
+
+    /**
+     * Record the tag of a key just adopted for [vaultId] from a TRUSTED source (A7 review LOW-1): our own UVK wrap, a
+     * verified v2 grant, a vouched legacy key, or a vault this device created. An unvouched read-only v1 seal is
+     * server-mintable and records nothing (its vouch, if the human or the freeze gives one, records it then). No-op
+     * when a tag is recorded or the key contradicts the gate.
+     */
+    private fun recordHeldKey(vaultId: String, vk: ByteArray, source: KeySource) {
+        val trusted = when (source) {
+            KeySource.UVK_WRAP, KeySource.SIGNED_GRANT -> true
+            KeySource.LEGACY_SEAL -> legacyVouched(vaultId, vk)
+            KeySource.PERSONAL_WRAP -> false
+        }
+        if (!trusted || heldKeyTags.containsKey(vaultId) || vouchGate(vaultId, vk) == VouchGate.MISMATCH) return
+        heldKeyTags[vaultId] = tagOf(vk)
+    }
+
     private fun tagOf(vk: ByteArray): String = Bytes.toHexLower(crypto.sha256(vk))
 
     /**
@@ -459,17 +494,25 @@ class Account private constructor(
      * it is flagged vk_mismatch. Every key-source decision in this class routes through here.
      */
     fun vouchGate(vaultId: String, key: ByteArray?): VouchGate {
-        val v = legacyAuthorized[vaultId] ?: return VouchGate.NO_VOUCH
-        return if (key != null && v.tag == tagOf(key)) VouchGate.OK else VouchGate.MISMATCH
+        // A7: the held-key tag is the same kind of device-local memory as a vouch, and goes through the same gate.
+        val v = legacyAuthorized[vaultId]
+        val h = heldKeyTags[vaultId]
+        if (v == null && h == null) return VouchGate.NO_VOUCH
+        val t = key?.let { tagOf(it) } ?: return VouchGate.MISMATCH
+        if (v != null && v.tag != t) return VouchGate.MISMATCH
+        if (h != null && h != t) return VouchGate.MISMATCH
+        return VouchGate.OK
     }
 
     /** True when the key HELD for [vaultId] contradicts this device's vouch for it. */
     fun heldKeyContradictsVouch(vaultId: String): Boolean =
         vaultKeys.containsKey(vaultId) && vouchGate(vaultId, vaultKeys[vaultId]) == VouchGate.MISMATCH
 
-    /** The row's v1 seal key, only when the gate says it IS the vouched key. */
+    /** The row's v1 seal key, only when this device holds a §8.2 VOUCH and the gate says it IS the vouched key (a
+     *  held-key tag alone never makes a seal key acceptable). */
     private fun vouchedSealKey(vaultId: String, sealed: String?): ByteArray? =
-        sealed?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(vaultId, it) }?.takeIf { vouchGate(vaultId, it) == VouchGate.OK }
+        if (!legacyAuthorized.containsKey(vaultId)) null
+        else sealed?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(vaultId, it) }?.takeIf { vouchGate(vaultId, it) == VouchGate.OK }
 
     private fun legacyVouched(vaultId: String, vk: ByteArray?): Boolean =
         legacyMode(vaultId, vk).let { it == LegacyGrant.Mode.FROZEN || it == LegacyGrant.Mode.CONFIRMED }
@@ -938,6 +981,7 @@ class Account private constructor(
                             return
                         }
                         keySources[grant.vaultId] = KeySource.SIGNED_GRANT
+                        recordHeldKey(grant.vaultId, held, KeySource.SIGNED_GRANT) // LOW-1: now a trusted key
                         signedGrantFrom[grant.vaultId] = o.from
                         pendingGrants.remove(grant.vaultId)
                         grantAnomalies.remove(grant.vaultId)
@@ -976,6 +1020,7 @@ class Account private constructor(
         // SyncEngine's runCatching paths classify differently from a CryptoException, so the
         // same broken grant produced two different verdicts depending on which branch minted it.
         if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
+        recordHeldKey(grant.vaultId, vk, opened.source)
         vaultKeys[grant.vaultId] = vk
         keySources[grant.vaultId] = opened.source
         opened.from?.let { signedGrantFrom[grant.vaultId] = it }
@@ -1066,7 +1111,8 @@ class Account private constructor(
             val signedDiffers = !grant.signedGrant.isNullOrEmpty() && openSigned(grant, heldVk = vk).verdict == GrantVerdict.VK_MISMATCH
             // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
             val gateAnomaly = if (vouchGate(grant.vaultId, vk) == VouchGate.MISMATCH) GrantVerdict.VK_MISMATCH else null
-            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers, anomaly = gateAnomaly)
+            // A6 final review LOW-H: the gate's mismatch also lands in vkMismatchVaults (the "vault key mismatch" notice).
+            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers || gateAnomaly != null, anomaly = gateAnomaly)
         }
         // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
         if (!grant.signedGrant.isNullOrEmpty()) {
@@ -1184,6 +1230,8 @@ class Account private constructor(
     fun authorizeLegacyKey(vaultId: String, keyTag: String? = null, frozen: Boolean = false) {
         val tag = keyTag ?: legacyKeyTag(vaultId) ?: return
         legacyAuthorized[vaultId] = LegacyVouch(tag, frozen)
+        // A7 review LOW-1: a vouched key is a trusted key; its tag joins the held-key memory (never overwriting one).
+        if (Regex("^[0-9a-f]{64}$").matches(tag)) heldKeyTags.getOrPut(vaultId) { tag }
     }
 
     /** The sender the VERIFIED v2 grant for [vaultId] names (null unless the key came from one). */
@@ -1384,6 +1432,15 @@ class Account private constructor(
     /** The role exactly as the server declared it. */
     fun serverRoleFor(vaultId: String): String? = vaultRoles[vaultId]
 
+    /**
+     * A7 review MEDIUM-1: forget this device's key memory for [vaultId] (the §8.2 vouch and the held-key tag). Only for
+     * a drop the USER initiated on this device (their own leave or delete); a server-driven drop keeps both.
+     */
+    fun forgetKeyMemory(vaultId: String) {
+        legacyAuthorized.remove(vaultId)
+        heldKeyTags.remove(vaultId)
+    }
+
     /** Drop a vault's key + role (removedGrants purge) so later writes fail fast client-side. */
     fun removeVault(vaultId: String) {
         vaultKeys.remove(vaultId)
@@ -1394,7 +1451,7 @@ class Account private constructor(
         unreadableKeyVaults.remove(vaultId)
         keySources.remove(vaultId)
         signedGrantFrom.remove(vaultId)
-        legacyAuthorized.remove(vaultId)
+        // A7 review MEDIUM-1: the vouch and the held-key tag are NOT dropped here; see [forgetKeyMemory].
         pendingGrants.remove(vaultId)
         grantAnomalies.remove(vaultId)
     }
@@ -1414,6 +1471,7 @@ class Account private constructor(
             wrappedVk = Envelope.sealB64(crypto, uvk, svk, Ad.vk(vaultId, userId)),
         )
         vaultKeys[vaultId] = svk
+        heldKeyTags[vaultId] = tagOf(svk) // A7: a fresh vault's key is this device's from the first moment
         vaultRoles[vaultId] = "owner"
         keySources[vaultId] = KeySource.UVK_WRAP
         uvkWrappedVaults.add(vaultId)

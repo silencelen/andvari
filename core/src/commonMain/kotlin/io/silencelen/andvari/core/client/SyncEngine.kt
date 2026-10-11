@@ -228,6 +228,19 @@ class SyncEngine(
         internal const val FREEZE_DONE_KEY = "grant.freeze.done"
         /** grantIds of pending invitations the human declined. */
         internal const val DECLINED_KEY = "grant.declined"
+        /** [LifecycleNotice.reason] on a `left` notice whose leave carried no proof (in-window, §8.6): the copy adds
+         *  "Didn't do this? Tell your admin". */
+        const val LEFT_UNPROVEN = "unproven"
+        /** [LifecycleNotice.reason] on a `replay-denied` notice raised by a consumed removal nonce (§6.3 step 5), as
+         *  opposed to the recovered-edits refusal that kind also covers. */
+        const val REMOVAL_REPLAY = "removal"
+        /** [LifecycleNotice.reason] on a `removed` / `left` notice whose nonce another of this user's devices already
+         *  consumed (found only in account state, A7 review MEDIUM-2): calm, "already recorded on another device". */
+        const val ALREADY_RECORDED = "already-recorded"
+        /** [LifecycleNotice.reason] on a `removed` notice attributed by a v1 (legacy) proof, in-window (A7 review LOW-3). */
+        const val REMOVED_LEGACY = "legacy"
+        /** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches. */
+        internal const val HELD_KEYS_KEY = "grant.held.keys"
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -497,7 +510,54 @@ class SyncEngine(
             val tag = parts.getOrNull(1) ?: continue // bound to the exact key vouched for; no tag, no vouch
             account.authorizeLegacyKey(parts[0], tag, frozen = parts.getOrNull(2) == "frozen")
         }
+        loadHeldKeys()
     }
+
+    // ---- per-vault held-key memory (security review 2026-10, root cause A, branch A7; R15(g)) ----
+
+    /** Push the persisted held-key tags into the account (the durable record wins). */
+    private fun loadHeldKeys() {
+        for (entry in persistedSet(HELD_KEYS_KEY)) {
+            val parts = entry.split('|')
+            if (parts.size == 2) account.rememberHeldKey(parts[0], parts[1])
+        }
+    }
+
+    /** Persist the tag of every vault the account adopted a key for and this device has no tag for yet. A recorded
+     *  tag is never overwritten here; only [hardDropLocal] removes one, with the vault. */
+    private fun persistHeldKeys() {
+        val persisted = persistedSet(HELD_KEYS_KEY)
+        val known = persisted.mapTo(HashSet()) { it.substringBefore('|') }
+        val added = account.heldKeyTagsSnapshot().filterKeys { it !in known }.map { (v, t) -> "$v|$t" }
+        if (added.isNotEmpty()) persistSet(HELD_KEYS_KEY, persisted + added)
+    }
+
+    // ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7) ----
+
+    /**
+     * §6.3 `liveSince`: stamp every vault this device now holds a key for, outside the holding area, that has no
+     * stamp yet, with the DEVICE clock. Cleared when the vault leaves the live view ([hardDropLocal]), so a re-add
+     * this device sees moves it past every proof minted before the re-add. Never set from a server value.
+     */
+    private fun markLiveVaults() {
+        val now = nowMs()
+        for (v in cache.vaults()) {
+            val id = v.vaultId
+            if (!account.hasVault(id) || cache.getHeld(id) != null || cache.liveSince(id) != null) continue
+            cache.setLiveSince(id, now)
+        }
+        for (g in cache.grants()) {
+            val id = g.vaultId
+            if (!account.hasVault(id) || cache.getHeld(id) != null || cache.liveSince(id) != null) continue
+            cache.setLiveSince(id, now)
+        }
+    }
+
+    /** §6.3 step 5: THIS device's consumed nonces for [vaultId]. */
+    private fun consumedFor(vaultId: String): Set<String> = cache.consumedNonces()[vaultId].orEmpty().mapTo(HashSet()) { it.nonce }
+
+    /** A7 review MEDIUM-2: the account state's consumed nonces for [vaultId] (other devices of this user). */
+    private fun accountConsumedFor(vaultId: String): Set<String> = accountState.doc.consumedNonces[vaultId].orEmpty().mapTo(HashSet()) { it.nonce }
 
     /** Called after a personal wrap is stored server-side, so a native host can update its cached
      *  `AccountKeys` (an offline cold start then knows the personal vault without the network). */
@@ -1020,6 +1080,8 @@ class SyncEngine(
         // from a verified v2 grant or a v1 key this device froze or the human confirmed (never for a key only an
         // unconfirmed v1 seal vouches for: the A1 laundering bug). Then the owner's §8.2 step 4 re-issue.
         reevaluateGrants()
+        persistHeldKeys()
+        markLiveVaults()
         surfaceGrantStates()
         postAuthorizedSelfWraps()
         runCatching { reissueLegacyGrants() }
@@ -1033,6 +1095,7 @@ class SyncEngine(
      * retried here on every launch (e.g. after an upgrade or a later-opened grant).
      */
     fun hydrate() {
+        loadHeldKeys() // A7: the durable record first (a rolled-back pull re-hydrates through here too)
         for (g in cache.grants()) {
             runCatching { account.addGrant(g) } // role applies unconditionally; key opens if missing
         }
@@ -1070,6 +1133,8 @@ class SyncEngine(
         for (v in cache.vaults()) {
             runCatching { applyTransferState(v, noticeable = false) }
         }
+        persistHeldKeys()
+        markLiveVaults()
         surfaceKeyAnomalies()
     }
 
@@ -1313,6 +1378,8 @@ class SyncEngine(
                     hardDropLocal(vaultId) // still ensure the vault leaves the live view
                 }
             }
+            markLiveVaults()
+            persistHeldKeys()
             cache.setCursor(resp.rev)
         }
         return reinstated
@@ -1391,28 +1458,28 @@ class SyncEngine(
         // Unverifiable: the VK was not held before this pull (fresh device, hidden grant, or a
         // since=0 / resync pull) → silent no-op. Drop any stray unusable row.
         if (cachedName == null || since == 0L || resyncing) {
-            hardDropLocal(vaultId)
+            hardDropLocal(vaultId, forgetKeyMemory = selfInitiated)
             return
         }
 
-        // This device initiated the delete/leave — drop cleanly, no banner (design §4/§13).
+        // This device initiated the delete/leave — drop cleanly, no banner (design §4/§13). The user's own action is
+        // the one drop that clears this device's key memory for the vault (A7 review MEDIUM-1).
         if (selfInitiated) {
-            hardDropLocal(vaultId)
+            hardDropLocal(vaultId, forgetKeyMemory = true)
             return
         }
 
         val reason = info?.reason ?: "removed"
-        val verdict = when {
-            reason == "left" -> "left"
-            verifyRemoval(vaultId, reason, info) -> "valid"
-            else -> "anomaly"
+        if (reason == "removed" || reason == "left") {
+            handleRemovalOrLeave(vaultId, reason, info, cachedName)
+            return
         }
+        val verdict = if (verifyRemoval(vaultId, reason, info)) "valid" else "anomaly"
 
         // Snapshot ciphertext + move to holding BEFORE forgetting the VK.
         val parkedCount = moveToHolding(vaultId, reason, info, verdict == "valid")
 
         when {
-            verdict == "left" -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "left"))
             verdict == "anomaly" -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "anomaly"))
             reason == "deleted" -> pushNotice(
                 LifecycleNotice(
@@ -1424,22 +1491,66 @@ class SyncEngine(
         }
     }
 
-    /** Verify the relayed removal/delete proof under the still-held VK (spec 03 §11). */
+    /**
+     * `removed` / `left` on a vault this device held, not self-initiated (security review 2026-10, root cause A §6.3,
+     * §8.6; branch A7). [io.silencelen.andvari.core.crypto.RemovalProof.decide] runs the verification order against
+     * the held VK, this device's `liveSince` and the consumed set (device ∪ account state); its verdict picks the
+     * banner. A valid verdict's `(vaultId, nonce, issuedAt)` is consumed in the SAME transaction that moves the vault
+     * to the holding area (this runs inside [applyPull]'s [VaultCache.atomically]). The data handling is the same for
+     * every verdict: holding area, 30 days.
+     */
+    private fun handleRemovalOrLeave(vaultId: String, reason: String, info: RemovedGrantInfo?, cachedName: String) {
+        val decision = runCatching {
+            io.silencelen.andvari.core.crypto.RemovalProof.decide(
+                crypto = account.cryptoProvider(),
+                lifecycleKey = account.lifecycleKeyFor(vaultId),
+                vaultId = vaultId,
+                myUserId = account.userId,
+                reason = reason,
+                proofV = info?.proofV,
+                proof = info?.removeProof,
+                nonce = info?.removeNonce,
+                issuedAt = info?.issuedAt,
+                consumed = consumedFor(vaultId),
+                consumedAccount = accountConsumedFor(vaultId),
+                liveSince = cache.liveSince(vaultId),
+                now = nowMs(),
+            )
+        }.getOrElse { io.silencelen.andvari.core.crypto.RemovalProof.Decision(io.silencelen.andvari.core.crypto.RemovalProof.Verdict.ANOMALY, "error") }
+        // Consume first, then snapshot + move to holding BEFORE forgetting the VK: one transaction.
+        val consumeNonce = decision.consumeNonce
+        val consumeAt = decision.consumeIssuedAt
+        if (consumeNonce != null && consumeAt != null) cache.addConsumedNonce(vaultId, consumeNonce, consumeAt)
+        moveToHolding(vaultId, reason, info, verifiedDelete = false)
+        val n = when (decision.verdict) {
+            io.silencelen.andvari.core.crypto.RemovalProof.Verdict.VALID ->
+                LifecycleNotice(account.newItemId(), vaultId, cachedName, if (reason == "left") "left" else "removed")
+            // A7 review LOW-3: a v1 proof is qualified ("sent by an older app version"), never shown as fully genuine.
+            io.silencelen.andvari.core.crypto.RemovalProof.Verdict.VALID_LEGACY ->
+                LifecycleNotice(account.newItemId(), vaultId, cachedName, "removed", reason = REMOVED_LEGACY)
+            // A7 review MEDIUM-2: another of this user's devices already consumed this genuine proof. Calm.
+            io.silencelen.andvari.core.crypto.RemovalProof.Verdict.ALREADY_RECORDED ->
+                LifecycleNotice(account.newItemId(), vaultId, cachedName, if (reason == "left") "left" else "removed", reason = ALREADY_RECORDED)
+            io.silencelen.andvari.core.crypto.RemovalProof.Verdict.LEFT_UNPROVEN ->
+                LifecycleNotice(account.newItemId(), vaultId, cachedName, "left", reason = LEFT_UNPROVEN)
+            io.silencelen.andvari.core.crypto.RemovalProof.Verdict.REPLAY_DENIED ->
+                LifecycleNotice(account.newItemId(), vaultId, cachedName, "replay-denied", reason = REMOVAL_REPLAY)
+            io.silencelen.andvari.core.crypto.RemovalProof.Verdict.ANOMALY ->
+                LifecycleNotice(account.newItemId(), vaultId, cachedName, "anomaly")
+        }
+        pushNotice(n)
+    }
+
+    /** Verify the relayed delete proof under the still-held VK (spec 03 §11). `removed` / `left` go through
+     *  [handleRemovalOrLeave] instead (branch A7). */
     private fun verifyRemoval(vaultId: String, reason: String, info: RemovedGrantInfo?): Boolean {
-        if (info == null) return false // a bare revocation of a held vault is never "valid"
+        if (info == null || reason != "deleted") return false // a bare revocation of a held vault is never "valid"
         return runCatching {
             val key = account.lifecycleKeyFor(vaultId)
             val crypto = account.cryptoProvider()
-            if (reason == "deleted") {
-                val proof = info.deleteProof ?: return false
-                val id = info.deleteId ?: return false
-                LifecycleProof.verify(LifecycleProof.delete(crypto, key, vaultId, id), proof)
-            } else {
-                // 'removed' / 'transferred': verify the optional removal proof over (vaultId, me, nonce).
-                val proof = info.removeProof ?: return false
-                val nonce = info.removeNonce ?: return false
-                LifecycleProof.verify(LifecycleProof.remove(crypto, key, vaultId, account.userId, nonce), proof)
-            }
+            val proof = info.deleteProof ?: return false
+            val id = info.deleteId ?: return false
+            LifecycleProof.verify(LifecycleProof.delete(crypto, key, vaultId, id), proof)
         }.getOrDefault(false)
     }
 
@@ -1481,15 +1592,26 @@ class SyncEngine(
         return parked.size
     }
 
-    /** Drop a vault from the LIVE view: rows, queued mutations, key/role, incoming offer. */
-    private fun hardDropLocal(vaultId: String) {
+    /**
+     * Drop a vault from the LIVE view: rows, queued mutations, key/role, incoming offer, and this device's liveSince.
+     *
+     * A7 review MEDIUM-1: the device's KEY MEMORY for the vault (the §8.2 vouch and the held-key tag) survives every
+     * server-driven drop — every removal verdict, the silent resync drop — because the server could otherwise reset
+     * it and re-add the vault under a key it chose (no step of root cause A re-keys a vault, so a genuine re-add
+     * carries the same key). Only a drop the USER initiated on this device ([forgetKeyMemory]: their own leave or
+     * delete) clears it, which keeps "leave it and ask its owner to add you again" a working recovery for vk_mismatch.
+     */
+    private fun hardDropLocal(vaultId: String, forgetKeyMemory: Boolean = false) {
         cache.dropVault(vaultId)
         cache.dropPending(vaultId)
         account.removeVault(vaultId)
         incomingByVault.remove(vaultId)
-        // A vouched-for legacy key dies with the vault: a later v1 grant for the same vaultId (a re-add, or a
-        // server replay) starts read-only again instead of inheriting this device's old trust.
-        persistSet(LEGACY_AUTHORIZED_KEY, persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }.toSet())
+        cache.setLiveSince(vaultId, null)
+        if (forgetKeyMemory) {
+            account.forgetKeyMemory(vaultId)
+            persistSet(LEGACY_AUTHORIZED_KEY, persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }.toSet())
+            persistSet(HELD_KEYS_KEY, persistedSet(HELD_KEYS_KEY).filterNot { it.startsWith("$vaultId|") }.toSet())
+        }
     }
 
     /** Expunge holding-area entries past their deadline (purgeAt / +30d, design §6). */
@@ -1629,7 +1751,7 @@ class SyncEngine(
         val resp = api.deleteVault(vaultId, VaultDeleteRequest(deleteId, proof))
         suppressDrop.add(vaultId)
         try {
-            reconcileSync(onFailure = { hardDropLocal(vaultId) })
+            reconcileSync(onFailure = { hardDropLocal(vaultId, forgetKeyMemory = true) })
         } finally {
             suppressDrop.remove(vaultId) // #4: never outlives the action's own reconcile
         }
@@ -1656,15 +1778,32 @@ class SyncEngine(
         reconcileSync() // restore committed; a failed reconcile trues up later
     }
 
-    /** LEAVE (self-removal). This device initiated it → drop cleanly (no "you left" banner here). */
+    /** LEAVE (self-removal). This device initiated it → drop cleanly (no "you left" banner here). Carries a v2
+     *  leave proof (root cause A §6.2, branch A7) so this member's OTHER devices can verify the leave. */
     suspend fun leaveSharedVault(vaultId: String) {
-        api.leaveVault(vaultId)
+        val nonce = LifecycleProof.newNonce(account.cryptoProvider())
+        val issuedAt = nowMs()
+        val proof = LifecycleProof.leave(account.cryptoProvider(), account.lifecycleKeyFor(vaultId), vaultId, account.userId, nonce, issuedAt)
+        api.leaveVault(vaultId, io.silencelen.andvari.core.model.VaultLeaveRequest(proofV = 2, proof = proof, nonce = nonce, issuedAt = issuedAt))
         suppressDrop.add(vaultId)
         try {
-            reconcileSync(onFailure = { hardDropLocal(vaultId) })
+            reconcileSync(onFailure = { hardDropLocal(vaultId, forgetKeyMemory = true) })
         } finally {
             suppressDrop.remove(vaultId) // #4: never outlives the action's own reconcile
         }
+    }
+
+    /**
+     * REMOVE a member (owner; root cause A §6.2, branch A7): mints a v2 removal proof under the held VK — a fresh
+     * 16-byte nonce and this device's clock — and sends it with the DELETE, so the removed member's devices can
+     * attribute the removal and refuse a replay. Web twin: store.ts `removeVaultMember`.
+     */
+    suspend fun removeVaultMember(vaultId: String, userId: String) {
+        val nonce = LifecycleProof.newNonce(account.cryptoProvider())
+        val issuedAt = nowMs()
+        val proof = LifecycleProof.removeV2(account.cryptoProvider(), account.lifecycleKeyFor(vaultId), vaultId, userId, nonce, issuedAt)
+        api.removeVaultMember(vaultId, userId, io.silencelen.andvari.core.model.VaultMemberRemoveRequest(proof = proof, nonce = nonce, proofV = 2, issuedAt = issuedAt))
+        reconcileSync()
     }
 
     /** TRANSFER offer. seq = the vault's last completed transfer seq + 1 (= transferSeq+1). */

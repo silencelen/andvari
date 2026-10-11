@@ -183,6 +183,29 @@ export function mergeAccountState(
   };
 }
 
+/**
+ * Fold this device's consumed removal nonces (root cause A §6.2, branch A7) into `doc` by the merge rule (union per
+ * vault, the larger issuedAt for a repeated nonce, newest NONCE_CAP kept). Core `AccountState.withConsumed` twin.
+ */
+export function withConsumedNonces(doc: AccountStateDoc, extra: Record<string, ConsumedNonce[]>): AccountStateDoc {
+  const maps = new Map<string, Map<string, number>>();
+  for (const src of [doc.consumedNonces, extra]) {
+    for (const [vaultId, list] of Object.entries(src)) {
+      const m = maps.get(vaultId) ?? new Map<string, number>();
+      for (const [n, t] of list) m.set(n, Math.max(m.get(n) ?? t, t));
+      maps.set(vaultId, m);
+    }
+  }
+  const consumedNonces: Record<string, ConsumedNonce[]> = {};
+  for (const vaultId of [...maps.keys()].sort()) {
+    consumedNonces[vaultId] = [...maps.get(vaultId)!.entries()]
+      .map(([n, t]) => [n, t] as ConsumedNonce)
+      .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      .slice(0, NONCE_CAP);
+  }
+  return { ...doc, consumedNonces };
+}
+
 /** Same content ignoring seq (no write needed). */
 export function sameAccountStateContent(a: AccountStateDoc | null, b: AccountStateDoc | null): boolean {
   if (!a || !b) return false;
