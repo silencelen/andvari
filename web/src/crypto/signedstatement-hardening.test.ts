@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Account } from "../vault/account";
 import type { KdfParams } from "./keys";
 import { boxKeypairFromSeed, randomBytes, signKeypairFromSeed } from "./provider";
@@ -10,10 +10,26 @@ import {
   type Statement,
   type UnverifiedStatement,
   VerifiedStatement,
-  verifyEscrowStatement,
   verifySignedStatement,
+  type EscrowStatementVerifier,
 } from "./signedstatement";
 import { initSodium } from "./sodium";
+
+/**
+ * The anchored escrow verifier is module-private (security review 2026-10, A5): escrow.ts claims it once.
+ * This suite grades it in an ISOLATED module registry (fresh signedstatement + sodium instances) where no
+ * escrow.ts has claimed it yet. Verdicts are read duck-typed, since the fresh SignedStatementError is a
+ * different class object.
+ */
+let verifyEscrowStatement: EscrowStatementVerifier;
+async function claimIsolatedEscrowVerifier(): Promise<EscrowStatementVerifier> {
+  vi.resetModules();
+  const sodium = await import("./sodium");
+  await sodium.initSodium();
+  const mod = await import("./signedstatement");
+  return mod.claimEscrowVerifier();
+}
+
 
 /**
  * The A3-review hardening A4 (the codec's first caller) had to land (security review 2026-10), web twin
@@ -35,6 +51,7 @@ const verdictOf = (f: () => unknown) => {
     f();
   } catch (e) {
     if (e instanceof SignedStatementError) return e.verdict;
+    if (e && typeof (e as { verdict?: unknown }).verdict === "string") return (e as { verdict: string }).verdict;
     throw e;
   }
   return null;
@@ -43,6 +60,7 @@ const verdictOf = (f: () => unknown) => {
 describe("SignedStatement hardening (A3 review, landed in A4)", () => {
   beforeAll(async () => {
     await initSodium();
+    verifyEscrowStatement ??= await claimIsolatedEscrowVerifier();
   });
 
   it("an escrow statement whose embedded identity differs from the anchor is rejected despite a valid signature", () => {
@@ -101,5 +119,37 @@ describe("SignedStatement hardening (A3 review, landed in A4)", () => {
     // @ts-expect-error — no public signing method on Account
     expect(account.signStatement).toBeUndefined();
     expect("signStatement" in account).toBe(false);
+  });
+});
+
+describe("the anchored escrow verifier is reachable from the escrow open path only (A4 carry-forward, A5)", () => {
+  it("is not exported, and escrow.ts holds the one claim", async () => {
+    const { readFileSync, readdirSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const src = fileURLToPath(new URL("../", import.meta.url));
+    const ss = readFileSync(join(src, "crypto/signedstatement.ts"), "utf-8");
+    expect(ss).not.toMatch(/export\s+(async\s+)?function\s+verifyEscrowStatement/);
+    expect(ss).not.toMatch(/export\s*\{[^}]*verifyEscrowStatement/);
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name)) {
+          const text = readFileSync(p, "utf-8");
+          if (text.includes("claimEscrowVerifier") && !p.endsWith(join("crypto", "escrow.ts")) && !p.endsWith(join("crypto", "signedstatement.ts"))) offenders.push(p);
+        }
+      }
+    };
+    walk(src);
+    expect(offenders).toEqual([]);
+  });
+
+  it("a second claim in the same module instance throws (escrow.ts already holds it)", async () => {
+    vi.resetModules();
+    await import("./escrow");
+    const mod = await import("./signedstatement");
+    expect(() => mod.claimEscrowVerifier()).toThrow(/escrow open path/);
   });
 });

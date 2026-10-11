@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { fingerprint } from "../crypto/escrow";
+import { boxKeypairFromSeed } from "../crypto/provider";
+import { initSodium } from "../crypto/sodium";
 import { enrollPrefillFor, type EnrollPayload } from "./enrolllink";
 import {
   INVITE_TTL_DEFAULT,
   escrowPostureLabel,
   inviteResultView,
   inviteTtlMinutes,
+  confirmOrgFingerprint,
   normalizeOrgFp,
   shouldOfferQr,
   stampedRfp,
@@ -98,23 +102,43 @@ describe("inviteResultView — the public break-glass origin is ALWAYS token-onl
   });
 });
 
-describe("stampedRfp — a QR stamps rfp ONLY from an admin-confirmed sheet, never a server fetch (§F.2)", () => {
-  it("stamps the confirmed org fingerprint on a required invite", () => {
-    expect(stampedRfp("required", "b26efdd3eafc9dad")).toBe("b26efdd3eafc9dad");
+const FULL = "b26efdd3eafc9dad0011223344556677889900aabbccddeeff00112233445566";
+
+describe("stampedRfp — a QR stamps the FULL rfp ONLY from an admin-confirmed sheet, never a server fetch (§F.2, A5)", () => {
+  it("stamps the confirmed FULL org fingerprint on a required invite", () => {
+    expect(stampedRfp("required", FULL)).toBe(FULL);
+  });
+  it("never stamps a short id (the pre-A5 16-hex value) or a 32-hex prefix", () => {
+    expect(stampedRfp("required", FULL.slice(0, 16))).toBeUndefined();
+    expect(stampedRfp("required", FULL.slice(0, 32))).toBeUndefined();
   });
   it("stamps NOTHING when the admin hasn't confirmed their sheet (invitee falls back to typing)", () => {
     expect(stampedRfp("required", null)).toBeUndefined();
   });
   it("never stamps rfp on a waived invite (no fingerprint anywhere)", () => {
-    expect(stampedRfp("waived", "b26efdd3eafc9dad")).toBeUndefined();
+    expect(stampedRfp("waived", FULL)).toBeUndefined();
     expect(stampedRfp("waived", null)).toBeUndefined();
   });
 });
 
-describe("normalizeOrgFp — a typed sheet fingerprint is 16 hex after normalization", () => {
+describe("normalizeOrgFp", () => {
   it("lowercases and drops separators", () => {
     expect(normalizeOrgFp("B26E-FDD3 EAFC:9DAD")).toBe("b26efdd3eafc9dad");
-    expect(normalizeOrgFp("B26E FDD3 EAFC 9DAD").length).toBe(16);
+  });
+});
+
+describe("confirmOrgFingerprint — the admin types 32 hex, the confirmed value is the full served-key fingerprint (A5)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  it("returns the full 64-hex fingerprint only on a 32-hex human match", async () => {
+    const kp = boxKeypairFromSeed(new Uint8Array(32).fill(4));
+    const full = await fingerprint(kp.publicKey);
+    expect(await confirmOrgFingerprint(full.slice(0, 32), kp.publicKey)).toBe(full);
+    expect(await confirmOrgFingerprint(full.slice(0, 16), kp.publicKey)).toBeNull(); // the old 16-hex confirm
+    expect(await confirmOrgFingerprint("f".repeat(32), kp.publicKey)).toBeNull();
+    const other = boxKeypairFromSeed(new Uint8Array(32).fill(8));
+    expect(await confirmOrgFingerprint(full.slice(0, 32), other.publicKey)).toBeNull(); // the server serves a different key
   });
 });
 

@@ -349,8 +349,9 @@ function verifySigner(f: SignedStatementFrame, statement: Statement, pinnedIdent
  * `ed25519PkToCurve25519(signerPub) == pinnedIdentityPub` (`signer_not_pinned_key`; the pin MUST come
  * from out of band, never a server response), then the signature (`bad_signature`).
  *
- * Escrow statements are REFUSED here: they verify only through {@link verifyEscrowStatement}, which
- * cannot be called without the out-of-band anchor (security review 2026-10, A3 review).
+ * Escrow statements are REFUSED here: they verify only through the module-private `verifyEscrowStatement`,
+ * which only the escrow open path holds and which cannot be called without the out-of-band anchor
+ * (security review 2026-10, A3 review; A5).
  */
 export function verifySignedStatement(frame: Uint8Array, expectedPurposeCode: PurposeCode, pinnedIdentityPub: Uint8Array): VerifiedStatement {
   if (expectedPurposeCode === 2) throw new Error("escrow statements verify only through verifyEscrowStatement (anchored)");
@@ -367,8 +368,14 @@ export function verifySignedStatement(frame: Uint8Array, expectedPurposeCode: Pu
  * fields (`user_mismatch` / `recovery_fp_mismatch`, a refusal only); signer → anchor
  * (`signer_not_pinned_key`), signature (`bad_signature`); then the VERIFIED `userId`, `identityKey` and
  * `recoveryFp` must EQUAL the anchor (`user_mismatch` / `identity_mismatch` / `recovery_fp_mismatch`).
+ *
+ * MODULE-PRIVATE (security review 2026-10, root cause A, A4 review carry-forward closed in A5): not
+ * exported. The escrow open path (escrow.ts) takes it ONCE through {@link claimEscrowVerifier} at module
+ * load, so no other caller can verify an escrow frame against an anchor it derived itself (for instance
+ * from a public `parseFrame(...).signerPub`, which would be a self-pin). Core twin: `internal fun
+ * SignedStatement.verifyEscrow`.
  */
-export function verifyEscrowStatement(
+function verifyEscrowStatement(
   frame: Uint8Array,
   expectedUserId: string,
   anchoredIdentityPub: Uint8Array,
@@ -384,4 +391,20 @@ export function verifyEscrowStatement(
   if (!ctEquals(st.identityKey, anchoredIdentityPub)) refuse("identity_mismatch", "statement identityKey is not the anchored identity");
   if (st.recoveryFp !== expectedRecoveryFp) refuse("recovery_fp_mismatch", "verified statement names another recovery key");
   return verified;
+}
+
+export type EscrowStatementVerifier = typeof verifyEscrowStatement;
+
+let escrowVerifierClaimed = false;
+
+/**
+ * Hands the anchored escrow verifier to THE escrow open path, exactly once per module instance: escrow.ts
+ * claims it at load, and any later claim throws. That is the web form of core's `internal`: the verifier
+ * is reachable from the escrow open path and nowhere else. Do not call it from anywhere but escrow.ts (a
+ * source-scan test pins that); tests that grade the verifier claim it in an isolated module registry.
+ */
+export function claimEscrowVerifier(): EscrowStatementVerifier {
+  if (escrowVerifierClaimed) throw new Error("the escrow verifier belongs to the escrow open path (escrow.ts) and is already claimed");
+  escrowVerifierClaimed = true;
+  return verifyEscrowStatement;
 }

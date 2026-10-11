@@ -21,6 +21,12 @@ export const adRecovery = (userId: string) => join("recovery-uvk", userId);
 export const adIdkey = (userId: string) => join("idkey", userId);
 export const adVk = (vaultId: string, userId: string) => join("vk", vaultId, userId);
 export const adVaultMeta = (vaultId: string) => join("vaultmeta", vaultId);
+/** Security review 2026-10, root cause A §4.1: the PERSONAL wrap (`AccountKeys.personalWrap`). A distinct
+ *  purpose from {@link adVk}, so an owner wrap of a shared vault never opens as a personal wrap and the
+ *  reverse. Twin of core `Ad.vkPersonal`. */
+export const adVkPersonal = (vaultId: string, userId: string) => join("vk-personal", vaultId, userId);
+/** Root cause A §4.2: the per-user account-state blob, sealed under the UVK. Twin of core `Ad.accountState`. */
+export const adAccountState = (userId: string) => join("account-state", userId);
 /** spec 02 §8.2 (design 2026-08-22) — the per-user usage ledger envelope. Bound to the userId so
  *  one member's ledger can never be served into another's slot on a shared endpoint. */
 export const adUsage = (userId: string) => join("usage", userId);

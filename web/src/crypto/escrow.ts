@@ -4,7 +4,11 @@ import { requireJsonSafe } from "./canonicaljson";
 import { open as openEnvelope } from "./envelope";
 import { matchesShort } from "./fingerprint";
 import { boxKeypairFromSeed, ed25519PkToCurve25519, type KeyPairBytes, sealOpen, sealTo, sha256 } from "./provider";
-import { buildSignedStatement, type EscrowUvkStatement, formatOf, SignedStatementError, verifyEscrowStatement } from "./signedstatement";
+import { buildSignedStatement, claimEscrowVerifier, type EscrowUvkStatement, formatOf, SignedStatementError } from "./signedstatement";
+
+// The anchored escrow verifier is module-private to signedstatement.ts; this escrow open path claims it
+// once, here, so nothing else can (security review 2026-10, root cause A; core twin: `internal`).
+const verifyEscrowStatement = claimEscrowVerifier();
 import { CryptoError } from "./sodium";
 
 /** spec 04 §3 — sealed escrow payloads; mirrors core Escrow.kt. */
@@ -56,8 +60,15 @@ const FULL_FP_RE = /^[0-9a-f]{64}$/;
  * `Escrow.sealUvkV2`: an `escrow-uvk` SignedStatement binding `userId`, the member's seed-derived
  * identity key, the FULL org fingerprint and the UVK, signed with the joint key `signer` and sealed to
  * `recoveryPub`. REFUSES unless `hex(SHA-256(recoveryPub)) === verifiedRecoveryFp` IN FULL (64
- * lowercase hex) — a human-verified (or built-in) value, never a bare server response — and unless
- * `signer` maps to `identityPub`. The canary stays v1.
+ * lowercase hex), and unless `signer` maps to `identityPub`. The canary stays v1.
+ *
+ * `verifiedRecoveryFp` is always a value a HUMAN anchored, never one taken from a server response on its
+ * own (security review 2026-10, root cause A, branch A5). Two anchors exist: the typed sheet (the member
+ * typed 32 hex that matched the server-advertised full fingerprint, which is then passed here), and the
+ * in-person QR, whose FULL 64-hex `rfp` the admin client minted from the admin's own sheet check and the
+ * invitee accepts only after typing the in-person code from the admin's screen (`enrollCheckCode`). The
+ * link's `rfp` itself is passed here, so the served key must hash to it in full — never
+ * `fingerprint(servedKey)` anchored by a short prefix.
  */
 export async function sealUvkV2(params: {
   recoveryPub: Uint8Array;
@@ -275,10 +286,9 @@ export async function fingerprint(publicKey: Uint8Array): Promise<string> {
 }
 
 /**
- * The 16-hex (64-bit) short id of the org recovery key. NOT the 32-hex human short form used by the
- * typed enrolment path (see {@link matchesShort}). It is STILL used, at 16 hex, by the recovery-cli
- * operator display (read aloud), the admin sheet-confirm (typed), and the in-person-QR `rfp` compare.
- * Those paths have not been widened yet; a full-length compare is tracked for a later branch.
+ * The legacy 16-hex (64-bit) short id of the org recovery key, kept ONLY because `seal.json` pins it.
+ * Nothing compares or displays it any more (security review 2026-10, root cause A, branch A5): the admin
+ * sheet-confirm and the in-person-QR `rfp` are full 64-hex compares (`matchesFull`). Do not add a caller.
  */
 export async function shortFingerprint(publicKey: Uint8Array): Promise<string> {
   return (await fingerprint(publicKey)).slice(0, 16);
