@@ -1005,9 +1005,6 @@ class SyncEngine(
      * could classify another cycle's staged denial (see [surfaceStagedDenials]).
      */
     suspend fun sync() = syncMutex.withLock {
-        // §8.2: evidence is what THIS cache held before the upgrade. If no hydrate looked at it, nothing this
-        // engine pulls from now on may count as pre-upgrade evidence.
-        if (cache.clientState(FREEZE_DONE_KEY) == null) cache.setClientState(FREEZE_DONE_KEY, "1")
         pruneHolding()
         rejectedMutationIds.clear() // H03: per-row verdicts are consumed by the save that sent them; a background cycle starts clean
         flushQueue()
@@ -1078,6 +1075,10 @@ class SyncEngine(
     fun close() = cache.close()
 
     private suspend fun pull() {
+        // §8.2 (A6 re-review LOW-D): evidence is what THIS cache held before the upgrade. Every pull (sync, an
+        // import, a write's reconcile) marks the freeze as done FIRST, so if no hydrate looked at the cache, nothing
+        // this engine pulls from now on can count as pre-upgrade evidence.
+        if (cache.clientState(FREEZE_DONE_KEY) == null) cache.setClientState(FREEZE_DONE_KEY, "1")
         // Epoch guard (#0 belt): stamp the START of this pull before anything is fetched.
         // surfaceStagedDenials only classifies denials staged BEFORE a completed pull's
         // start — i.e. verdicts always come from a snapshot fetched after the denial.

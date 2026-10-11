@@ -1897,7 +1897,7 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // H71 (web F20 twin): a genuinely new non-owner grant — calm, informational.
         // Root cause A §1.6 (A6): a verified grant names the PINNED contact who signed it (core canon).
         "added" -> Pair(io.silencelen.andvari.core.client.HouseholdCopy.addedNotice(name, n.byLabel), false)
-        "grant-anomaly" -> Pair(io.silencelen.andvari.core.client.HouseholdCopy.GRANT_ANOMALY_NOTICE, true)
+        "grant-anomaly" -> Pair(io.silencelen.andvari.core.client.HouseholdCopy.grantAnomalyNotice(n.reason), true)
         // H03/H19: queued changes the server definitively refused and the drain dropped —
         // the canon lead sentence (web appends its revert tail; core has no optimistic apply).
         "write-rejected" -> Pair(HouseholdCopy.writeRejectedNotice(n.parkedCount ?: 0, name, n.reason), true)

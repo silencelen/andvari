@@ -37,6 +37,15 @@ class SignedGrantCopyTest {
         assertTrue(warn)
     }
 
+    /** A6 re-review LOW-C: a key mismatch tells the member how to recover (leave, ask the owner to re-add). */
+    @Test
+    fun aVkMismatchAnomalySaysHowToRecover() {
+        val (body, warn) = noticeBody(notice("grant-anomaly", reason = "vk_mismatch"))
+        assertEquals(HouseholdCopy.GRANT_VK_MISMATCH_NOTICE, body)
+        assertTrue(body.contains("leave it and ask its owner to add you again"))
+        assertTrue(warn)
+    }
+
     @Test
     fun low2_serverReportedDetailsAreLabelled() {
         val info = PersonalChoiceInfo("v", "Household", 3, PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER, listOf(CoHolder("u", "Bo", "b@example.com", "writer")), false)

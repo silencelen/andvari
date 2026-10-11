@@ -1045,13 +1045,18 @@ class Account private constructor(
         if (!grant.signedGrant.isNullOrEmpty()) {
             when (val o = openSigned(grant, heldVk = null)) {
                 is GrantOutcome.Adopted -> {
-                    // A6 review MED-2, cold start: a vault this device vouched for keeps its vouched v1 key when a
-                    // verified grant names a DIFFERENT key (an anomaly, never a silent switch).
-                    if (grant.vaultId in legacyAuthorized && !sealed.isNullOrEmpty()) {
-                        val vouched = openSealOrNull(grant.vaultId, sealed)?.takeIf { legacyVouched(grant.vaultId, it) }
-                        if (vouched != null && !Bytes.ctEquals(vouched, o.vk)) {
+                    // A6 review MED-2 / re-review MEDIUM-A, cold start: a vault this device vouched for is decided
+                    // from the device-local vouch TAG, not from whether the server kept the v1 seal. A verified grant
+                    // naming a DIFFERENT key than the vouched one is the vk_mismatch anomaly: keep the vouched key
+                    // when the row's seal still opens to it, otherwise refuse the row with no key. Never adopt it.
+                    val vouch = legacyAuthorized[grant.vaultId]
+                    if (vouch != null && vouch.tag != tagOf(o.vk)) {
+                        val vouched = sealed?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(grant.vaultId, it) }
+                            ?.takeIf { legacyVouched(grant.vaultId, it) }
+                        if (vouched != null) {
                             return OpenedVk(vouched, KeySource.LEGACY_SEAL, sealMismatch = true, anomaly = GrantVerdict.VK_MISMATCH)
                         }
+                        throw GrantRefusedException(GrantVerdict.VK_MISMATCH)
                     }
                     return OpenedVk(o.vk, KeySource.SIGNED_GRANT, sealMismatch = false, from = o.from)
                 }

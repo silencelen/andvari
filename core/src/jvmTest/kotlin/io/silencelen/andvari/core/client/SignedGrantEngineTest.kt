@@ -597,6 +597,85 @@ class SignedGrantEngineTest {
         assertTrue(engine.notices().any { it.kind == "grant-anomaly" && it.reason == "vk_mismatch" })
     }
 
+    // ---- A6 re-review round 2 ----
+
+    private suspend fun vouchedThenRestart(w: World, row: WireGrant): Pair<Account, Pair<SyncEngine, FakeServer>> {
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val cache = InMemoryVaultCache()
+        val first = SyncEngine(api(server), unlock(w.member), cache)
+        first.sync()
+        first.acceptLegacyVault(w.vaultId)
+        first.accountState.pin(pinOf(w.owner, "Owner"))
+        val restartCache = InMemoryVaultCache()
+        for (k in listOf("grant.legacy.authorized", "grant.freeze.done", "acctstate.copy", "acctstate.hw", "pins.confirmed")) {
+            restartCache.setClientState(k, cache.clientState(k))
+        }
+        server.selfWraps.clear() // the Accept above posted one; only what the restarted device posts matters here
+        server.feed = feed(w, 12, row)
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, restartCache)
+        engine.hydrate()
+        engine.sync()
+        return device to (engine to server)
+    }
+
+    /** MEDIUM-A: the vouch is decided from the device-local tag, not from whether the server kept the v1 seal. */
+    @Test
+    fun aVouchWithAStrippedSealRefusesADifferentKeyV2Grant() = runBlocking<Unit> {
+        val w = world()
+        val (device, es) = vouchedThenRestart(w, memberRow(w, 12, null, forgeSigned(w, w.owner, crypto.randomBytes(32))))
+        val (engine, server) = es
+        assertFalse(device.hasVault(w.vaultId), "K' is never adopted")
+        assertEquals("vk_mismatch", engine.notices().single { it.kind == "grant-anomaly" }.reason)
+        assertTrue(server.selfWraps.isEmpty())
+    }
+
+    @Test
+    fun aVouchWithAStrippedSealAdoptsASameKeyV2GrantNormally() = runBlocking<Unit> {
+        val w = world()
+        val (device, es) = vouchedThenRestart(w, memberRow(w, 12, null, forgeSigned(w, w.owner, w.vk)))
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+        assertTrue(es.first.notices().none { it.kind == "grant-anomaly" })
+    }
+
+    /** LOW-A parity (core already replaced the user's earlier confirmation; pinned here for the web twin). */
+    @Test
+    fun reConfirmingAUserReplacesThisDevicesEarlierConfirmation() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val b = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        b.sync()
+        val oldKey = Bytes.toB64(crypto.randomBytes(32))
+        b.accountState.pin(Contact(w.owner.userId, oldKey, "Owner", 1_000, Contact.METHOD_TYPED))
+        b.accountState.pin(pinOf(w.owner, "Owner").copy(verifiedAt = 2_000))
+        val a = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        a.sync()
+        a.accountState.pin(Contact(w.owner.userId, oldKey, "Owner", 3_000, Contact.METHOD_TYPED))
+        b.sync()
+        assertEquals(oldKey, b.accountState.doc.contact(w.owner.userId)!!.identityPub)
+        assertNull(b.accountState.currentPin(w.owner.userId))
+    }
+
+    /** LOW-D: an import (or any write's reconcile) that pulls before any sync/hydrate must not leave the freeze to
+     *  run later over rows this release pulled. */
+    @Test
+    fun anImportBeforeTheFirstSyncCannotLaterCountAsPreUpgradeEvidence() = runBlocking<Unit> {
+        val w = world()
+        val item = w.owner.account.let { o ->
+            val id = o.newItemId(); val up = o.encryptItem(w.vaultId, id, doc)
+            WireItem(id, w.vaultId, 4, 1, 1, false, false, up.formatVersion, emptyList(), up.blob)
+        }
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null), listOf(item)))
+        val cache = InMemoryVaultCache()
+        val first = SyncEngine(api(server), unlock(w.member), cache)
+        first.importAll(emptyList()) // pulls the post-upgrade rows; no sync(), no hydrate()
+        assertNotNull(cache.clientState("grant.freeze.done"), "the pull itself marks the freeze as done")
+        val again = unlock(w.member)
+        val e2 = SyncEngine(api(server), again, cache)
+        e2.hydrate()
+        assertTrue(again.isLegacyReadOnly(w.vaultId), "rows pulled by this release are never pre-upgrade evidence")
+    }
+
     // ---- A6 review LOW-2: a present-but-broken v2 field is never an "Accept anyway" ----
 
     @Test
