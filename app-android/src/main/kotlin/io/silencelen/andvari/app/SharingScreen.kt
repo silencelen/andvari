@@ -74,9 +74,18 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
                 (n.parkedCount?.let { " $it of your edits hadn’t synced — they’ll be recovered if the vault is restored this week." } ?: ""),
             false,
         )
-        "removed" -> Pair("Your access to “$name” was removed.", false)
+        // A7 review: MEDIUM-2 (already recorded on another device, calm) and LOW-3 (a v1 proof, qualified).
+        "removed" -> when (n.reason) {
+            SyncEngine.ALREADY_RECORDED -> Pair(HouseholdCopy.removalAlreadyRecordedNotice(name), false)
+            SyncEngine.REMOVED_LEGACY -> Pair(HouseholdCopy.removedLegacyNotice(name), false)
+            else -> Pair("Your access to “$name” was removed.", false)
+        }
         // Root cause A §8.6 (A7): a leave with no proof, in the compatibility window, adds "Didn't do this? Tell your admin".
-        "left" -> Pair(if (n.reason == SyncEngine.LEFT_UNPROVEN) HouseholdCopy.leftUnprovenNotice(name) else "You left “$name”.", n.reason == SyncEngine.LEFT_UNPROVEN)
+        "left" -> when (n.reason) {
+            SyncEngine.LEFT_UNPROVEN -> Pair(HouseholdCopy.leftUnprovenNotice(name), true)
+            SyncEngine.ALREADY_RECORDED -> Pair(HouseholdCopy.leftAlreadyRecordedNotice(name), false)
+            else -> Pair("You left “$name”.", false)
+        }
         "restored" -> Pair("“$name” was restored.", false)
         "transfer-complete" -> Pair(
             if (n.becameMine) "You are now the owner of “$name”." else "“$name” now has a new owner.",
