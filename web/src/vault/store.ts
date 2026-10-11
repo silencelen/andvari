@@ -27,7 +27,7 @@ import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account } from "./account";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
-import { type PersonalCandidate, personalVaultChoices } from "./personalvault";
+import { type CoHolder, type PersonalCandidate, type PersonalChange, type PersonalChoiceInfo, type PersonalVaultProposal, personalVaultChoices } from "./personalvault";
 import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
 
 /**
@@ -455,7 +455,7 @@ export class VaultStore {
   readonly accountState: AccountStateSync;
   private readonly clientState: ClientStateStore;
 
-  /** Non-null while the §8.5 migration needs the human: "Which vault is your Personal vault?". */
+  /** Non-null while the human must answer "Which vault is your Personal vault?" (no wrap anywhere). */
   personalVaultChoices: PersonalCandidate[] | null = null;
 
   /** The question's choices, from the synced rows and this client's own key provenance. The server's
@@ -477,35 +477,49 @@ export class VaultStore {
     return out;
   }
 
+  /** The wrap this browser cached the last time it authenticated one (UVK-sealed; null if none). */
+  private cachedPersonalWrap(): PersonalWrap | null {
+    try {
+      const raw = this.clientState.get("personal.wrap");
+      const o = raw ? (JSON.parse(raw) as Partial<PersonalWrap>) : null;
+      return o && typeof o.vaultId === "string" && typeof o.wrappedVk === "string" ? { vaultId: o.vaultId, wrappedVk: o.wrappedVk } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private rememberPersonalWrap(w: PersonalWrap): void {
+    this.clientState.set("personal.wrap", JSON.stringify({ vaultId: w.vaultId, wrappedVk: w.wrappedVk }));
+    this.clientState.set("personal.last", w.vaultId);
+  }
+
   /**
-   * Root cause A §4.3 as amended by the A5 review (H-1), local only, never minting (core twin):
-   * confirmed → cache the wrap on this device; absent + cached → "withheld" (anomaly, the cached wrap
-   * stands, no question, no label); absent + nothing cached → ask; unreadable → only a re-designation.
+   * Root cause A §4.3 as amended by the A5 review (H-1) and re-review (A5b), local only, never minting (core
+   * twin). confirmed + a cached wrap for ANOTHER vault → "changed": the device keeps its own until the human
+   * confirms (also an older wrap replayed, L-2); confirmed otherwise → cache the wrap; absent + cached →
+   * "withheld"; absent + nothing cached → ask; unreadable + a cached wrap that opens → "unreadable-cached"
+   * (L-1); unreadable otherwise → only a re-designation.
    */
   private decidePersonalLocally(): void {
+    const cached = this.cachedPersonalWrap();
     switch (this.account.personalStatus) {
       case "confirmed": {
-        const w = this.account.personalWrap;
-        if (w) this.clientState.set("personal.wrap", JSON.stringify({ vaultId: w.vaultId, wrappedVk: w.wrappedVk }));
-        this.clientState.set("personal.last", this.account.personalVaultId);
         this.personalVaultChoices = null;
+        if (cached && this.account.holdPersonalChange(cached)) return;
+        const w = this.account.personalWrap;
+        if (w) this.rememberPersonalWrap(w);
         return;
       }
       case "withheld":
+      case "changed":
+      case "unreadable-cached":
         this.personalVaultChoices = null;
         return;
       case "unreadable":
-        this.personalVaultChoices = [];
+        if (cached) this.account.applyCachedPersonalWrap(cached);
+        this.personalVaultChoices = (this.account.personalStatus as string) === "unreadable-cached" ? null : [];
         return;
       case "absent": {
-        let cached: PersonalWrap | null = null;
-        try {
-          const raw = this.clientState.get("personal.wrap");
-          const o = raw ? (JSON.parse(raw) as Partial<PersonalWrap>) : null;
-          if (o && typeof o.vaultId === "string" && typeof o.wrappedVk === "string") cached = { vaultId: o.vaultId, wrappedVk: o.wrappedVk };
-        } catch {
-          cached = null;
-        }
         if (cached) {
           this.account.applyCachedPersonalWrap(cached);
           this.personalVaultChoices = (this.account.personalStatus as string) === "withheld" ? null : [];
@@ -516,16 +530,100 @@ export class VaultStore {
     }
   }
 
+  // ---- A5b (M-2): an informed, confirmed choice ----
+
+  private readonly coHoldersByVault = new Map<string, CoHolder[]>();
+  private pendingProposal: PersonalVaultProposal | null = null;
+
+  /** The vault this browser already had as personal: its cached wrap, else the last one it used (L-1). */
+  devicePersonalVaultId(): string | null {
+    return this.cachedPersonalWrap()?.vaultId ?? this.clientState.get("personal.last");
+  }
+
+  /** One vault as the question and the Settings list show it (core `personalChoiceInfo` twin). `coHolders` is
+   *  null until {@link refreshPersonalChoiceDetails} (or a proposal) loaded it. What the server reports. */
+  personalChoiceInfo(vaultId: string): PersonalChoiceInfo {
+    const row = this.vaultsById.get(vaultId);
+    const name = row ? this.account.decryptVaultName(vaultId, row.metaBlob) : null;
+    let itemCount = 0;
+    for (const it of this.itemsById.values()) if (it.vaultId === vaultId) itemCount++;
+    return {
+      vaultId,
+      name: name && name !== "(vault)" ? name : null,
+      itemCount,
+      origin: row?.lastTransfer?.newOwnerUserId === this.account.userId ? "received" : "created",
+      coHolders: this.coHoldersByVault.get(vaultId) ?? null,
+      onThisDevice: vaultId === this.devicePersonalVaultId(),
+    };
+  }
+
+  private async loadCoHolders(vaultId: string): Promise<CoHolder[]> {
+    const list = (await this.api.vaultMembers(vaultId))
+      .filter((m) => m.userId !== this.account.userId)
+      .map((m) => ({ userId: m.userId, displayName: m.displayName, email: m.email, role: m.role }));
+    this.coHoldersByVault.set(vaultId, list);
+    return list;
+  }
+
+  /** Best effort: who else holds each vault, for the lists (an unreachable server leaves null). */
+  async refreshPersonalChoiceDetails(vaultIds: string[]): Promise<void> {
+    for (const id of vaultIds) {
+      try {
+        await this.loadCoHolders(id);
+      } catch {
+        /* unknown stays null */
+      }
+    }
+  }
+
   /**
-   * The human's answer to "Which vault is your Personal vault?" (§8.5), or a Settings re-designation
-   * (owner decision Q9). Only a vault keyed from our own UVK wrap. `currentAuthKey` (a FRESH password
-   * entry) is required by the server to REPLACE an existing wrap.
+   * Step 1 of a designation (core `proposePersonalVault` twin): describe the chosen vault for the confirmation.
+   * Mints NOTHING. Refuses a vault not keyed from our own UVK wrap, and fails when the co-holders cannot be
+   * loaded (the confirmation must name them). Supersedes any earlier proposal.
    */
-  async designatePersonalVault(vaultId: string, currentAuthKey?: string): Promise<void> {
-    const wrap = this.account.buildPersonalWrap(vaultId);
+  async proposePersonalVault(vaultId: string): Promise<PersonalVaultProposal> {
+    this.pendingProposal = null;
+    if (!this.account.keyFromOwnUvkWrap(vaultId)) throw new Error("that vault is not wrapped under this account's key");
+    const coHolders = await this.loadCoHolders(vaultId);
+    const info = this.personalChoiceInfo(vaultId);
+    const p: PersonalVaultProposal = Object.freeze({ vaultId, name: info.name, origin: info.origin, coHolders, replacing: this.account.personalVaultId || null });
+    this.pendingProposal = p;
+    return p;
+  }
+
+  cancelPersonalProposal(): void {
+    this.pendingProposal = null;
+  }
+
+  /**
+   * Step 2: the human confirmed `proposal` after reading its name and co-holders. Only the pending proposal
+   * this store issued is accepted, once. `currentAuthKey` (a FRESH password entry) is required by the server
+   * to REPLACE an existing wrap (re-designation, Q9; keeping the current vault over a change).
+   */
+  async confirmPersonalVault(proposal: PersonalVaultProposal, currentAuthKey?: string): Promise<void> {
+    if (proposal !== this.pendingProposal) throw new Error("that personal-vault choice was not confirmed here (or is stale)");
+    this.pendingProposal = null;
+    const wrap = this.account.buildPersonalWrap(proposal.vaultId);
     await this.api.putPersonalWrap(wrap, currentAuthKey);
+    this.rememberPersonalWrap(wrap); // before applying, so the new wrap is never read as a change
     this.account.applyPersonalWrap(wrap);
-    this.decidePersonalLocally(); // caches the new wrap and clears the question
+    this.decidePersonalLocally(); // clears the question
+  }
+
+  /** Non-null while a served wrap names another vault than this browser's and the human has not decided. */
+  personalChange(): PersonalChange | null {
+    const served = this.account.pendingPersonalChange;
+    if (this.account.personalStatus !== "changed" || !served) return null;
+    return { currentVaultId: this.account.personalVaultId, servedVaultId: served.vaultId };
+  }
+
+  /** The human confirmed the change: the served wrap (authenticated under our UVK) is in force and cached.
+   *  Mints nothing. Keeping the current vault instead is a confirmed re-designation with the password. */
+  acceptPersonalChange(): void {
+    this.account.acceptPersonalChange();
+    const w = this.account.personalWrap;
+    if (w) this.rememberPersonalWrap(w);
+    this.decidePersonalLocally();
   }
 
   /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
@@ -615,8 +713,9 @@ export class VaultStore {
    * Vaults whose key we hold, personal first then shared by name.
    *
    * `type` is DERIVED, not copied (security review 2026-10, root cause A §4.3; core vaultInfos twin):
-   * "personal" iff the vault is `account.personalVaultId`, which only the UVK-authenticated personal wrap
-   * (or the §8.5 migration) sets. The server's `type` label is ignored for every decision this feeds.
+   * "personal" iff the vault is `account.personalVaultId`, which only a UVK-authenticated personal wrap sets:
+   * one the server served, one this browser cached, or one minted from the human's confirmed choice (there is
+   * no automatic migration pick any more). The server's `type` label is ignored for every decision this feeds.
    */
   vaults(): VaultInfo[] {
     const out: VaultInfo[] = [];

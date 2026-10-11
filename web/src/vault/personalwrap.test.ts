@@ -100,6 +100,9 @@ class FakeApi {
   async putPersonalWrap(wrap: PersonalWrap, currentAuthKey?: string) {
     this.puts.push({ wrap, currentAuthKey });
   }
+  async vaultMembers() {
+    return [];
+  }
   async accountState() {
     return { sealedState: null, seq: 0 };
   }
@@ -171,7 +174,7 @@ describe("the personal vault is never a server label (VaultStore)", () => {
     expect(device.personalVaultId).toBe("");
     expect(api.puts).toHaveLength(0);
     expect(new Set(store.personalVaultChoices!.map((c) => c.vaultId))).toEqual(new Set([victim.personalVaultId, other.vaultId]));
-    await store.designatePersonalVault(victim.personalVaultId);
+    await store.confirmPersonalVault(await store.proposePersonalVault(victim.personalVaultId));
     expect(device.personalStatus).toBe("confirmed");
     expect(api.puts).toHaveLength(1);
     expect(api.puts[0]!.currentAuthKey).toBeUndefined();
@@ -195,14 +198,14 @@ describe("the personal vault is never a server label (VaultStore)", () => {
     expect(device.personalVaultId).toBe("");
     expect(new Set(store.personalVaultChoices!.map((c) => c.vaultId))).toEqual(new Set([victim.personalVaultId, owned.vaultId]));
     expect(api.puts).toHaveLength(0);
-    await expect(store.designatePersonalVault(sealed.vaultId)).rejects.toThrow();
+    await expect(store.proposePersonalVault(sealed.vaultId)).rejects.toThrow();
 
-    await store.designatePersonalVault(victim.personalVaultId);
+    await store.confirmPersonalVault(await store.proposePersonalVault(victim.personalVaultId));
     expect(device.personalVaultId).toBe(victim.personalVaultId);
     expect(store.personalVaultChoices).toBeNull();
 
     expect(new Set(store.redesignationChoices().map((x) => x.vaultId))).toEqual(new Set([victim.personalVaultId, owned.vaultId]));
-    await store.designatePersonalVault(owned.vaultId, "fresh-auth-key");
+    await store.confirmPersonalVault(await store.proposePersonalVault(owned.vaultId), "fresh-auth-key");
     expect(device.personalVaultId).toBe(owned.vaultId);
     expect(api.puts.at(-1)!.currentAuthKey).toBe("fresh-auth-key");
   });

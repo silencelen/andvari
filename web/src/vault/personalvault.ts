@@ -26,3 +26,41 @@ export function personalVaultChoices(candidates: PersonalCandidate[], lastUsedPe
       return la !== lb ? la - lb : cmp(a.vaultId, b.vaultId);
     });
 }
+
+// ---- A5b (A5 re-review M-2): what the human sees when choosing (core `PersonalChoice.kt` twin) ----
+
+/** Another account the server reports as holding a vault. Informs the human; decides nothing. */
+export interface CoHolder {
+  userId: string;
+  displayName: string;
+  email: string;
+  role: string;
+}
+
+/** One vault as the personal-vault question and the Settings list show it. */
+export interface PersonalChoiceInfo {
+  vaultId: string;
+  name: string | null;
+  itemCount: number;
+  /** "received": the vault's last ownership transfer names this account as the new owner. */
+  origin: "created" | "received";
+  /** Everyone else the server reports on the vault; null until loaded. */
+  coHolders: CoHolder[] | null;
+  /** The vault this browser already had as personal (its cached wrap, else the last one used) (L-1). */
+  onThisDevice: boolean;
+}
+
+/** A pending, not yet confirmed designation. Only the store that issued it, while still pending, accepts it. */
+export interface PersonalVaultProposal {
+  readonly vaultId: string;
+  readonly name: string | null;
+  readonly origin: "created" | "received";
+  readonly coHolders: readonly CoHolder[];
+  readonly replacing: string | null;
+}
+
+/** A served wrap naming another vault than this browser's (status "changed"). */
+export interface PersonalChange {
+  currentVaultId: string;
+  servedVaultId: string;
+}
