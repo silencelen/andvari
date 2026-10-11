@@ -148,6 +148,7 @@ function showView(unlocked: boolean): void {
   if (!unlocked) {
     stopTotp();
     el("must-change").hidden = true; // unlocked-session chrome — refresh() re-derives it
+    el("personal-change").hidden = true; // A5b: likewise
     el("qu-offer").hidden = true; // quick-unlock offer/enroll are unlocked-only chrome (spec 01 §8.4)
     el("qu-enroll").hidden = true;
     el("qu-settings").hidden = true;
@@ -175,6 +176,7 @@ async function refresh(): Promise<void> {
   // E1-6: rescue-issued temporary password — a persistent, non-dismissable strip for the
   // whole unlocked session; it clears only via a fresh unlock whose response drops the flag.
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
+  el("personal-change").hidden = !(s.unlocked && s.personalChange); // A5b M-2: never a silent switch
   if (s.unlocked) {
     await loadUnlocked();
     // a11y 2c: on a recovery-password session, move focus onto the critical notice so a screen
@@ -1441,6 +1443,11 @@ el("forgot").addEventListener("click", () => void openServerPage("/#recover"));
 // E1-6: the rescue-nudge strip IS the affordance — the extension can't change the master
 // password itself, so clicking anywhere on it opens the web vault (same action as open-vault).
 el("must-change").addEventListener("click", () => void openServerPage());
+el("personal-change-accept").addEventListener("click", async () => {
+  const r = await ask({ type: "personalAcceptChange" });
+  if (!r?.ok) showMsg("err", "Couldn't switch the personal vault. Lock and unlock, then try again.");
+  await refresh();
+});
 
 el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
