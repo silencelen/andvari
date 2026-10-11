@@ -370,7 +370,10 @@ key signs only through the flows that need it (today: escrow v2).
     shared vaults" card (trust on first use; owner decision Q7: "Accept anyway" is allowed for a
     vault this device does not hold yet, and the copy says the sender cannot be confirmed). A
     vouch from (b) or (c) is bound to SHA-256 of the exact key vouched for, so a different v1 key
-    served later for the same vault is read-only again; a removed vault forgets it. The decision is
+    served later for the same vault is read-only again, and a verified v2 grant naming a key other
+    than the vouched one is `vk_mismatch` decided from that local tag alone (the vouched key is kept
+    when the row's seal still opens to it; otherwise the row is refused with no key), whether or not
+    the server still serves the v1 seal; a removed vault forgets it. The decision is
     the graded function of `legacyMode` (window, evidence for this key, confirmation of this key). After the window closes (branch A8) a v1-only key for a vault
     with no evidence is refused. Pinned as `sharedgrant.json` → `legacyMode`.
   - **Canonical-key precedence (NORMATIVE; security review 2026-10).** A `sealedVk` is an
