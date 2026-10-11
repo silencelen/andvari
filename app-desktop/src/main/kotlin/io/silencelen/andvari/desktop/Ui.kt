@@ -2012,12 +2012,15 @@ private fun UnopenableVaultWarning(count: Int) {
  */
 @Composable
 private fun AttentionArea(state: DesktopState) {
+    val personalUnconfirmed = state.personalStatus().let { it != null && it != io.silencelen.andvari.core.client.Account.PersonalStatus.CONFIRMED && it != io.silencelen.andvari.core.client.Account.PersonalStatus.MIGRATED_UNSTORED }
     val hasAnything = ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ||
         state.incomingTransfers.isNotEmpty() || state.lifecycleNotices.isNotEmpty() ||
-        state.undecryptableSharedVaultCount > 0
+        state.undecryptableSharedVaultCount > 0 || personalUnconfirmed
     if (!hasAnything) return
     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
         if ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
+        // Root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default destination; ask when needed.
+        PersonalVaultBanner(state) { state.refresh() }
         IncomingTransferCards(state)
         LifecycleNoticesBanner(state.lifecycleNotices, state::dismissNotice)
         if (state.undecryptableSharedVaultCount > 0) UnopenableVaultWarning(state.undecryptableSharedVaultCount)
@@ -3173,6 +3176,10 @@ private fun SettingsScreen(state: DesktopState) {
             }
             Spacer(Modifier.height(16.dp))
         }
+        HouseholdCard(state)
+        Spacer(Modifier.height(16.dp))
+        PersonalVaultCard(state)
+        Spacer(Modifier.height(16.dp))
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("Server", style = MaterialTheme.typography.titleLarge)

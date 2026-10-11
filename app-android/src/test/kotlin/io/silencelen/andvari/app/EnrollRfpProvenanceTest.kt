@@ -28,7 +28,8 @@ class EnrollRfpProvenanceTest {
 
     private companion object {
         const val ORIGIN = "https://vault.example.org"
-        const val RFP = "14f1bf4220e132f3"
+        // A5: the in-person QR carries the FULL 64-hex fingerprint (a 16-hex rfp no longer parses).
+        const val RFP = "14f1bf4220e132f3aa00bb11cc22dd33ee44ff5566778899aabbccddeeff0011"
     }
 
     private val mainSource =
@@ -117,5 +118,42 @@ class EnrollRfpProvenanceTest {
         )
         // The member's own assertion stays a first-person tick — that one IS theirs to make.
         assertTrue(mainSource.contains("I scanned this code in person from my household admin and it matches their screen."))
+    }
+
+    // ---- A5: the affirm leg compares the rfp at FULL length (the A2 carry-forward) ----
+
+    private val strong = "correct horse battery staple 42!"
+
+    /** A machine value is compared whole: a 16-hex (the pre-A5 id) or 32-hex (the human form) prefix of
+     *  the server's fingerprint never passes; only the exact 64 lowercase hex does. */
+    @Test
+    fun affirmRfpComparesTheFullFingerprint() {
+        assertTrue(affirmRfpMatches(RFP, RFP))
+        assertFalse(affirmRfpMatches(RFP.take(16), RFP), "the retired 16-hex short id")
+        assertFalse(affirmRfpMatches(RFP.take(32), RFP), "the 32-hex HUMAN form is not a machine match")
+        assertFalse(affirmRfpMatches(RFP.uppercase(), RFP))
+        assertFalse(affirmRfpMatches(null, RFP))
+    }
+
+    /** The gate the form submits through: before A5 a prefix rfp that the 32-hex human helper accepted
+     *  made the affirm leg ready. Now a prefix is never ready, and a full match also needs the in-person code. */
+    @Test
+    fun theAffirmLegRejectsAPrefixRfp() {
+        val prefix = RFP.take(32)
+        assertFalse(
+            enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, prefix, RFP),
+            "a 32-hex prefix rfp must not make the affirm leg ready",
+        )
+        assertFalse(enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, RFP.take(16), RFP))
+        assertFalse(enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, RFP, RFP), "no in-person code typed")
+        assertTrue(enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, RFP, RFP, inPersonOk = true))
+    }
+
+    /** The submit path hands the full rfp to the ViewModel as the seal anchor, never through the human helper. */
+    @Test
+    fun theFormSubmitsTheFullRfpAsTheAnchor() {
+        assertTrue(mainCode.contains("val affirmMatches = affirmRfpMatches(linkRfp, fp)"))
+        assertTrue(mainCode.contains("affirmedRfp = if (affirming) linkRfp else null"))
+        assertFalse(mainCode.contains("Escrow.shortFormMatches(linkRfp"), "the rfp must never go through the 32-hex human helper")
     }
 }
