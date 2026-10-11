@@ -125,3 +125,53 @@ export function secretstreamDecrypt(key: Uint8Array, header: Uint8Array, chunks:
     return result.message;
   });
 }
+
+/**
+ * Ed25519 detached-signature VERIFY (crypto_sign_verify_detached) — twin of core
+ * `CryptoProvider.signVerifyDetached`. Never throws: a wrong size or a bad signature is `false`.
+ */
+export function signVerifyDetached(publicKey: Uint8Array, signature: Uint8Array, message: Uint8Array): boolean {
+  const s = sodium();
+  if (publicKey.length !== s.crypto_sign_PUBLICKEYBYTES || signature.length !== s.crypto_sign_BYTES) return false;
+  try {
+    return s.crypto_sign_verify_detached(signature, message, publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ed25519 keypair from a 32-byte seed (crypto_sign_seed_keypair) — twin of core
+ * `CryptoProvider.signKeypairFromSeed`. The JOINT key over the existing identity seed (security review
+ * 2026-10, root cause A §1.1; owner decision: joint key): `ed25519PkToCurve25519(publicKey)` equals
+ * `boxKeypairFromSeed(seed).publicKey`, so no identity fingerprint changes. The 64-byte secret
+ * CONTAINS the seed: derive at unlock, never persist.
+ */
+export function signKeypairFromSeed(seed: Uint8Array): KeyPairBytes {
+  const s = sodium();
+  if (seed.length !== s.crypto_sign_SEEDBYTES) throw new CryptoError("sign seed must be 32 bytes");
+  const kp = s.crypto_sign_seed_keypair(seed);
+  return { publicKey: kp.publicKey, privateKey: kp.privateKey };
+}
+
+/** Ed25519 detached signature (crypto_sign_detached) with a 64-byte secret key; deterministic. */
+export function signDetached(secretKey: Uint8Array, message: Uint8Array): Uint8Array {
+  const s = sodium();
+  if (secretKey.length !== s.crypto_sign_SECRETKEYBYTES) throw new CryptoError("sign secret key must be 64 bytes");
+  return s.crypto_sign_detached(message, secretKey);
+}
+
+/**
+ * crypto_sign_ed25519_pk_to_curve25519 — twin of core `CryptoProvider.ed25519PkToCurve25519`. The
+ * input is attacker-supplied, so a wrong length, a non-point or a small-order point throws
+ * {@link CryptoError}. `A` and `−A` map to the same output: the signature check, not this, authenticates.
+ */
+export function ed25519PkToCurve25519(ed25519PublicKey: Uint8Array): Uint8Array {
+  const s = sodium();
+  if (ed25519PublicKey.length !== s.crypto_sign_PUBLICKEYBYTES) throw new CryptoError("ed25519 public key must be 32 bytes");
+  try {
+    return s.crypto_sign_ed25519_pk_to_curve25519(ed25519PublicKey);
+  } catch (e) {
+    throw new CryptoError("ed25519 public key has no curve25519 image (invalid or small-order point)", { cause: e });
+  }
+}
