@@ -544,6 +544,11 @@ class DesktopState(
         private set
     var escrowFingerprint by mutableStateOf("")
         private set
+    // Escrow v2 migration (security review 2026-10, root cause A §8.4): the server hints this account's
+    // escrow is still a v1 seal. Raised on a full-password unlock; the re-seal card asks the member to
+    // confirm the household recovery key from the sheet, then re-seals v2 ("Later" = next unlock).
+    var escrowNeedsV2 by mutableStateOf(false)
+        private set
     // Shown-once recovery-phrase reveal (design §F.4/§F.7): the base64url display form
     // (MemberRecovery.displayForm) of a fresh enrollee's self-service recovery secret, held ONLY
     // for the RecoverySetup screen's reveal+confirm gate and nulled the instant the confirm passes.
@@ -1044,7 +1049,7 @@ class DesktopState(
         pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
         pendingPieceId = null; pendingCaptureAuthKey = null
         signInTotpRequired = false; mustChangePassword = false
-        escrowStale = false; escrowFingerprint = ""
+        escrowStale = false; escrowFingerprint = ""; escrowNeedsV2 = false
         clearSecondary()
     }
 
@@ -1267,11 +1272,15 @@ class DesktopState(
                     else -> throw e
                 }
             }
-            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys) }
+            val acct = withContext(Dispatchers.Default) {
+                Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.loadSelfIdentityPub(originKey(baseUrl), s.userId))
+            }
+            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, acct)
             store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
+            escrowNeedsV2 = s.accountKeys.escrowNeedsV2
             mustChangePassword = s.mustChangePassword // F58: a recovery temp password forces the banner
             signInTotpRequired = false
             // (v2 #15) §F.9 vault-entry capture gate (web Unlock/SignIn parity): the server says this
@@ -1320,9 +1329,12 @@ class DesktopState(
             throw e
         }
         // KDF off the UI thread (argon2id 64 MiB — the unlock spinner must animate).
-        val acct = withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys) }
+        val acct = withContext(Dispatchers.Default) {
+            Account.unlock(session.userId, password, keys, selfIdentityPub = store.loadSelfIdentityPub(nsKey, session.userId))
+        }
+        store.recordSelfIdentityPub(nsKey, session.userId, acct)
         bind(a, acct)
-        escrowStale = keys.escrowStale; escrowFingerprint = keys.escrowFingerprint
+        escrowStale = keys.escrowStale; escrowFingerprint = keys.escrowFingerprint; escrowNeedsV2 = keys.escrowNeedsV2
         runCatching { syncNow(engine!!) }.onFailure {
             if (it is java.io.IOException) notice = "Offline — showing cached data" else throw it
         }
@@ -1433,6 +1445,7 @@ class DesktopState(
             commitPendingSwitch()
             store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
+            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, acct)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
@@ -1900,7 +1913,7 @@ class DesktopState(
         val pub = withContext(Dispatchers.Default) { a.recoveryPubkey() }
         val upload = withContext(Dispatchers.Default) { acct.resealEscrowFor(pub, fp) }
         a.escrowSelf(upload)
-        busy = false; escrowStale = false; notice = "Account re-protected — your recovery is up to date."
+        busy = false; escrowStale = false; escrowNeedsV2 = false; notice = "Account re-protected — your recovery is up to date."
     }
 
     // F18: [vaultId] is honored ONLY for a NEW item (itemId == null) — the core save guard
@@ -3219,7 +3232,7 @@ class DesktopState(
         // A-escrow (P4 parity): the ReSealCard moves to the global AttentionArea — a
         // "Later"-deferred stale flag must not linger past the session (the screen gate is
         // belt; this is the braces). A fresh unlock/sign-in re-reads it from accountKeys.
-        escrowStale = false; escrowFingerprint = ""
+        escrowStale = false; escrowFingerprint = ""; escrowNeedsV2 = false
     }
 
     /** Last-known org offlineCacheAllowed for the CURRENT origin — live policy first, then that

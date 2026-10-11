@@ -384,7 +384,7 @@ private fun MustChangePasswordBanner(ui: UiState) {
 private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
     val fyiNeedsUpdate = ui.needsUpdateCount > 0 && ui.items.isNotEmpty()
     val fyiUnopenable = ui.undecryptableSharedVaultCount > 0
-    val hasAnything = (ui.escrowStale && ui.escrowFingerprint.isNotEmpty()) ||
+    val hasAnything = ((ui.escrowStale || ui.escrowNeedsV2) && ui.escrowFingerprint.isNotEmpty()) ||
         ui.incomingTransfers.isNotEmpty() || ui.lifecycleNotices.isNotEmpty() ||
         ui.needsUpdateCount > 0 || fyiUnopenable
     if (!hasAnything) return
@@ -394,7 +394,7 @@ private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
     // (re-seal, transfers) visible; overflow scrolls instead of clipping.
     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
         // Critical-direct — never collapsed.
-        if (ui.escrowStale && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
+        if ((ui.escrowStale || ui.escrowNeedsV2) && ui.escrowFingerprint.isNotEmpty()) ReSealCard(vm, ui)
         IncomingTransferCards(vm, ui)
         LifecycleNoticesBanner(ui.lifecycleNotices, vm::dismissNotice)
         if (ui.needsUpdateCount > 0 && ui.items.isEmpty()) { // A2: the "vault looks empty" explanation
@@ -1327,7 +1327,12 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
         Column(Modifier.padding(12.dp)) {
             if (!open) {
                 Text(
-                    "Your household's recovery key changed — re-protect this account so it stays recoverable.",
+                    if (ui.escrowStale) {
+                        "Your household's recovery key changed — re-protect this account so it stays recoverable."
+                    } else {
+                        // §8.4 escrow v2 migration: same flow, the key did not change — it gets confirmed.
+                        "Confirm your household recovery key — it upgrades how this account is protected for an admin recovery."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
                 // a11y (Cut B): primary on tertiaryContainer is 3.75:1 in light — use the pair's own ink.
@@ -1338,7 +1343,7 @@ private fun ReSealCard(vm: AndvariViewModel, ui: UiState) {
             } else {
                 Text("Re-protect account", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. " +
+                    (if (ui.escrowStale) "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. " else "Confirm the recovery fingerprint from your printed household recovery sheet, then re-protect. ") +
                         "Your master key never leaves this device except sealed to the recovery key you verify.",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 6.dp),

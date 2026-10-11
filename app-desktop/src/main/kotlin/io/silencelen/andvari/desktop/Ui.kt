@@ -477,7 +477,12 @@ private fun ReSealCard(state: DesktopState) {
         Column(Modifier.padding(12.dp)) {
             if (!open) {
                 Text(
-                    "Your household's recovery key changed — re-protect this account so it stays recoverable.",
+                    if (state.escrowStale) {
+                        "Your household's recovery key changed — re-protect this account so it stays recoverable."
+                    } else {
+                        // §8.4 escrow v2 migration: same flow, the key did not change — it gets confirmed.
+                        "Confirm your household recovery key — it upgrades how this account is protected for an admin recovery."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
                 // a11y (Cut B review): primary on tertiaryContainer is 3.75:1 in light (Android parity).
@@ -488,7 +493,7 @@ private fun ReSealCard(state: DesktopState) {
             } else {
                 Text("Re-protect account", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. " +
+                    (if (state.escrowStale) "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect. " else "Confirm the recovery fingerprint from your printed household recovery sheet, then re-protect. ") +
                         "Your master key never leaves this device except sealed to the recovery key you verify.",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 6.dp),
@@ -2007,12 +2012,12 @@ private fun UnopenableVaultWarning(count: Int) {
  */
 @Composable
 private fun AttentionArea(state: DesktopState) {
-    val hasAnything = (state.escrowStale && state.escrowFingerprint.isNotEmpty()) ||
+    val hasAnything = ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ||
         state.incomingTransfers.isNotEmpty() || state.lifecycleNotices.isNotEmpty() ||
         state.undecryptableSharedVaultCount > 0
     if (!hasAnything) return
     Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
-        if (state.escrowStale && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
+        if ((state.escrowStale || state.escrowNeedsV2) && state.escrowFingerprint.isNotEmpty()) ReSealCard(state)
         IncomingTransferCards(state)
         LifecycleNoticesBanner(state.lifecycleNotices, state::dismissNotice)
         if (state.undecryptableSharedVaultCount > 0) UnopenableVaultWarning(state.undecryptableSharedVaultCount)
