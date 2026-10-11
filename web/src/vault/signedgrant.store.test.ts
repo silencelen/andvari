@@ -682,6 +682,58 @@ describe("A6 fix round", () => {
     expect(s2.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["vk_mismatch"]);
   });
 
+  it("round 2 MEDIUM-A: a vouch + STRIPPED seal + a v2 grant with a DIFFERENT key → refused, never adopted", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const s1 = new VaultStore(new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null))).asClient(), await unlock(w.member), undefined, local);
+    await s1.sync();
+    await s1.acceptLegacyVault(w.vaultId);
+    await s1.accountState.pin(pinOf(w.owner, "Owner"));
+    const server = new FakeServer(feed(w, 12, memberRow(w, 12, null, await signedFor(w, randomBytes(32)))));
+    server.accountStateBlob = (s1 as unknown as { api: FakeServer }).api.accountStateBlob;
+    server.accountSeq = (s1 as unknown as { api: FakeServer }).api.accountSeq;
+    const d = await unlock(w.member);
+    const s2 = new VaultStore(server.asClient(), d, undefined, local);
+    await s2.sync();
+    expect(d.hasVault(w.vaultId)).toBe(false);
+    expect(s2.notices().filter((n) => n.kind === "grant-anomaly").map((n) => n.reason)).toEqual(["vk_mismatch"]);
+    expect(server.selfWraps).toEqual([]);
+  });
+
+  it("round 2 MEDIUM-A: a vouch + STRIPPED seal + a v2 grant with the SAME key → adopted normally", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const s1 = new VaultStore(new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null))).asClient(), await unlock(w.member), undefined, local);
+    await s1.sync();
+    await s1.acceptLegacyVault(w.vaultId);
+    await s1.accountState.pin(pinOf(w.owner, "Owner"));
+    const server = new FakeServer(feed(w, 12, memberRow(w, 12, null, await signedFor(w, w.vk))));
+    server.accountStateBlob = (s1 as unknown as { api: FakeServer }).api.accountStateBlob;
+    server.accountSeq = (s1 as unknown as { api: FakeServer }).api.accountSeq;
+    const d = await unlock(w.member);
+    const s2 = new VaultStore(server.asClient(), d, undefined, local);
+    await s2.sync();
+    expect(d.keySource(w.vaultId)).toBe("signed-grant");
+    expect(s2.notices().filter((n) => n.kind === "grant-anomaly")).toEqual([]);
+  });
+
+  it("round 2 LOW-A: re-confirming a user replaces this device's earlier confirmation (core recordConfirmed parity)", async () => {
+    const w = await world();
+    const server = new FakeServer(feed(w, 5, null));
+    const b = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await b.sync();
+    const oldKey = toB64(randomBytes(32));
+    await b.accountState.pin({ userId: w.owner.userId, identityPub: oldKey, label: "Owner", verifiedAt: 1000, method: "typed" });
+    await b.accountState.pin({ ...pinOf(w.owner, "Owner"), verifiedAt: 2000 });
+    // Another device later re-pins the OLD key: this device's confirmation of it was replaced, so it does not count.
+    const a = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await a.sync();
+    await a.accountState.pin({ userId: w.owner.userId, identityPub: oldKey, label: "Owner", verifiedAt: 3000, method: "typed" });
+    await b.sync();
+    expect(b.accountState.doc.contacts.find((c) => c.userId === w.owner.userId)!.identityPub).toBe(oldKey);
+    expect(b.accountState.currentPin(w.owner.userId)).toBeNull();
+  });
+
   it("LOW-2: a PRESENT but garbage v2 field is an anomaly with no v1 fallback and no review card", async () => {
     const w = await world();
     const garbage = toB64(randomBytes(200));

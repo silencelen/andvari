@@ -724,9 +724,14 @@ export class Account {
       const vouched = this.vouchedSealKey(grant);
       const o = this.openSigned(grant, null);
       if (o.verdict === "adopt") {
-        // MED-2: a vouched legacy key is never silently replaced by a v2 grant carrying another key: keep the
-        // vouched key (as legacy) and flag the mismatch.
-        if (vouched && !ctEquals(vouched, o.vk)) return { vk: vouched, source: "legacy-seal", sealMismatch: false, anomaly: "vk_mismatch" };
+        // MED-2 / re-review MEDIUM-A: decided from the device-local vouch TAG, not from whether the server kept
+        // the v1 seal. A verified grant naming a DIFFERENT key than the vouched one is vk_mismatch: keep the vouched
+        // key when the seal still opens to it, otherwise refuse the row with no key. Never adopt it.
+        const vouch = this.legacyVouches.get(grant.vaultId);
+        if (vouch && vouch.tag !== legacyTagOf(o.vk)) {
+          if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false, anomaly: "vk_mismatch" };
+          throw new GrantRefusedSignal("vk_mismatch");
+        }
         return { vk: o.vk, source: "signed-grant", sealMismatch: false, from: o.from };
       }
       if (o.verdict === "pending_invitation") {

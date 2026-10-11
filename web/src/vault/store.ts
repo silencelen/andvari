@@ -1128,9 +1128,6 @@ export class VaultStore {
    * surfaceStagedDenials so the Editor's failure UX is unchanged.
    */
   async sync(): Promise<void> {
-    // §8.2: evidence is what THIS cache held before the upgrade; if no hydrate looked at it, nothing pulled from
-    // now on may count as pre-upgrade evidence.
-    if (!(await this.cache.freezeDone())) await this.cache.setFreezeDone();
     await this.flushQueue();
     await this.pull();
     // H38 (audit 2026-09-13): a bell that rang DURING that pull joined it and got a snapshot
@@ -1199,6 +1196,10 @@ export class VaultStore {
   }
 
   private async pullOnce(): Promise<void> {
+    // §8.2 (A6 re-review LOW-D, core pull() parity): evidence is what THIS cache held before the upgrade. Every
+    // pull marks the freeze as done first, so if no hydrate looked at the cache, nothing pulled from now on can
+    // count as pre-upgrade evidence.
+    if (!(await this.cache.freezeDone())) await this.cache.setFreezeDone();
     const since = this.cursor;
     // Epoch guard (breaker #3, core SyncEngine.pull #0 belt): stamp the START of this pull
     // BEFORE anything is fetched. surfaceStagedDenials only classifies a denial once a pull
