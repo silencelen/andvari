@@ -6,10 +6,12 @@ import {
   ACCOUNT_STATE_SEALED_MAX,
   type AccountStateDoc,
   AccountStateError,
+  type ConsumedNonce,
   type Contact,
   emptyAccountState,
   mergeAccountState,
   sameAccountStateContent,
+  withConsumedNonces,
   withContact,
   withoutContact,
 } from "./accountstate";
@@ -83,6 +85,8 @@ export class AccountStateSync {
   anomaly: AccountStateAnomaly = null;
   readOnly = false;
   private serverSeq = 0;
+  /** Branch A7: this device's consumed removal nonces (the store wires its durable set here). */
+  deviceConsumed: () => Record<string, ConsumedNonce[]> = () => ({});
 
   constructor(
     private readonly api: ApiClient,
@@ -171,7 +175,11 @@ export class AccountStateSync {
           unreadable = true;
         }
       }
-      const localDoc = this.loadLocal() ?? (this.doc.seq > 0 || this.doc.contacts.length > 0 ? this.doc : null);
+      // Root cause A §6.2 (branch A7): this device's consumed removal nonces merge into account state at the next
+      // flush. The merge is a union that never drops a local entry, so served state can never shrink the set.
+      const baseDoc = this.loadLocal() ?? (this.doc.seq > 0 || this.doc.contacts.length > 0 || Object.keys(this.doc.consumedNonces).length > 0 ? this.doc : null);
+      const deviceNonces = this.deviceConsumed();
+      const localDoc = Object.keys(deviceNonces).length === 0 ? baseDoc : withConsumedNonces(baseDoc ?? emptyAccountState(this.account.userId), deviceNonces);
       const merged = mergeAccountState(this.account.userId, localDoc, served, this.highWater());
       this.anomaly = unreadable ? "unreadable" : merged.rollback ? "rollback" : null;
       const needsWrite = unreadable || merged.rollback || (served === null && localDoc !== null) || !sameAccountStateContent(merged.doc, served);

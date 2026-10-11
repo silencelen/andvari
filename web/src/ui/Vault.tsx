@@ -13,9 +13,11 @@ import { CARD_CREATE_ENABLED, brand, brandLabel, cardSubtitle, composeShortExpir
 import {
   CopyDeniedError,
   ItemChangedError,
+  LEFT_UNPROVEN,
   type LifecycleNotice,
   type MoveGesture,
   type PendingUpload,
+  REMOVAL_REPLAY,
   type VaultInfo,
   type VaultItem,
   type VaultStore,
@@ -901,10 +903,24 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
     case "removed":
       return { warn: false, body: `Your access to “${name}” was removed.` };
     case "left":
+      // Root cause A §8.6 (branch A7): a leave with no proof, in the compatibility window, adds the one line that
+      // lets the human catch a forged one. TWIN of core HouseholdCopy.leftUnprovenNotice, byte-equal (pinned).
+      if (n.reason === LEFT_UNPROVEN) return { warn: true, body: `You left “${name}”. Didn't do this? Tell your admin.` };
       return { warn: false, body: `You left “${name}”.` };
     case "restored":
       return { warn: false, body: `“${name}” was restored.` };
     case "replay-denied": {
+      // Root cause A §6.3 step 5 (branch A7): a REPLAYED removal proof (consumed nonce). Danger tone. TWIN of core
+      // HouseholdCopy.removalReplayDeniedNotice, byte-equal (pinned by vault-copy.test.ts).
+      if (n.reason === REMOVAL_REPLAY) {
+        return {
+          warn: true,
+          body:
+            `The server says you lost access to “${name}”, but it sent a removal notice that was already used once, so andvari did not trust it. ` +
+            `A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). ` +
+            `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
+        };
+      }
       // C1 (core LC-1): recovered (F21-parked) edits replayed after a restore, refused on the
       // now-live vault — the member's role likely changed across the grace. Calm, never an error.
       // TWIN of core HouseholdCopy.replayDeniedNotice, byte-equal — web can't import Kotlin, so

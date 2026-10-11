@@ -39,6 +39,7 @@ import type {
   VaultDeleteResponse,
   VaultMemberAdd,
   VaultMemberRemoveRequest,
+  VaultLeaveRequest,
   VaultMemberSummary,
   VaultMetaUpdateRequest,
   VaultRestoreRequest,
@@ -502,8 +503,10 @@ export class ApiClient {
     return this.json<DeletedVaultSummary[]>("GET", "/api/v1/vaults/deleted");
   }
 
-  async leaveVault(vaultId: string) {
-    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/leave`, {});
+  /** `body` is the v2 leave proof (root cause A §6.2, branch A7) minted by store.leaveSharedVault; `{}` is the
+   *  pre-A7 shape the server still accepts in the compatibility window. */
+  async leaveVault(vaultId: string, body?: VaultLeaveRequest) {
+    return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/leave`, body ?? {});
   }
 
   async offerTransfer(vaultId: string, body: TransferOfferRequest) {

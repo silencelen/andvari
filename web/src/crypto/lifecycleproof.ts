@@ -1,6 +1,6 @@
 import { ctEquals, fromB64, toB64, toHexLower, utf8 } from "./bytes";
 import { hkdfSha256 } from "./hkdf";
-import { hmacSha256, sha256 } from "./provider";
+import { hmacSha256, randomBytes, sha256 } from "./provider";
 
 /**
  * Lifecycle proofs (spec 03 §11) — the TS mirror of core LifecycleProof.kt, byte-identical
@@ -98,4 +98,100 @@ export function verifyProof(expected: string, presented: string): boolean {
   } catch {
     return false;
   }
+}
+
+// ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7; core LifecycleProof/RemovalProof twin) ----
+
+/** `andvari/v1|lifecycle|remove-v2|{vaultId}|{targetUserId}|{nonce}|{issuedAt}`. */
+export const removeV2Proof = (key: Uint8Array, vaultId: string, targetUserId: string, nonce: string, issuedAt: number): Promise<string> => {
+  requireDomainSafe(vaultId, targetUserId, nonce);
+  return mac(key, `andvari/v1|lifecycle|remove-v2|${vaultId}|${targetUserId}|${nonce}|${issuedAt}`);
+};
+
+/** `andvari/v1|lifecycle|leave|{vaultId}|{userId}|{nonce}|{issuedAt}`: minted by the LEAVING member's client. */
+export const leaveProof = (key: Uint8Array, vaultId: string, userId: string, nonce: string, issuedAt: number): Promise<string> => {
+  requireDomainSafe(vaultId, userId, nonce);
+  return mac(key, `andvari/v1|lifecycle|leave|${vaultId}|${userId}|${nonce}|${issuedAt}`);
+};
+
+/** A fresh v2 nonce: 16 CSPRNG bytes, base64url unpadded. */
+export function newRemovalNonce(): string {
+  return toB64(randomBytes(16));
+}
+
+/** True for a well-formed v2 nonce: base64url that decodes to exactly 16 bytes and re-encodes to itself. */
+export function isV2Nonce(nonce: string): boolean {
+  try {
+    const raw = fromB64(nonce);
+    return raw.length === 16 && toB64(raw) === nonce;
+  } catch {
+    return false;
+  }
+}
+
+/** ±10 minutes of clock skew around liveSince and now (§6.3 step 6). */
+export const REMOVAL_SKEW_MS = 10 * 60 * 1000;
+
+export type RemovalVerdict = "valid" | "valid_legacy" | "left_unproven" | "anomaly" | "replay_denied";
+
+export interface RemovalDecision {
+  verdict: RemovalVerdict;
+  /** The §6.3 step that decided it. */
+  step: string;
+  /** For a valid verdict: the record to consume, `[nonce, issuedAt]`. */
+  consume?: [string, number];
+}
+
+/**
+ * The removal-proof verifier (root cause A §6.3, §8.6; branch A7) — core `RemovalProof.decide` twin, graded by
+ * spec/test-vectors/lifecycleproof.json `verdicts`, and THE function store.ts calls on every removed/left row. The
+ * caller handles `deleted` and a self-initiated drop first. Steps in order, first failure wins: (3) a complete v2
+ * proof, else the in-window legacy rows (a v1 remove proof whose MAC verifies and whose nonce is unconsumed is
+ * "valid_legacy"; a proof-less `left` is "left_unproven"); (4) the MAC for the reason's domain, target = me;
+ * (5) the nonce unconsumed (device ∪ account state) else "replay_denied"; (6) liveSince − 10 min ≤ issuedAt ≤
+ * now + 10 min, liveSince being THIS device's own first sight (missing → fail closed).
+ */
+export async function decideRemoval(input: {
+  lifecycleKey: Uint8Array;
+  vaultId: string;
+  myUserId: string;
+  reason: string;
+  proofV?: number | null;
+  proof?: string | null;
+  nonce?: string | null;
+  issuedAt?: number | null;
+  consumed: ReadonlySet<string>;
+  liveSince: number | null | undefined;
+  now: number;
+}): Promise<RemovalDecision> {
+  const { lifecycleKey: key, vaultId, myUserId, reason, proof, nonce, issuedAt, consumed, liveSince, now } = input;
+  const proofV = input.proofV ?? null;
+  if (reason !== "removed" && reason !== "left") return { verdict: "anomaly", step: "reason" };
+  if (proofV !== 2) {
+    if (proofV !== null && proofV !== 1) return { verdict: "anomaly", step: "fields" };
+    if (reason === "left") {
+      return (proof ?? null) === null && (nonce ?? null) === null ? { verdict: "left_unproven", step: "legacy" } : { verdict: "anomaly", step: "fields" };
+    }
+    if (!proof || !nonce) return { verdict: "anomaly", step: "fields" };
+    let expected: string;
+    try {
+      expected = await removeProof(key, vaultId, myUserId, nonce);
+    } catch {
+      return { verdict: "anomaly", step: "mac" };
+    }
+    if (!verifyProof(expected, proof)) return { verdict: "anomaly", step: "mac" };
+    if (consumed.has(nonce)) return { verdict: "replay_denied", step: "nonce" };
+    return { verdict: "valid_legacy", step: "legacy", consume: [nonce, now] };
+  }
+  if (!proof || nonce == null || issuedAt == null || !Number.isSafeInteger(issuedAt) || !isV2Nonce(nonce)) return { verdict: "anomaly", step: "fields" };
+  let expected: string;
+  try {
+    expected = reason === "removed" ? await removeV2Proof(key, vaultId, myUserId, nonce, issuedAt) : await leaveProof(key, vaultId, myUserId, nonce, issuedAt);
+  } catch {
+    return { verdict: "anomaly", step: "mac" };
+  }
+  if (!verifyProof(expected, proof)) return { verdict: "anomaly", step: "mac" };
+  if (consumed.has(nonce)) return { verdict: "replay_denied", step: "nonce" };
+  if (liveSince == null || issuedAt < liveSince - REMOVAL_SKEW_MS || issuedAt > now + REMOVAL_SKEW_MS) return { verdict: "anomaly", step: "window" };
+  return { verdict: "valid", step: "valid", consume: [nonce, issuedAt] };
 }

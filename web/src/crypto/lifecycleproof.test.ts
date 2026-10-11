@@ -3,14 +3,20 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { toB64 } from "./bytes";
 import {
+  REMOVAL_SKEW_MS,
   acceptProof,
+  decideRemoval,
   deleteProof,
+  isV2Nonce,
+  leaveProof,
   lifecycleKey,
   offerProof,
   removeProof,
+  removeV2Proof,
   restoreProof,
   verifyProof,
 } from "./lifecycleproof";
+import { hmacSha256 } from "./provider";
 import { initSodium } from "./sodium";
 
 /**
@@ -47,6 +53,49 @@ describe("lifecycle-proof vectors", () => {
       }
       expect(actual, `proof for op=${c.op}`).toBe(c.proof);
       expect(verifyProof(c.proof as string, actual), `verify accepts op=${c.op}`).toBe(true);
+    }
+  });
+
+  // Branch A7 (root cause A §6.1): both v2 domains, byte-exact, and a valid MAC for each.
+  it("mints both v2 domains identically to core (remove-v2, leave)", async () => {
+    const key = await lifecycleKey(fromB64(v.vk));
+    const cases = v.v2Cases as Record<string, string | number>[];
+    expect(new Set(cases.map((c) => c.op))).toEqual(new Set(["remove-v2", "leave"]));
+    for (const c of cases) {
+      const actual =
+        c.op === "remove-v2"
+          ? await removeV2Proof(key, c.vaultId as string, c.targetUserId as string, c.nonce as string, c.issuedAt as number)
+          : await leaveProof(key, c.vaultId as string, c.userId as string, c.nonce as string, c.issuedAt as number);
+      expect(actual, `v2 proof for op=${c.op}`).toBe(c.proof);
+      expect(toB64(await hmacSha256(key, new TextEncoder().encode(c.domain as string))), `domain pinned (${c.op})`).toBe(c.proof);
+      expect(isV2Nonce(c.nonce as string)).toBe(true);
+    }
+  });
+
+  // Branch A7 (root cause A §6.3, §8.6): the verdict table, graded against decideRemoval — THE function
+  // store.ts calls on every removed/left row (A6's lesson: never grade a helper production does not call).
+  it("decides every verdict-table row exactly as core does", async () => {
+    const key = await lifecycleKey(fromB64(v.vk));
+    const t = v.verdicts as { vaultId: string; myUserId: string; skewMs: number; cases: Record<string, unknown>[] };
+    expect(t.skewMs).toBe(REMOVAL_SKEW_MS);
+    expect(t.cases.length).toBeGreaterThanOrEqual(20);
+    for (const c of t.cases) {
+      const d = await decideRemoval({
+        lifecycleKey: key,
+        vaultId: t.vaultId,
+        myUserId: t.myUserId,
+        reason: c.reason as string,
+        proofV: c.proofV as number | null,
+        proof: c.proof as string | null,
+        nonce: c.nonce as string | null,
+        issuedAt: c.issuedAt as number | null,
+        consumed: new Set(c.consumed as string[]),
+        liveSince: c.liveSince as number | null,
+        now: c.now as number,
+      });
+      expect(d.verdict, `verdict: ${c.name}`).toBe(c.expect);
+      expect(d.step, `deciding step: ${c.name}`).toBe(c.step);
+      expect(d.consume ?? null, `consume: ${c.name}`).toEqual((c.consume as [string, number] | undefined) ?? null);
     }
   });
 
