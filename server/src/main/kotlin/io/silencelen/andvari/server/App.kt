@@ -852,6 +852,15 @@ fun Application.andvariModule(services: Services) {
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
             call.respond(HttpStatusCode.Created, service.addVaultMember(p, vaultId, call.receive(), call.clientIp(config)))
         }
+        put("/api/v1/vaults/{vaultId}/members/{userId}/grant") {
+            // Root cause A §8.2 step 4 (A6): the owner re-issues a member's grant as v2 (same key). Owner-only in
+            // Service; its own bucket (an owner's client re-issues once per legacy member, best effort).
+            val p = sharingPrincipal(config, service)
+            if (!limiter.allow("vault_reissue:${p.userId}", 60, 3_600_000)) throw RateLimited()
+            val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
+            val userId = requireUuid(call.parameters["userId"], "user_id")
+            call.respond(service.reissueVaultGrant(p, vaultId, userId, call.receive(), call.clientIp(config)))
+        }
         put("/api/v1/vaults/{vaultId}/members/{userId}") {
             val p = sharingPrincipal(config, service)
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")

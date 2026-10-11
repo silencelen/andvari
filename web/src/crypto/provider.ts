@@ -46,6 +46,12 @@ export async function sha256(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data as BufferSource));
 }
 
+/** Synchronous SHA-256 (libsodium crypto_hash_sha256) for the few decisions that cannot await: the key tag a
+ *  legacy-key vouch is bound to, and the per-device pin-confirmation record (security review 2026-10, A6). */
+export function sha256Sync(data: Uint8Array): Uint8Array {
+  return sodium().crypto_hash_sha256(data);
+}
+
 export function aeadEncrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, ad: Uint8Array): Uint8Array {
   const s = sodium();
   if (key.length !== s.crypto_aead_xchacha20poly1305_ietf_KEYBYTES) throw new CryptoError("AEAD key must be 32 bytes");

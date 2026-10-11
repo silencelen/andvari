@@ -20,12 +20,15 @@ class AccountStateSync(
     private val api: AndvariApi,
     private val account: Account,
     private val local: VaultCache,
+    /** Durable per-(origin, user) device state (A5b); where "confirmed on this device" pins are recorded. */
+    private val deviceState: DeviceState? = null,
     private val clock: () -> Long = { kotlinx.datetime.Clock.System.now().toEpochMilliseconds() },
 ) {
     enum class Anomaly { ROLLBACK, UNREADABLE }
 
     private val hwKey = "acctstate.hw"
     private val copyKey = "acctstate.copy"
+    private val confirmedKey = "pins.confirmed"
 
     /** The current merged document (empty until the first [refresh] or a local copy exists). */
     var doc: AccountStateDoc = loadLocal() ?: AccountState.empty(account.userId)
@@ -48,6 +51,48 @@ class AccountStateSync(
     }
 
     fun contacts(): List<Contact> = doc.contacts
+
+    // ---- pin currency (security review 2026-10, root cause A, A5 review L-3; A6, revised by the A6 review MED-1) ----
+    //
+    // From A6 a pin skips the add-member check and auto-adopts grants, so it may do either only when it is CURRENT
+    // on this device, and the rule is: a pin is current on a device only when a HUMAN made or re-confirmed it ON
+    // THAT DEVICE ([pin], i.e. the verification ceremony). A synced pin is never current by itself. (The first A6
+    // rule trusted pins first seen after the device had a high-water mark; the review showed a server could step
+    // that mark up by serving OLDER authentic blobs in ascending order and bring back a tombstoned pin as current.)
+    // The record is keyed by userId + SHA-256 of the confirmed identity key, so a confirmation of another key for
+    // the same person does not count, and it lives in the device's durable state ([deviceState], the same store as
+    // the A5b personal-wrap cache), falling back to the cache's client state. A tombstoned pin is absent from the
+    // merged document, so a tombstone still wins. A host that keeps neither durably (memory only) loses the record
+    // on restart and its pins are not current until re-confirmed: fail closed (spec 05 R15).
+
+    private fun store(key: String): String? = deviceState?.get(key) ?: local.clientState(key)
+    private fun storeSet(key: String, value: String?) {
+        deviceState?.set(key, value)
+        local.setClientState(key, value)
+    }
+
+    private fun keyTag(c: Contact): String? = runCatching {
+        c.userId + "|" + io.silencelen.andvari.core.crypto.Bytes.toHexLower(account.cryptoProvider().sha256(io.silencelen.andvari.core.crypto.Bytes.fromB64(c.identityPub)))
+    }.getOrNull()
+
+    private fun confirmedHere(): Set<String> =
+        store(confirmedKey)?.split('\n')?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+
+    private fun recordConfirmed(c: Contact) {
+        val tag = keyTag(c) ?: return
+        storeSet(confirmedKey, (confirmedHere().filterNot { it.startsWith(c.userId + "|") } + tag).sorted().joinToString("\n"))
+    }
+
+    private fun forgetConfirmed(userId: String) {
+        val next = confirmedHere().filterNot { it.startsWith("$userId|") }
+        storeSet(confirmedKey, if (next.isEmpty()) null else next.sorted().joinToString("\n"))
+    }
+
+    /** True when a human confirmed THIS pin's key for this user on THIS device. */
+    fun isCurrent(c: Contact): Boolean = keyTag(c)?.let { it in confirmedHere() } == true
+
+    /** The pin for [userId] when it is current on this device; null when there is none or it is not current. */
+    fun currentPin(userId: String): Contact? = doc.contact(userId)?.takeIf { isCurrent(it) }
 
     /** GET → open → merge with the local copy and high-water → write back when anything differs. */
     suspend fun refresh(): AccountStateDoc {
@@ -128,7 +173,8 @@ class AccountStateSync(
         if (readOnly) throw IllegalStateException("account state was written by a newer client")
         runCatching { refresh() }
         repeat(3) {
-            if (write(AccountState.withContact(doc, contact))) return
+            // A pin made HERE, from a human comparison on this device, is current here (MED-1).
+            if (write(AccountState.withContact(doc, contact))) { recordConfirmed(contact); return }
             refresh()
         }
         throw IllegalStateException("account state kept changing; try again")
@@ -139,7 +185,7 @@ class AccountStateSync(
         if (readOnly) throw IllegalStateException("account state was written by a newer client")
         runCatching { refresh() }
         repeat(3) {
-            if (write(AccountState.withoutContact(doc, userId, clock()))) return
+            if (write(AccountState.withoutContact(doc, userId, clock()))) { forgetConfirmed(userId); return }
             refresh()
         }
         throw IllegalStateException("account state kept changing; try again")

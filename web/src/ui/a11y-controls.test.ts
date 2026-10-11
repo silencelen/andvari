@@ -183,7 +183,11 @@ describe("F10 — no unnamed <input> anywhere under web/src/ui", () => {
     const sharingTsx = readFileSync(here("./Sharing.tsx"), "utf8");
     expect(adminTsx).toContain('<div className="field-head" style={{ marginBottom: 8 }}>Minimum client versions</div>');
     expect(exportTsx).toContain('<div className="field-head">What gets exported</div>');
-    expect(sharingTsx).toContain('className="field-head">{found.displayName}\'s identity code</div>');
+    // A6 (security review 2026-10): the add-member flow no longer shows a per-add read-only code block; an
+    // unverified member goes through the household verification ceremony (Household.tsx VerifyMemberPanel, whose
+    // inputs are Field-wrapped and pinned above), and a pinned member needs no code step at all.
+    expect(sharingTsx).toContain("presetServed={found}");
+    expect(sharingTsx).not.toContain("'s identity code</label>");
     expect(welcomeTsx).toContain('<div className="field-head">Your recovery phrase</div>');
   });
 });

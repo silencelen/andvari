@@ -557,5 +557,23 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 14) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Security review 2026-10, root cause A §1.5 (branch A6): grant v2. `signedGrant` is the
+                    // member's sealed SignedStatement (the owner's joint-key signature over the grant), OPAQUE to
+                    // the server exactly like sealedVk, which stays beside it (dual-sent in the compatibility
+                    // window). NULL on every existing row: those members hold a v1 grant (`legacyGrant` hint).
+                    // Idempotent: a database put back to an older version marker (restore drills) re-runs this.
+                    val has = st.executeQuery("PRAGMA table_info(grants)").use { rs ->
+                        var found = false
+                        while (rs.next()) if (rs.getString("name") == "signedGrant") found = true
+                        found
+                    }
+                    if (!has) st.executeUpdate("ALTER TABLE grants ADD COLUMN signedGrant TEXT")
+                    st.executeUpdate("UPDATE meta SET value='14' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

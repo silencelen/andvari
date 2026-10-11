@@ -236,6 +236,18 @@ export function parseStatement(purposeCode: number, statement: Uint8Array): Unve
   return Object.freeze(routing) as UnverifiedStatement;
 }
 
+/**
+ * The UNVERIFIED routing fields of a vault-grant statement, for the grant verifier's §1.4 steps 5–7 (security
+ * review 2026-10, root cause A, branch A6; core reads `UnverifiedStatement.parsed` module-internally). It runs
+ * the same strict parse, and returns the addressee's public key and the grant id so a misaddressed grant is named
+ * precisely and the pin is chosen by the sender the statement NAMES. It never returns the vault key: a key is
+ * only ever read from a {@link VerifiedStatement}.
+ */
+export function parseVaultGrantRouting(statement: Uint8Array): { from: string; to: string; toKey: Uint8Array; vaultId: string; grantId: Uint8Array } {
+  const st = parseFields(1, statement) as VaultGrantStatement;
+  return { from: st.from, to: st.to, toKey: st.toKey.slice(), vaultId: st.vaultId, grantId: st.grantId.slice() };
+}
+
 function parseFields(purposeCode: number, statement: Uint8Array): Statement {
   if (!isPurposeCode(purposeCode)) return refuse("bad_frame", "unknown purpose code");
   if (statement.length < MIN_STATEMENT_BYTES || statement.length > MAX_STATEMENT_BYTES) refuse("bad_frame", "statement length");

@@ -49,7 +49,9 @@ test("G14 — the totp SW handler refuses tab senders BEFORE it looks the item u
 // ---- G21: a reader-vault login is never OFFERED a write the server will refuse ----
 
 test("G21 — buildVaultKeys records each opened grant's role beside its key", () => {
-  const build = spanOf(bg, "function buildVaultKeys(", "\nfunction ");
+  // A6 (Q8): the builder moved to the UVK-wraps-only leaf grantkeys.ts (buildVaultKeysFromWraps).
+  const leaf = readFileSync(new URL("./grantkeys.ts", import.meta.url), "utf-8");
+  const build = spanOf(leaf, "export function buildVaultKeysFromWraps(", "\nexport function ");
   const keySet = at(build, "vaultKeys.set(g.vaultId, vk);", "the key record");
   const roleSet = at(build, "vaultRoles.set(g.vaultId, g.role);", "the role record");
   assert.ok(keySet < roleSet, "the role is recorded for exactly the vaults whose key opened");
@@ -57,8 +59,9 @@ test("G21 — buildVaultKeys records each opened grant's role beside its key", (
   // personal-vault choice refuses on); the pin still says what it always said — everything
   // buildVaultKeys learns about a grant leaves it together, so no caller can see the keys
   // without the role.
-  // Root cause A §3.1 (security review 2026-10) added the two refused-key sets to the same return.
-  assert.ok(build.includes("return { vaultKeys, vaultRoles, memberGranted, vkMismatch, keyUnreadable };"), "every map leaves the builder together");
+  // Root cause A §3.1 (security review 2026-10) added the refused-key set; A6 (Q8) dropped the seal compare
+  // (vkMismatch) and added the waiting set — all still leave the builder together.
+  assert.ok(build.includes("return { vaultKeys, vaultRoles, memberGranted, keyUnreadable, waiting };"), "every map leaves the builder together");
 });
 
 test("G21 — writableItem is the one gate, and it reads the recorded role", () => {

@@ -1,4 +1,5 @@
 import { pickPersonal, type PersonalWrapWire } from "./personalpick";
+import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import type { BioReq, BioResult } from "./bioprotocol";
 import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
@@ -7,7 +8,6 @@ import {
   adItem,
   adUsage,
   adUvk,
-  adVk,
   authKey,
   assertServerKdfParams,
   KdfPolicyError,
@@ -17,7 +17,6 @@ import {
   fromB64,
   open,
   seal,
-  openSharedGrant,
   toB64,
   usageKey,
   wrapKey,
@@ -273,6 +272,9 @@ interface Session {
    *  can wrap it; NEVER written to storage.session/local. Absent on a snapshot-restored session (SW was
    *  evicted) → enroll must trigger a fresh full unlock. */
   uvk?: Uint8Array;
+  /** Root cause A §1.7 (A6): grant rows with no UVK wrap (a seal or signed grant only) — waiting for a full
+   *  client to verify and self-wrap. Shown in the popup; recomputed by resync() without the UVK. */
+  waitingGrants?: number;
   /** How this session was opened. `enroll` COPIES the surviving full-password stamp regardless, but the
    *  provenance makes the "never mint `now` from a QUICK session" invariant (breaker A4) explicit. */
   provenance: "PASSWORD" | "QUICK";
@@ -303,6 +305,8 @@ interface SessionSnapshot {
   /** Optional: joined the snapshot with G21 (2026-08-30) — a pre-G21 snapshot lacks it, and the
    *  empty default merely restores the pre-fix behavior (every vault treated writable). */
   vaultRoles?: Record<string, string>;
+  /** A6: the waiting-grant count (a count, no key material); absent in an older snapshot = 0. */
+  waitingGrants?: number;
   items: DecryptedItem[];
 }
 
@@ -1197,6 +1201,7 @@ function ensureLoaded(): Promise<void> {
         // vaultRoles joined the snapshot with G21 (2026-08-30) — a pre-G21 snapshot lacks it;
         // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
+        waitingGrants: typeof snap.waitingGrants === "number" ? snap.waitingGrants : 0,
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         // spec 02 §3.2: a snapshot persisted by a pre-check build may hold a malformed doc — the
@@ -1250,6 +1255,7 @@ function persistSession(): Promise<void> {
     lastFullUnlockAt: session.lastFullUnlockAt,
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
     vaultRoles: Object.fromEntries(session.vaultRoles),
+    waitingGrants: session.waitingGrants ?? 0,
     items: session.items,
   };
   // The known-logins digest tracks the items it is derived from: every persist of the session
@@ -1366,6 +1372,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // pair waits — at most TEARDOWN_FLUSH_TIMEOUT_MS; a flush that outlives the bound is abandoned.
   const teardownFlush = flushUsageForTeardown();
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
+  personalChangeDescribed = null; // A6: a co-holder describe step never outlives the session it was shown in
   clearPendingUsage(); // behavioral records must not outlive the session that produced them
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
@@ -1504,6 +1511,8 @@ async function resync(): Promise<void> {
     const granted = new Set(sync.grants.map((g) => g.vaultId));
     for (const g of sync.grants) if (session.vaultKeys.has(g.vaultId)) session.vaultRoles.set(g.vaultId, g.role);
     for (const vaultId of [...session.vaultRoles.keys()]) if (!granted.has(vaultId)) session.vaultRoles.delete(vaultId);
+    // A6 (§1.7): a new grant waits for a full client; the count needs no UVK, so it stays honest after an eviction.
+    session.waitingGrants = waitingGrantCount(sync.grants, new Set(session.vaultKeys.keys()));
     persistSession();
     // G04: a landed full snapshot (cursor 0) is the one moment we hold the COMPLETE live item set,
     // so this is the only flush allowed to prune the usage ledger — never the debounce/lock flushes.
@@ -1727,6 +1736,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         quickUnlock: await quStateForStatus(),
         totpPending: tp ? { email: tp.email, expiresAt: tp.expiresAt } : null,
         personalChange: session ? (await readPersonalChange(session.userId)) !== null : false,
+        personalChangeText: session ? await personalChangeText(session) : null,
+        waitingGrants: session?.waitingGrants ?? 0,
       } satisfies Res<"status">;
     }
     case "lock": {
@@ -1774,6 +1785,9 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).
       if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalAcceptChange">;
       return acceptPersonalChange();
+    case "personalDescribeChange":
+      if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalDescribeChange">;
+      return describePersonalChange();
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
@@ -2022,92 +2036,10 @@ function verifyServerIdentity(localPub: Uint8Array, identityPubB64: string): voi
   }
 }
 
-/** Constant-shape byte equality for two VKs (extension crypto.ts carries no ctEquals). */
-function sameKey(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let d = 0;
-  for (let i = 0; i < a.length; i++) d |= a[i]! ^ b[i]!;
-  return d === 0;
-}
-
-/** Open every grant we hold a key for. Shared by the full unlock and the quick-unlock redeem — the
- *  redeem holding the UVK + identity again is what lets a brand-new shared-vault grant open on a quick
- *  unlock (design §1).
- *
- *  Canonical-key precedence (security review 2026-10, root cause A §3.1; core/web `openGrantVk`
- *  twin): our own UVK wrap (`wrappedVk`) wins whenever the row carries one; a v1 `sealedVk` is used
- *  only when there is no wrap. A seal on a row whose wrap opened is opened only to compare — a
- *  DIFFERENT key is recorded in `vkMismatch` and refused (the server can mint a seal to our public
- *  key; it cannot mint our wrap). A wrap that is present but does not open is recorded in
- *  `keyUnreadable` and the vault stays keyless: never a fallback to the seal. */
-function buildVaultKeys(
-  sync: SyncResponse,
-  uvk: Uint8Array,
-  identity: { publicKey: Uint8Array; privateKey: Uint8Array },
-  userId: string,
-): {
-  vaultKeys: Map<string, Uint8Array>;
-  vaultRoles: Map<string, string>;
-  memberGranted: Set<string>;
-  vkMismatch: Set<string>;
-  keyUnreadable: Set<string>;
-} {
-  const vaultKeys = new Map<string, Uint8Array>();
-  const vaultRoles = new Map<string, string>();
-  // H64: which VKs belong to a vault somebody else can read. See pickPersonalVaultId — a sealedVk is
-  // anonymous (anyone with our identity pubkey can mint one) and the key inside it is by construction
-  // one somebody else already holds, so it can never be evidence that a vault is ours alone. Since the
-  // member self-wrap (root cause A §3.2) a member row can carry a wrappedVk too, so a row with ANY seal
-  // or a non-owner role also counts (core/web Account.addGrant parity).
-  const memberGranted = new Set<string>();
-  const vkMismatch = new Set<string>();
-  const keyUnreadable = new Set<string>();
-  const openSeal = (g: SyncResponse["grants"][number]): Uint8Array | null => {
-    try {
-      // openSharedGrant (crypto.ts) is the vector-graded twin of core/web and THROWS on a
-      // reseated/forged grant or a non-32-byte VK (H93).
-      return openSharedGrant(identity.publicKey, identity.privateKey, g.vaultId, fromB64(g.sealedVk!));
-    } catch {
-      return null;
-    }
-  };
-  for (const g of sync.grants) {
-    let vk: Uint8Array | null = null;
-    let viaSeal = false;
-    if (g.wrappedVk) {
-      try {
-        vk = open(uvk, fromB64(g.wrappedVk), adVk(g.vaultId, userId)); // owner / personal / member self-wrap
-        if (vk.length !== 32) vk = null;
-      } catch {
-        vk = null;
-      }
-      if (vk === null) {
-        keyUnreadable.add(g.vaultId); // damaged or substituted wrap: NO seal fallback
-        continue;
-      }
-      if (g.sealedVk) {
-        const sealVk = openSeal(g);
-        if (sealVk !== null && !sameKey(sealVk, vk)) vkMismatch.add(g.vaultId);
-      }
-    } else if (g.sealedVk) {
-      vk = openSeal(g); // legacy v1 member grant; a malformed one is skipped, never accepted
-      viaSeal = true;
-    }
-    if (vk === null) continue; // wrong key / not ours — skip
-    vaultKeys.set(g.vaultId, vk);
-    if (viaSeal || g.sealedVk || g.role !== "owner") memberGranted.add(g.vaultId);
-    // G21: record the grant's role beside the key — "reader" means the server denies every push
-    // to this vault, so the write paths must never target its items.
-    vaultRoles.set(g.vaultId, g.role);
-  }
-  if (vkMismatch.size > 0 || keyUnreadable.size > 0) {
-    // The vault page and the native apps raise the "server may be misbehaving" notice; here the key
-    // decision is what matters, and it has already been made in our favour.
-    console.warn(`andvari: refused server key material — mismatch ${vkMismatch.size}, unreadable ${keyUnreadable.size}`);
-  }
-  return { vaultKeys, vaultRoles, memberGranted, vkMismatch, keyUnreadable };
-}
-
+/** Key building lives in grantkeys.ts (security review 2026-10, root cause A, branch A6; DESIGN-A §1.7, owner
+ *  decision Q8): the extension adopts ONLY keys that open under the UVK (personal wrap, owner wraps, member
+ *  self-wraps) and never opens a grant seal, v1 or v2. Shared by the full unlock and the quick-unlock redeem.
+ *  The A1 seal-vs-wrap "vault key mismatch" compare went with the seal opening; the full clients keep it. */
 /**
  * The personal vault (save target, and the VK the usage ledger is keyed from — crypto.ts `usageKey`).
  * Security review 2026-10, root cause A §4 (A5 review H-1): decided by `AccountKeys.personalWrap` alone, or —
@@ -2121,6 +2053,9 @@ export async function pickPersonalVaultId(
   uvk: Uint8Array,
   userId: string,
   vaultKeys: Map<string, Uint8Array>,
+  /** The sync's vault rows: only their (ciphertext) meta blobs are kept beside a pending change, so the popup
+   *  can name both vaults (A5b LOW-3) under keys the session holds. */
+  vaults: readonly { vaultId: string; metaBlob?: string }[] = [],
 ): Promise<string> {
   const key = nsk(`personalWrap:${userId}`);
   let cached: PersonalWrapWire | null = null;
@@ -2138,7 +2073,16 @@ export async function pickPersonalVaultId(
     }
     // A5b M-2 / L-2: a served wrap naming another vault waits for the human (popup notice); the cache keeps
     // the vault this device had. Anything else clears a stale pending change.
-    if (pick.source === "changed") await chrome.storage.local.set({ [changeKey]: pick.served });
+    if (pick.source === "changed") {
+      const metaOf = (id: string) => vaults.find((v) => v.vaultId === id)?.metaBlob ?? "";
+      const record: PersonalChangeRecord = {
+        ...pick.served,
+        currentVaultId: pick.vaultId,
+        currentMetaBlob: metaOf(pick.vaultId), // ciphertext only
+        servedMetaBlob: metaOf(pick.served.vaultId),
+      };
+      await chrome.storage.local.set({ [changeKey]: record });
+    }
     else await chrome.storage.local.remove(changeKey);
   } catch {
     /* best effort */
@@ -2150,34 +2094,100 @@ export async function pickPersonalVaultId(
   return pick.vaultId;
 }
 
-/** A5b M-2: the pending personal-vault change for the signed-in user (a served wrap, already authenticated
- *  under the UVK when it was picked), or null. */
-async function readPersonalChange(userId: string): Promise<PersonalWrapWire | null> {
+/** A pending personal-vault change as stored: the served wrap plus the two vaults' meta CIPHERTEXT (for the
+ *  names, A5b LOW-3). Nothing in it is trusted at accept time: the wrap is re-opened under the UVK (LOW-4). */
+interface PersonalChangeRecord extends PersonalWrapWire {
+  currentVaultId?: string;
+  currentMetaBlob?: string;
+  servedMetaBlob?: string;
+}
+
+/** A5b M-2: the pending personal-vault change for the signed-in user, or null. */
+async function readPersonalChange(userId: string): Promise<PersonalChangeRecord | null> {
   try {
     const k = nsk(`personalChange:${userId}`);
-    const raw = (await chrome.storage.local.get(k))[k] as PersonalWrapWire | undefined;
+    const raw = (await chrome.storage.local.get(k))[k] as PersonalChangeRecord | undefined;
     return raw && typeof raw.vaultId === "string" && typeof raw.wrappedVk === "string" ? raw : null;
   } catch {
     return null;
   }
 }
 
+/** A5b LOW-3 (closed in A6): the popup notice text, naming the current and the new vault (names decrypt under
+ *  keys the session holds; a name that does not decrypt falls back to neutral words). Null when none pends. */
+async function personalChangeText(s: Session): Promise<string | null> {
+  const c = await readPersonalChange(s.userId);
+  if (!c) return null;
+  const currentId = c.currentVaultId ?? s.personalVaultId;
+  return personalChangeNotice(
+    vaultNameFromMeta(s.vaultKeys.get(currentId), currentId, c.currentMetaBlob),
+    vaultNameFromMeta(s.vaultKeys.get(c.vaultId), c.vaultId, c.servedMetaBlob),
+  );
+}
+
+/** Key-state anomalies the popup does not render: the full clients raise those notices. */
+function warnKeyState(keyUnreadable: ReadonlySet<string>, waiting: ReadonlySet<string>): void {
+  if (keyUnreadable.size > 0) console.warn(`andvari: ${keyUnreadable.size} vault key wrap(s) do not open; those vaults stay locked (no seal fallback)`);
+  if (waiting.size > 0) console.info(`andvari: ${waiting.size} shared vault(s) wait for a full client to verify them`);
+}
+
 /**
- * A5b M-2: the human confirmed, in the popup, that the personal vault changed. The served wrap opened under
- * the UVK when it was picked and its key is held; it now becomes this browser's cached wrap and the save
- * target. Mints nothing. (Keeping the current vault instead is a re-designation in a full client.)
+ * The co-holder describe step for a pending personal-vault change, held in SW MEMORY only: an evicted SW, a lock or
+ * another account starts over. `acceptPersonalChange` refuses (`coholders_not_loaded`) unless it names the exact
+ * served vault and this account (A5b review LOW-1 parity, A6 fix round).
+ */
+let personalChangeDescribed: { vaultId: string; userId: string } | null = null;
+
+/**
+ * Load who the SERVER reports on the NEW personal vault (GET /vaults/{id}/members). Success records the describe
+ * step for that vaultId and returns the line the popup shows, labelled as server-reported (LOW-2). Failure clears
+ * it: the popup then offers only "keep current" and says it cannot check who else holds that vault.
+ */
+async function describePersonalChange(): Promise<Res<"personalDescribeChange">> {
+  personalChangeDescribed = null;
+  if (!session) return { ok: false, code: "locked" };
+  const userId = session.userId;
+  const staged = await readPersonalChange(userId);
+  if (!staged) return { ok: false, code: "none" };
+  try {
+    const members = await api.vaultMembers(staged.vaultId);
+    if (!session || session.userId !== userId) return { ok: false, code: "locked" };
+    personalChangeDescribed = { vaultId: staged.vaultId, userId };
+    return { ok: true, coHoldersLine: coHoldersLine(coHoldersOf(members, userId)) };
+  } catch {
+    return { ok: false, code: "coholders_unavailable" };
+  }
+}
+
+/**
+ * A5b M-2: the human confirmed, in the popup, that the personal vault changed. Mints nothing. (Keeping the current
+ * vault instead is a re-designation in a full client.)
+ *
+ * A5b review LOW-4 (closed in A6): the staged record sat in storage.local, which is not authenticated, so it is
+ * RE-OPENED here under the session UVK with the vk-personal AD (reopenStagedPersonalWrap) and the key installed
+ * is the one that re-open yields; a key merely present in the session map proves nothing about the blob. A
+ * session restored after an MV3 eviction holds no UVK (breaker B1: memory-only custody), so it answers
+ * `need_full_unlock` and the popup asks for a full unlock first; a blob that does not open is `unverified`.
  */
 async function acceptPersonalChange(): Promise<Res<"personalAcceptChange">> {
   if (!session) return { ok: false, code: "locked" };
-  const served = await readPersonalChange(session.userId);
-  if (!served || !session.vaultKeys.has(served.vaultId)) return { ok: false, code: "none" };
+  const staged = await readPersonalChange(session.userId);
+  if (!staged) return { ok: false, code: "none" };
   const userId = session.userId;
+  // A5b LOW-1 parity (A6 fix round): only a vault whose co-holders the human was shown, in this SW lifetime.
+  const gate = acceptGate(personalChangeDescribed, staged.vaultId, userId);
+  if (gate) return { ok: false, code: gate };
+  const r = reopenStagedPersonalWrap(staged, session.uvk, userId);
+  if (!r.ok) return { ok: false, code: r.code };
+  const served: PersonalWrapWire = { vaultId: staged.vaultId, wrappedVk: staged.wrappedVk };
   try {
     await chrome.storage.local.set({ [nsk(`personalWrap:${userId}`)]: served });
     await chrome.storage.local.remove(nsk(`personalChange:${userId}`));
   } catch {
     return { ok: false, code: "storage" };
   }
+  personalChangeDescribed = null;
+  session.vaultKeys.set(served.vaultId, r.vk);
   session.personalVaultId = served.vaultId;
   await persistSession();
   return { ok: true };
@@ -2359,8 +2369,9 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       api.setTokens(null, null); // a switch/lock landed during sync — drop the tokens, install nothing
       return { ok: false, code: "aborted" };
     }
-    const { vaultKeys, vaultRoles } = buildVaultKeys(sync, uvk, identity, s.userId);
-    const personalVaultId = await pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys);
+    const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, uvk, s.userId);
+    warnKeyState(keyUnreadable, waiting);
+    const personalVaultId = await pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys, sync.vaults);
     const items = decryptItems(sync, vaultKeys);
     // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
     // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
@@ -2373,6 +2384,7 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       personalVaultId,
       mustChangePassword: s.mustChangePassword ?? false,
       uvk,
+      waitingGrants: waiting.size,
       provenance: "PASSWORD",
       lastFullUnlockAt: Date.now(),
     };
@@ -2605,8 +2617,9 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           const sync = await api.sync(0);
           await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
           if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
-          const { vaultKeys, vaultRoles } = buildVaultKeys(sync, begin.uvk, identity, begin.userId);
-          const personalVaultId = await pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys);
+          const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, begin.uvk, begin.userId);
+          warnKeyState(keyUnreadable, waiting);
+          const personalVaultId = await pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys, sync.vaults);
           const items = decryptItems(sync, vaultKeys);
           // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
           // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
@@ -2619,6 +2632,7 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
             personalVaultId,
             mustChangePassword: false,
             uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
+            waitingGrants: waiting.size,
             provenance: "QUICK",
             lastFullUnlockAt: begin.blob.lastFullUnlockAt,
           };

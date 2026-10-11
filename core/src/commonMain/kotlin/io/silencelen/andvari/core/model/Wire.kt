@@ -329,6 +329,13 @@ data class WireGrant(
     // crypto_box_seal to the member identityPub) is set (spec 01 §6). Additive: old
     // clients ignore it (Json ignoreUnknownKeys), and member grants carry wrappedVk="".
     val sealedVk: String? = null,
+    /**
+     * Grant v2 (security review 2026-10, root cause A §1.5, branch A6): `crypto_box_seal(memberIdentityPub,
+     * SignedStatement(vault-grant))`, the owner's joint-key signature over {from, to, toKey, vaultId, grantId,
+     * issuedAt, vk}. Verified per §1.4 against the member's PIN for `from`; additive (an old client ignores it
+     * and uses the dual-sent [sealedVk]).
+     */
+    val signedGrant: String? = null,
 )
 
 @Serializable
@@ -393,8 +400,18 @@ data class UserLookupRequest(val email: String)
 @Serializable
 data class UserLookupResponse(val userId: String, val displayName: String, val identityPub: String)
 
+/**
+ * `POST /vaults/{id}/members`. [signedGrant] is grant v2 (root cause A §1.5): an N owner client sends it and,
+ * during the compatibility window, ALSO the v1 [sealedVk] so older member clients keep working. Both are sealed
+ * to the identity key the owner PINNED for the member, never to a key fresh from `/users/lookup`.
+ */
 @Serializable
-data class VaultMemberAdd(val userId: String, val role: String, val sealedVk: String)
+data class VaultMemberAdd(val userId: String, val role: String, val sealedVk: String, val signedGrant: String? = null)
+
+/** `PUT /vaults/{id}/members/{userId}/grant` (root cause A §8.2 step 4): the owner re-issues a member's grant
+ *  as v2 with the SAME vault key, so the member can confirm a key it held only from a v1 seal. Owner only. */
+@Serializable
+data class GrantReissueRequest(val signedGrant: String)
 
 @Serializable
 data class VaultMemberRole(val role: String)
@@ -410,6 +427,12 @@ data class VaultMemberSummary(
     // F22 rider (spec 03 §10): account status ('active'|'disabled') — additive; feeds the
     // transfer target picker and the disabled-member badge.
     val status: String? = null,
+    /**
+     * Root cause A §8.2 step 4 (branch A6): the member's active grant carries neither a v2 `signedGrant` nor a
+     * self-wrap, so its devices hold the vault key only from a v1 seal. A server HINT for the owner's client
+     * ("re-issue", or "verify <name> to secure their access"); it decides nothing.
+     */
+    val legacyGrant: Boolean? = null,
 )
 
 // ---- vault lifecycle (spec 03 §11) ----

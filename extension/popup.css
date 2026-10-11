@@ -308,6 +308,9 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 .personal-change { cursor: default; font-weight: 500; }
 .personal-change:hover { background: color-mix(in oklab, var(--danger) 12%, transparent); border-color: color-mix(in oklab, var(--danger) 30%, transparent); }
 .personal-change button { display: block; margin-top: 6px; }
+.personal-change button[hidden], .personal-change-coholders[hidden] { display: none; } /* A6: "Use new" stays hidden until co-holders load */
+.personal-change-coholders { display: block; margin-top: 6px; font-weight: 400; }
+.grants-waiting { cursor: default; font-weight: 500; } /* A6 (§1.7): informational, not a link */
 
 /* ---- "Unsealing…" — honest KDF progress (the ~6 s Argon2id), indeterminate gold sweep ---- */
 .kdf { margin-top: 12px; }
