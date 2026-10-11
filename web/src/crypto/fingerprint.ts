@@ -7,9 +7,11 @@
  * second preimage; 128 bits is out of reach. The construction (`SHA-256(pub)`) is unchanged — only
  * the human-visible truncation length and the compare helper.
  *
- * A prefix (short) match is accepted ONLY from a human-typed entry ({@link matchesShort}). Machine
- * values (an in-person QR, a file, `Account.resealEscrowFor`) are compared at full 64-hex length by
- * their own callers, never through this helper.
+ * A prefix (short) match is intended ONLY for a human-typed entry ({@link matchesShort}). Machine
+ * values should be compared at full 64-hex length by their own callers, and `Account.resealEscrowFor`
+ * does so today. NOT YET TRUE everywhere: the in-person-QR `rfp` value and the admin sheet-confirm
+ * still use the 16-hex short id (`shortFingerprint` in escrow.ts); moving them to a full-length compare
+ * is tracked for a later branch of this security review.
  */
 
 /** Human short-form length in hex chars (128 bits). */

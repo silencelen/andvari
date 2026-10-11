@@ -16,7 +16,7 @@
         { "entry": "zzzz zzzz zzzz zzzz zzzz zzzz zzzz zzzz", "ok": false, "why": "non-hex" }
     ],
     "machineFullCompare": {
-        "_doc": "A machine-supplied fingerprint (an in-person QR, a file, Account.resealEscrowFor) is compared at FULL 64 hex; a short (prefix) match is accepted ONLY from a human-typed entry. So the 32-hex short form matches the HUMAN helper but must NOT equal the full value a machine compare uses.",
+        "_doc": "Demonstrates the HUMAN helper's short/full distinction: the 32-hex short form matches the human matchesShort helper but is not equal to the full 64-hex value. This vector does NOT by itself prove that a live machine path compares at full length. Account.resealEscrowFor does; the in-person-QR rfp and the admin sheet-confirm still use the 16-hex short id pending a later branch of this security review.",
         "full": "b26efdd3eafc9dad3ba040a73900eb29d23827e0dabfa265222a8998d98d71de",
         "short": "b26efdd3eafc9dad3ba040a73900eb29",
         "fullEqualsFull": true,

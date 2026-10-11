@@ -9,9 +9,11 @@ package io.silencelen.andvari.core.crypto
  * by a hostile server; 128 bits is out of reach. The underlying construction is unchanged
  * (`SHA-256(pub)`); only the human-visible truncation length and the compare helper changed.
  *
- * **A prefix (short) match is accepted ONLY from a human-typed entry** ([matchesShort]). Machine-
- * supplied values (an in-person QR, a file, [Account.resealEscrowFor]) are always compared at full
- * 64-hex length by their own callers — never through this helper.
+ * **A prefix (short) match is intended ONLY for a human-typed entry** ([matchesShort]). Machine-
+ * supplied values should be compared at full 64-hex length by their own callers, and
+ * [Account.resealEscrowFor] does so today. NOT YET TRUE everywhere: the in-person-QR `rfp` value and
+ * the admin sheet-confirm are still compared on a 16-hex short id ([Escrow.shortFingerprint]); moving
+ * them to a full-length compare is tracked for a later branch of this security review.
  *
  * One helper, two engines: the web twin is `web/src/crypto/fingerprint.ts`.
  */
