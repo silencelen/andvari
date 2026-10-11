@@ -176,6 +176,40 @@ interface VaultCache {
 
     fun lastVerifiedTransferSeq(vaultId: String): Long
     fun setLastVerifiedTransferSeq(vaultId: String, seq: Long)
+
+    // ---- removal proofs v2 (security review 2026-10, root cause A §6.2/§6.3; branch A7) ----
+    // Both ride [clientState], so they share the cache's transaction ([atomically]: the consumed record lands in the
+    // SAME transaction that moves the vault to the holding area), survive a restart, and survive a resync [clear].
+    // Neither is ever written from a server value.
+
+    /** This device's consumed removal nonces, by vaultId (never shrinks; only a namespace purge removes it). */
+    fun consumedNonces(): Map<String, List<ConsumedNonce>> {
+        val out = LinkedHashMap<String, MutableList<ConsumedNonce>>()
+        for (line in clientState(CONSUMED_NONCES_KEY)?.split('\n').orEmpty()) {
+            val p = line.split('|')
+            if (p.size != 3) continue
+            val at = p[2].toLongOrNull() ?: continue
+            out.getOrPut(p[0]) { mutableListOf() }.add(ConsumedNonce(p[1], at))
+        }
+        return out
+    }
+
+    /** Record one consumed `(vaultId, nonce, issuedAt)`. Idempotent. */
+    fun addConsumedNonce(vaultId: String, nonce: String, issuedAt: Long) {
+        val lines = clientState(CONSUMED_NONCES_KEY)?.split('\n')?.filter { it.isNotEmpty() }.orEmpty()
+        if (lines.any { it.startsWith("$vaultId|$nonce|") }) return
+        setClientState(CONSUMED_NONCES_KEY, (lines + "$vaultId|$nonce|$issuedAt").joinToString("\n"))
+    }
+
+    /** The device-local wall-clock time this device last saw [vaultId] go from not-live to live (§6.3 step 6). */
+    fun liveSince(vaultId: String): Long? = clientState(LIVE_SINCE_PREFIX + vaultId)?.toLongOrNull()
+
+    fun setLiveSince(vaultId: String, at: Long?) = setClientState(LIVE_SINCE_PREFIX + vaultId, at?.toString())
+
+    companion object {
+        const val CONSUMED_NONCES_KEY = "lifecycle.consumed"
+        const val LIVE_SINCE_PREFIX = "lifecycle.liveSince."
+    }
 }
 
 /** In-memory cache — no persistence across process death. */

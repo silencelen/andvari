@@ -107,6 +107,10 @@ abstract class LifecycleTestSupport : P4TestSupport() {
     protected suspend fun HttpClient.vaultLeave(vc: VirtualClient, vaultId: String): HttpResponse =
         post("/api/v1/vaults/$vaultId/leave") { authed(vc) }
 
+    /** Branch A7: leave WITH a body (the v2 leave proof, or a malformed one). */
+    protected suspend fun HttpClient.vaultLeave(vc: VirtualClient, vaultId: String, body: io.silencelen.andvari.core.model.VaultLeaveRequest): HttpResponse =
+        post("/api/v1/vaults/$vaultId/leave") { authed(vc); contentType(ContentType.Application.Json); setBody(body) }
+
     protected suspend fun HttpClient.transferOffer(vc: VirtualClient, vaultId: String, req: TransferOfferRequest): HttpResponse =
         post("/api/v1/vaults/$vaultId/transfer") {
             authed(vc); contentType(ContentType.Application.Json); setBody(req)

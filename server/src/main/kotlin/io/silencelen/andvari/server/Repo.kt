@@ -409,7 +409,7 @@ class Repo(val db: Db) {
         // removeProof/nonce only 'removed'/'left'.
         val removedInfo = c.queryAll(
             """SELECT g.vaultId, COALESCE(g.revokedReason,'member_remove') AS rr,
-                      g.removeProof, g.removeNonce,
+                      g.removeProof, g.removeNonce, g.removeProofV, g.removeIssuedAt,
                       v.deletedAt, v.purgeAt, v.deleteId, v.deleteProof
                FROM grants g JOIN vaults v ON v.vaultId=g.vaultId
                WHERE g.userId=? AND g.revokedAt IS NOT NULL AND g.rev>?""",
@@ -430,6 +430,9 @@ class Repo(val db: Db) {
                 // attribute the removal even across a server restart (spec 03 §11).
                 vaultId = rs.getString("vaultId"), reason = reason,
                 removeProof = rs.getString("removeProof"), removeNonce = rs.getString("removeNonce"),
+                // Removal proofs v2 (root cause A §6.2, branch A7): the version and the actor's clock, both reasons.
+                proofV = rs.getInt("removeProofV").let { if (rs.wasNull()) null else it },
+                issuedAt = rs.getLong("removeIssuedAt").let { if (rs.wasNull()) null else it },
             )
         }
         io.silencelen.andvari.core.model.SyncResponse(

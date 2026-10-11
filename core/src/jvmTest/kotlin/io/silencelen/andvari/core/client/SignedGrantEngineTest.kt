@@ -723,6 +723,8 @@ class SignedGrantEngineTest {
         if (heldIsKPrime) {
             assertFalse(device.selfWrapAuthorized(w.vaultId), "$label: K' never self-wrapped")
             assertFailsWith<VaultKeyNotVerifiedException>("$label: K' never owner-wrapped") { device.buildOwnerWrap(w.vaultId) }
+            // A6 final review LOW-G: nor signed onward to anyone.
+            assertFailsWith<VaultKeyNotVerifiedException>("$label: K' never signed onward") { device.buildSignedGrant(w.vaultId, pinOf(w.owner, "Owner")) }
         }
         for ((_, wrap) in server.selfWraps) {
             assertFalse(Bytes.ctEquals(kPrime, Envelope.openB64(crypto, ownerUvk(w.member), wrap, Ad.vk(w.vaultId, w.member.userId))), "$label: no self-wrap of K'")
@@ -742,6 +744,8 @@ class SignedGrantEngineTest {
             "pending+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, third, k)) },
             "broken+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), Bytes.toB64(crypto.randomBytes(200))) },
             "absent" to { _, _ -> null },
+            // A6 final review LOW-G: the seal IS the vouched key K and the v2 grant carries K'.
+            "seal(K)+v2(K')" to { w, k -> memberRow(w, 0, sealOf(w, w.vk), forgeSigned(w, w.owner, k)) },
         )
         for ((name, shape) in shapes) {
             for (twoPull in listOf(false, true)) {
@@ -752,6 +756,150 @@ class SignedGrantEngineTest {
                 assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = name == "wrap", label = "$name/${if (twoPull) "two-pull" else "single"}")
             }
         }
+    }
+
+    /** A6 final review LOW-G: the same table on a WARM session — rows served to the very engine that vouched, with
+     *  no restart in between (the held branch of addGrant, not the cold path). */
+    @Test
+    fun theVouchGateHoldsOnAWarmSessionToo() = runBlocking<Unit> {
+        val third = enroll("a7-unpinned-sender")
+        val shapes: List<Pair<String, (World, ByteArray) -> WireGrant?>> = listOf(
+            "wrap" to { w, k -> memberRow(w, 0, null, null).copy(wrappedVk = wrapOf(w, k)) },
+            "v2" to { w, k -> memberRow(w, 0, null, forgeSigned(w, w.owner, k)) },
+            "v2+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, w.owner, k)) },
+            "seal" to { w, k -> memberRow(w, 0, sealOf(w, k), null) },
+            "pending+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, third, k)) },
+            "broken+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), Bytes.toB64(crypto.randomBytes(200))) },
+            "seal(K)+v2(K')" to { w, k -> memberRow(w, 0, sealOf(w, w.vk), forgeSigned(w, w.owner, k)) },
+        )
+        for ((name, shape) in shapes) {
+            val w = world()
+            val kPrime = crypto.randomBytes(32)
+            val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+            val device = unlock(w.member)
+            val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+            engine.sync()
+            engine.acceptLegacyVault(w.vaultId)
+            engine.accountState.pin(pinOf(w.owner, "Owner"))
+            server.selfWraps.clear()
+            var rev = 12L
+            for (row in listOf(memberRow(w, 0, sealOf(w, kPrime), null), shape(w, kPrime))) {
+                server.feed = feed(w, rev, row?.copy(rev = rev))
+                engine.sync()
+                rev += 3
+            }
+            // Warm: the vouched key K is still the one held, whatever the rows carried.
+            assertEquals(tag(w.vk), device.legacyKeyTag(w.vaultId), "warm/$name: K stays held")
+            assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = false, label = "warm/$name")
+        }
+    }
+
+    /** A6 final review LOW-G: a held LEGACY_SEAL key whose vouch (seeded directly) names ANOTHER key is never promoted,
+     *  even by a verified v2 grant carrying the held key itself. Removing the held-branch gate reds this test. */
+    @Test
+    fun aHeldLegacyKeyWithAMismatchingVouchIsNeverPromoted() {
+        val w = world()
+        val device = unlock(w.member)
+        device.grantPins = { uid -> if (uid == w.owner.userId) GrantPin(Bytes.fromB64(w.owner.reg.identityPub), true) else null }
+        val ks = crypto.randomBytes(32)
+        device.addGrant(memberRow(w, 9, sealOf(w, ks), null))
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId))
+        device.authorizeLegacyKey(w.vaultId, tag(w.vk), frozen = false) // the vouch is for K, the held key is K_s
+        device.addGrant(memberRow(w, 12, sealOf(w, ks), forgeSigned(w, w.owner, ks)))
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId), "never promoted to SIGNED_GRANT")
+        assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, device.grantAnomalies()[w.vaultId])
+        assertFalse(device.selfWrapAuthorized(w.vaultId))
+        assertFailsWith<VaultKeyNotVerifiedException> { device.buildSignedGrant(w.vaultId, pinOf(w.owner, "Owner")) }
+    }
+
+    /** A6 final review LOW-H: rule 2 meeting a mismatching vouch also raises the "vault key mismatch" flag. */
+    @Test
+    fun ruleTwoAgainstTheVouchAlsoFlagsVkMismatch() = runBlocking<Unit> {
+        val w = world()
+        val kPrime = crypto.randomBytes(32)
+        val (device, engine, _) = vouchedThenServe(w, listOf(memberRow(w, 0, null, null).copy(wrappedVk = wrapOf(w, kPrime))))
+        assertTrue(device.vkMismatch(w.vaultId), "vkMismatchVaults carries it")
+        assertTrue(engine.notices().any { it.kind == "vk-mismatch" && it.vaultId == w.vaultId })
+    }
+
+    // ---- branch A7: per-vault held-key memory (closes R15(g) on a device that held the vault) ----
+
+    /** A vault adopted from a verified v2 grant and self-wrapped; the server then strips the wrap and serves a grant
+     *  for K' signed by a pinned contact. Warm: flagged, K kept. After a restart: refused, never adopted. */
+    @Test
+    fun aV2AdoptedVaultServedWithAnotherKeyIsFlaggedWarmAndRefusedAfterARestart() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val cache = InMemoryVaultCache()
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, cache)
+        engine.sync()
+        assertNotNull(engine.verifyMemberTyped(served(w.owner, "Owner"), w.owner.account.identityFingerprintShort()))
+        server.feed = feed(w, 9, memberRow(w, 9, null, ownerSignedGrant(w)))
+        engine.sync()
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+        assertEquals(1, server.selfWraps.size)
+        val kPrime = crypto.randomBytes(32)
+        server.feed = feed(w, 12, memberRow(w, 12, null, forgeSigned(w, w.owner, kPrime)))
+        engine.sync()
+        assertEquals(tag(w.vk), device.legacyKeyTag(w.vaultId), "warm: K stays")
+        assertTrue(device.vkMismatch(w.vaultId), "warm: flagged")
+        // Restart over the same cache: the cached row now carries only the v2 grant for K'.
+        val again = unlock(w.member)
+        val restarted = SyncEngine(api(server), again, cache)
+        restarted.hydrate()
+        restarted.sync()
+        assertFalse(again.legacyKeyTag(w.vaultId) == tag(kPrime), "K' is never adopted")
+        assertFalse(again.hasVault(w.vaultId), "the row is refused with no key")
+        assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, again.grantAnomalies()[w.vaultId])
+        assertEquals(1, server.selfWraps.size, "and nothing is wrapped for K'")
+    }
+
+    /** A vault held from our own UVK wrap; the server strips it and serves a v1 seal or a v2 grant for K'. */
+    @Test
+    fun aWrapAdoptedVaultServedWithAnotherKeyIsRefusedAfterARestart() = runBlocking<Unit> {
+        for (shape in listOf("seal", "v2")) {
+            val w = world()
+            val server = FakeServer(feed(w, 5, null))
+            val cache = InMemoryVaultCache()
+            val device = unlock(w.member)
+            val engine = SyncEngine(api(server), device, cache)
+            engine.sync()
+            engine.accountState.pin(pinOf(w.owner, "Owner"))
+            server.feed = feed(w, 9, memberRow(w, 9, null, null).copy(wrappedVk = wrapOf(w, w.vk)))
+            engine.sync()
+            assertEquals(Account.KeySource.UVK_WRAP, device.keySource(w.vaultId))
+            val kPrime = crypto.randomBytes(32)
+            val swapped = if (shape == "seal") memberRow(w, 12, sealOf(w, kPrime), null) else memberRow(w, 12, null, forgeSigned(w, w.owner, kPrime))
+            server.feed = feed(w, 12, swapped)
+            engine.sync()
+            assertEquals(tag(w.vk), device.legacyKeyTag(w.vaultId), "$shape warm: K stays")
+            assertTrue(device.vkMismatch(w.vaultId), "$shape warm: flagged")
+            val again = unlock(w.member)
+            val restarted = SyncEngine(api(server), again, cache)
+            restarted.hydrate()
+            restarted.sync()
+            assertFalse(again.hasVault(w.vaultId), "$shape: K' is refused after a restart, never adopted")
+            assertTrue(restarted.legacyReviewVaults().none { it.vaultId == w.vaultId }, "$shape: never offered for Accept")
+        }
+    }
+
+    /** The memory dies with the vault: after a removal, a re-add for the same vaultId starts fresh. */
+    @Test
+    fun theHeldKeyMemoryIsDroppedWithTheVault() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val cache = InMemoryVaultCache()
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, cache)
+        engine.sync()
+        server.feed = feed(w, 9, memberRow(w, 9, null, null).copy(wrappedVk = wrapOf(w, w.vk)))
+        engine.sync()
+        assertTrue(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId))
+        server.feed = feed(w, 12, null).copy(removedGrants = listOf(w.vaultId))
+        engine.sync()
+        assertFalse(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId))
+        assertTrue(device.heldKeyTagsSnapshot()[w.vaultId] == null)
     }
 
     /** MEDIUM-B, named: pull 1 holds K_s from a seal (≠ vouched K); pull 2 brings a verified v2 for K_s. */
