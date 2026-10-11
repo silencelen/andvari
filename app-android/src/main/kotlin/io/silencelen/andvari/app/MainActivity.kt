@@ -386,9 +386,12 @@ private fun MustChangePasswordBanner(ui: UiState) {
 private fun AttentionArea(vm: AndvariViewModel, ui: UiState) {
     val fyiNeedsUpdate = ui.needsUpdateCount > 0 && ui.items.isNotEmpty()
     val fyiUnopenable = ui.undecryptableSharedVaultCount > 0
+    // A5b: the personal-vault banner (the question, a change notice, an anomaly) counts on its own; before,
+    // it rendered only when some other notice happened to open this area (desktop's twin already counted it).
+    val personalNeedsAttention = vm.personalStatus().let { it != null && it != io.silencelen.andvari.core.client.Account.PersonalStatus.CONFIRMED }
     val hasAnything = ((ui.escrowStale || ui.escrowNeedsV2) && ui.escrowFingerprint.isNotEmpty()) ||
         ui.incomingTransfers.isNotEmpty() || ui.lifecycleNotices.isNotEmpty() ||
-        ui.needsUpdateCount > 0 || fyiUnopenable
+        ui.needsUpdateCount > 0 || fyiUnopenable || personalNeedsAttention
     if (!hasAnything) return
     // Capped + scrollable so a pile-up (many lifecycle rows + several simultaneous incoming
     // transfers) can't clip its own lower items or squeeze the vault list below to ~0 — it's a
