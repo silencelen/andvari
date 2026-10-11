@@ -335,6 +335,24 @@ object HouseholdCopy {
      * [count] is the notice's `parkedCount` with a null taken as 0, and [vaultName] is already
      * resolved by the caller — every §11 notice falls back to "a vault" for a blank name.
      */
+    /**
+     * Removal proofs v2 (security review 2026-10, root cause A §6.3 step 5; branch A7): a `removed` or `left` whose
+     * nonce this device or this account already consumed — a replay of an earlier, genuine removal. Danger tone; the
+     * data handling is the same as every removal (kept sealed for 30 days). The notice kind is `replay-denied` with
+     * reason [SyncEngine.REMOVAL_REPLAY]. TWIN of web Vault.tsx noticeBody, byte-equal.
+     */
+    fun removalReplayDeniedNotice(vaultName: String): String =
+        "The server says you lost access to “$vaultName”, but it sent a removal notice that was already used once, so andvari did not trust it. " +
+            "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +
+            "If nobody in your household did this, tell your admin — the server may be misbehaving."
+
+    /**
+     * Root cause A §8.6 (branch A7), compatibility window only: a `left` that carried no leave proof (an older client
+     * left, or the server says so). The calm "You left" plus the one line that lets the human catch a forged one.
+     * TWIN of web Vault.tsx noticeBody, byte-equal.
+     */
+    fun leftUnprovenNotice(vaultName: String): String = "You left “$vaultName”. Didn't do this? Tell your admin."
+
     fun replayDeniedNotice(count: Int, vaultName: String): String =
         if (count == 1) {
             "A recovered edit to “$vaultName” couldn't be applied — your access may have changed while the vault was deleted."

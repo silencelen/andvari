@@ -879,7 +879,7 @@ fun Application.andvariModule(services: Services) {
                 runCatching { call.receive<io.silencelen.andvari.core.model.VaultMemberRemoveRequest>() }
                     .getOrElse { throw BadRequest("bad_request") }
             } else null
-            call.respond(service.removeVaultMember(p, vaultId, userId, call.clientIp(config), body?.proof, body?.nonce))
+            call.respond(service.removeVaultMember(p, vaultId, userId, call.clientIp(config), body?.proof, body?.nonce, body?.proofV, body?.issuedAt))
         }
 
         // ---- vault lifecycle (spec 03 §11) — authed, version-checked, refused on the
@@ -907,7 +907,13 @@ fun Application.andvariModule(services: Services) {
             val p = sharingPrincipal(config, service)
             if (!limiter.allow("vault_recovery:${p.userId}", 30, 3_600_000)) throw RateLimited()
             val vaultId = requireUuid(call.parameters["vaultId"], "vault_id")
-            call.respond(service.leaveVault(p, vaultId, call.clientIp(config)))
+            // Root cause A §6.2 (branch A7): the v2 leave proof body. Older clients post `{}` (or nothing), which the
+            // compatibility window still accepts; a PRESENT body that does not parse is a 400, never silently dropped.
+            val body = if ((call.request.contentLength() ?: 0L) > 0L) {
+                runCatching { call.receive<io.silencelen.andvari.core.model.VaultLeaveRequest>() }
+                    .getOrElse { throw BadRequest("bad_request") }
+            } else null
+            call.respond(service.leaveVault(p, vaultId, call.clientIp(config), body))
         }
         post("/api/v1/vaults/{vaultId}/transfer") {
             val p = sharingPrincipal(config, service)

@@ -198,6 +198,25 @@ object AccountState {
         )
     }
 
+    /**
+     * Fold this device's consumed removal nonces (root cause A §6.2, branch A7) into [doc]: the same rule as [merge]
+     * (union per vault, the larger issuedAt for a repeated nonce, newest [NONCE_CAP] kept). Nothing else changes.
+     */
+    fun withConsumed(doc: AccountStateDoc, extra: Map<String, List<ConsumedNonce>>): AccountStateDoc {
+        if (extra.isEmpty()) return doc
+        val nonces = HashMap<String, HashMap<String, Long>>()
+        for ((vaultId, list) in doc.consumedNonces.entries + extra.entries) {
+            val m = nonces.getOrPut(vaultId) { HashMap() }
+            for (n in list) m[n.nonce] = maxOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
+        }
+        val capped = nonces.mapValues { (_, m) ->
+            m.entries.map { ConsumedNonce(it.key, it.value) }
+                .sortedWith(compareByDescending<ConsumedNonce> { it.issuedAt }.thenBy { it.nonce })
+                .take(NONCE_CAP)
+        }.toSortedMap()
+        return doc.copy(consumedNonces = capped)
+    }
+
     /** True when [a] and [b] carry the same content, ignoring seq (no write is needed). */
     fun sameContent(a: AccountStateDoc?, b: AccountStateDoc?): Boolean =
         a != null && b != null && a.copy(seq = 0) == b.copy(seq = 0)

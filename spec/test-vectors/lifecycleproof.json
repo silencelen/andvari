@@ -39,5 +39,445 @@
             "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
             "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w"
         }
-    ]
+    ],
+    "v2Cases": [
+        {
+            "op": "remove-v2",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "targetUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
+            "nonce": "AAECAwQFBgcICQoLDA0ODw",
+            "issuedAt": 1760000000000,
+            "domain": "andvari/v1|lifecycle|remove-v2|0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10|f42e08cb-8cd4-435c-9599-83b519815789|AAECAwQFBgcICQoLDA0ODw|1760000000000",
+            "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M"
+        },
+        {
+            "op": "leave",
+            "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+            "userId": "f42e08cb-8cd4-435c-9599-83b519815789",
+            "nonce": "AAECAwQFBgcICQoLDA0ODw",
+            "issuedAt": 1760000000000,
+            "domain": "andvari/v1|lifecycle|leave|0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10|f42e08cb-8cd4-435c-9599-83b519815789|AAECAwQFBgcICQoLDA0ODw|1760000000000",
+            "proof": "oUjy9QAWcBXoBSN1yrlXLHgmi9CM_hleWJNfJeEjU-Q"
+        }
+    ],
+    "verdicts": {
+        "note": "Hand-authored (security review 2026-10, root cause A §6.3/§8.6, branch A7); MACs computed by an independent HKDF/HMAC oracle, not by vector-gen. Graded against the verifier production calls: core RemovalProof.decide, web decideRemoval. vaultId and myUserId are fixed; `consumed` is the union of the device and account-state sets for the vault; `consume` is [nonce, issuedAt] recorded on a valid verdict.",
+        "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
+        "myUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
+        "skewMs": 600000,
+        "cases": [
+            {
+                "name": "remove-v2 valid",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "valid",
+                "step": "valid",
+                "consume": [
+                    "AAECAwQFBgcICQoLDA0ODw",
+                    1760000000000
+                ]
+            },
+            {
+                "name": "leave valid",
+                "reason": "left",
+                "proofV": 2,
+                "proof": "oUjy9QAWcBXoBSN1yrlXLHgmi9CM_hleWJNfJeEjU-Q",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "valid",
+                "step": "valid",
+                "consume": [
+                    "AAECAwQFBgcICQoLDA0ODw",
+                    1760000000000
+                ]
+            },
+            {
+                "name": "wrong target: minted for another member",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "IRg6GYoNs4oCs2MXlgAqqe52uqQgwtQV_esCpl-iWdw",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "wrong reason domain: a leave proof relayed as removed",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "oUjy9QAWcBXoBSN1yrlXLHgmi9CM_hleWJNfJeEjU-Q",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "wrong reason domain: a remove proof relayed as left",
+                "reason": "left",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "issuedAt not bound: proof for T, row says T+1",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000001,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "nonce not bound: proof for n1, row says n2",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "EBESExQVFhcYGRobHB0eHw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "consumed nonce (device or account state)",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "replay_denied",
+                "step": "nonce"
+            },
+            {
+                "name": "consumed leave nonce",
+                "reason": "left",
+                "proofV": 2,
+                "proof": "oUjy9QAWcBXoBSN1yrlXLHgmi9CM_hleWJNfJeEjU-Q",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [
+                    "EBESExQVFhcYGRobHB0eHw",
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "replay_denied",
+                "step": "nonce"
+            },
+            {
+                "name": "order: a bad MAC is an anomaly even when the nonce is consumed",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "IRg6GYoNs4oCs2MXlgAqqe52uqQgwtQV_esCpl-iWdw",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "order: a consumed nonce wins over a stale window",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "r0d3Ks0x4kd6riaP9EPDmnUhVT6Is4LlFi1YK_Z2w5M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1759995799999,
+                "consumed": [
+                    "AAECAwQFBgcICQoLDA0ODw"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "replay_denied",
+                "step": "nonce"
+            },
+            {
+                "name": "issuedAt one ms before liveSince - 10 min",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "r0d3Ks0x4kd6riaP9EPDmnUhVT6Is4LlFi1YK_Z2w5M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1759995799999,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "window"
+            },
+            {
+                "name": "issuedAt exactly liveSince - 10 min (edge, inside)",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "z-3kNn-6ldyEpSk6rCqDXsHCJ_Bp5bgcvmjs1VEruCI",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1759995800000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "valid",
+                "step": "valid",
+                "consume": [
+                    "AAECAwQFBgcICQoLDA0ODw",
+                    1759995800000
+                ]
+            },
+            {
+                "name": "issuedAt one ms after now + 10 min",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "XqXANJhrWmX5IeS20AokcfLPDJzNDVi7OEtk3pVMHIA",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000660001,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "window"
+            },
+            {
+                "name": "issuedAt exactly now + 10 min (edge, inside)",
+                "reason": "left",
+                "proofV": 2,
+                "proof": "FKYOvAu2BbnlSbeUoeTe_9fpv-8z9OKN4iupwuHKtIo",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000660000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "valid",
+                "step": "valid",
+                "consume": [
+                    "AAECAwQFBgcICQoLDA0ODw",
+                    1760000660000
+                ]
+            },
+            {
+                "name": "no liveSince on this device fails closed",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": null,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "window"
+            },
+            {
+                "name": "missing proof",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": null,
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            },
+            {
+                "name": "missing nonce",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": null,
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            },
+            {
+                "name": "missing issuedAt",
+                "reason": "left",
+                "proofV": 2,
+                "proof": "oUjy9QAWcBXoBSN1yrlXLHgmi9CM_hleWJNfJeEjU-Q",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            },
+            {
+                "name": "v2 nonce must be 16 bytes (a UUID is not)",
+                "reason": "removed",
+                "proofV": 2,
+                "proof": "K63V71xGdrvcju3LSuYFqCDMxpLS6EyVfY-x9XiuzX8",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            },
+            {
+                "name": "unknown proof version",
+                "reason": "removed",
+                "proofV": 3,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": 1760000000000,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            },
+            {
+                "name": "v1 remove proof in-window, unconsumed: valid (legacy), consumed at now",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "valid_legacy",
+                "step": "legacy",
+                "consume": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                    1760000060000
+                ]
+            },
+            {
+                "name": "v1 remove proof in-window, consumed: replay denied",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
+                ],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "replay_denied",
+                "step": "nonce"
+            },
+            {
+                "name": "v1 remove proof for another member",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "ayWkHqZvLUnaZRlHHN4VCKprS71mQoKdsXcQkSswguM",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "v1 proof with proofV 1 explicit",
+                "reason": "removed",
+                "proofV": 1,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "valid_legacy",
+                "step": "legacy",
+                "consume": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                    1760000060000
+                ]
+            },
+            {
+                "name": "a v2 proof with its proofV stripped is checked as v1 and fails",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "CRez4RCiM58F_FaEU8MQni81y-mSYDYRR4qdP3PfY6M",
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "mac"
+            },
+            {
+                "name": "removed with no proof at all",
+                "reason": "removed",
+                "proofV": null,
+                "proof": null,
+                "nonce": null,
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            },
+            {
+                "name": "left with no proof in-window: you left + tell your admin",
+                "reason": "left",
+                "proofV": null,
+                "proof": null,
+                "nonce": null,
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "left_unproven",
+                "step": "legacy"
+            },
+            {
+                "name": "left with half a legacy proof",
+                "reason": "left",
+                "proofV": null,
+                "proof": null,
+                "nonce": "AAECAwQFBgcICQoLDA0ODw",
+                "issuedAt": null,
+                "consumed": [],
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "fields"
+            }
+        ]
+    }
 }

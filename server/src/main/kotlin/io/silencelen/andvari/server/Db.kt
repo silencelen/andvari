@@ -575,5 +575,28 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 15) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Security review 2026-10, root cause A §6.2 (branch A7): removal proofs v2. The revoked grant row
+                    // keeps the proof's version and the actor's `issuedAt` beside removeProof/removeNonce (both relayed
+                    // in removedGrantsInfo for `removed` AND `left`). `removal_nonces` remembers every nonce a vault
+                    // ever stored, across re-adds (which clear the grant row's copy), so the server refuses a reused
+                    // one: honest-server hygiene only — the clients' consumed sets are the actual defence. Opaque,
+                    // like the proofs. Idempotent: a restore drill that rewinds the marker re-runs this.
+                    val cols = st.executeQuery("PRAGMA table_info(grants)").use { rs ->
+                        val names = HashSet<String>()
+                        while (rs.next()) names.add(rs.getString("name"))
+                        names
+                    }
+                    if ("removeProofV" !in cols) st.executeUpdate("ALTER TABLE grants ADD COLUMN removeProofV INTEGER")
+                    if ("removeIssuedAt" !in cols) st.executeUpdate("ALTER TABLE grants ADD COLUMN removeIssuedAt INTEGER")
+                    st.executeUpdate(
+                        "CREATE TABLE IF NOT EXISTS removal_nonces(vaultId TEXT NOT NULL, nonce TEXT NOT NULL, usedAt INTEGER NOT NULL, PRIMARY KEY(vaultId, nonce))",
+                    )
+                    st.executeUpdate("UPDATE meta SET value='15' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

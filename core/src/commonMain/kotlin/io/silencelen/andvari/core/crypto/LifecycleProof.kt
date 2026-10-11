@@ -83,6 +83,34 @@ object LifecycleProof {
         return mac(crypto, key, "andvari/v1|lifecycle|remove|$vaultId|$targetUserId|$nonce")
     }
 
+    // ---- removal proofs v2 (security review 2026-10, root cause A §6.1; branch A7) ----
+    //
+    // Freshness-bound and single-use: a 16-byte CSPRNG nonce (base64url, unpadded) and the actor's wall clock
+    // `issuedAt` (ms, decimal) ride every remove and every leave. Still MACs under [lifecycleKey] (owner decision
+    // Q11: delete / restore / transfer stay MACs too): the server never holds VK, so it cannot mint one. The
+    // verifier's order and the single-use rule live in [RemovalProof.decide].
+
+    /** `andvari/v1|lifecycle|remove-v2|{vaultId}|{targetUserId}|{nonce}|{issuedAt}`. */
+    fun removeV2(crypto: CryptoProvider, key: ByteArray, vaultId: String, targetUserId: String, nonce: String, issuedAt: Long): String {
+        requireDomainSafe(vaultId, targetUserId, nonce)
+        return mac(crypto, key, "andvari/v1|lifecycle|remove-v2|$vaultId|$targetUserId|$nonce|$issuedAt")
+    }
+
+    /** `andvari/v1|lifecycle|leave|{vaultId}|{userId}|{nonce}|{issuedAt}`: minted by the LEAVING member's client. */
+    fun leave(crypto: CryptoProvider, key: ByteArray, vaultId: String, userId: String, nonce: String, issuedAt: Long): String {
+        requireDomainSafe(vaultId, userId, nonce)
+        return mac(crypto, key, "andvari/v1|lifecycle|leave|$vaultId|$userId|$nonce|$issuedAt")
+    }
+
+    /** A fresh v2 nonce: 16 CSPRNG bytes, base64url unpadded (22 chars). */
+    fun newNonce(crypto: CryptoProvider): String = Bytes.toB64(crypto.randomBytes(16))
+
+    /** True for a well-formed v2 nonce: base64url that decodes to exactly 16 bytes and re-encodes to itself. */
+    fun isV2Nonce(nonce: String): Boolean {
+        val raw = runCatching { Bytes.fromB64(nonce) }.getOrNull() ?: return false
+        return raw.size == 16 && Bytes.toB64(raw) == nonce
+    }
+
     /** Constant-time compare of a [presented] base64url proof against the [expected] value
      *  (recompute expected with the mint helper above). Any decode failure ⇒ false. */
     fun verify(expected: String, presented: String): Boolean {
