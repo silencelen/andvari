@@ -67,8 +67,11 @@ describe("H137 — secrets are blanked on paper", () => {
   it("the exception is applied by hand at the reveal, never by a blanket selector", () => {
     const welcome = readFileSync(here("./Welcome.tsx"), "utf8");
     expect(welcome).toContain('className="mono print-keep"');
-    // Exactly one surface claims it — an exception that spreads stops being an exception.
-    expect(welcome.match(/className="[^"]*print-keep/g)?.length).toBe(1);
+    // Exactly the TWO reveal-sheet surfaces claim it — the recovery phrase and (security review
+    // 2026-10 §7 / spec 04 §6) the member's identity fingerprint, which the sheet prints so it can
+    // anchor a household recovery. Both live in the ONE shown-once RecoveryReveal; the guard below
+    // keeps the exception from spreading to any OTHER file.
+    expect(welcome.match(/className="[^"]*print-keep/g)?.length).toBe(2);
     for (const file of ["Vault.tsx", "Health.tsx", "Staleness.tsx", "Admin.tsx", "Settings.tsx"]) {
       expect(readFileSync(here(`./${file}`), "utf8"), `${file} must not opt out of print blanking`).not.toMatch(
         /className="[^"]*print-keep/,
