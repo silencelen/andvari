@@ -145,3 +145,21 @@ describe("R10 — the Appearance promise is scoped, on both surfaces", () => {
     expect(optionsHtml).toContain("The web vault keeps its own setting.");
   });
 });
+
+/**
+ * Security review 2026-10, root cause A §3.1: the two key-precedence notices are canon in core
+ * HouseholdCopy (the natives render it directly); web's copies are pinned byte-equal here.
+ */
+describe("Vault.tsx key-precedence notices — the core HouseholdCopy twins", () => {
+  it("vk-mismatch carries HouseholdCopy.vkMismatchNotice byte-equal", () => {
+    const fn = householdKt.match(/fun vkMismatchNotice\([^)]*\): String =\s*"([^"]+)"/);
+    expect(fn, "HouseholdCopy.vkMismatchNotice moved or was renamed — update the pin").not.toBeNull();
+    expect(vaultTsx).toContain(asTemplate(fn![1]!));
+  });
+
+  it("key-unreadable carries HouseholdCopy.KEY_UNREADABLE_NOTICE byte-equal", () => {
+    const m = householdKt.match(/const val KEY_UNREADABLE_NOTICE: String =\s*"([^"]+)"/);
+    expect(m, "HouseholdCopy.KEY_UNREADABLE_NOTICE moved — update the pin").not.toBeNull();
+    expect(vaultTsx).toContain(JSON.stringify(m![1]!));
+  });
+});

@@ -2095,7 +2095,9 @@ class DesktopState(
         val acct = account ?: return 0
         val grantedIds = e.grants().mapTo(HashSet()) { it.vaultId }
         return e.vaultRows().count {
-            it.type == "shared" && it.vaultId in grantedIds && !acct.hasVault(it.vaultId)
+            // A damaged UVK wrap is the separate "key unreadable" notice (root cause A §3.1), not
+            // this "sealed to another device" warning, whose advice would send the member the wrong way.
+            it.type == "shared" && it.vaultId in grantedIds && !acct.hasVault(it.vaultId) && !acct.keyUnreadable(it.vaultId)
         }
     }
 

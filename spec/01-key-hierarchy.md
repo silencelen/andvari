@@ -210,7 +210,30 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
     (`rejectVersion`, `rejectVaultMismatch`, `rejectVkLength`).
   - A grant normally carries **exactly one** of `wrappedVk` / `sealedVk`; after an
     ownership transfer (spec 03 §11) the new owner's grant MAY carry both (`wrappedVk`
-    current, `sealedVk` retained as fallback key material until vault purge).
+    current, `sealedVk` retained), and so MAY a member's grant once that member has stored
+    its **self-wrap** (below).
+  - **Canonical-key precedence (NORMATIVE; security review 2026-10).** A `sealedVk` is an
+    anonymous `crypto_box_seal` to the member's PUBLIC key, so anyone holding that key,
+    the server included, can mint one; a `wrappedVk` opens only under the client's own UVK.
+    A client therefore takes a vault's VK from the first of these its own grant row
+    carries: (1) the caller's `wrappedVk`; (2) a `sealedVk`, only when the row carries no
+    `wrappedVk`. A seal is never preferred over a wrap. When the wrap opens, a seal on the
+    same row MAY still be opened, only to compare: the same VK is silent; a DIFFERENT VK
+    keeps the wrapped key, refuses the seal and raises a "vault key mismatch" notice; a
+    seal that does not open is ignored (an honest post-transfer row can retain a seal for
+    an earlier identity). When the wrap is present and does NOT open (any §4 structural
+    refusal or an AEAD tag failure — the UVK has already proven itself at unlock, so a tag
+    failure here is never a wrong password), the vault is "key unreadable — tell your
+    admin" and the client MUST NOT fall back to the seal. The same order governs every
+    path that opens a grant, including the holding-area name peek (spec 03 §11).
+  - **Member self-wrap.** After adopting a VK from a `sealedVk`, a member's client wraps it
+    as `Envelope(key = UVK, plaintext = VK, ad = "andvari/v1|vk|{vaultId}|{userId}")` — the
+    owner-wrap construction — verifies the round trip, and stores it on its own grant with
+    `PUT /vaults/{id}/grant/self-wrap` (spec 03 §10). From then on every device of that
+    member reads the VK from the wrap. Because a member row can now carry a `wrappedVk`, the
+    personal-vault refusal of spec 02 §4 (audit H64) treats a row as member-granted when the
+    key came from a seal, when the row carries any `sealedVk`, or when its role is not
+    `owner`.
   - Roles: `owner` (exactly one per vault at every instant; reassignable ONLY via the
     two-phase offer/accept transfer of spec 03 §11, in which the new owner's client
     re-wraps VK under its own UVK and the old owner demotes to `writer`, retaining VK —

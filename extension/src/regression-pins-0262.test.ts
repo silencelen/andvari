@@ -57,7 +57,8 @@ test("G21 — buildVaultKeys records each opened grant's role beside its key", (
   // personal-vault choice refuses on); the pin still says what it always said — everything
   // buildVaultKeys learns about a grant leaves it together, so no caller can see the keys
   // without the role.
-  assert.ok(build.includes("return { vaultKeys, vaultRoles, memberGranted };"), "all three maps leave the builder together");
+  // Root cause A §3.1 (security review 2026-10) added the two refused-key sets to the same return.
+  assert.ok(build.includes("return { vaultKeys, vaultRoles, memberGranted, vkMismatch, keyUnreadable };"), "every map leaves the builder together");
 });
 
 test("G21 — writableItem is the one gate, and it reads the recorded role", () => {

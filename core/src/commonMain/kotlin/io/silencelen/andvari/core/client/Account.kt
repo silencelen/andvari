@@ -268,6 +268,20 @@ class VaultKeyDamagedException(message: String, cause: Throwable? = null) :
     Exception("account key material is unreadable: $message", cause)
 
 /**
+ * A grant row carries OUR UVK wrap (`wrappedVk`) for a vault, and it does not open: it fails a
+ * structural check or its AEAD tag (security review 2026-10, root cause A §3.1; the spec 01 §4
+ * classification extended to VK wraps). By the time a grant is applied the UVK has already
+ * proven itself on the account-key blobs, so an AEAD failure here cannot mean "wrong password";
+ * it is a damaged or substituted row, and the vault shows as "key unreadable — tell your admin".
+ *
+ * Deliberately NOT a [CryptoException], and deliberately terminal: the one thing the client must
+ * not do is fall back to a `sealedVk` on the same row, because a seal is `crypto_box_seal` to our
+ * PUBLIC key and the server can mint one around a key it chose. Web twin: `VaultGrantKeyUnreadableError`.
+ */
+class VaultGrantKeyUnreadableException(val vaultId: String, reason: String, cause: Throwable? = null) :
+    Exception("vault key for $vaultId is unreadable ($reason)", cause)
+
+/**
  * An unlocked account — the Kotlin sibling of web/src/vault/account.ts. Holds the
  * in-memory UVK + personal vault key and performs item AEAD (AD-bound to
  * userId/vaultId/itemId, spec 02 §2). Nothing here is persisted in the clear.
@@ -290,6 +304,17 @@ class Account private constructor(
      * replay them anyway), so it cannot go stale across a restart.
      */
     private val memberGrantedVaults: MutableSet<String> = mutableSetOf()
+
+    /**
+     * Vaults whose grant row carried a seal that opened to a DIFFERENT key than the one we hold
+     * from our own UVK wrap: the "vault key mismatch" anomaly (root cause A §3.1). The wrapped key
+     * was kept and the seal refused; this records only that the server served a second key.
+     * Rebuilt from the persisted rows on every hydrate, like [memberGrantedVaults].
+     */
+    private val vkMismatchVaults: MutableSet<String> = mutableSetOf()
+
+    /** Vaults whose UVK wrap is present but does not open ("key unreadable — tell your admin"). */
+    private val unreadableKeyVaults: MutableSet<String> = mutableSetOf()
 
     companion object {
         /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed). */
@@ -647,20 +672,28 @@ class Account private constructor(
     /**
      * Apply an incoming grant (spec 01 §6). The ROLE update is unconditional — a role
      * change re-delivers the grant with a bumped rev and must take effect even though the
-     * VK is already held; the key itself is opened only when missing. Member grants carry
-     * sealedVk (crypto_box_seal to our identity); owner/personal grants carry wrappedVk
-     * (under UVK).
+     * VK is already held; the key itself is opened only when missing, by [openGrantVk]'s
+     * canonical-key precedence (security review 2026-10, root cause A §3.1).
+     *
+     * Throws [VaultGrantKeyUnreadableException] when the row carries our UVK wrap and it does
+     * not open: that vault stays keyless (no seal fallback) and [keyUnreadable] says so.
      */
     fun addGrant(grant: WireGrant) {
         if (grant.role.isNotEmpty()) vaultRoles[grant.vaultId] = grant.role
-        if (vaultKeys.containsKey(grant.vaultId)) return
-        val sealed = grant.sealedVk
-        val arrivedByMemberGrant = !sealed.isNullOrEmpty()
-        val vk = if (arrivedByMemberGrant) {
-            SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed))
-        } else {
-            Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
+        val held = vaultKeys[grant.vaultId]
+        if (held != null) {
+            // Already held: the row cannot change our key (the warm-session guard), but a
+            // re-delivered row that now carries a DIFFERENT key is still worth surfacing.
+            if (rowCarriesOtherKey(grant, held)) vkMismatchVaults.add(grant.vaultId)
+            return
         }
+        val opened = try {
+            openGrantVk(grant)
+        } catch (e: VaultGrantKeyUnreadableException) {
+            unreadableKeyVaults.add(grant.vaultId)
+            throw e
+        }
+        val vk = opened.vk
         // The same 32-byte assertion [SharedGrant.open] makes on the sealed branch, on the
         // wrapped one (audit F32). Nothing downstream re-checks: a wrong-length VK went into
         // the key map and only surfaced at the next envelope operation, as an
@@ -669,15 +702,110 @@ class Account private constructor(
         // same broken grant produced two different verdicts depending on which branch minted it.
         if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
         vaultKeys[grant.vaultId] = vk
-        // Provenance of the KEY, recorded at the one moment it is knowable (audit H64). It is
-        // deliberately NOT re-stamped by a later re-delivery: the early return above means the
-        // first grant that actually opened the key is the one that says how it arrived, so a
-        // hostile server cannot launder a member-granted vault by re-sending the same vaultId
-        // with an (unopenable, therefore never reached) wrappedVk, and a post-transfer owner
-        // grant carrying BOTH forms (spec 02 §4) does not retroactively make a vault we joined
-        // as a member look like one we minted.
-        if (arrivedByMemberGrant) memberGrantedVaults.add(grant.vaultId)
+        unreadableKeyVaults.remove(grant.vaultId)
+        if (opened.sealMismatch) vkMismatchVaults.add(grant.vaultId)
+        // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and NOT
+        // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
+        // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer
+        // separates "shared" from "mine alone". A row is member-granted when the key came from a
+        // seal, OR the row carries any seal at all (a member row, or a post-transfer owner row
+        // that retains one), OR its role is not owner (a member self-wrap whose seal the server
+        // dropped). Only an owner row with a bare UVK wrap and no seal is a personal candidate,
+        // which is exactly what enrolment mints. The residue is unchanged and documented on
+        // [setPersonalVault]: those three signals are server plaintext, so a server that strips
+        // the seal AND relabels the role can still present a shared vault as an owner row,
+        // until the personal-vault identity of root cause A §4 lands.
+        if (opened.viaSeal || !grant.sealedVk.isNullOrEmpty() || grant.role != "owner") {
+            memberGrantedVaults.add(grant.vaultId)
+        }
     }
+
+    /** A key opened from a grant row, with how it was reached ([viaSeal]) and whether a seal on
+     *  the same row opened to a different key ([sealMismatch], the §3.1 anomaly). */
+    private class OpenedVk(val vk: ByteArray, val viaSeal: Boolean, val sealMismatch: Boolean)
+
+    /**
+     * Canonical-key precedence (security review 2026-10, root cause A §3.1). The VK comes from
+     * the FIRST of these that the row carries:
+     *
+     *  1. the personal wrap (§4): not yet built, it lands with the personal-vault identity branch;
+     *  2. our own UVK wrap, `wrappedVk` = `Envelope(UVK, VK, Ad.vk(vaultId, userId))`: the owner
+     *     wrap, the post-transfer new-owner wrap and the member self-wrap (§3.2);
+     *  3. a v2 signed grant (§1.4): not yet built, the hook for the signed-grants branch;
+     *  4. a v1 `sealedVk`, legacy only.
+     *
+     * A server-delivered seal is never preferred over a UVK wrap. When the wrap opens, a seal on
+     * the same row is still opened, only to compare: the same key is silent, a different key is
+     * reported as [OpenedVk.sealMismatch] (the wrapped key wins), and a seal that does not open
+     * is ignored (an honest post-transfer row can retain a seal for an earlier identity).
+     *
+     * When the wrap is PRESENT but does not open, this throws [VaultGrantKeyUnreadableException]
+     * and never tries the seal: a damaged or substituted wrap must not hand the decision to a
+     * blob the server can mint.
+     */
+    private fun openGrantVk(grant: WireGrant): OpenedVk {
+        val sealed = grant.sealedVk
+        if (grant.wrappedVk.isNotEmpty()) {
+            val vk = try {
+                val envelope = Bytes.fromB64(grant.wrappedVk)
+                Envelope.structuralRefusal(envelope)?.let { throw VaultGrantKeyUnreadableException(grant.vaultId, it) }
+                Envelope.open(crypto, uvk, envelope, Ad.vk(grant.vaultId, userId))
+            } catch (e: VaultGrantKeyUnreadableException) {
+                throw e
+            } catch (e: Exception) {
+                throw VaultGrantKeyUnreadableException(grant.vaultId, "wrap does not open", e)
+            }
+            // A wrap that OPENS under our UVK was minted by one of our own clients, so a wrong
+            // length is a buggy writer, not a substitution: it keeps the audit F32 CryptoException
+            // classification (still terminal, still no seal fallback).
+            if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
+            val sealVk = if (sealed.isNullOrEmpty()) null else openSealOrNull(grant.vaultId, sealed)
+            return OpenedVk(vk, viaSeal = false, sealMismatch = sealVk != null && !Bytes.ctEquals(sealVk, vk))
+        }
+        // (3) v2 signed grant: verified per root cause A §1.4 once that construction exists.
+        if (!sealed.isNullOrEmpty()) {
+            return OpenedVk(
+                SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed)),
+                viaSeal = true, sealMismatch = false,
+            )
+        }
+        throw CryptoException("grant for ${grant.vaultId} carries no key")
+    }
+
+    private fun openSealOrNull(vaultId: String, sealed: String): ByteArray? =
+        runCatching { SharedGrant.open(crypto, identityPub, identityPriv, vaultId, Bytes.fromB64(sealed)) }.getOrNull()
+
+    /** A re-delivered row for a vault whose key we hold: does any key it carries differ from it? */
+    private fun rowCarriesOtherKey(grant: WireGrant, held: ByteArray): Boolean {
+        val fromWrap = if (grant.wrappedVk.isEmpty()) null else runCatching {
+            Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
+        }.getOrNull()
+        val fromSeal = grant.sealedVk?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(grant.vaultId, it) }
+        return listOfNotNull(fromWrap, fromSeal).any { !Bytes.ctEquals(it, held) }
+    }
+
+    /** True when a grant row for this vault carried a seal whose key differs from the one we
+     *  hold (the "vault key mismatch" anomaly, root cause A §3.1). Display only: the held key
+     *  is already the canonical one. */
+    fun vkMismatch(vaultId: String): Boolean = vaultId in vkMismatchVaults
+
+    /** Vault ids currently flagged by [vkMismatch]. */
+    fun vkMismatchVaultIds(): Set<String> = vkMismatchVaults.toSet()
+
+    /** True when this vault's grant carries our UVK wrap and it does not open (no seal fallback). */
+    fun keyUnreadable(vaultId: String): Boolean = vaultId in unreadableKeyVaults
+
+    /** Vault ids currently flagged by [keyUnreadable]. */
+    fun keyUnreadableVaultIds(): Set<String> = unreadableKeyVaults.toSet()
+
+    /**
+     * True when we hold this vault's key from a v1 seal and the row has no UVK wrap of ours yet:
+     * the member self-wrap of root cause A §3.2 should be built ([buildSelfWrap]) and posted, so
+     * every other device of this account reads the key from the wrap instead of the seal.
+     */
+    fun needsSelfWrap(grant: WireGrant): Boolean =
+        vaultKeys.containsKey(grant.vaultId) && grant.wrappedVk.isEmpty() && !grant.sealedVk.isNullOrEmpty() &&
+            grant.role != "owner" && grant.userId == userId
 
     /**
      * True when this vault's VK reached us through a member grant (`sealedVk`,
@@ -690,6 +818,11 @@ class Account private constructor(
      * evidence that this client itself sealed that key for itself (enrollment, shared-vault
      * creation, password change re-wrap, transfer accept). "Which vault is mine alone" must
      * rest on the second kind of evidence, never the first.
+     *
+     * Since the member self-wrap (root cause A §3.2) a member's row can carry a `wrappedVk` too,
+     * so this also answers true for a row that carries any seal or whose role is not owner (see
+     * [addGrant]). The name is kept because callers ask the same question: "is this a vault
+     * somebody else can read?"
      */
     fun keyArrivedByMemberGrant(vaultId: String): Boolean = vaultId in memberGrantedVaults
 
@@ -710,9 +843,9 @@ class Account private constructor(
      * steers where new items are saved by default.
      *
      * The refusal is cheap and total because the honest case never needs it: a personal vault
-     * is minted locally at enrollment and its grant is ALWAYS `wrappedVk` under our own UVK.
-     * So "arrived sealed" and "is my personal vault" are disjoint by construction, and this
-     * costs a legitimate account nothing.
+     * is minted locally at enrollment and its grant is ALWAYS an owner row with a bare
+     * `wrappedVk` under our own UVK and no seal. So "member-granted" (see [addGrant]) and "is
+     * my personal vault" are disjoint by construction, and this costs a legitimate account nothing.
      *
      * Fail-closed on purpose: when every held candidate is member-granted we keep
      * `personalVaultId` empty rather than pick one. Empty means "no personal vault", which
@@ -740,6 +873,8 @@ class Account private constructor(
         vaultKeys.remove(vaultId)
         vaultRoles.remove(vaultId)
         memberGrantedVaults.remove(vaultId) // provenance dies with the key it describes (H64)
+        vkMismatchVaults.remove(vaultId)
+        unreadableKeyVaults.remove(vaultId)
     }
 
     // ---- shared vaults (spec 01 §6 / spec 03 §10) ----
@@ -793,11 +928,22 @@ class Account private constructor(
      * (`seal(UVK, VK, Ad.vk(vaultId, me))`). Round-trip-verified before returning, so a
      * garbage wrap that would lock the new owner out never gets posted.
      */
-    fun buildOwnerWrap(vaultId: String): String {
+    fun buildOwnerWrap(vaultId: String): String = roundTripWrap(vaultId, "owner wrap")
+
+    /**
+     * Member self-wrap (security review 2026-10, root cause A §3.2): the VK this member already
+     * holds, wrapped under its OWN UVK with the same construction as [buildOwnerWrap], round-trip
+     * verified, for `PUT /vaults/{id}/grant/self-wrap`. Once it is on the row, every device of
+     * this member takes the key from the wrap (precedence rule 2) and the seal stops being
+     * load-bearing.
+     */
+    fun buildSelfWrap(vaultId: String): String = roundTripWrap(vaultId, "self wrap")
+
+    private fun roundTripWrap(vaultId: String, what: String): String {
         val vk = vk(vaultId)
         val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vk(vaultId, userId))
         if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vk(vaultId, userId)).contentEquals(vk)) {
-            throw CryptoException("owner wrap failed round-trip verification")
+            throw CryptoException("$what failed round-trip verification")
         }
         return wrapped
     }
@@ -837,12 +983,9 @@ class Account private constructor(
      * again through the display path. Null when the grant/blob doesn't open.
      */
     fun peekVaultName(grant: WireGrant, metaBlob: String): String? = runCatching {
-        val sealed = grant.sealedVk
-        val heldVk = if (!sealed.isNullOrEmpty()) {
-            SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed))
-        } else {
-            Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
-        }
+        // Same canonical-key precedence as [addGrant] (root cause A §3.1): our UVK wrap wins,
+        // and a damaged wrap is null here, never a seal fallback.
+        val heldVk = openGrantVk(grant).vk
         val plain = Envelope.openB64(crypto, heldVk, metaBlob, Ad.vaultMeta(grant.vaultId)).decodeToString()
         ItemDocShape.vaultName(Json.parseToJsonElement(plain))
     }.getOrNull()
