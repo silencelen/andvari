@@ -85,10 +85,11 @@ object Escrow {
         Bytes.toHexLower(crypto.sha256(publicKey))
 
     /**
-     * The MACHINE short id of the org recovery key — first 16 hex. NOT the human short form (that
-     * moved to 32 hex, [Fingerprint]). This is only the recovery-cli operator display and the
-     * in-person-QR `rfp` compare, neither of which is a human-typed/read anchor; the enrolling
-     * human types the 32-hex short form of the full fingerprint via [shortFormMatches] instead.
+     * The 16-hex (64-bit) short id of the org recovery key. NOT the 32-hex human short form used by
+     * the typed enrolment path ([shortFormMatches] / [Fingerprint]). It is STILL used, at 16 hex, by
+     * the recovery-cli operator display (read aloud), the admin sheet-confirm (typed), and the
+     * in-person-QR `rfp` compare. Those paths have not been widened yet; moving them to a full-length
+     * compare is tracked for a later branch of this security review.
      */
     fun shortFingerprint(crypto: CryptoProvider, publicKey: ByteArray): String =
         fingerprint(crypto, publicKey).take(16)

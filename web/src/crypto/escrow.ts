@@ -75,9 +75,10 @@ export async function fingerprint(publicKey: Uint8Array): Promise<string> {
 }
 
 /**
- * The MACHINE short id of the org recovery key — first 16 hex. NOT the human short form (that moved
- * to 32 hex, see {@link matchesShort}). Only the recovery-cli operator display and the in-person-QR
- * `rfp` compare use it; the enrolling human types the 32-hex short form of the full fingerprint.
+ * The 16-hex (64-bit) short id of the org recovery key. NOT the 32-hex human short form used by the
+ * typed enrolment path (see {@link matchesShort}). It is STILL used, at 16 hex, by the recovery-cli
+ * operator display (read aloud), the admin sheet-confirm (typed), and the in-person-QR `rfp` compare.
+ * Those paths have not been widened yet; a full-length compare is tracked for a later branch.
  */
 export async function shortFingerprint(publicKey: Uint8Array): Promise<string> {
   return (await fingerprint(publicKey)).slice(0, 16);
