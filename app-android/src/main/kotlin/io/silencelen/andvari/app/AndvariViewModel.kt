@@ -2989,15 +2989,40 @@ class AndvariViewModel(
 
     fun personalRedesignationChoices(): List<io.silencelen.andvari.core.client.VaultInfo> = engine?.redesignationChoices().orEmpty()
 
-    /** The §8.5 answer (first designation; no reauth needed while no wrap is stored). */
-    suspend fun designatePersonalVault(vaultId: String) {
-        requireNotNull(engine) { "locked" }.designatePersonalVault(vaultId, null)
+    fun personalVaultId(): String = account?.personalVaultId.orEmpty()
+
+    // A5b (M-2): every designation is propose -> confirm. Proposing mints nothing; only the confirmation the
+    // human gave after reading the vault's name and co-holders does.
+    fun personalChoiceInfo(vaultId: String): io.silencelen.andvari.core.client.PersonalChoiceInfo? = engine?.personalChoiceInfo(vaultId)
+
+    suspend fun refreshPersonalChoiceDetails(vaultIds: Collection<String>) {
+        engine?.refreshPersonalChoiceDetails(vaultIds)
     }
 
-    /** Settings re-designation (Q9): replaces the stored wrap with a fresh master-password reauth. */
-    suspend fun redesignatePersonalVault(vaultId: String, password: String) {
-        requireNotNull(engine) { "locked" }.redesignatePersonalVault(vaultId, password)
+    suspend fun proposePersonalVault(vaultId: String): io.silencelen.andvari.core.client.PersonalVaultProposal =
+        requireNotNull(engine) { "locked" }.proposePersonalVault(vaultId)
+
+    fun cancelPersonalProposal() { engine?.cancelPersonalProposal() }
+
+    /** The §8.5 answer, confirmed (first designation; no reauth needed while no wrap is stored). */
+    suspend fun confirmPersonalVault(proposal: io.silencelen.andvari.core.client.PersonalVaultProposal) {
+        requireNotNull(engine) { "locked" }.confirmPersonalVault(proposal, null)
     }
+
+    /** Settings re-designation (Q9), confirmed: replaces the stored wrap with a fresh master-password reauth. */
+    suspend fun redesignatePersonalVault(proposal: io.silencelen.andvari.core.client.PersonalVaultProposal, password: String) {
+        requireNotNull(engine) { "locked" }.redesignatePersonalVault(proposal, password)
+    }
+
+    fun personalChange(): io.silencelen.andvari.core.client.PersonalChange? = engine?.personalChange()
+
+    fun acceptPersonalChange() {
+        requireNotNull(engine) { "locked" }.acceptPersonalChange()
+    }
+
+    /** A vault's display name for the personal-vault notices. */
+    fun vaultDisplayName(vaultId: String): String =
+        engine?.vaultInfos()?.firstOrNull { it.vaultId == vaultId }?.name ?: engine?.personalChoiceInfo(vaultId)?.name ?: "another vault"
 
     /** Seed-derived identity FULL fingerprint (spec 01 §5, 64 hex) — printed on the recovery sheet
      *  (spec 04 §6) beside the short form as the recovery CLI's identity anchor. */
@@ -4041,7 +4066,9 @@ class AndvariViewModel(
         } else {
             deleteCache(originKey, acct.userId); InMemoryVaultCache()
         }
-        val newEngine = SyncEngine(a, acct, cache).also { it.hydrate() }
+        // A5b (M-1): the personal wrap this device authenticated lives OUTSIDE the cache (which may be in memory,
+        // or purged), so a withheld wrap stays an anomaly across restarts.
+        val newEngine = SyncEngine(a, acct, cache, deviceState = PersonalDeviceState.open(cacheDir, originKey, acct.userId)).also { it.hydrate() }
         // Root cause A §8.5 (A5): once the migration stores the personal wrap, carry it into the cached
         // account keys so an offline cold start knows the personal vault without the network.
         newEngine.onPersonalWrapStored = { w -> store.loadAccountKeys()?.let { persistAccountKeys(it.copy(personalWrap = w)) } }
