@@ -26,8 +26,13 @@ import type {
   WireItem,
 } from "../api/types";
 
-/** Where the personal vault came from (security review 2026-10, root cause A §4.3, §8.5). */
-export type PersonalStatus = "confirmed" | "withheld" | "absent" | "unreadable";
+/**
+ * Where the personal vault came from (security review 2026-10, root cause A §4.3, §8.5; A5b). Core twin:
+ * `Account.PersonalStatus`. "unreadable-cached": a junk served wrap, the device's valid cached wrap kept in
+ * force (L-1). "changed": a served wrap that opens names another vault than the device's; the device keeps
+ * its own until the human confirms (M-2, L-2).
+ */
+export type PersonalStatus = "confirmed" | "withheld" | "absent" | "unreadable" | "unreadable-cached" | "changed";
 
 /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed; core parity). */
 export const ITEM_FORMAT_VERSION = 2;
@@ -187,8 +192,8 @@ export class Account {
 
   /**
    * The personal vault (security review 2026-10, root cause A §4): named by `AccountKeys.personalWrap`
-   * (only this user's UVK can mint it, {@link applyPersonalWrap}) or picked by the §8.5 migration
-   * (the human's answer, never an automatic pick: A5 review H-1). "" = no personal vault: no default destination, no usage ledger.
+   * (only this user's UVK can mint it, {@link applyPersonalWrap}), a wrap this device cached, or minted from
+   * the human's CONFIRMED answer (never an automatic pick: A5 review H-1, A5b). "" = no personal vault: no default destination, no usage ledger.
    * NEVER set from a server `type` label or `role`. Core twin: `Account.personalVaultId`.
    */
   get personalVaultId(): string {
@@ -751,32 +756,68 @@ export class Account {
    */
   applyPersonalWrap(wrap: PersonalWrap | null) {
     if (!wrap) {
-      if (this.personalStatusValue !== "confirmed" && this.personalStatusValue !== "withheld") {
+      if (this.personalStatusValue === "absent" || this.personalStatusValue === "unreadable") {
         this.personalStatusValue = "absent";
         this.personalVaultIdValue = "";
       }
       return;
     }
+    this.pendingPersonalChangeValue = null;
     if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "confirmed";
     else {
       this.personalStatusValue = "unreadable";
       this.personalVaultIdValue = "";
+      this.personalWrapValue = null;
     }
   }
 
   /**
-   * A5 review H-1: the server served NO wrap, but this device cached one it authenticated before (UVK-sealed,
-   * so caching is safe). Only while "absent"; success → "withheld" (an anomaly the UI surfaces; no question,
-   * no label); a cached blob that does not open → "unreadable". Core twin: `applyCachedPersonalWrap`.
+   * The wrap THIS DEVICE cached the last time it authenticated one (UVK-sealed), applied after the served wrap
+   * was judged (A5 review H-1; A5b L-1). Core twin: `applyCachedPersonalWrap`.
+   *  - "absent" (none served): success → "withheld"; a cached blob that does not open → "unreadable";
+   *  - "unreadable" (junk served): success → "unreadable-cached", the cached wrap in force; else no change.
    */
   applyCachedPersonalWrap(wrap: PersonalWrap) {
-    if (this.personalStatusValue !== "absent") return;
-    if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "withheld";
-    else {
-      this.personalStatusValue = "unreadable";
-      this.personalVaultIdValue = "";
+    if (this.personalStatusValue === "absent") {
+      if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "withheld";
+      else {
+        this.personalStatusValue = "unreadable";
+        this.personalVaultIdValue = "";
+      }
+    } else if (this.personalStatusValue === "unreadable") {
+      if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "unreadable-cached";
     }
   }
+
+  /**
+   * A5b M-2 / L-2 (core `holdPersonalChange` twin): the served wrap opened ("confirmed") but this device's
+   * cached wrap names a DIFFERENT vault. If the cached wrap opens, it stays in force and the served one waits
+   * in {@link pendingPersonalChange} ("changed") until the human confirms. False when nothing was held.
+   */
+  holdPersonalChange(cached: PersonalWrap): boolean {
+    const served = this.personalWrapValue;
+    if (!served || this.personalStatusValue !== "confirmed" || cached.vaultId === served.vaultId) return false;
+    if (!this.openAndInstallPersonalWrap(cached)) return false; // mutates only on success
+    this.pendingPersonalChangeValue = served;
+    this.personalStatusValue = "changed";
+    return true;
+  }
+
+  /** The human confirmed a "changed" notice: the served wrap (already authenticated) is now in force. Mints nothing. */
+  acceptPersonalChange(): void {
+    const served = this.pendingPersonalChangeValue;
+    if (!served || this.personalStatusValue !== "changed") throw new Error("no personal-vault change is pending");
+    if (!this.openAndInstallPersonalWrap(served)) throw new Error("the served personal wrap no longer opens");
+    this.pendingPersonalChangeValue = null;
+    this.personalStatusValue = "confirmed";
+  }
+
+  /** The served wrap waiting for the human while the status is "changed". */
+  get pendingPersonalChange(): PersonalWrap | null {
+    return this.pendingPersonalChangeValue;
+  }
+
+  private pendingPersonalChangeValue: PersonalWrap | null = null;
 
   /** The wrap that decided the personal vault (served or cached), for the device's local cache. */
   get personalWrap(): PersonalWrap | null {

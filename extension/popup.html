@@ -66,6 +66,17 @@
       Recovery sign-in — set a new master password in the web vault.
     </button>
 
+    <!-- A5b (security review 2026-10, root cause A): the server sent a personal-vault record naming another
+         vault than this browser's (a change on another device, or an older record replayed). This browser
+         keeps saving to the vault it had until the user confirms here; keeping the current one is a
+         re-designation in the web vault or an app. Unlocked-only chrome, re-derived by refresh(). -->
+    <div id="personal-change" class="must-change-strip personal-change" role="alert" hidden>
+      Your personal vault was changed on another device, or the server sent an older record. This browser
+      keeps saving to the vault it had until you confirm. To keep it, choose it again in the web vault
+      (Settings, Personal vault).
+      <button id="personal-change-accept" class="ghost" type="button">Use the new personal vault</button>
+    </div>
+
     <section id="locked" class="locked" hidden>
       <div class="hero">
         <div class="sigil"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></div>

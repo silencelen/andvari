@@ -2660,17 +2660,44 @@ class DesktopState(
 
     fun personalStatus(): Account.PersonalStatus? = account?.personalStatus
 
+    fun personalVaultId(): String = account?.personalVaultId.orEmpty()
+
     fun personalVaultChoices(): List<io.silencelen.andvari.core.client.PersonalVaultMigration.Candidate>? = engine?.personalVaultChoices
 
     fun personalRedesignationChoices(): List<io.silencelen.andvari.core.client.VaultInfo> = engine?.redesignationChoices().orEmpty()
 
-    suspend fun designatePersonalVault(vaultId: String) {
-        requireNotNull(engine) { "locked" }.designatePersonalVault(vaultId, null)
+    // A5b (M-2): every designation is propose -> confirm. Proposing mints nothing; only the confirmation the
+    // human gave after reading the vault's name and co-holders does.
+    fun personalChoiceInfo(vaultId: String): io.silencelen.andvari.core.client.PersonalChoiceInfo? = engine?.personalChoiceInfo(vaultId)
+
+    suspend fun refreshPersonalChoiceDetails(vaultIds: Collection<String>) {
+        engine?.refreshPersonalChoiceDetails(vaultIds)
     }
 
-    suspend fun redesignatePersonalVault(vaultId: String, password: String) {
-        requireNotNull(engine) { "locked" }.redesignatePersonalVault(vaultId, password)
+    suspend fun proposePersonalVault(vaultId: String): io.silencelen.andvari.core.client.PersonalVaultProposal =
+        requireNotNull(engine) { "locked" }.proposePersonalVault(vaultId)
+
+    fun cancelPersonalProposal() { engine?.cancelPersonalProposal() }
+
+    /** A first designation (the "Which vault is your Personal vault?" answer), confirmed. */
+    suspend fun confirmPersonalVault(proposal: io.silencelen.andvari.core.client.PersonalVaultProposal) {
+        requireNotNull(engine) { "locked" }.confirmPersonalVault(proposal, null)
     }
+
+    /** A Settings re-designation (or keeping the current vault over a change), confirmed, with a reauth. */
+    suspend fun redesignatePersonalVault(proposal: io.silencelen.andvari.core.client.PersonalVaultProposal, password: String) {
+        requireNotNull(engine) { "locked" }.redesignatePersonalVault(proposal, password)
+    }
+
+    fun personalChange(): io.silencelen.andvari.core.client.PersonalChange? = engine?.personalChange()
+
+    fun acceptPersonalChange() {
+        requireNotNull(engine) { "locked" }.acceptPersonalChange()
+    }
+
+    /** A vault's display name for the personal-vault notices. */
+    fun vaultDisplayName(vaultId: String): String =
+        engine?.vaultInfos()?.firstOrNull { it.vaultId == vaultId }?.name ?: engine?.personalChoiceInfo(vaultId)?.name ?: "another vault"
 
     /** Seed-derived identity FULL fingerprint (spec 01 §5, 64 hex) — printed on the recovery sheet
      *  (spec 04 §6) beside the short form as the recovery CLI's identity anchor. */
@@ -3390,7 +3417,7 @@ class DesktopState(
         // interpolation-free, the §F.7 discipline).
         engine = SyncEngine(a, acct, newCache, log = CoreLog { event, _ ->
             if (event == CoreLog.EVENT_VAULT_META_REPLAY) notice = META_REPLAY_NOTICE
-        }).also {
+        }, deviceState = store.personalDeviceState(key, acct.userId)).also {
             // Root cause A §8.5 (A5): carry a freshly stored personal wrap into the cached account keys, so
             // an offline cold start knows the personal vault without the network.
             it.onPersonalWrapStored = { w ->

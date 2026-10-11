@@ -376,17 +376,38 @@ copy-to-Personal, the import target, the "(shared)" tag (now `vaultId != persona
 sort order. An account with no openable wrap has no personal vault (no default destination, usage
 paused, a banner saying so).
 
-**Once-per-account designation (root cause A §8.5, as amended by the A5 review, H-1).** There is NO
-automatic pick. A client keeps the wrap it last authenticated in its own local state (it is UVK-sealed,
-so caching it is safe). When the server serves no wrap:
+**Once-per-account designation (root cause A §8.5, as amended by the A5 review, H-1, and re-review,
+A5b).** There is NO automatic pick. A client keeps the wrap it last authenticated in its own local
+device state (it is UVK-sealed, so caching it is safe), which MUST outlive the offline cache: an
+in-memory cache, an org-forbid policy, a policy-flip or revocation purge and a sign-out leave it in place
+(native: a file in the (origin, user) namespace beside the self-identity pin; web: localStorage; the
+extension: storage.local). When the server serves no wrap:
 - and the device has a cached wrap: the wrap was WITHHELD — an anomaly the client surfaces; the cached
   wrap stands, and no question is asked and no label consulted;
 - and the device has none: the client asks "Which vault is your Personal vault?", offering EVERY held
   vault whose VK opened from a UVK wrap on the caller's own grant row (no seal on the row), with the
   vault this device last used first and the rest by `vaultId`. The server's label and role neither
-  filter nor order the choices, and only the human's answer mints the wrap (`PUT
+  filter nor order the choices, and only the human's CONFIRMED answer mints the wrap (`PUT
   /account/personal-wrap`, no reauth while none is stored; `409 personal_wrap_exists` sends the human to
   the reauthed re-designation).
+
+Every option, in the question and in the Settings re-designation list, shows who else the server reports
+as holding the vault (`GET /vaults/{id}/members`, minus the caller) and whether this account created it or
+received it by transfer (the vault row's `lastTransfer.newOwnerUserId` is the caller), and marks the vault
+this device already had. Choosing is two steps: the client describes the choice (no mint), then the human
+confirms a screen that names the vault and every co-holder; only that confirmation mints, once. The
+co-holder list and the transfer record are server-reported: they inform the human and decide nothing.
+
+When the server DOES serve a wrap:
+- it opens and names the vault this device cached (or the device has none): that is the personal vault,
+  and the device caches it;
+- it opens but names a DIFFERENT vault than the cached one (a re-designation on another device, or the
+  server replaying an older wrap): the device does NOT switch. The cached wrap stays in force and the
+  client shows a notice naming both vaults; the human either confirms the change (the served wrap, already
+  UVK-authenticated, becomes the cached one; nothing is minted) or keeps the current vault through the
+  reauthed re-designation, which replaces the server's copy;
+- it does not open: an anomaly. A cached wrap that opens stays in force (junk never discards a valid
+  local copy) and the client says so; with none, there is no personal vault until a re-designation.
 The design's original auto rule ("one vault labelled personal, own wrap, named Personal") was removed:
 whenever the server withheld the wrap it let the label decide again, and the client then minted a
 genuine wrap for that pick. Re-designation (`PUT /account/personal-wrap` with `currentAuthKey`, owner
