@@ -24,7 +24,7 @@ class Wave3EndpointSwitchTest {
 
     private val A = "https://a.example"
     private val B = "https://b.example"
-    private val RFP = "b26efdd3eafc9dad" // a 16-hex org recovery short fingerprint
+    private val RFP = "b26efdd3eafc9dad0011223344556677889900aabbccddeeff00112233445566" // the FULL org recovery fingerprint (A5: links carry 64 hex)
 
     // ---- §4.1 rule 1 (B1-5): NO token/session replay across a real origin switch ----
 
