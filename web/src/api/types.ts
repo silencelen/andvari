@@ -139,6 +139,10 @@ export interface RemovedGrantInfo {
   deleteProof?: string | null;
   removeProof?: string | null;
   removeNonce?: string | null;
+  /** Removal proofs v2 (root cause A §6.2, branch A7): 2 for a v2 remove/leave proof; rides removed AND left. */
+  proofV?: number | null;
+  /** The acting client's wall clock (ms) bound into a v2 proof. */
+  issuedAt?: number | null;
 }
 
 export interface WireGrant {
@@ -302,6 +306,17 @@ export interface VaultMetaUpdateRequest {
 export interface VaultMemberRemoveRequest {
   proof?: string;
   nonce?: string;
+  /** 2 for a v2 removal proof (root cause A §6.2, branch A7): `nonce` is 16 bytes base64url, `issuedAt` required. */
+  proofV?: number;
+  issuedAt?: number;
+}
+
+/** `POST /vaults/{id}/leave` body (root cause A §6.2, branch A7): the leaving member's v2 leave proof. */
+export interface VaultLeaveRequest {
+  proofV: 2;
+  proof: string;
+  nonce: string;
+  issuedAt: number;
 }
 
 export interface ItemUpload {

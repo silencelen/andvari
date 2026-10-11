@@ -19,16 +19,19 @@ import { concat, fromB64, toB64, toHexLower, utf8 } from "../crypto/bytes";
 import {
   acceptProof,
   acceptProofFromHash,
+  decideRemoval,
   deleteProof,
+  leaveProof,
+  newRemovalNonce,
   offerProof,
-  removeProof,
+  removeV2Proof,
   restoreProof,
   verifyProof,
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256 } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account, type LegacyVouchKind } from "./account";
-import type { Contact } from "./accountstate";
+import type { ConsumedNonce, Contact } from "./accountstate";
 import { pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
 import { type CoHolder, type PersonalCandidate, type PersonalChange, type PersonalChoiceInfo, type PersonalVaultProposal, personalVaultChoices } from "./personalvault";
@@ -197,6 +200,12 @@ export interface PersonalChangeDetails {
 // The freeze marker lives in the durable cache itself (VaultCache.freezeDone, A6 review LOW-1).
 const LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized";
 const DECLINED_KEY = "grant.declined";
+/** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches (core twin). */
+export const HELD_KEYS_KEY = "grant.held.keys";
+/** LifecycleNotice.reason on a `left` notice whose leave carried no proof (in-window, §8.6). Core `LEFT_UNPROVEN`. */
+export const LEFT_UNPROVEN = "unproven";
+/** LifecycleNotice.reason on a `replay-denied` raised by a consumed removal nonce (§6.3 step 5). Core `REMOVAL_REPLAY`. */
+export const REMOVAL_REPLAY = "removal";
 
 /** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
 export interface DeletedVaultInfo {
@@ -365,6 +374,13 @@ export class VaultStore {
   private holding = new Map<string, HeldVault>();
   /** deleteIds we have seen consumed by a restore — a later tombstone bearing one is stale. */
   private consumedDeleteIds = new Set<string>();
+  /** Root cause A §6.2 (branch A7): this device's consumed removal nonces, vaultId → nonce → issuedAt. Durable twin:
+   *  the cache's kv rows (PullBatch.addConsumedNonce, in the pull tx that moves the vault to holding). */
+  private consumedNonces = new Map<string, Map<string, number>>();
+  /** Root cause A §6.3 (branch A7): this device's own first sight of each live vault. Never a server value. */
+  private liveSince = new Map<string, number>();
+  /** liveSince stamps already in the durable cache (a stamp made outside a pull is persisted by the next pull). */
+  private liveSincePersisted = new Set<string>();
   /** Notices awaiting the UI banner. */
   private noticeList: LifecycleNotice[] = [];
   /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no
@@ -768,6 +784,60 @@ export class VaultStore {
     this.persistVouches(m);
   }
 
+  // ---- per-vault held-key memory (security review 2026-10, root cause A, branch A7; core SyncEngine twin) ----
+
+  /** Push the persisted held-key tags into the account (the durable record wins). */
+  private loadHeldKeys(): void {
+    for (const line of this.persistedSet(HELD_KEYS_KEY)) {
+      const [vaultId, tag] = line.split("|");
+      if (vaultId && tag) this.account.rememberHeldKey(vaultId, tag);
+    }
+  }
+
+  /** Persist the tag of every vault the account adopted a key for and this device has no tag for yet. A recorded
+   *  tag is never overwritten here; only hardDropLocal removes one, with the vault. */
+  private persistHeldKeys(): void {
+    const persisted = this.persistedSet(HELD_KEYS_KEY);
+    const known = new Set([...persisted].map((l) => l.split("|")[0]));
+    let changed = false;
+    for (const [vaultId, tag] of this.account.heldKeyTagsSnapshot()) {
+      if (known.has(vaultId)) continue;
+      persisted.add(`${vaultId}|${tag}`);
+      changed = true;
+    }
+    if (changed) this.persistSet(HELD_KEYS_KEY, persisted);
+  }
+
+  // ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7; core SyncEngine twin) ----
+
+  /**
+   * §6.3 liveSince: stamp every vault this device now holds a key for, outside the holding area, that has no stamp
+   * yet, with the DEVICE clock; inside a pull, persist every stamp not yet on disk (same tx). Cleared when the vault
+   * leaves the live view (hardDropLocal), so a re-add this device sees moves it past every earlier proof.
+   */
+  private markLiveVaults(): void {
+    const now = Date.now();
+    const ids = new Set<string>([...this.vaultsById.keys(), ...this.grantWireByVault.keys()]);
+    for (const id of ids) {
+      if (!this.account.hasVault(id) || this.holding.has(id) || this.liveSince.has(id)) continue;
+      this.liveSince.set(id, now);
+    }
+    if (this.pullOps) {
+      for (const [id, at] of this.liveSince) {
+        if (this.liveSincePersisted.has(id)) continue;
+        this.liveSincePersisted.add(id);
+        this.recordPullOp((b) => b.setLiveSince(id, at));
+      }
+    }
+  }
+
+  /** The consumed set §6.3 step 5 checks: this device's ∪ the account state's, for `vaultId`. */
+  private consumedFor(vaultId: string): Set<string> {
+    const out = new Set<string>(this.consumedNonces.get(vaultId)?.keys() ?? []);
+    for (const [n] of this.accountState.doc.consumedNonces[vaultId] ?? []) out.add(n);
+    return out;
+  }
+
   /** Re-run §1.4 for rows whose key is not held (pending, refused) or held only from a v1 seal; make the items of
    *  any vault that became readable visible. */
   private reevaluateGrants(): void {
@@ -1028,6 +1098,13 @@ export class VaultStore {
       }
     };
     for (const v of this.persistedVouches().values()) this.account.authorizeLegacyKey(v.vaultId, v.tag, v.kind);
+    this.loadHeldKeys();
+    // A7: the device's consumed removal nonces merge into account state at each flush.
+    this.accountState.deviceConsumed = () => {
+      const out: Record<string, ConsumedNonce[]> = {};
+      for (const [vaultId, m] of this.consumedNonces) out[vaultId] = [...m.entries()].map(([n, t]) => [n, t] as ConsumedNonce);
+      return out;
+    };
     // CR-01 (compliance 2026-07-15): the moment this cache's IndexedDB connection closes out
     // from under us — a browser-forced close (eviction/corruption) or a sibling tab / session-
     // level wipe firing deleteDatabase → versionchange — idbcache invokes onClosed. Demote to
@@ -1146,6 +1223,8 @@ export class VaultStore {
     // froze or the human confirmed (never an unconfirmed v1 seal: the A1 laundering bug); then the owner's
     // §8.2 step 4 re-issue.
     this.reevaluateGrants();
+    this.persistHeldKeys();
+    this.markLiveVaults();
     this.surfaceGrantStates();
     await this.postAuthorizedSelfWraps();
     await this.reissueLegacyGrants().catch(() => {});
@@ -1456,6 +1535,9 @@ export class VaultStore {
       }
     }
 
+    // A7: liveSince for every vault that went live in this pull, and the held-key memory, before the cursor.
+    this.markLiveVaults();
+    this.persistHeldKeys();
     const syncedAt = Date.now();
     this._lastSyncAt = syncedAt;
     // §D.1 ordering: the cursor is the LAST write of the tx (nothing on disk ever claims a
@@ -1871,6 +1953,18 @@ export class VaultStore {
       this.holding.set(rec.vault.vaultId, { ...rec, cachedName: this.peekHeldName(rec) });
     }
     for (const id of await this.cache.consumedDeleteIds()) this.consumedDeleteIds.add(id);
+    // A7: the consumed removal nonces and this device's liveSince stamps (never server values).
+    for (const c of await this.cache.consumedNonces()) {
+      const m = this.consumedNonces.get(c.vaultId) ?? new Map<string, number>();
+      m.set(c.nonce, c.issuedAt);
+      this.consumedNonces.set(c.vaultId, m);
+    }
+    for (const l of await this.cache.liveSinces()) {
+      this.liveSince.set(l.vaultId, l.at);
+      this.liveSincePersisted.add(l.vaultId);
+    }
+    this.persistHeldKeys();
+    this.markLiveVaults(); // a vault live here with no stamp yet (an upgrade, or no durable cache): first sight is now
     for (const t of await this.cache.transferSeqs()) this.lastTransferSeqSeen.set(t.vaultId, t.seq);
     // Rebuild incoming-transfer state (spec 03 §11, core hydrate parity): a pending-offer
     // row is NOT re-delivered while the offer merely pends (only cancel/expiry/
@@ -2232,15 +2326,16 @@ export class VaultStore {
     }
 
     const reason: RemovedReason = info?.reason ?? "removed";
-    const verdict: "valid" | "anomaly" | "left" =
-      reason === "left" ? "left" : (await this.verifyRemoval(vaultId, reason, info)) ? "valid" : "anomaly";
+    if (reason === "removed" || reason === "left") {
+      await this.handleRemovalOrLeave(vaultId, reason, info, cachedName);
+      return;
+    }
+    const verdict: "valid" | "anomaly" = (await this.verifyRemoval(vaultId, reason, info)) ? "valid" : "anomaly";
 
     // Snapshot ciphertext + move to holding BEFORE forgetting the VK.
     const parkedCount = this.moveToHolding(vaultId, reason, info, verdict === "valid", cachedName);
 
-    if (verdict === "left") {
-      this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: cachedName, kind: "left" });
-    } else if (verdict === "anomaly") {
+    if (verdict === "anomaly") {
       this.pushNotice({ id: crypto.randomUUID(), vaultId, vaultName: cachedName, kind: "anomaly" });
     } else if (reason === "deleted") {
       this.pushNotice({
@@ -2256,18 +2351,65 @@ export class VaultStore {
     }
   }
 
-  /** Verify the relayed removal/delete proof under the still-held VK (spec 03 §11). */
+  /**
+   * `removed` / `left` on a vault this device held, not self-initiated (root cause A §6.3, §8.6; branch A7; core
+   * SyncEngine.handleRemovalOrLeave twin). decideRemoval runs the verification order against the held VK, this
+   * device's liveSince and the consumed set (device ∪ account state); its verdict picks the banner. A valid verdict's
+   * `(vaultId, nonce, issuedAt)` is consumed in the SAME pull tx that moves the vault to holding (both are PullBatch
+   * ops). The data handling is the same for every verdict: holding area, 30 days.
+   */
+  private async handleRemovalOrLeave(vaultId: string, reason: "removed" | "left", info: RemovedGrantInfo | undefined, cachedName: string): Promise<void> {
+    let decision: Awaited<ReturnType<typeof decideRemoval>>;
+    try {
+      decision = await decideRemoval({
+        lifecycleKey: await this.account.lifecycleKeyFor(vaultId),
+        vaultId,
+        myUserId: this.account.userId,
+        reason,
+        proofV: info?.proofV ?? null,
+        proof: info?.removeProof ?? null,
+        nonce: info?.removeNonce ?? null,
+        issuedAt: info?.issuedAt ?? null,
+        consumed: this.consumedFor(vaultId),
+        liveSince: this.liveSince.get(vaultId) ?? null,
+        now: Date.now(),
+      });
+    } catch {
+      decision = { verdict: "anomaly", step: "error" };
+    }
+    if (decision.consume) {
+      const [nonce, at] = decision.consume;
+      const m = this.consumedNonces.get(vaultId) ?? new Map<string, number>();
+      m.set(nonce, at);
+      this.consumedNonces.set(vaultId, m);
+      this.recordPullOp((b) => b.addConsumedNonce(vaultId, nonce, at));
+    }
+    this.moveToHolding(vaultId, reason, info, false, cachedName);
+    const base = { id: crypto.randomUUID(), vaultId, vaultName: cachedName };
+    switch (decision.verdict) {
+      case "valid":
+      case "valid_legacy":
+        this.pushNotice({ ...base, kind: reason === "left" ? "left" : "removed" });
+        break;
+      case "left_unproven":
+        this.pushNotice({ ...base, kind: "left", reason: LEFT_UNPROVEN });
+        break;
+      case "replay_denied":
+        this.pushNotice({ ...base, kind: "replay-denied", reason: REMOVAL_REPLAY });
+        break;
+      default:
+        this.pushNotice({ ...base, kind: "anomaly" });
+    }
+  }
+
+  /** Verify the relayed delete proof under the still-held VK (spec 03 §11). `removed` / `left` go through
+   *  handleRemovalOrLeave instead (branch A7). */
   private async verifyRemoval(vaultId: string, reason: RemovedReason, info: RemovedGrantInfo | undefined): Promise<boolean> {
-    if (!info) return false; // a bare revocation of a held vault is never "valid"
+    if (!info || reason !== "deleted") return false; // a bare revocation of a held vault is never "valid"
     try {
       const key = await this.account.lifecycleKeyFor(vaultId);
-      if (reason === "deleted") {
-        if (!info.deleteProof || !info.deleteId) return false;
-        return verifyProof(info.deleteProof, await deleteProof(key, vaultId, info.deleteId));
-      }
-      // 'removed' / 'transferred': verify the optional removal proof over (vaultId, me, nonce).
-      if (!info.removeProof || !info.removeNonce) return false;
-      return verifyProof(info.removeProof, await removeProof(key, vaultId, this.account.userId, info.removeNonce));
+      if (!info.deleteProof || !info.deleteId) return false;
+      return verifyProof(info.deleteProof, await deleteProof(key, vaultId, info.deleteId));
     } catch {
       return false;
     }
@@ -2362,6 +2504,12 @@ export class VaultStore {
     // replay) starts read-only again instead of inheriting this device's old trust.
     const vouches = this.persistedVouches();
     if (vouches.delete(vaultId)) this.persistVouches(vouches);
+    // A7: so does the held-key memory, and the vault is no longer live on this device (§6.3 liveSince).
+    const held = this.persistedSet(HELD_KEYS_KEY);
+    const keep = new Set([...held].filter((l) => !l.startsWith(`${vaultId}|`)));
+    if (keep.size !== held.size) this.persistSet(HELD_KEYS_KEY, keep);
+    this.liveSince.delete(vaultId);
+    if (this.liveSincePersisted.delete(vaultId)) this.recordPullOp((b) => b.setLiveSince(vaultId, null));
     // §D.1: inside a pull, mirror the drop to disk (grant + vault row + items — the
     // removedGrants purge, spec 03 §4). C4: queue rows are NOT dropped vault-wide here — a
     // commit-time dropPending also erased rows staged AFTER moveToHolding's fold-read but
@@ -3275,10 +3423,12 @@ export class VaultStore {
    *  — never call api.removeVaultMember bodyless from a UI (store.lifecycle.test.ts pins both the
    *  minted body and that a victim lands it as "removed", not "anomaly"). */
   async removeVaultMember(vaultId: string, userId: string): Promise<void> {
-    const nonce = crypto.randomUUID();
+    // Root cause A §6.2 (branch A7): a v2 proof — a fresh 16-byte nonce and this device's clock, bound in the MAC.
+    const nonce = newRemovalNonce();
+    const issuedAt = Date.now();
     const key = await this.account.lifecycleKeyFor(vaultId);
-    const proof = await removeProof(key, vaultId, userId, nonce);
-    await this.api.removeVaultMember(vaultId, userId, { proof, nonce });
+    const proof = await removeV2Proof(key, vaultId, userId, nonce, issuedAt);
+    await this.api.removeVaultMember(vaultId, userId, { proofV: 2, proof, nonce, issuedAt });
   }
 
   /** The caller's own in-grace deleted vaults — re-opens each VK from the wrappedVk it already
@@ -3312,9 +3462,13 @@ export class VaultStore {
     }
   }
 
-  /** LEAVE (self-removal). This device initiated it → drop cleanly (no "you left" banner here). */
+  /** LEAVE (self-removal). This device initiated it → drop cleanly (no "you left" banner here). Carries a v2 leave
+   *  proof (root cause A §6.2, branch A7) so this member's OTHER devices can verify the leave. */
   async leaveSharedVault(vaultId: string): Promise<void> {
-    await this.api.leaveVault(vaultId);
+    const nonce = newRemovalNonce();
+    const issuedAt = Date.now();
+    const proof = await leaveProof(await this.account.lifecycleKeyFor(vaultId), vaultId, this.account.userId, nonce, issuedAt);
+    await this.api.leaveVault(vaultId, { proofV: 2, proof, nonce, issuedAt });
     this.suppressDrop.add(vaultId);
     try {
       try {

@@ -17,7 +17,7 @@ import { Account, legacyTagOf, VaultKeyNotVerifiedError } from "./account";
 import { memoryClientState } from "./accountstatesync";
 import type { Contact } from "./accountstate";
 import { IdbVaultCache, openVaultCache } from "./idbcache";
-import { MemberNotVerifiedError, VaultStore } from "./store";
+import { HELD_KEYS_KEY, MemberNotVerifiedError, VaultStore } from "./store";
 
 /**
  * Signed vault grants on the path a real client takes (security review 2026-10, root cause A §1.4–§1.6, §3.2,
@@ -814,6 +814,8 @@ async function assertVouchHolds(w: World, kPrime: Uint8Array, d: Account, store:
   if (heldIsKPrime) {
     expect(d.selfWrapAuthorized(w.vaultId), `${label}: never self-wrapped`).toBe(false);
     expect(() => d.buildOwnerWrap(w.vaultId), `${label}: never owner-wrapped`).toThrow();
+    // A6 final review LOW-G: nor signed onward to anyone.
+    expect(() => d.buildSignedGrant(w.vaultId, pinOf(w.owner, "Owner")), `${label}: never signed onward`).toThrow();
   }
   for (const sw of server.selfWraps) {
     expect(toB64(await opensTo(w.member, sw.wrappedVk, w.vaultId)), `${label}: no self-wrap of K'`).not.toBe(toB64(kPrime));
@@ -840,6 +842,8 @@ describe("A6 re-review round 3 — the vouch gate", () => {
       ["pending+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), await signedBy(w, third, k))],
       ["broken+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), toB64(randomBytes(200)))],
       ["absent", async () => null],
+      // A6 final review LOW-G: the seal IS the vouched key K and the v2 grant carries K'.
+      ["seal(K)+v2(K')", async (w, k) => memberRow(w, 0, sealFor(w, w.vk), await signedBy(w, w.owner, k))],
     ];
     for (const [name, shape] of shapes) {
       for (const twoPull of [false, true]) {
@@ -876,6 +880,146 @@ describe("A6 re-review round 3 — the vouch gate", () => {
     expect(d.keySource(w.vaultId)).toBe("uvk-wrap");
     expect(store.notices().some((n) => n.kind === "grant-anomaly" && n.reason === "vk_mismatch")).toBe(true);
     await assertVouchHolds(w, k, d, store, server, true, "LOW-F");
+  });
+});
+
+describe("A6 final review LOW-G / LOW-H (closed in A7)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  it("LOW-G: the vouch table holds on a WARM session too (rows served to the engine that vouched, no restart)", async () => {
+    const third = await enroll("a7-unpinned-sender");
+    const shapes: [string, (w: World, k: Uint8Array) => Promise<WireGrant | null>][] = [
+      ["wrap", async (w, k) => ({ ...memberRow(w, 0, null, null), wrappedVk: await wrapFor(w, k) })],
+      ["v2", async (w, k) => memberRow(w, 0, null, await signedBy(w, w.owner, k))],
+      ["v2+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), await signedBy(w, w.owner, k))],
+      ["seal", async (w, k) => memberRow(w, 0, sealFor(w, k), null)],
+      ["pending+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), await signedBy(w, third, k))],
+      ["broken+seal", async (w, k) => memberRow(w, 0, sealFor(w, k), toB64(randomBytes(200)))],
+      ["seal(K)+v2(K')", async (w, k) => memberRow(w, 0, sealFor(w, w.vk), await signedBy(w, w.owner, k))],
+    ];
+    for (const [name, shape] of shapes) {
+      const w = await world();
+      const kPrime = randomBytes(32);
+      const server = new FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)));
+      const d = await unlock(w.member);
+      const store = new VaultStore(server.asClient(), d, undefined, memoryClientState());
+      await store.sync();
+      await store.acceptLegacyVault(w.vaultId);
+      await store.accountState.pin(pinOf(w.owner, "Owner"));
+      server.selfWraps = [];
+      let rev = 12;
+      for (const row of [memberRow(w, 0, sealFor(w, kPrime), null), await shape(w, kPrime)]) {
+        server.feed = feed(w, rev, row ? { ...row, rev } : null);
+        await store.sync();
+        rev += 3;
+      }
+      expect(d.legacyKeyTag(w.vaultId), `warm/${name}: K stays held`).toBe(legacyTagOf(w.vk));
+      await assertVouchHolds(w, kPrime, d, store, server, false, `warm/${name}`);
+    }
+  }, 120_000);
+
+  it("LOW-G: a held legacy key whose vouch (seeded directly) names another key is never promoted", async () => {
+    const w = await world();
+    const d = await unlock(w.member);
+    d.grantPins = (uid) => (uid === w.owner.userId ? { identityPub: fromB64(w.owner.identityPub), current: true } : null);
+    const ks = randomBytes(32);
+    d.addGrant(memberRow(w, 9, sealFor(w, ks), null));
+    expect(d.keySource(w.vaultId)).toBe("legacy-seal");
+    d.authorizeLegacyKey(w.vaultId, legacyTagOf(w.vk), "confirmed"); // the vouch is for K, the held key is K_s
+    d.addGrant(memberRow(w, 12, sealFor(w, ks), await signedBy(w, w.owner, ks)));
+    expect(d.keySource(w.vaultId), "never promoted to signed-grant").toBe("legacy-seal");
+    expect(d.grantAnomalies().get(w.vaultId)).toBe("vk_mismatch");
+    expect(d.selfWrapAuthorized(w.vaultId)).toBe(false);
+    expect(() => d.buildSignedGrant(w.vaultId, pinOf(w.owner, "Owner"))).toThrow();
+  });
+
+  it("LOW-H: rule 2 meeting a mismatching vouch also raises the vault-key-mismatch flag", async () => {
+    const w = await world();
+    const k = randomBytes(32);
+    const { d, store } = await vouchedThenServe(w, [{ ...memberRow(w, 0, null, null), wrappedVk: await wrapFor(w, k) }]);
+    expect(d.vkMismatch(w.vaultId)).toBe(true);
+    expect(store.notices().some((n) => n.kind === "vk-mismatch" && n.vaultId === w.vaultId)).toBe(true);
+  });
+});
+
+describe("A7 — per-vault held-key memory (closes R15(g) on a device that held the vault)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  it("a v2-adopted vault later served with K' is flagged on a warm session and refused after a restart", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 5, null));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, local);
+    await store.sync();
+    await store.accountState.pin(pinOf(w.owner, "Owner"));
+    server.feed = feed(w, 9, memberRow(w, 9, null, await signedBy(w, w.owner, w.vk)));
+    await store.sync();
+    expect(d.keySource(w.vaultId)).toBe("signed-grant");
+    expect(server.selfWraps).toHaveLength(1);
+    const kPrime = randomBytes(32);
+    server.feed = feed(w, 12, memberRow(w, 12, null, await signedBy(w, w.owner, kPrime)));
+    await store.sync();
+    expect(d.legacyKeyTag(w.vaultId), "warm: K stays").toBe(legacyTagOf(w.vk));
+    expect(d.vkMismatch(w.vaultId), "warm: flagged").toBe(true);
+    // Reload: the server now serves only the grant for K'.
+    const again = await unlock(w.member);
+    const reloaded = new VaultStore(server.asClient(), again, undefined, local);
+    await reloaded.sync();
+    expect(again.hasVault(w.vaultId), "K' is refused, never adopted").toBe(false);
+    expect(again.grantAnomalies().get(w.vaultId)).toBe("vk_mismatch");
+    expect(server.selfWraps, "nothing wrapped for K'").toHaveLength(1);
+  });
+
+  for (const shape of ["seal", "v2"] as const) {
+    it(`a wrap-adopted vault later served a ${shape} for K' is refused after a restart`, async () => {
+      const w = await world();
+      const local = memoryClientState();
+      const server = new FakeServer(feed(w, 5, null));
+      const d = await unlock(w.member);
+      const store = new VaultStore(server.asClient(), d, undefined, local);
+      await store.sync();
+      await store.accountState.pin(pinOf(w.owner, "Owner"));
+      server.feed = feed(w, 9, { ...memberRow(w, 9, null, null), wrappedVk: await wrapFor(w, w.vk) });
+      await store.sync();
+      expect(d.keySource(w.vaultId)).toBe("uvk-wrap");
+      const kPrime = randomBytes(32);
+      server.feed = feed(w, 12, shape === "seal" ? memberRow(w, 12, sealFor(w, kPrime), null) : memberRow(w, 12, null, await signedBy(w, w.owner, kPrime)));
+      await store.sync();
+      expect(d.legacyKeyTag(w.vaultId), "warm: K stays").toBe(legacyTagOf(w.vk));
+      expect(d.vkMismatch(w.vaultId), "warm: flagged").toBe(true);
+      const again = await unlock(w.member);
+      const reloaded = new VaultStore(server.asClient(), again, undefined, local);
+      await reloaded.sync();
+      expect(again.hasVault(w.vaultId), "K' refused after a restart").toBe(false);
+      expect(reloaded.legacyReviewVaults().some((r) => r.vaultId === w.vaultId), "never offered for Accept").toBe(false);
+    });
+  }
+
+  it("the memory is dropped with the vault", async () => {
+    const w = await world();
+    const local = memoryClientState();
+    const server = new FakeServer(feed(w, 5, null));
+    const d = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), d, undefined, local);
+    await store.sync();
+    server.feed = feed(w, 9, { ...memberRow(w, 9, null, null), wrappedVk: await wrapFor(w, w.vk) });
+    await store.sync();
+    expect(local.get(HELD_KEYS_KEY) ?? "").toContain(w.vaultId);
+    server.feed = { ...feed(w, 12, null), full: false, removedGrants: [w.vaultId] };
+    await store.sync();
+    expect(local.get(HELD_KEYS_KEY) ?? "").not.toContain(w.vaultId);
+    expect(d.heldKeyTagsSnapshot().has(w.vaultId)).toBe(false);
   });
 });
 

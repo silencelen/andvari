@@ -185,3 +185,26 @@ describe("Vault.tsx key-precedence notices — the core HouseholdCopy twins", ()
     expect(vaultTsx).toContain(JSON.stringify(m![1]!));
   });
 });
+
+/**
+ * Root cause A §6.3/§8.6 (branch A7): the two new removal-verdict sentences live in core HouseholdCopy
+ * (removalReplayDeniedNotice, leftUnprovenNotice) and the natives render them directly; web's templates are pinned
+ * byte-equal here, the same way as the replay-denied pair above.
+ */
+describe("Vault.tsx removal-proof v2 notices — the core HouseholdCopy twins", () => {
+  it("carries the replayed-removal sentence byte-equal to the canon", () => {
+    const fn = householdKt.match(/fun removalReplayDeniedNotice\([\s\S]*?\n\n/);
+    expect(fn, "HouseholdCopy.removalReplayDeniedNotice moved or was renamed — update the pin").not.toBeNull();
+    const literals = [...fn![0].matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+    expect(literals).toHaveLength(3);
+    expect(vaultTsx).toContain(asTemplate(literals[0]!));
+    expect(vaultTsx).toContain("`" + literals[1]! + "`");
+    expect(vaultTsx).toContain("`" + literals[2]! + "`");
+  });
+
+  it("carries the proof-less leave sentence byte-equal to the canon", () => {
+    const m = householdKt.match(/fun leftUnprovenNotice\(vaultName: String\): String = "([^"]+)"/);
+    expect(m, "HouseholdCopy.leftUnprovenNotice moved or was renamed — update the pin").not.toBeNull();
+    expect(vaultTsx).toContain(asTemplate(m![1]!));
+  });
+});

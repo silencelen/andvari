@@ -13,7 +13,7 @@ import type {
 } from "../api/types";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
-import { acceptProofFromHash, deleteProof, offerProof, removeProof, restoreProof } from "../crypto/lifecycleproof";
+import { acceptProofFromHash, deleteProof, offerProof, removeProof, removeV2Proof, restoreProof } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
@@ -275,18 +275,20 @@ describe("Skipti tri-state removedGrants (spec 03 §11)", () => {
     expect(call, "the DELETE went out").toBeTruthy();
     expect(call!.args.id).toBe(s.vaultId);
     expect(call!.args.userId).toBe(s.member.userId);
-    const body = call!.args.body as { proof?: string; nonce?: string } | undefined;
-    expect(body?.nonce, "a fresh nonce rides the body").toMatch(/^[0-9a-f-]{36}$/);
+    const body = call!.args.body as { proofV?: number; proof?: string; nonce?: string; issuedAt?: number } | undefined;
+    // Branch A7 (root cause A §6.2): the body is a v2 removal proof — a 16-byte nonce and the owner's clock.
+    expect(body?.proofV, "a v2 proof").toBe(2);
+    expect(body?.nonce, "a fresh 16-byte nonce rides the body").toMatch(/^[A-Za-z0-9_-]{22}$/);
     expect(body?.proof, "a proof rides the body").toBeTruthy();
-    // The proof is the spec 03 §11 remove MAC under the vault's lifecycle key, over THIS target.
+    // The proof is the remove-v2 MAC under the vault's lifecycle key, over THIS target.
     const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    expect(body!.proof).toBe(await removeProof(key, s.vaultId, s.member.userId, body!.nonce!));
+    expect(body!.proof).toBe(await removeV2Proof(key, s.vaultId, s.member.userId, body!.nonce!, body!.issuedAt!));
 
     // Server relay (Service.kt stores proof+nonce on the grant; Repo.kt hands them back in
     // removedGrantsInfo) → the victim's engine attributes the removal to the owner.
     s.api.queue.push({
       rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed", removeProof: body!.proof, removeNonce: body!.nonce }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed", removeProof: body!.proof, removeNonce: body!.nonce, proofV: body!.proofV, issuedAt: body!.issuedAt }],
     });
     await store_sync(s);
     expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("removed");

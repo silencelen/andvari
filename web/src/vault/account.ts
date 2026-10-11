@@ -222,6 +222,14 @@ export class Account {
   private readonly signedGrantFrom = new Map<string, string>();
   /** v1-only keys this device vouches for (§8.2), each bound to the key it was given for (HIGH-1). */
   private readonly legacyVouches = new Map<string, LegacyVouch>();
+  /**
+   * Per-vault held-key memory (security review 2026-10, root cause A, branch A7; core `heldKeyTags` twin; closes
+   * R15(g) on a device that held the vault): vaultId → SHA-256 (hex) of the FIRST key this device adopted for it, by
+   * any rule. No step of root cause A re-keys a vault (§8.7), so a later different key is vk_mismatch through
+   * {@link vouchGate}, like a vouch. Persisted by the store beside the vouches; dropped with the vault. It vouches for
+   * nothing: it never lifts a legacy key's read-only state and never makes a seal key acceptable on its own.
+   */
+  private readonly heldKeyTags = new Map<string, string>();
   /** §1.6 pending invitations by vaultId. */
   private readonly pendingGrantsByVault = new Map<string, PendingGrant>();
   /** §1.4 anomaly verdicts by vaultId (nothing adopted). */
@@ -656,6 +664,7 @@ export class Account {
       throw e;
     }
     const viaSeal = opened.source === "legacy-seal" || opened.source === "signed-grant";
+    this.recordHeldKey(grant.vaultId, opened.vk);
     this.vaultKeys.set(grant.vaultId, opened.vk);
     this.keySources.set(grant.vaultId, opened.source);
     if (opened.from) this.signedGrantFrom.set(grant.vaultId, opened.from);
@@ -719,7 +728,8 @@ export class Account {
       const signedDiffers = !!grant.signedGrant && this.openSigned(grant, vk).verdict === "vk_mismatch";
       // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
       const gate = this.vouchGate(grant.vaultId, vk) === "mismatch" ? ("vk_mismatch" as GrantVerdict) : undefined;
-      return { vk, source: "uvk-wrap", sealMismatch: (sealVk !== null && !ctEquals(sealVk, vk)) || signedDiffers, anomaly: gate };
+      // A6 final review LOW-H: the gate's mismatch also lands in vkMismatchVaults (the "vault key mismatch" notice).
+      return { vk, source: "uvk-wrap", sealMismatch: (sealVk !== null && !ctEquals(sealVk, vk)) || signedDiffers || gate !== undefined, anomaly: gate };
     }
     // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
     if (grant.signedGrant) {
@@ -767,9 +777,31 @@ export class Account {
    * flags vk_mismatch. Every key-source decision in this class routes through here.
    */
   vouchGate(vaultId: string, key: Uint8Array | null | undefined): "no-vouch" | "ok" | "mismatch" {
+    // A7: the held-key tag is the same kind of device-local memory as a vouch, and goes through the same gate.
     const v = this.legacyVouches.get(vaultId);
-    if (!v) return "no-vouch";
-    return key && legacyTagOf(key) === v.tag ? "ok" : "mismatch";
+    const h = this.heldKeyTags.get(vaultId);
+    if (!v && !h) return "no-vouch";
+    if (!key) return "mismatch";
+    const t = legacyTagOf(key);
+    if (v && v.tag !== t) return "mismatch";
+    if (h && h !== t) return "mismatch";
+    return "ok";
+  }
+
+  /** Restore a persisted held-key tag (the store's durable record wins over an in-memory one). */
+  rememberHeldKey(vaultId: string, tag: string): void {
+    if (/^[0-9a-f]{64}$/.test(tag)) this.heldKeyTags.set(vaultId, tag);
+  }
+
+  /** The held-key tags to persist. */
+  heldKeyTagsSnapshot(): Map<string, string> {
+    return new Map(this.heldKeyTags);
+  }
+
+  /** Record the tag of a key just adopted for `vaultId`, unless one is recorded or the key contradicts the gate. */
+  private recordHeldKey(vaultId: string, vk: Uint8Array): void {
+    if (this.heldKeyTags.has(vaultId) || this.vouchGate(vaultId, vk) === "mismatch") return;
+    this.heldKeyTags.set(vaultId, legacyTagOf(vk));
   }
 
   /** True when the key HELD for `vaultId` contradicts this device's vouch for it. */
@@ -777,9 +809,10 @@ export class Account {
     return this.vaultKeys.has(vaultId) && this.vouchGate(vaultId, this.vaultKeys.get(vaultId)) === "mismatch";
   }
 
-  /** The row's v1 seal key, only when the gate says it IS the vouched key. */
+  /** The row's v1 seal key, only when this device holds a §8.2 VOUCH and the gate says it IS the vouched key (a
+   *  held-key tag alone never makes a seal key acceptable). */
   private vouchedSealKey(grant: WireGrant): Uint8Array | null {
-    if (!grant.sealedVk) return null;
+    if (!grant.sealedVk || !this.legacyVouches.has(grant.vaultId)) return null;
     const k = this.openSealOrNull(grant.vaultId, grant.sealedVk);
     return k && this.vouchGate(grant.vaultId, k) === "ok" ? k : null;
   }
@@ -1004,6 +1037,7 @@ export class Account {
     this.keySources.delete(vaultId);
     this.signedGrantFrom.delete(vaultId);
     this.legacyVouches.delete(vaultId);
+    this.heldKeyTags.delete(vaultId); // A7: the held-key memory dies with the vault, like a vouch
     this.pendingGrantsByVault.delete(vaultId);
     this.grantAnomaliesByVault.delete(vaultId);
   }
@@ -1032,6 +1066,7 @@ export class Account {
       wrappedVk: toB64(seal(this.uvk, vk, adVk(vaultId, this.userId))),
     };
     this.vaultKeys.set(vaultId, vk);
+    this.heldKeyTags.set(vaultId, legacyTagOf(vk)); // A7: a fresh vault's key is this device's from the first moment
     this.vaultRoles.set(vaultId, "owner");
     this.keySources.set(vaultId, "uvk-wrap");
     this.uvkWrappedVaults.add(vaultId);
