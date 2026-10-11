@@ -825,7 +825,8 @@ class SyncEngine(
     /** §8.2 "Review your shared vaults": the vaults readable only through an unconfirmed v1 seal. */
     fun legacyReviewVaults(): List<LegacyVaultReview> {
         // A6 review LOW-2: vaults whose v2 field failed or awaits verification are not offered for trust on first use.
-        val ids = account.legacyReadOnlyVaultIds() - account.grantAnomalies().keys - account.pendingGrants().map { it.vaultId }.toSet()
+        val ids = (account.legacyReadOnlyVaultIds() - account.grantAnomalies().keys - account.pendingGrants().map { it.vaultId }.toSet())
+            .filterNot { account.heldKeyContradictsVouch(it) }.toSet() // round 3: the vouch gate
         if (ids.isEmpty()) return emptyList()
         val counts = items().groupingBy { it.vaultId }.eachCount()
         return cache.vaults().filter { it.vaultId in ids }.map { v ->
@@ -844,6 +845,7 @@ class SyncEngine(
     suspend fun acceptLegacyVault(vaultId: String) {
         check(account.isLegacyReadOnly(vaultId)) { "vault $vaultId is not awaiting review" }
         // A6 review LOW-2: a row whose v2 field failed or awaits verification is never an "Accept anyway".
+        check(!account.heldKeyContradictsVouch(vaultId)) { "vault $vaultId holds a key this device's earlier vouch contradicts" }
         check(vaultId !in account.grantAnomalies() && account.pendingGrants().none { it.vaultId == vaultId }) {
             "vault $vaultId has a grant that failed verification or awaits it; it cannot be accepted on trust"
         }

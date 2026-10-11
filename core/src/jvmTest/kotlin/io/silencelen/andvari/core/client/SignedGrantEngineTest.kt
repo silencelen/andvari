@@ -375,7 +375,9 @@ class SignedGrantEngineTest {
         val e2 = SyncEngine(api(server2), again, cache2)
         e2.hydrate()
         e2.sync()
-        assertTrue(again.isLegacyReadOnly(w.vaultId), "the vouch does not carry over to a key the server swapped in")
+        // Round 3 (the vouch gate): the swapped-in key is not even held read-only; it is refused as vk_mismatch.
+        assertFalse(again.hasVault(w.vaultId), "the vouch does not carry over to a key the server swapped in")
+        assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, again.grantAnomalies()[w.vaultId])
         assertTrue(server2.selfWraps.isEmpty())
     }
 
@@ -674,6 +676,114 @@ class SignedGrantEngineTest {
         val e2 = SyncEngine(api(server), again, cache)
         e2.hydrate()
         assertTrue(again.isLegacyReadOnly(w.vaultId), "rows pulled by this release are never pre-upgrade evidence")
+    }
+
+    // ---- A6 re-review round 3: ONE vouch gate on every key-source path ----
+
+    /** A device that vouched for the real key K (Accept), restarted, then served [rows] in order (warm pulls). */
+    private suspend fun vouchedThenServe(w: World, rows: List<WireGrant?>): Triple<Account, SyncEngine, FakeServer> {
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val cache = InMemoryVaultCache()
+        val first = SyncEngine(api(server), unlock(w.member), cache)
+        first.sync()
+        first.acceptLegacyVault(w.vaultId)
+        first.accountState.pin(pinOf(w.owner, "Owner"))
+        val restartCache = InMemoryVaultCache()
+        for (k in listOf("grant.legacy.authorized", "grant.freeze.done", "acctstate.copy", "acctstate.hw", "pins.confirmed")) {
+            restartCache.setClientState(k, cache.clientState(k))
+        }
+        server.selfWraps.clear()
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, restartCache)
+        engine.hydrate()
+        var rev = 12L
+        for (row in rows) {
+            server.feed = feed(w, rev, row?.copy(rev = rev))
+            engine.sync()
+            rev += 3
+        }
+        return Triple(device, engine, server)
+    }
+
+    private fun sealOf(w: World, vk: ByteArray) = Bytes.toB64(SharedGrant.seal(crypto, Bytes.fromB64(w.member.reg.identityPub), w.vaultId, vk))
+    private fun wrapOf(w: World, vk: ByteArray) = Envelope.sealB64(crypto, ownerUvk(w.member), vk, Ad.vk(w.vaultId, w.member.userId))
+    private fun tag(vk: ByteArray) = Bytes.toHexLower(crypto.sha256(vk))
+
+    /** The invariant: K' (≠ the vouched K) is never writable, never self-wrapped, never offered for Accept, never
+     *  owner-wrapped; only under rule 2 (our own UVK wrap) is it used, and then it is flagged vk_mismatch. */
+    private suspend fun assertVouchHolds(w: World, kPrime: ByteArray, device: Account, engine: SyncEngine, server: FakeServer, ruleTwo: Boolean, label: String) {
+        val heldIsKPrime = device.hasVault(w.vaultId) && device.legacyKeyTag(w.vaultId) == tag(kPrime)
+        if (ruleTwo) {
+            assertTrue(heldIsKPrime, "$label: the UVK wrap is canonical (A1) and is used")
+            assertEquals(io.silencelen.andvari.core.crypto.GrantVerdict.VK_MISMATCH, device.grantAnomalies()[w.vaultId], "$label: flagged")
+        } else {
+            assertFalse(heldIsKPrime && !device.isLegacyReadOnly(w.vaultId), "$label: K' never writable")
+            assertFalse(heldIsKPrime, "$label: K' never held at all")
+        }
+        if (heldIsKPrime) {
+            assertFalse(device.selfWrapAuthorized(w.vaultId), "$label: K' never self-wrapped")
+            assertFailsWith<VaultKeyNotVerifiedException>("$label: K' never owner-wrapped") { device.buildOwnerWrap(w.vaultId) }
+        }
+        for ((_, wrap) in server.selfWraps) {
+            assertFalse(Bytes.ctEquals(kPrime, Envelope.openB64(crypto, ownerUvk(w.member), wrap, Ad.vk(w.vaultId, w.member.userId))), "$label: no self-wrap of K'")
+        }
+        assertTrue(engine.legacyReviewVaults().none { it.vaultId == w.vaultId }, "$label: not offered for Accept")
+        assertTrue(runCatching { engine.acceptLegacyVault(w.vaultId) }.isFailure, "$label: Accept refuses")
+    }
+
+    @Test
+    fun theVouchGateHoldsForEveryRowShapeInEveryOrder() = runBlocking<Unit> {
+        val third = enroll("a6-unpinned-sender")
+        val shapes: List<Pair<String, (World, ByteArray) -> WireGrant?>> = listOf(
+            "wrap" to { w, k -> memberRow(w, 0, null, null).copy(wrappedVk = wrapOf(w, k)) },
+            "v2" to { w, k -> memberRow(w, 0, null, forgeSigned(w, w.owner, k)) },
+            "v2+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, w.owner, k)) },
+            "seal" to { w, k -> memberRow(w, 0, sealOf(w, k), null) },
+            "pending+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), forgeSigned(w, third, k)) },
+            "broken+seal" to { w, k -> memberRow(w, 0, sealOf(w, k), Bytes.toB64(crypto.randomBytes(200))) },
+            "absent" to { _, _ -> null },
+        )
+        for ((name, shape) in shapes) {
+            for (twoPull in listOf(false, true)) {
+                val w = world()
+                val kPrime = crypto.randomBytes(32)
+                val rows = if (twoPull) listOf(memberRow(w, 0, sealOf(w, kPrime), null), shape(w, kPrime)) else listOf(shape(w, kPrime))
+                val (device, engine, server) = vouchedThenServe(w, rows)
+                assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = name == "wrap", label = "$name/${if (twoPull) "two-pull" else "single"}")
+            }
+        }
+    }
+
+    /** MEDIUM-B, named: pull 1 holds K_s from a seal (≠ vouched K); pull 2 brings a verified v2 for K_s. */
+    @Test
+    fun aTwoPullSealThenSameKeyV2NeverPromotesAKeyAgainstTheVouch() = runBlocking<Unit> {
+        val w = world()
+        val ks = crypto.randomBytes(32)
+        val (device, engine, server) = vouchedThenServe(w, listOf(memberRow(w, 0, sealOf(w, ks), null), memberRow(w, 0, sealOf(w, ks), forgeSigned(w, w.owner, ks))))
+        assertFalse(device.keySource(w.vaultId) == Account.KeySource.SIGNED_GRANT, "never promoted")
+        assertTrue(engine.notices().any { it.kind == "grant-anomaly" && it.reason == "vk_mismatch" })
+        assertVouchHolds(w, ks, device, engine, server, ruleTwo = false, label = "MEDIUM-B")
+    }
+
+    /** LOW-E: a v1 seal for another key than the vouch is vk_mismatch, never a review card, Accept refuses. */
+    @Test
+    fun aSealForAnotherKeyThanTheVouchIsAMismatchNotAnAcceptOffer() = runBlocking<Unit> {
+        val w = world()
+        val kPrime = crypto.randomBytes(32)
+        val (device, engine, server) = vouchedThenServe(w, listOf(memberRow(w, 0, sealOf(w, kPrime), null)))
+        assertTrue(engine.notices().any { it.kind == "grant-anomaly" && it.reason == "vk_mismatch" })
+        assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = false, label = "LOW-E")
+    }
+
+    /** LOW-F: another device's self-wrap (rule 2) is used, but flagged when it differs from this device's vouch. */
+    @Test
+    fun aUvkWrapForAnotherKeyThanTheVouchIsUsedButFlagged() = runBlocking<Unit> {
+        val w = world()
+        val kPrime = crypto.randomBytes(32)
+        val (device, engine, server) = vouchedThenServe(w, listOf(memberRow(w, 0, null, null).copy(wrappedVk = wrapOf(w, kPrime))))
+        assertEquals(Account.KeySource.UVK_WRAP, device.keySource(w.vaultId))
+        assertTrue(engine.notices().any { it.kind == "grant-anomaly" && it.reason == "vk_mismatch" })
+        assertVouchHolds(w, kPrime, device, engine, server, ruleTwo = true, label = "LOW-F")
     }
 
     // ---- A6 review LOW-2: a present-but-broken v2 field is never an "Accept anyway" ----
