@@ -893,6 +893,7 @@ export class VaultStore {
       if (!ids.has(v.vaultId)) continue;
       // LOW-2: never offer trust-on-first-use over a v2 grant that is pending verification or failed it.
       if (this.account.hasPendingGrant(v.vaultId) || this.account.hasGrantAnomaly(v.vaultId)) continue;
+      if (this.account.heldKeyContradictsVouch(v.vaultId)) continue; // round 3: the vouch gate
       const n = this.account.decryptVaultName(v.vaultId, v.metaBlob);
       out.push({ vaultId: v.vaultId, name: n && n !== "(vault)" ? n : null, itemCount: counts.get(v.vaultId) ?? 0 });
     }
@@ -908,6 +909,7 @@ export class VaultStore {
   /** "Accept anyway" on the review card (Q7, trust on first use): vouch for the v1-only key, post the self-wrap. */
   async acceptLegacyVault(vaultId: string): Promise<void> {
     if (!this.account.isLegacyReadOnly(vaultId)) throw new Error("that vault is not awaiting review");
+    if (this.account.heldKeyContradictsVouch(vaultId)) throw new Error("that vault holds a key this device's earlier vouch contradicts");
     if (this.account.hasPendingGrant(vaultId) || this.account.hasGrantAnomaly(vaultId)) {
       throw new Error("that vault has a newer-format grant waiting on verification, or one that failed it: verify the sender instead");
     }
