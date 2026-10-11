@@ -1,6 +1,10 @@
 package io.silencelen.andvari.server
 
+import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.model.AdminEscrowDownload
 import io.silencelen.andvari.core.model.AdminStatus
+import io.silencelen.andvari.core.model.EscrowDrillReceipt
+import io.silencelen.andvari.core.model.EscrowDrillResult
 import io.silencelen.andvari.core.model.AdminUserSummary
 import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.RecoveryUpload
@@ -181,8 +185,38 @@ class AdminService(private val repo: Repo, private val config: Config) {
         repo.auditOn(c, "recovery_apply", byUserId, null, null, req.userId)
     }
 
-    fun userSealed(userId: String): String? = repo.db.read {
-        it.queryOne("SELECT sealed FROM escrow WHERE userId=?", userId) { rs -> rs.getString(1) }
+    /** Design §2.5: the escrow blob + the identity file the recovery CLI checks it against + the
+     *  retained legacy blob (§8.4). Null when the account has no escrow row (waived / unknown id). */
+    fun escrowDownload(userId: String): AdminEscrowDownload? = repo.db.read { c ->
+        c.queryOne(
+            """SELECT e.sealed, u.encryptedIdentitySeed, u.identityPub, l.sealed
+               FROM escrow e JOIN users u ON u.userId = e.userId LEFT JOIN escrow_legacy l ON l.userId = e.userId
+               WHERE e.userId=?""",
+            userId,
+        ) { rs -> AdminEscrowDownload(userId, rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)) }
+    }
+
+    /**
+     * §8.4 drill hook: drop `escrow_legacy` for every account whose CURRENT escrow blob hashes to the
+     * drilled one; keep it otherwise (the account re-sealed after the drill, or the row was never
+     * drilled). One audit row per drop.
+     */
+    fun applyDrillReceipt(receipt: EscrowDrillReceipt, byUserId: String, ip: String?): EscrowDrillResult = repo.db.tx { c ->
+        val dropped = mutableListOf<String>()
+        val kept = mutableListOf<String>()
+        for (pass in receipt.passed) {
+            val current = c.queryOne("SELECT sealed FROM escrow WHERE userId=?", pass.userId) { it.getString(1) }
+            val hasLegacy = c.queryOne("SELECT 1 FROM escrow_legacy WHERE userId=?", pass.userId) { 1 } != null
+            val hash = current?.let { runCatching { Bytes.toHexLower(ServerCrypto.sha256(Bytes.fromB64(it))) }.getOrNull() }
+            if (hasLegacy && hash != null && hash == pass.sealedSha256.lowercase()) {
+                c.exec("DELETE FROM escrow_legacy WHERE userId=?", pass.userId)
+                repo.auditOn(c, "escrow_legacy_dropped", byUserId, null, ip, pass.userId)
+                dropped += pass.userId
+            } else if (hasLegacy) {
+                kept += pass.userId
+            }
+        }
+        EscrowDrillResult(dropped, kept)
     }
 
     /**

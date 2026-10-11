@@ -414,6 +414,7 @@ export function App() {
         isAdmin={phase.meta.isAdmin}
         mustChangePassword={phase.meta.mustChangePassword}
         escrowStale={phase.meta.escrowStale}
+        escrowNeedsV2={phase.meta.escrowNeedsV2 ?? false}
         escrowFingerprint={phase.meta.escrowFingerprint}
         offlineRecoveryReminder={phase.meta.offlineRecoveryReminder ?? false}
         onLock={onManualLock}

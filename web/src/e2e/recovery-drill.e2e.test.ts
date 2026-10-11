@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiClient } from "../api/client";
@@ -69,16 +69,25 @@ describe.skipIf(!BASE)("account recovery drill", () => {
     await store0.save(null, { type: "login", name: "drill-canary", login: { username: "canary", password: CANARY_PW } });
     await store0.sync();
 
-    // --- Step 2: admin downloads the sealed escrow blob (F59 route) ---
-    const sealed = (await admin.adminUserEscrow(drillUserId)).trim();
-    expect(sealed.length, "escrow blob downloaded").toBeGreaterThan(40);
+    // --- Step 2: admin downloads the escrow identity file (F59 route; design §2.5 since escrow v2) ---
+    const download = await admin.adminUserEscrow(drillUserId);
+    const dl = JSON.parse(download);
+    expect(dl.userId, "the download names the account").toBe(drillUserId);
+    expect(fromB64(dl.sealed).length, "a release-N enrolment seals escrow v2 (not the 226-byte v1 seal)").not.toBe(226);
+    const identityFile = join(WORK, `andvari-escrow-${drillUserId}.json`);
+    writeFileSync(identityFile, download);
+    // The identity anchor comes from out of band: here, the member's own client (their recovery sheet
+    // prints it). 32 hex = the human short form.
+    const identityFp = (await drillEnroll.account.identityFingerprintFull()).slice(0, 32);
 
     // --- Step 3: offline recover with the printed-sheet SEED — the ACTUAL recovery-cli jar ---
-    const out = execFileSync("java", ["-jar", RECOVERY_JAR, "recover", sealed], {
-      input: SEED + "\n",
-      cwd: WORK,
-      encoding: "utf-8",
-    });
+    // (security review 2026-10, root cause A §2.3: named account + identity anchor + identity file, and
+    // the typed `RECOVER <first 8>` confirmation before anything is generated)
+    const out = execFileSync(
+      "java",
+      ["-jar", RECOVERY_JAR, "recover", "--user", drillUserId, "--identity-fp", identityFp, "--identity-file", identityFile],
+      { input: SEED + "\n" + `RECOVER ${drillUserId.slice(0, 8)}` + "\n", cwd: WORK, encoding: "utf-8" },
+    );
     const lines = out.split("\n");
     const tpIdx = lines.findIndex((l) => l.includes("ONE-TIME temporary password"));
     const tempPassword = (lines[tpIdx + 1] ?? "").trim();

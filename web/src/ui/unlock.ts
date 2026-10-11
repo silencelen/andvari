@@ -4,6 +4,7 @@ import { assertServerKdfParams, KdfPolicyError, WEAK_KDF_MESSAGE } from "../cryp
 import { CryptoError } from "../crypto/sodium";
 import { Account, IdentityMismatchError, VaultKeyDamagedError } from "../vault/account";
 import { NullCache, openVaultCache, type VaultCache } from "../vault/idbcache";
+import { loadSelfIdentityPub, recordSelfIdentityPub } from "../vault/selfidentity";
 import { SyncIntegrityError, VaultStore } from "../vault/store";
 import { NetworkError, UNREACHABLE, net } from "./errors";
 import { needsRecoveryCapture } from "./recovery-capture";
@@ -139,7 +140,8 @@ export async function unlockExistingSession(
     // the (offline: cached) identityPub. IdentityMismatch is tampering, never "wrong password".
     let account: Account;
     try {
-      account = await Account.unlock(userId, password, keys);
+      account = await Account.unlock(userId, password, keys, loadSelfIdentityPub(userId));
+      recordSelfIdentityPub(userId, account);
     } catch (e) {
       // R41: the eviction must happen BEFORE close() — a closed handle no-ops every write (§D.2a),
       // which would have made the clear silently do nothing.
@@ -210,6 +212,7 @@ export async function unlockExistingSession(
       // a returning-session unlock cannot observe a flip, so it hardcodes false (Welcome comment).
       mustChangePassword: false,
       escrowStale: keys.escrowStale ?? false,
+      escrowNeedsV2: keys.escrowNeedsV2 ?? false,
       escrowFingerprint: keys.escrowFingerprint,
       // §C6 — ONLY the offline path nags; online proceeds to the (unchanged) hard-blocking gate.
       offlineRecoveryReminder: offline && needsRecoveryCapture(keys),

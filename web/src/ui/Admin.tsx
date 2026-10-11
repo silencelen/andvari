@@ -165,6 +165,67 @@ function UsersTab({ client, signupMode }: { client: ApiClient; signupMode: strin
           </table>
         </div>
       )}
+      <DrillReceiptForm client={client} />
+    </div>
+  );
+}
+
+/**
+ * §8.4 drill hook (security review 2026-10, root cause A): after a re-seal the server keeps the
+ * member's PREVIOUS backstop key until a fleet drill passes on the new one. `recovery-cli verify`
+ * prints a receipt (userIds + blob hashes, nothing secret); pasting it here drops the retained copy
+ * only for accounts whose CURRENT key is the one the drill opened.
+ */
+function DrillReceiptForm({ client }: { client: ApiClient }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ tone: "good" | "bad"; text: string } | null>(null);
+  const submit = async () => {
+    setMsg(null);
+    let receipt: unknown;
+    try {
+      receipt = JSON.parse(text);
+    } catch {
+      setMsg({ tone: "bad", text: "That isn't a drill receipt — paste the JSON block `recovery-cli verify` printed." });
+      return;
+    }
+    if (!receipt || typeof receipt !== "object" || !Array.isArray((receipt as { passed?: unknown }).passed)) {
+      setMsg({ tone: "bad", text: "That isn't a drill receipt — paste the JSON block `recovery-cli verify` printed." });
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await client.adminEscrowDrill(text);
+      setText("");
+      setMsg({
+        tone: "good",
+        text: `Drill recorded: ${r.dropped.length} retained older key(s) released` + (r.kept.length ? `, ${r.kept.length} kept (their key changed after the drill — drill again).` : "."),
+      });
+    } catch (e) {
+      setMsg({ tone: "bad", text: errText(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ marginTop: "1rem" }}>
+      {!open ? (
+        <button className="link" onClick={() => setOpen(true)}>Record a fleet drill →</button>
+      ) : (
+        <div>
+          <p className="muted">
+            After members re-protect their accounts, the server keeps each one's previous admin-backstop key until a fleet
+            drill proves the new one opens. Paste the receipt <code>recovery-cli verify</code> printed.
+          </p>
+          <Field label="Drill receipt (JSON)" prompt>
+            <textarea value={text} onChange={(e) => setText(e.target.value)} rows={6} spellCheck={false} autoComplete="off" />
+          </Field>
+          {msg && <Msg kind={msg.tone === "good" ? "info" : "err"}>{msg.text}</Msg>}
+          <button className="primary" disabled={busy || !text.trim()} onClick={submit}>{busy ? "Recording…" : "Record drill"}</button>
+          <button className="ghost" disabled={busy} onClick={() => setOpen(false)}>Close</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -200,11 +261,13 @@ function UserRows({ user: u, expanded, devices, busy, onToggleDevices, onDisable
     setEscrowMsg("");
     setEscrowBusy(true);
     try {
-      const sealed = await onDownloadEscrow();
-      const url = URL.createObjectURL(new Blob([sealed], { type: "text/plain" }));
+      // Design §2.5 (security review 2026-10, root cause A): the download is the recovery CLI's
+      // `--identity-file` — {sealed, encryptedIdentitySeed, identityPub, legacySealed?} as JSON.
+      const download = await onDownloadEscrow();
+      const url = URL.createObjectURL(new Blob([download], { type: "application/json" }));
       const a = document.createElement("a");
       a.href = url;
-      a.download = `andvari-escrow-${u.userId}.txt`;
+      a.download = `andvari-escrow-${u.userId}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();

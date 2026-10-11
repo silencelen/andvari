@@ -228,7 +228,7 @@ class MinVersionGateTest : P4TestSupport() {
         }
         fun escrowBody() = io.silencelen.andvari.core.model.EscrowUpload(
             io.silencelen.andvari.core.crypto.Bytes.toB64(
-                io.silencelen.andvari.core.crypto.Escrow.sealUvk(crypto, recovery.publicKey, vc.userId, crypto.randomBytes(32)),
+                io.silencelen.andvari.core.crypto.Escrow.sealUvkV1(crypto, recovery.publicKey, vc.userId, crypto.randomBytes(32)),
             ),
             fingerprint,
         )

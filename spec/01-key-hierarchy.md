@@ -190,6 +190,14 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   against the server-sent `identityPub` as a security fault. Displaying a hash of the
   server-supplied value would let a malicious server pass an out-of-band check while
   substituting a key it controls.
+- **Self-identity backstop (security review 2026-10, root cause A §2.4).** Every device that
+  unlocked an account keeps the seed-derived `identityPub` it saw (native: per origin + userId
+  beside the cached account keys; web: per origin in local storage) and passes it to every later
+  unlock; if the seed then derives a DIFFERENT key, unlock hard-fails with the same security-fault
+  copy as the server-`identityPub` mismatch. The record is public data and MUST survive sign-out,
+  session revocation and offline-cache wipes (an admin recovery revokes every session first); it is
+  written once from an unlock that passed and never overwritten from a server value. It stops a
+  forged org recovery (which must change the identity seed) on every device that knew the real key.
 - **Out-of-band verification (sharing, P5):** before an owner seals a shared VK to a
   member, the member reads their short fingerprint from their own client and the owner
   confirms it over an out-of-band channel (in person / phone). This closes the
@@ -248,6 +256,22 @@ follows it does. Field checks that depend on the caller (`to` is me, `vaultId` i
 held-key compare) come after the helper returns. The extension does not verify signed statements.
 `spec/test-vectors/signedstatement.json` pins the layout, the mapping for the `sharedgrant.json`
 member seed, and every rejection rule.
+
+**Escrow statements bind to the anchor, not to themselves (escrow v2).** The generic helper REFUSES
+purpose `0x02`. An escrow statement verifies only through the escrow-specific helper
+(`SignedStatement.verifyEscrow` / `verifyEscrowStatement`), which cannot be called without the
+caller's out-of-band anchor: the expected `userId`, the anchored identity key, and the fingerprint of
+the org key that opened the seal. The pin is that anchored key, never the statement's own
+`identityKey`; the unverified `userId`/`recoveryFp` may be compared first only to refuse precisely
+(`user_mismatch`, `recovery_fp_mismatch`); after the signature, the statement's `userId`,
+`identityKey` and `recoveryFp` MUST EQUAL the anchor (`identity_mismatch` for a validly signed
+statement naming another identity). Spec 04 §4 gives the full recovery order.
+
+**Typed separation.** A strict parse returns an UNVERIFIED type that is neither a statement nor a
+verified statement and exposes only routing fields (`from`/`to`/`vaultId`, or `userId`/`recoveryFp`),
+never key material; only the verify helpers mint a verified statement, and its byte fields are
+handed out as copies (read-only). There is no public "sign any statement" API on an account: the joint
+key signs only through the flows that need it (today: escrow v2).
 
 ## 6. Vault keys — everything is a vault
 

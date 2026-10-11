@@ -85,7 +85,7 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
         val encIdentity = Envelope.sealB64(crypto, uvk, identitySeed, Ad.idkey(userId))
         val wrappedVk = Envelope.sealB64(crypto, uvk, vk, Ad.vk(personalVaultId, userId))
         val metaBlob = Envelope.sealB64(crypto, vk, """{"name":"Personal"}""".encodeToByteArray(), Ad.vaultMeta(personalVaultId))
-        val sealed = Bytes.toB64(Escrow.sealUvk(crypto, recoveryPub, userId, uvk))
+        val sealed = Bytes.toB64(Escrow.sealUvkV1(crypto, recoveryPub, userId, uvk))
         return RegisterRequest(
             inviteToken = inviteToken,
             userId = userId,
@@ -211,6 +211,14 @@ class VirtualClient(val email: String, val password: String, fast: Boolean = tru
         SharedGrant.open(crypto, identity.publicKey, identity.privateKey, vaultId, Bytes.fromB64(sealedVkB64))
 
     /** The client's seed-derived identity fingerprint (what the sharing UX verifies out-of-band). */
+    /** An escrow v2 blob for THIS client (what a release-N client seals at enrolment or migration). */
+    fun sealEscrowV2(recoveryPub: ByteArray, verifiedFingerprint: String): String = Bytes.toB64(
+        Escrow.sealUvkV2(
+            crypto, recoveryPub, verifiedFingerprint, userId, identity.publicKey, crypto.signKeypairFromSeed(identitySeed), uvk,
+            System.currentTimeMillis(),
+        ),
+    )
+
     fun identityShortFingerprint(): String = SharedGrant.shortFingerprint(crypto, identity.publicKey)
 
     fun encItemIn(vaultId: String, vaultKey: ByteArray, itemId: String, plaintext: String): ItemUpload {

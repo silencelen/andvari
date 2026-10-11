@@ -45,14 +45,14 @@ class KeysAndEscrowTest {
         val uvk = crypto.randomBytes(32)
         val userId = "55555555-5555-4555-8555-555555555555"
 
-        val sealed = Escrow.sealUvk(crypto, recovery.publicKey, userId, uvk)
-        val payload = Escrow.open(crypto, recovery.publicKey, recovery.privateKey, sealed)
+        val sealed = Escrow.sealUvkV1(crypto, recovery.publicKey, userId, uvk)
+        val payload = Escrow.parseV1(crypto, crypto.sealOpen(recovery.publicKey, recovery.privateKey, sealed))
         assertEquals(userId, payload.userId)
         assertEquals(Escrow.KEY_TYPE_UVK, payload.keyType)
         assertContentEquals(uvk, Bytes.fromB64(payload.key))
 
         val wrongKey = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
-        assertFailsWith<CryptoException> { Escrow.open(crypto, wrongKey.publicKey, wrongKey.privateKey, sealed) }
+        assertFailsWith<CryptoException> { crypto.sealOpen(wrongKey.publicKey, wrongKey.privateKey, sealed) }
     }
 
     @Test
@@ -60,17 +60,15 @@ class KeysAndEscrowTest {
         val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
         val bogus = """{"v":1,"userId":"x","keyType":"uvk","key":"${Bytes.toB64(crypto.randomBytes(32))}","sha256":"${Bytes.toB64(crypto.randomBytes(32))}"}"""
         val sealed = crypto.sealTo(recovery.publicKey, bogus.encodeToByteArray())
-        assertFailsWith<CryptoException> { Escrow.open(crypto, recovery.publicKey, recovery.privateKey, sealed) }
+        val e = assertFailsWith<EscrowOpenException> { Escrow.parseV1(crypto, crypto.sealOpen(recovery.publicKey, recovery.privateKey, sealed)) }
+        assertEquals(EscrowVerdict.V1_SELF_CHECK_FAILED, e.verdict)
     }
 
     @Test
     fun canaryRoundTrip() {
         val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
         val sealed = Escrow.sealCanary(crypto, recovery.publicKey)
-        val payload = Escrow.open(crypto, recovery.publicKey, recovery.privateKey, sealed)
-        assertEquals(Escrow.KEY_TYPE_CANARY, payload.keyType)
-        assertEquals(Escrow.CANARY_USER_ID, payload.userId)
-        assertContentEquals(Escrow.CANARY_KEY, Bytes.fromB64(payload.key))
+        Escrow.openCanary(crypto, recovery, sealed) // throws unless it is exactly the fixed canary
     }
 
     @Test

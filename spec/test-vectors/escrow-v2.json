@@ -1,0 +1,534 @@
+{
+  "_about": "Escrow v2 (security review 2026-10, root cause A §2, spec 04 §3–§4). Hand-authored; every blob was produced by an INDEPENDENT oracle (Node/OpenSSL SHA-2, X25519 and Ed25519; tweetnacl XSalsa20-Poly1305; @noble blake2b and XChaCha20-Poly1305), never by an engine. Sealed boxes use FIXED ephemeral keys so the bytes are reproducible; a real seal is randomised. Org key = seal.json recovery key, member identity seed = sharedgrant.json/signedstatement.json member seed, member UVK + userId = seal.json escrowUvk (whose v1 blob is this member's legacy escrow). `open` rows are graded in order: the FIRST failing step decides the verdict (spec 04 §4).",
+  "unanchoredAck": "I understand this recovery is UNANCHORED",
+  "org": {
+    "seedB64": "Fh0kKzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O8",
+    "pubB64": "yTbaxHYCIrhdBRcIyqfS0R-zQrm-2FWT8WjsYSRDi0M",
+    "fingerprint": "14f1bf4220e132f39314cabd75e7fa8d88348a699154a7965e64e76321b54f49"
+  },
+  "member": {
+    "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "identitySeedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+    "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+    "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o",
+    "identityFingerprint": "ab2fa2ebe95dbddf0f6aaccedbcdd89d57142a368d2a495c3bc9048711cc4eda",
+    "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw"
+  },
+  "identityCheck": {
+    "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+    "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+  },
+  "v2": {
+    "issuedAt": "1791590400000",
+    "statementUtf8": "{\"v\":2,\"purpose\":\"escrow-uvk\",\"userId\":\"dddddddd-dddd-4ddd-8ddd-dddddddddddd\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"recoveryFp\":\"14f1bf4220e132f39314cabd75e7fa8d88348a699154a7965e64e76321b54f49\",\"issuedAt\":1791590400000,\"key\":\"IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw\"}",
+    "frameB64": "YXZzAgKcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhzUpKlrN60tqqIRCd1xvauN34sVckT8khuHM9NWHQ8i6_dB7Y07WgYKiU5gSpn89-C9nNaRcLTSsKZYM0ZsnQx7InYiOjIsInB1cnBvc2UiOiJlc2Nyb3ctdXZrIiwidXNlcklkIjoiZGRkZGRkZGQtZGRkZC00ZGRkLThkZGQtZGRkZGRkZGRkZGRkIiwiaWRlbnRpdHlLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwicmVjb3ZlcnlGcCI6IjE0ZjFiZjQyMjBlMTMyZjM5MzE0Y2FiZDc1ZTdmYThkODgzNDhhNjk5MTU0YTc5NjVlNjRlNzYzMjFiNTRmNDkiLCJpc3N1ZWRBdCI6MTc5MTU5MDQwMDAwMCwia2V5IjoiSXlveE9EOUdUVlJiWW1sd2QzNkZqSk9hb2FpdnRyM0V5OUxaNE9mdTlmdyJ9",
+    "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+    "sealedLength": 444
+  },
+  "sealRefuse": [
+    {
+      "name": "verified fingerprint is only the 32-hex human short form (machine compare is FULL)",
+      "verifiedRecoveryFp": "14f1bf4220e132f39314cabd75e7fa8d"
+    },
+    {
+      "name": "verified fingerprint is another key's",
+      "verifiedRecoveryFp": "05aef1543c8a0137a072e2b56a9242ff95452b672b8c330c2246e01cc9614c52"
+    },
+    {
+      "name": "verified fingerprint in uppercase",
+      "verifiedRecoveryFp": "14F1BF4220E132F39314CABD75E7FA8D88348A699154A7965E64E76321B54F49"
+    },
+    {
+      "name": "empty verified fingerprint",
+      "verifiedRecoveryFp": ""
+    }
+  ],
+  "open": [
+    {
+      "name": "v2 valid, anchored (32-hex prefix)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "expect": {
+        "format": "v2",
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw",
+        "identityKeyB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "anchored": true
+      }
+    },
+    {
+      "name": "v2 valid, anchored (full 64-hex)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d57142a368d2a495c3bc9048711cc4eda",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "expect": {
+        "format": "v2",
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw",
+        "identityKeyB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "anchored": true
+      }
+    },
+    {
+      "name": "v2 valid, unanchored WITH the typed acknowledgment (Q2)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": null,
+      "unanchoredAck": "I understand this recovery is UNANCHORED",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "expect": {
+        "format": "v2",
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw",
+        "identityKeyB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "anchored": false
+      }
+    },
+    {
+      "name": "v1 legacy blob (seal.json escrowUvk) with the mandatory identity check, anchored (Q3)",
+      "sealedB64": "xyq5ayig7gRNrEvuah67aXXKzjxuJG8DmC6t0roHxls_cKY7doV5EksP8uqVIuDiF3Fe_sdQhhwxZhUbly1H7nUFsVhDKRC2d64kLPzhnhk58r45hcwsA_mMFNMJe47Wmzhn32xrqZWeJ7-aOqRKrsov-ttRnqMYgDSBieUrlqEJddrqnA_f0CUL9-2EZDaAS_Gw6HZZLDBH5WKX3zTTqD03RSWR-_bCnP85dBOu3nbOni8Ehu7fzYwS0UEYwFXuH8huflWN0lqKTOSxDEc_2CXulRV05zlUnwMgL-gevhbDkg",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "expect": {
+        "format": "v1_legacy",
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw",
+        "identityKeyB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "anchored": true
+      }
+    },
+    {
+      "name": "v1 legacy blob, unanchored with acknowledgment: identity check still runs",
+      "sealedB64": "xyq5ayig7gRNrEvuah67aXXKzjxuJG8DmC6t0roHxls_cKY7doV5EksP8uqVIuDiF3Fe_sdQhhwxZhUbly1H7nUFsVhDKRC2d64kLPzhnhk58r45hcwsA_mMFNMJe47Wmzhn32xrqZWeJ7-aOqRKrsov-ttRnqMYgDSBieUrlqEJddrqnA_f0CUL9-2EZDaAS_Gw6HZZLDBH5WKX3zTTqD03RSWR-_bCnP85dBOu3nbOni8Ehu7fzYwS0UEYwFXuH8huflWN0lqKTOSxDEc_2CXulRV05zlUnwMgL-gevhbDkg",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": null,
+      "unanchoredAck": "I understand this recovery is UNANCHORED",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "expect": {
+        "format": "v1_legacy",
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "IyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fw",
+        "identityKeyB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "anchored": false
+      }
+    },
+    {
+      "name": "expectedUserId is not a lowercase uuid",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_user_id"
+    },
+    {
+      "name": "anchor shorter than 32 hex (a 16-hex short id is not an anchor)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_anchor"
+    },
+    {
+      "name": "anchor of 31 hex",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_anchor"
+    },
+    {
+      "name": "anchor in uppercase hex (callers normalise typed entry first)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "AB2FA2EBE95DBDDF0F6AACCEDBCDD89D",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_anchor"
+    },
+    {
+      "name": "anchor with separators",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2f a2eb e95d bddf 0f6a acce dbcd d89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_anchor"
+    },
+    {
+      "name": "unanchored WITHOUT the acknowledgment",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": null,
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "unanchored_not_acknowledged"
+    },
+    {
+      "name": "unanchored with a wrong acknowledgment",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": null,
+      "unanchoredAck": "yes",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "unanchored_not_acknowledged"
+    },
+    {
+      "name": "no identity check supplied (v2)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": null,
+      "verdict": "identity_check_required"
+    },
+    {
+      "name": "no identity check supplied (v1): a v1 blob is only ever recovered through it",
+      "sealedB64": "xyq5ayig7gRNrEvuah67aXXKzjxuJG8DmC6t0roHxls_cKY7doV5EksP8uqVIuDiF3Fe_sdQhhwxZhUbly1H7nUFsVhDKRC2d64kLPzhnhk58r45hcwsA_mMFNMJe47Wmzhn32xrqZWeJ7-aOqRKrsov-ttRnqMYgDSBieUrlqEJddrqnA_f0CUL9-2EZDaAS_Gw6HZZLDBH5WKX3zTTqD03RSWR-_bCnP85dBOu3nbOni8Ehu7fzYwS0UEYwFXuH8huflWN0lqKTOSxDEc_2CXulRV05zlUnwMgL-gevhbDkg",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": null,
+      "verdict": "identity_check_required"
+    },
+    {
+      "name": "identity check's identityPub is not 32 bytes",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGg"
+      },
+      "verdict": "identity_check_failed"
+    },
+    {
+      "name": "sealed to a different recovery key",
+      "sealedB64": "KVi9L3GMZODK9v3GVJbQZi2IAqN8ihMdOb_KlQpN0xLACf5cOpx-xnmrx4g-klID0xGB5zYDPh3IbpJhJMH93lJViIfa99lQ_6nICBi5yvI7JjzPZ-m-00QFX_wCKoW-zeEmvTXyp8zWzYqi0FdlpY2qQ7q7jAcEy-dQgdUjOPNLQbD0qqTePig7msn4o_IkV3jcESjekH0jYfDkhaYFpTtha5JKiGJq1-23FCr34AzgnlAqzPmqYd94LV2MRjarWPR7A8FHHXkVRYW6jHcEXIz0MHVJ33r-0XZ6I_V8S9VwRYxIAV2IZX3J183-j0quSAH_uo-k7vSy_3xBMoA6z6SeBbpEfdFYmtG_jRcn3ZlvhZBAkgUj2kbrOlms46fB9L7Ml93rFFL6YNaDXYcXwMO0e4u-jCukUFZ5_tpeFbW7XNr3Ons9-ZS7-oNqU-_lgWaVQD7W7xQH2Q4svgZTK9s4WSkW8BmspPnnJRb86MvP2rLYeBppn4iWOWDKIKi3R650tw8Xt_6n8FaPudwQcYsUb__z9yhViSRUPztzVuxO01Dq8qas3i5pMTUC3XUtQo5VFDNn4hvy82G4",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "unopenable"
+    },
+    {
+      "name": "neither a v1 JSON nor a v2 frame",
+      "sealedB64": "6W_ZoxKTiooiFUNJ_j3wr7mcpCKMX_uqkIycxAV-Rjpr_Xj-023IjR3xxA8aRaxEUJzGWnMi3i0R9K_aRp8S8MwY4Cg4",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "unknown_format"
+    },
+    {
+      "name": "a vault-grant frame (purpose 0x01) inside an escrow seal",
+      "sealedB64": "LGzVa6C3qbEmwBF3V9L3A5nOfvBJZ9uWflcfPImXEDv2Pw7llACE2RD_kcYSyjLEB7S2af9M47SoVrzzA8mGWgl5yilMuBGHKrqxwGYUVDAYe-i-Epzf3LcnagMfOjcJrphNbLvdcY4anxL-2DS9rztRAK0EqCVzl-AX2VVhGyK_59qhW30T4yiJ-QxKcs9gSI4icUPL3zuVPz5c_fJBXHBfForSDGYcXnSb-UvVIHCZgqA0oW1XpADEkiqE_nZfUhdxg1VkobMOp9CYf5JfQAKjNxgQ23AkyToKc6nXtTSyin-t1nUNeEcwmkFOLzDkfCrdKC2s9I-668GD2fmR-Dw1inuVo2j6V3kVXt7p9R4cAOWz4_ElsHwYgU4hbOWnHLb6_gGz374BTICSPj0-TRcoTLULoYOfE814mjWSIMspbwPRCTZXBK0v91NzGi-m__1zLSRcKZg9RsEdvJYEVLvg1yCv3DaYa7gQ63HjWAWoEP4cCgrd-eJzTclCyI5dPpPaF4ToC_Sk3b-aPP4ne2nG-trgGiXlal6AmXB_g0qNIOuTiHrzDNc25rNa_ZZTAgr9rojMFdihA31b",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_frame"
+    },
+    {
+      "name": "non-canonical statement (a space after a colon)",
+      "sealedB64": "YYCdX981U_sTTmVjrQqiTfCotzdyISbtMx2FQlz5jm5-Ydx3EwU8eO_fkFp2xyFOT-1XGku78BzoTyRYLBnN8NJ_YZAbcpfRw48ekGQJbsfFyFiJaCHUsN00wjrFTtyDl0iAJ8HchauE7dnqCR_NU-Iud-YqhIAyGM0KalCfOzPKe3gvBWJKXIIkh6ZsjD8iighOaINReOPrpRBoPvKjtMMpM29kLsEzkjYL_8MwtpcbFNyOHewQmJjSasuBy0J3rECBIlmKHiPeW2qL4mx55pwo0nmoeLyvVfB__FiagntRtHf5YTIZmOvqoA_frEJpk_ip6XLRYRclvJ7ViQJtCMX-Obe9G1uLHzVdLLvZshk8WydX4zw3sjGKOlJxJSJdN_PVMBQ1ujofnQcOSEvGp6bEVb9yh6u7RayOBRZxEgf4sJ5JgQ10yU2qEfEHclQVAIXNZ4izSaoU_52EoCQIBdSRkvSc2yzNZKpoMNuBs0zXpEfw35WwU9DP10Y2quMBlNxYx40uhHl9ihbfEG0YjqX7s8ohMJ5pb6xtXX6SlPbMPLtn4nJxs_ttxIoAz7NnIdIKRm5pofdJNnguTQ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "non_canonical"
+    },
+    {
+      "name": "wrong expectedUserId: the admin asked for X, the blob is the member's (A-2)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expectedIdentityFpPrefix": "df702414711b7aa6b32deba038ba8256",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1tre4eGfCeZmUYxrP2uET2hMoUrL8BNZqnkZ3qGRHYASiNN7_A5D-2tdP_uKrozKlTEc",
+        "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM"
+      },
+      "verdict": "user_mismatch"
+    },
+    {
+      "name": "A-2 swap: the server serves ANOTHER member's genuine blob for this account",
+      "sealedB64": "lI4s0QRu1TBc9rZyKAZJNgssqXgmPGk_XuiLclRs53-D_l6tNKZZ-rDchigGpp5zxzKar-xUtBGzFAG4y0M7mtvn1e_HGZSk6iAy_aGJbPSX0yn6Sb2Rb81433Zio2rDTLOeVmVYw07UlffsvTJS1mGPYbcZhB404-c3XE2_rlvn_9wFeOhvFCZK9evXaG6cfCL7wS9umxUQLBVkJ_8U0_ByEI2fLwthyas-HVGMknNUvn2T9IxaI7uISLqrlnHDsz_iU9n0qYohbufG7olHKq6JnNTHJr09y3bBAbaDsb4gAPnSim7ohOVCj3GjBrtEhUwBp9TWNbwMFoHj359isI40h-4SB2Edg7RHYVKM1Xp71mxME4-Ii7i2LKZxQUUN8_jmA-mTnAqOyMSXTLrMxDDx4TgJjkubvALpRolpFoIVTyHgTN3G5FtchGkQfqvHNKMlUztZ2Ut2-rmJq2zWX1nCwGnFpEaDueuWDpC8EX1u-IDJmo6zu00GzBgh7uhgivq_WmXbURFDlsbRVH2JiueJhyh8cXbccWaXesPEvBZVJCe4VLzBQO00WZLDJY57jOKUYyIPscz2qIwE",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "user_mismatch"
+    },
+    {
+      "name": "statement names a different recovery fingerprint",
+      "sealedB64": "Xc8NimphQTZMtf2X5Hx1Pm8_xyrMFVDtOKUc2SdKjTcRpKNp0s8b1GqaKtPfhMfga-f2mTBBEfDisssHakJOim5s9W72q3e_65xNlQiTEhySofWPHVu-HWul4cHKZ44OqfFGhgeh4pGmho8deLyTi9bAGm_BxrY4qhEevHCslW0GP3mROL7G4IUcK8lvlE0LGmCBVjYtDqjml-oJ51A9tyeU4dUIcRlrkmeZJUad2yMA3E_WHJ0kJ_hmAveV6YMpJSJgHfPxzvwdI6o1PB61OtzM04zyryUiXEGB8plGlly3TSvJAD0rDt5UEd9Dn7pc1M108Ijo3-_DB5LbhW9TwSewCz0ziXhKKbviiBpsUxaXpAQFYmZGIdCLT73zZ8XClphZeokPtxf2BpemkSG_uII2DNVZ1uih5nDfwW8SU0DSiRLwZwqDgegBohRYzq4ClByVvjyWsdpeb48hbSRlbKb7_nh0ynKKEnmZ-m8VxyQMnT5qv2N_qryUH9kCHpGIlt-qaFBZzNklab6ClzcIHTjDeggSExRQI4VbL5VNA5lMabvjwSbMwhSUZqaj8HasVqkV454sqTxqKFLo",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "recovery_fp_mismatch"
+    },
+    {
+      "name": "identity anchor is not a prefix of the identity-file key's fingerprint",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "df702414711b7aa6b32deba038ba8256",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_fp_mismatch"
+    },
+    {
+      "name": "anchor matches 31 of 32 hex (not a full prefix match)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd890",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_fp_mismatch"
+    },
+    {
+      "name": "signer does not map to the pinned identity (statement correct, signed by another member)",
+      "sealedB64": "xXrxrrBBQ3IHb-p5pMvdIgMuatVqexARYuie2bSPP0EP5SkE3H3F9jS_wORjW-VTyaVlTRenRfYsLSyJzx2-vypRbouSksniDl0364HLq2KDeLZT0-oiSigQtCYZk23c--b_61cs7ermqIaXYAdjdf26EpVFENzt9XSeWFbKMBnxaWFIigB7LxpDeoEomBANV96fTVgm8Zya8q6H7KQIjyLMVZYOLmiSsg7rBFahob3vtDX4j5Sa5-IsKgz-caB4TpkAHwJVzpx6i6wRnZh_MR3_qtpHUDslTlrLDT2d1hVyR-yTAUw6OwHnzF6ghMD-S1bcmrnjA9tnovJJPc7Cz3rRi1knJvcLqFF0TQNewIpumnuWhIkAyiYLCXJJgHb0nQDGz6e-Vq7qUupELOhI05s0w8VfWQTDvFwaDFLrbhHtkcedG_RpuWTSVNAhumzYAXfh77yh_Wg9ijMXzEXPBtnofg2N1t91fa_KqwlCp4hZf97dzkSIUuYIpx1ceaDAH9QP5nJocWeIjwCKe45WlXkhzJHM5HmhI_1qoL2VAHRqOS4NZXyHsDrO8onFn_tSV786bITnfhwgUVmP",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "signer_not_pinned_key"
+    },
+    {
+      "name": "embedded identity differs from the anchor although the signature is valid (no self-pinning)",
+      "sealedB64": "wAohYSqwl9qiVgJZjSRms1fRCkWahu7Losv_qjoWx1SErC_y1BUGykJS1YoYNg9qeztUkIqugxPpnk1krMpjYdnBM3BUe6XE3PrZUNsZiOKhNnew_6slVAJh0vzX60JWbKH3huIS_NYKXCWclNTtKz5rk9lEZT6Lbr50h6u0S7o_qA27fLSl8G-NWC8rR2ohDCBEF3jIhcIjwrAQ-LmFh9BAlsIzH3kFQ_8lUSNP5VUtsCy7e-ARU6JkivzdUUY_5WH-NZWlnbZNTlcNmLDM5qRnRC9uv9hD7AKcZmthegSeJL0B_vZaV5LKg0L63uDFHA6S1u3bUDEA2C3dHDJycoD22mw5G20DcU7HI48Rw55lvQGipsYikxUpqcEf4TEKOiSGzEl7s4uODIN0iWuhAhmvYR5NfFRLoNkwiceMmilU0KCAqBP5qE02sRF6iOoZwh-5ARC_zcQEouUSIY0fITZkrURz8CNt4j9K2Ub9hLEounZDiY4-8LzCfpcZ2cp9AMjpAceZUyisQu8Fd8r3tE-rhbfZs3jNbhWr2o9zXejpfDIWD6kI3mTp349TMzwakzSaNE1sPec_VLyY",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_mismatch"
+    },
+    {
+      "name": "A-3: a server-minted identity (statement self-signed by the key it names, identity file to match) is refused by the anchor",
+      "sealedB64": "5S6tgHoze53EWUWl39HDpMN685XVdYUB1nWv77Zt2G744WwrzmfngNmX8i8mhAk-ZYLmpp3Zvnv_LjXQE_-uop7V0mdVU0AYnPUbn2DemVcoTR3GWI6RBCZMryATw93WHfZXM-lqtg9WKFgVhSl_lEZAmqkLoQHIbABXdO-tmXEva-G0hexmk1-KNlwJL7vve5EY-5WQeBNt4XHrSWGe9pWSdbOT2j8pXvARF5nOGgywTWqSuSynO2cnuSeOZllC-6d9lgIDcWEOdcAyclPVZzHJ7WGuA1FIZny0VJQ9HcKgI5TwZgEpJnGycDFZEej0Zr-sog9pCdPQsSGafDEXhLbXajFOs2TEzvlWL3VR48-j_nwrnxNG8PDikSPbT0FS9S-kih_4Zj15tzHQCxWKR8SmUeqwtq4yHoEdR3tIqDIWDjYA6c3PRpQIFaOnzOZ6ei6CvgRi2SjMLTXLgBbn14VCZN_YcfkFAR8Yyu2RdgoGJSD9XjZVkhQm304s3dJMmb82iJqtX0gMv3nW6S2g3jCzVTowpDqZLr_ZwNVS7lPKXVylNlpSGmSpl1bKSL6a6--tAe2r3T6ZZYWM",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trfx-SHZOZOQ5HvZ6FAczGwWlq2anzp7djpI944KH2UKciMUu0U7bZuyU_T6fSH70X0",
+        "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM"
+      },
+      "verdict": "identity_fp_mismatch"
+    },
+    {
+      "name": "RESIDUAL (design §2.3, Q2): the same server-minted identity OPENS in unanchored mode; it is reported anchored=false so the bundle is marked UNANCHORED",
+      "sealedB64": "5S6tgHoze53EWUWl39HDpMN685XVdYUB1nWv77Zt2G744WwrzmfngNmX8i8mhAk-ZYLmpp3Zvnv_LjXQE_-uop7V0mdVU0AYnPUbn2DemVcoTR3GWI6RBCZMryATw93WHfZXM-lqtg9WKFgVhSl_lEZAmqkLoQHIbABXdO-tmXEva-G0hexmk1-KNlwJL7vve5EY-5WQeBNt4XHrSWGe9pWSdbOT2j8pXvARF5nOGgywTWqSuSynO2cnuSeOZllC-6d9lgIDcWEOdcAyclPVZzHJ7WGuA1FIZny0VJQ9HcKgI5TwZgEpJnGycDFZEej0Zr-sog9pCdPQsSGafDEXhLbXajFOs2TEzvlWL3VR48-j_nwrnxNG8PDikSPbT0FS9S-kih_4Zj15tzHQCxWKR8SmUeqwtq4yHoEdR3tIqDIWDjYA6c3PRpQIFaOnzOZ6ei6CvgRi2SjMLTXLgBbn14VCZN_YcfkFAR8Yyu2RdgoGJSD9XjZVkhQm304s3dJMmb82iJqtX0gMv3nW6S2g3jCzVTowpDqZLr_ZwNVS7lPKXVylNlpSGmSpl1bKSL6a6--tAe2r3T6ZZYWM",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": null,
+      "unanchoredAck": "I understand this recovery is UNANCHORED",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trfx-SHZOZOQ5HvZ6FAczGwWlq2anzp7djpI944KH2UKciMUu0U7bZuyU_T6fSH70X0",
+        "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM"
+      },
+      "expect": {
+        "format": "v2",
+        "userId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "uvkB64": "wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t8",
+        "identityKeyB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+        "anchored": false
+      }
+    },
+    {
+      "name": "flipped signature bit",
+      "sealedB64": "xWPYCxYt4vBC8eAW8Fbk4l8LKNfHmZJM8xjX0SO9kDzfc0tp3IjzHnWNAB3Y_qd59UVCmlQAHq8x8TaFhL0PuzOs2gcalrT4wVlH7NPtHnzjgbSY75yR9tRVVDlJO5_kz91p9I2UJFOe6oEa6gcAmYxt9ZzM78gwEbl8n8M4WkonGwB556rExgYv--5r0M8V5Yk7UpHGniHze85VKUmIefJEL0iAnfqIKCJdh4izYQjOETFiIQXgJNWAVFdb3nZVH0-KdhCIEfvcy-v_XYJVKTCafx22hGiev-oRQMY482aibCwahkfBsymQsw2RTx5BGG99icBXxMOz9ABZmMUXzzAC-3kqckpOVEMgXB2M3db-x2d3JkpyeK2mdj7Qga0-C0ULWOLJkzm8XBdwvKVFECJg5vgX35Cq3T7phIV7tkC8D3uA6q3lXrCFK0nIWxSH3lK_yL7Jrx9QcQu5QRzn0_xCkoY-SHetb_xTCkZ5kNuU6_DDRvBZeo3pPTEGVdxYnhpaP9Rcqe5wpreopQnxm3CSvEnF3wogetGVfzS9BFUW2_YD1v7PMHFlHAR3ALuaIiEbTzUhBmNnmRhv",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "bad_signature"
+    },
+    {
+      "name": "identity file's seed does not derive the pinned identity (v2)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trfU8l9SSjf7h6hi4_grtOVpVQoVUW1pkWV1p71w23oc_GSXOeeQFwHfcghfwgJsH9c",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_check_failed"
+    },
+    {
+      "name": "identity file's seed does not open under the escrowed key (v2)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trcVz9pJ_AYR6Oc4N3q2dbaT_-WhT5MV2w0q_0l8RSuHL-qlSQtSRf3nUk7LwnrTjdM",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_check_failed"
+    },
+    {
+      "name": "identity file's seed is bound to another userId (Ad.idkey)",
+      "sealedB64": "w3B3-0MtGcUdaoxv352_BvhHHPEu2xytq3aurCmReh6PF8pf5mMeHxdtbNkCTupS23J_8bH4OmpUs2NmEOBaqMj7qEyBlPWRWM7ZfHov4zG5ux9n-QR5RccJsTfyzFHWZDMfRF7q_UjXzSq8AsLV-TAe8F9Q8fvCayU8b-Nr2bSOhckMmUELJ12TjGK8IwWs1O6EUomBEdk26l5dZWRBkxgQpp3HotLeT-j0rG59mZUPkIPNz6zj3bK8IlCJ3tWlmku-FOffxEcXh0NoI40cBQoNePjkTbibY6loZFEdaRZ3bPbJi_aMeqITFGNcPnEPJw1qMlNaGUTC9pjdi-jaITcmCnI8FN5m54EgMyd1igEmRvO-7Uh81phUXjVBSXdw_opuWIamzbD1pQ3D2X5WemgqFsibriLJws0d3ZSyaVneZvecJeYaL-EfQI3G2l6hkgQljuOpCXUEgsJkd_wa_2DOKesIOJQ2VjSZw4QeEkY8OC__hV38NHHJjUxF7dA4-apjaBc6eLLJXkXKndFMVV2YU-4p-pXwvruxgHwYKVb-BG3uarEK6IWfAF1S7l6i76SwcH0182eMp_tZ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU557MUbxU-_TiKJEnvJfQcIqg",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_check_failed"
+    },
+    {
+      "name": "v1 forged UVK with a SELF-CONSISTENT forged seed: refused by the anchor (6′)",
+      "sealedB64": "Nt7fOtPaOSq7nXakK5JlhJNUIt5pXpuUHqT6UZPHzTfzt846CklL4bhfirn23SSf2X_hIE5Dbmwtb6xwwnVTEZO7Th9mjInHUW2MDZH1jvqS9FGqISTr_h_YH1sfDjPT2Xu-lqX3oS7Ha2hyRCpe4rY6ah8JvQq3iInSfrRmGtTR-NwgQmO1tLr2UkJEEv6_63at6lH5xxuCY6CvDSOuEUga62XPKb747IrdogKtJAo-tJdqMvsrIv0O_Ad0exc9VHuuAEwE_ZtC8rwHQJomdHxo1CYzmzcY-ei-P_HNZVI18Q",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trcAAtgW-EhZ00rywQ99pxVhh7aDkDtAfy1ZHGf1_o7TpYnr_YWE5_36J3DS42IOPGM",
+        "identityPubB64": "8jX_Xh-kcNiREogtS7MzbDJ1ebz-fm5JRJjjiPghH2U"
+      },
+      "verdict": "identity_fp_mismatch"
+    },
+    {
+      "name": "v1 forged UVK served beside the REAL identityPub: refused by the identity check (6′)",
+      "sealedB64": "Nt7fOtPaOSq7nXakK5JlhJNUIt5pXpuUHqT6UZPHzTfzt846CklL4bhfirn23SSf2X_hIE5Dbmwtb6xwwnVTEZO7Th9mjInHUW2MDZH1jvqS9FGqISTr_h_YH1sfDjPT2Xu-lqX3oS7Ha2hyRCpe4rY6ah8JvQq3iInSfrRmGtTR-NwgQmO1tLr2UkJEEv6_63at6lH5xxuCY6CvDSOuEUga62XPKb747IrdogKtJAo-tJdqMvsrIv0O_Ad0exc9VHuuAEwE_ZtC8rwHQJomdHxo1CYzmzcY-ei-P_HNZVI18Q",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trcAAtgW-EhZ00rywQ99pxVhh7aDkDtAfy1ZHGf1_o7TpYnr_YWE5_36J3DS42IOPGM",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_check_failed"
+    },
+    {
+      "name": "v1 forged UVK with the real identity file: the real seed does not open under UVK'",
+      "sealedB64": "Nt7fOtPaOSq7nXakK5JlhJNUIt5pXpuUHqT6UZPHzTfzt846CklL4bhfirn23SSf2X_hIE5Dbmwtb6xwwnVTEZO7Th9mjInHUW2MDZH1jvqS9FGqISTr_h_YH1sfDjPT2Xu-lqX3oS7Ha2hyRCpe4rY6ah8JvQq3iInSfrRmGtTR-NwgQmO1tLr2UkJEEv6_63at6lH5xxuCY6CvDSOuEUga62XPKb747IrdogKtJAo-tJdqMvsrIv0O_Ad0exc9VHuuAEwE_ZtC8rwHQJomdHxo1CYzmzcY-ei-P_HNZVI18Q",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_check_failed"
+    },
+    {
+      "name": "v1 blob for another account",
+      "sealedB64": "CUyqwd4OJUteMDAcZIdPaR3Ac59YupmSDjMzAvn0L2IWGaIQvWmcwEIzuuE2ciKVFcNfFdEHNZOHdMrPNI9s6qtGJyd_YU1zrs8bcS6V0S-5IQnLj3h0jzuqRRYSCC6YtLuw1Zr6PMb1c7U2NF3NTbV_JCksK0JfN6l4T5_qUNs-52P4zusaQAJF1H3wuxuRs1ksq9YljPEdpNv0aM8sE167kGOlhQAARbNOltjApzhMh4DXwggws3B0O-qTydh12VbwMlHT4L5V6AzpfRKY_Jt3ga-ag-TUfUy7OIoWlYLnDA",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "user_mismatch"
+    },
+    {
+      "name": "v1 sha256 self-check fails",
+      "sealedB64": "TOOcndPPW63glpwTlY7NQZl1Ye2WZyxU8bLP7iVLZEay3u9HaKH0unXXXARBenA4vZd_F_6GiKX11_XIBBR7rUjt9lnjmy7rwMslwHd5_V6Wls-1kPA5vx_JzcT3OmN-f-Hok3NsMZj7jyCNy71T8KUCDdZ5WOoBjSG-HldjKZw3ArINAfQ6VfsOXvEmtF-oowwOKFUpSPUxvqySuVHq5QVw6QVsi2Tw3383vmF5RCEIaAU1tfakSIik6Ts4UbdpnLw5uVkZcXeOI2szPH5vKMF5w-9hXkgBMwArHcfTYK9GbQ",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "v1_self_check_failed"
+    },
+    {
+      "name": "v1 canary blob is not a member's escrow",
+      "sealedB64": "4Nr6G1usggmkWWLzHWv3gpEWlVdiih5k__XpR3O8_AUA0aKS4BhEWTUZZwdXarZi83GqFS675_F8zBJSMFdy9O9VUtLXDI9ICPQ8GtIfAGiYyUMWVKrUqGipMssoKsBmPdoFdy-OZYv3AI01tac_BuWMFC8F9Zs3BFhKhxp9b3yXxuMLOXErYUCH5xU24hexIhJaWW_Xl2DTauxEMhCFSw19O3rHaWDxNJ67n82g2uVcZdgSH6_J1NJNL3DlrRAZkPzzHntXqBP1uPcmKXm1LGSbR0eiBuiM8MNMJ0oI-7Y6_dZHfA",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "v1_malformed"
+    },
+    {
+      "name": "v1 JSON claiming v:2 (v2 is the binary frame, never JSON)",
+      "sealedB64": "PsszQ6hMYumKuVySIXNATOCNrncf-ZPSsNF8bYE3vB0CYZ4Yi0zF8SDYh27MzDJH4xzmbeqSctiwg5HrtYeAL5jn9h6uaQ_hDVJZKoLIcPIAsCZy-RpLXYZrpeyKFwlYmll5NnXTLnzWiq3pTnOnvJAOrt8OfO_ALGPgIm6siVG_Y0T5MJZX4GwkHxdt5StIE-LxZf_TczkEYMfNWPeC5a_06KBkxq_afV3Ft3-ppqokU7g4s7ssXNIKiDjO3pDDB8elOaUx6Ri56bupCMBsFo1R7TvtBgZ2zmnLfbIPlhErgw",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "v1_malformed"
+    },
+    {
+      "name": "v1 key of 31 bytes",
+      "sealedB64": "ru1sXMB9oWrAKJYbVywEMZXXkSjhbX0o-2iLbYEHlRIFB3ImU5N9Lj6hCWydK9ehRFz3-9HDJjkga2pnNLhytPmJBopgm0wyEBejRFv8wBT2560cZC0ITfDi-tTBAh-CYjVDLt7OAtHNRlXHwbXiCSIjzQbBRqwrQZkFcAehoQZCOJJC5VCSP3LDKqmFwj5tT0FLl9MTKivaN7cc9yE4qe-Gv0THX5_gfWeNxbK_gDAr_mIlaynz01-HXGBmkjFVdx2X1IKDcyiC7oCgRZwGjNm0ZS8QirGyGPdqj1iZPPuP",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": "ab2fa2ebe95dbddf0f6aaccedbcdd89d",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "v1_malformed"
+    },
+    {
+      "name": "v1 forged blob, unanchored with ack: the seed check still refuses",
+      "sealedB64": "Nt7fOtPaOSq7nXakK5JlhJNUIt5pXpuUHqT6UZPHzTfzt846CklL4bhfirn23SSf2X_hIE5Dbmwtb6xwwnVTEZO7Th9mjInHUW2MDZH1jvqS9FGqISTr_h_YH1sfDjPT2Xu-lqX3oS7Ha2hyRCpe4rY6ah8JvQq3iInSfrRmGtTR-NwgQmO1tLr2UkJEEv6_63at6lH5xxuCY6CvDSOuEUga62XPKb747IrdogKtJAo-tJdqMvsrIv0O_Ad0exc9VHuuAEwE_ZtC8rwHQJomdHxo1CYzmzcY-ei-P_HNZVI18Q",
+      "expectedUserId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "expectedIdentityFpPrefix": null,
+      "unanchoredAck": "I understand this recovery is UNANCHORED",
+      "identityCheck": {
+        "encryptedIdentitySeedB64": "AQGgoaKjpKWmp6ipqqusra6vsLGys7S1trd5ReLZz6h-DFWVDmOOG0DS-F1IGigW1C4o8JBL_lU5573A64HliuE6k1ZfZ2C2VPI",
+        "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio"
+      },
+      "verdict": "identity_check_failed"
+    }
+  ]
+}

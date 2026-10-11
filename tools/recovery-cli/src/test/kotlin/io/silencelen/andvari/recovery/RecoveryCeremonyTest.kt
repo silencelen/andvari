@@ -1,9 +1,11 @@
 package io.silencelen.andvari.recovery
 
+import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.crypto.Ad
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.IdentityCheck
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.createCryptoProvider
@@ -31,24 +33,27 @@ class RecoveryCeremonyTest {
         val sealed = Escrow.sealCanary(crypto, kp.publicKey)
         // Verify from a freshly-reconstructed keypair (simulating typing the printed seed).
         val fromSheet = crypto.boxKeypairFromSeed(seed)
-        val payload = Escrow.open(crypto, fromSheet.publicKey, fromSheet.privateKey, sealed)
-        assertEquals(Escrow.KEY_TYPE_CANARY, payload.keyType)
-        assertContentEquals(Escrow.CANARY_KEY, Bytes.fromB64(payload.key))
+        Escrow.openCanary(crypto, fromSheet, sealed) // throws unless it is exactly the fixed canary
     }
 
     @Test
     fun fullRecoveryReWrapUnlocks() {
-        // Enrollment: user has a UVK, escrowed to the org recovery key.
+        // Enrollment: a real enrolment (escrow v2 since security review 2026-10, root cause A).
         val recoverySeed = crypto.randomBytes(32)
         val recovery = crypto.boxKeypairFromSeed(recoverySeed)
-        val userId = "abcdef01-2345-4678-8abc-def012345678"
-        val uvk = crypto.randomBytes(32)
-        val sealed = Escrow.sealUvk(crypto, recovery.publicKey, userId, uvk)
+        val fp = Escrow.fingerprint(crypto, recovery.publicKey)
+        val r = Account.enroll("inv", "m@x.com", "m", "pw", KdfParams(ops = 1, memBytes = 8192), recovery.publicKey, fp, "dev", crypto)
+        val userId = r.request.userId
+        val uvk = r.account.uvkCopyForPlatformWrap()
+        val sealed = Bytes.fromB64(r.request.escrow!!.sealed)
 
-        // Recover: unseal offline.
-        val payload = Escrow.open(crypto, recovery.publicKey, recovery.privateKey, sealed)
-        assertEquals(userId, payload.userId)
-        val recoveredUvk = Bytes.fromB64(payload.key)
+        // Recover: unseal offline, bound to the named account, its anchor and its identity file.
+        val opened = Escrow.open(
+            crypto, recovery, sealed, userId, Escrow.fingerprint(crypto, r.account.identityPub).take(32),
+            IdentityCheck(r.request.encryptedIdentitySeed, r.request.identityPub),
+        )
+        assertEquals(userId, opened.userId)
+        val recoveredUvk = opened.uvk
         assertContentEquals(uvk, recoveredUvk)
 
         // Re-wrap under a temp password.
@@ -67,9 +72,9 @@ class RecoveryCeremonyTest {
     @Test
     fun wrongSheetCannotRecover() {
         val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
-        val sealed = Escrow.sealUvk(crypto, recovery.publicKey, "u", crypto.randomBytes(32))
+        val sealed = Escrow.sealCanary(crypto, recovery.publicKey)
         val wrong = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
-        assertFailsWith<Exception> { Escrow.open(crypto, wrong.publicKey, wrong.privateKey, sealed) }
+        assertFailsWith<Exception> { Escrow.openCanary(crypto, wrong, sealed) }
     }
 
     @Test

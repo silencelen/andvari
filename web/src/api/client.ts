@@ -650,11 +650,17 @@ export class ApiClient {
     return this.json<AdminDeviceSummary[]>("GET", `/api/v1/admin/users/${pathSeg(userId)}/devices`);
   }
 
-  /** F59 recovery step 1 — the user's sealed escrow blob (base64url, text/plain) to carry to
-   *  offline `recovery-cli recover`. Sealed to the org recovery PUBLIC key, so safe to hand
-   *  out. Throws ApiError `no_escrow` (404) if the user never enrolled one. */
+  /** F59 recovery step 1 — the member's escrow download (design §2.5, security review 2026-10):
+   *  JSON `{userId, sealed, encryptedIdentitySeed, identityPub, legacySealed?}`, returned VERBATIM as
+   *  text because it is written to disk as `recovery-cli recover --identity-file`. Everything in it is
+   *  sealed or public, so safe to hand out. Throws ApiError `no_escrow` (404) if there is none. */
   async adminUserEscrow(userId: string) {
     return this.text("GET", `/api/v1/admin/users/${pathSeg(userId)}/escrow`);
+  }
+
+  /** §8.4 drill hook — POST the receipt `recovery-cli verify` printed (verbatim JSON text). */
+  async adminEscrowDrill(receiptJson: string) {
+    return this.json<{ dropped: string[]; kept: string[] }>("POST", "/api/v1/admin/escrow/drill", JSON.parse(receiptJson));
   }
 
   /** F59 recovery step 3 (spec 04 §4) — POST the recovery-cli bundle to `/admin/recovery`. H24

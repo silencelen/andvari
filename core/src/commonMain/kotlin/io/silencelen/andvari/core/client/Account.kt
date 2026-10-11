@@ -439,18 +439,29 @@ class Account private constructor(
 
             val uvk = crypto.randomBytes(32)
             val identitySeed = crypto.randomBytes(32)
+            // The joint signing secret embeds the seed: if anything below throws before the Account
+            // takes ownership of it, it is wiped with the seed.
+            var signingForCleanup: ByteArray? = null
             try {
                 val identity = crypto.boxKeypairFromSeed(identitySeed)
+                val signing = crypto.signKeypairFromSeed(identitySeed)
+                signingForCleanup = signing.privateKey
                 val vk = crypto.randomBytes(32)
 
                 // Org escrow is CONDITIONAL (§F.4): sealed only for a `required` invite (org key present),
                 // preserving the verified-fingerprint discipline — refuse to seal the UVK to a key whose
                 // fingerprint the enrollee did not confirm out-of-band. Waived ⇒ no escrow blob.
+                // Escrow v2 from this release (security review 2026-10, root cause A §2.1, §8.4): the UVK
+                // travels inside a statement signed with the joint key, binding this account's userId and
+                // identity key and the FULL org fingerprint, so recovery can prove whose blob it is.
                 val escrow: EscrowUpload? = if (recoveryPublicKey != null) {
                     val fp = requireNotNull(recoveryFingerprint) { "recoveryFingerprint is required when sealing org escrow" }
                     val computedFp = Escrow.fingerprint(crypto, recoveryPublicKey)
                     if (computedFp != fp) throw CryptoException("recovery public key does not match its fingerprint")
-                    EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recoveryPublicKey, userId, uvk)), fp)
+                    EscrowUpload(
+                        Bytes.toB64(Escrow.sealUvkV2(crypto, recoveryPublicKey, fp, userId, identity.publicKey, signing, uvk, nowMs())),
+                        fp,
+                    )
                 } else {
                     null
                 }
@@ -479,13 +490,14 @@ class Account private constructor(
                     ),
                     device = DeviceInfo(platform, deviceName),
                 )
-                val signing = crypto.signKeypairFromSeed(identitySeed)
                 val account = Account(
                     crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, personalVaultId,
                     mutableMapOf(personalVaultId to vk), mutableMapOf(personalVaultId to "owner"),
                 )
+                signingForCleanup = null // owned by the returned Account now
                 return EnrollResult(req, account, recovery.recoverySecret)
             } finally {
+                signingForCleanup?.fill(0)
                 authKey.fill(0)
                 wrapKey.fill(0)
                 identitySeed.fill(0)
@@ -560,7 +572,20 @@ class Account private constructor(
         }
 
         /** Unlock a device holding only the password + the server's account keys. */
-        fun unlock(userId: String, password: String, keys: AccountKeys, crypto: CryptoProvider = createCryptoProvider()): Account {
+        /**
+         * [selfIdentityPub] (design §2.4, the recovered-member backstop): the seed-derived identityPub
+         * THIS device recorded the first time it unlocked this account ([SelfIdentityPin]). When given,
+         * the shared tail hard-fails with the spec 01 §5 security-fault copy if the seed now derives a
+         * different key — a forged recovery would have to change the identity seed, and every device
+         * that knew the real one refuses it. Null = this device never unlocked the account before.
+         */
+        fun unlock(
+            userId: String,
+            password: String,
+            keys: AccountKeys,
+            crypto: CryptoProvider = createCryptoProvider(),
+            selfIdentityPub: ByteArray? = null,
+        ): Account {
             // ZEROIZATION (audit H80; see [deriveAuthKey]): after the wrappedUvk open the session
             // needs only the UVK — MK and wrapKey are wiped on the way out, success or failure.
             val mk = Keys.masterKey(crypto, password, Bytes.fromB64(keys.kdfSalt), keys.kdfParams)
@@ -593,7 +618,7 @@ class Account private constructor(
             }
             // Password path validates the password by the wrappedUvk open above; from here the
             // work is identical to the UVK (quick-unlock) path — one shared tail, no drift.
-            return unlockFromUvk(userId, uvk, keys, crypto)
+            return unlockFromUvk(userId, uvk, keys, crypto, selfIdentityPub)
         }
 
         /**
@@ -615,8 +640,13 @@ class Account private constructor(
          * The returned [Account] keeps the passed [uvk] reference (see [enroll]/[unlock]: the
          * private ctor owns it). The caller must hand over a fresh array and not reuse/zero it.
          */
-        fun unlockWithUvk(userId: String, uvk: ByteArray, keys: AccountKeys, crypto: CryptoProvider = createCryptoProvider()): Account =
-            unlockFromUvk(userId, uvk, keys, crypto)
+        fun unlockWithUvk(
+            userId: String,
+            uvk: ByteArray,
+            keys: AccountKeys,
+            crypto: CryptoProvider = createCryptoProvider(),
+            selfIdentityPub: ByteArray? = null,
+        ): Account = unlockFromUvk(userId, uvk, keys, crypto, selfIdentityPub)
 
         /**
          * Shared unlock tail (spec 01 §5) reached by BOTH [unlock] (after it recovers the UVK
@@ -648,7 +678,13 @@ class Account private constructor(
          * quick-unlock blob on. Only the four structural refusals, which no secret could ever
          * have made pass, are re-labelled as the damaged-keys terminal.
          */
-        private fun unlockFromUvk(userId: String, uvk: ByteArray, keys: AccountKeys, crypto: CryptoProvider): Account {
+        private fun unlockFromUvk(
+            userId: String,
+            uvk: ByteArray,
+            keys: AccountKeys,
+            crypto: CryptoProvider,
+            selfIdentityPub: ByteArray? = null,
+        ): Account {
             val seedEnvelope = try {
                 Bytes.fromB64(keys.encryptedIdentitySeed)
             } catch (e: CryptoException) {
@@ -676,13 +712,26 @@ class Account private constructor(
                 // The signing secret embeds the seed (libsodium's seed ‖ pk layout): never leave it
                 // behind on the refusal path.
                 signing.privateKey.fill(0)
-                throw CryptoException(
-                    "identity key mismatch — the server returned an identity public key that " +
-                        "your account's sealed seed does not derive; possible server compromise. Do not proceed.",
-                )
+                identity.privateKey.fill(0)
+                throw CryptoException(IDENTITY_MISMATCH_MESSAGE)
+            }
+            // Design §2.4: this device's own record of the identity key wins over anything the server
+            // can change. A recovery that swapped the identity seed (A-3 against a member whose admin
+            // had no anchor) is refused here on every device that unlocked the account before.
+            if (selfIdentityPub != null && !Bytes.ctEquals(identity.publicKey, selfIdentityPub)) {
+                signing.privateKey.fill(0)
+                identity.privateKey.fill(0)
+                throw CryptoException(IDENTITY_MISMATCH_MESSAGE)
             }
             return Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, "", mutableMapOf())
         }
+
+        /** spec 01 §5 security-fault copy, shared by the server-identityPub check and the §2.4 backstop. */
+        const val IDENTITY_MISMATCH_MESSAGE =
+            "identity key mismatch — the server returned an identity public key that " +
+                "your account's sealed seed does not derive; possible server compromise. Do not proceed."
+
+        private fun nowMs(): Long = kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
 
         private fun uuid(crypto: CryptoProvider): String =
             Bytes.uuidV4FromBytes(crypto.randomBytes(16)) // RFC 4122 v4 from 16 random bytes
@@ -1130,7 +1179,13 @@ class Account private constructor(
         require(Escrow.fingerprint(crypto, pub) == verifiedFingerprint) {
             "recovery public key does not match the verified fingerprint — refusing to re-seal escrow"
         }
-        return EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, pub, userId, uvk)), verifiedFingerprint)
+        // Escrow v2 (security review 2026-10, root cause A §2.1 / §8.4): this is also the v1 → v2
+        // migration seal. The server keeps the previous blob as `escrow_legacy` until a fleet drill
+        // passes on this one, so a defective v2 seal cannot strand the member.
+        val sealed = Escrow.sealUvkV2(
+            crypto, pub, verifiedFingerprint, userId, identityPub, KeyPairBytes(signPub, signSecret), uvk, nowMs(),
+        )
+        return EscrowUpload(Bytes.toB64(sealed), verifiedFingerprint)
     }
 
     /**
