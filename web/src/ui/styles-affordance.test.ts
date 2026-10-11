@@ -49,8 +49,8 @@ describe("H49 — the caption caps are scoped OUT of sentence-length labels", ()
     // The five the H49 evidence enumerated are all still in the scan (a threshold change that
     // silently drops them would make the loop above vacuous for exactly the labels it exists for).
     for (const known of [
-      "Vault.tsx: Type the FIRST 16 characters of the fingerprint on your printed recovery sheet",
-      "Welcome.tsx: Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet",
+      "Vault.tsx: Type the FIRST 32 characters of the fingerprint on your printed recovery sheet",
+      "Welcome.tsx: Recovery check — type the FIRST 32 characters of the fingerprint on your printed recovery sheet",
       "Welcome.tsx: Type your recovery phrase back to confirm you saved it",
       "Admin.tsx: Confirm your recovery sheet (first 16 characters) to stamp a scannable code into the QR",
       "Admin.tsx: KDF (read-only — changing it requires a coordinated re-enrollment)",

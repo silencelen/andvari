@@ -146,8 +146,8 @@ class PureGatesTest {
 
     // ---- §F.1 enroll submit gate ----
 
-    private val serverFp = "0123456789abcdef0123456789abcdef"
-    private val shortFp = "0123456789abcdef"
+    private val serverFp = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" // 64 hex
+    private val shortFp = "0123456789abcdef0123456789abcdef" // 128-bit short form (first 32 of serverFp)
     private val strong = "correct horse battery staple 9!"
 
     @Test
@@ -177,7 +177,8 @@ class PureGatesTest {
         )
         assertFalse(ready(typed = "", fpOk = false))
         assertFalse(ready(typed = shortFp, fpOk = false)) // matched but not attested
-        assertFalse(ready(typed = "ffffffffffffffff", fpOk = true)) // attested but wrong
+        assertFalse(ready(typed = "f".repeat(32), fpOk = true)) // attested but wrong
+        assertFalse(ready(typed = shortFp.take(16), fpOk = true)) // old 16-hex prefix no longer matches
         assertTrue(ready(typed = shortFp, fpOk = true))
     }
 

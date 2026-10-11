@@ -168,8 +168,8 @@ describe("F10 — no unnamed <input> anywhere under web/src/ui", () => {
 
   it("the two one-shot recovery gates are wrapped in Field, not a bare label", () => {
     // Vault's re-seal banner (the household recovery key rotated) …
-    expect(vaultTsx).toContain('label="Type the FIRST 16 characters of the fingerprint on your printed recovery sheet"');
-    expect(vaultTsx).not.toContain("<label>Type the FIRST 16 characters");
+    expect(vaultTsx).toContain('label="Type the FIRST 32 characters of the fingerprint on your printed recovery sheet"');
+    expect(vaultTsx).not.toContain("<label>Type the FIRST 32 characters");
     // … and the shown-once phrase type-back, which blocks entry to the vault entirely.
     expect(welcomeTsx).toContain('label="Type your recovery phrase back to confirm you saved it"');
     expect(welcomeTsx).not.toContain("<label>Type your recovery phrase back");

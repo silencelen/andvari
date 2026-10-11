@@ -172,8 +172,10 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   ad = "andvari/v1|idkey|{userId}")`.
 - Used to receive shared-vault key grants (§6) and nothing else in v1.
 - **Identity fingerprint** = lowercase-hex `SHA-256(identityPub)` (same construction as
-  the recovery fingerprint, spec 04 §1); short form = first 16 hex chars, displayed
-  grouped `xxxx xxxx xxxx xxxx`. It MUST be computed over the **seed-derived** public key
+  the recovery fingerprint, spec 04 §1); short form = first **32 hex chars (128 bits)**,
+  displayed as 8 groups of 4 on two lines `xxxx xxxx xxxx xxxx / xxxx xxxx xxxx xxxx`
+  (security review 2026-10: a 64-bit/16-hex prefix is a grindable truncated second
+  preimage). It MUST be computed over the **seed-derived** public key
   (`boxKeypairFromSeed(identitySeed).publicKey`), NEVER over the `identityPub` the server
   returns in account keys. The server cannot forge `identitySeed` (it is UVK-sealed), so a
   client unlocking MUST derive the pubkey from the decrypted seed and treat a mismatch

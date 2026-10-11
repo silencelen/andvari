@@ -1065,7 +1065,7 @@ function ReSealBanner({ account, client, escrowFingerprint }: { account: Account
             named nothing and a screen reader reached the one un-skippable, one-shot re-protect
             input hearing "edit, blank". Same component, same association, same copy. */}
         <Field
-          label="Type the FIRST 16 characters of the fingerprint on your printed recovery sheet"
+          label="Type the FIRST 32 characters of the fingerprint on your printed recovery sheet"
           prompt
           /* The banner is a flex column with its own gap — .field's own margin would double it. */
           style={{ marginBottom: 0 }}

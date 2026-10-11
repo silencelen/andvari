@@ -21,7 +21,7 @@ class EnrollCeremonyTest {
         email: String = "a@x.com",
         password: String = strongPw,
         confirm: String = strongPw,
-        typedFp: String = fp.take(16),
+        typedFp: String = fp.take(32),
         attested: Boolean = true,
         serverFp: String = fp,
     ) = EnrollCeremony.ready(invite, email, password, confirm, typedFp, attested, serverFp)
@@ -62,13 +62,15 @@ class EnrollCeremonyTest {
 
     @Test
     fun typedSheetCeremonyIsLoadBearing() {
+        // 128-bit short form (security review 2026-10): the typed sheet value is 32 hex, not 16.
         assertFalse(ready(typedFp = ""), "nothing typed must block")
-        assertFalse(ready(typedFp = fp.take(15)), "15 chars must block")
-        assertFalse(ready(typedFp = fp.drop(1).take(16)), "wrong 16 chars must block")
+        assertFalse(ready(typedFp = fp.take(16)), "the old 16-hex prefix must now block (128-bit short form)")
+        assertFalse(ready(typedFp = fp.take(31)), "31 chars must block")
+        assertFalse(ready(typedFp = fp.drop(1).take(32)), "wrong 32 chars must block")
         // Separators/whitespace tolerated, case-insensitive — the printed sheet groups hex.
-        assertTrue(ready(typedFp = fp.take(16).uppercase().chunked(4).joinToString(" ")))
-        assertTrue(ready(typedFp = fp.take(16).chunked(4).joinToString(":")))
-        // Typing MORE than 16 hex chars is not a match (exactly-16 rule, spec 04 §2(3)).
-        assertFalse(ready(typedFp = fp.take(17)))
+        assertTrue(ready(typedFp = fp.take(32).uppercase().chunked(4).joinToString(" ")))
+        assertTrue(ready(typedFp = fp.take(32).chunked(4).joinToString(":")))
+        // Typing MORE than 32 hex chars is not a match (exactly-32 rule, spec 04 §2(3)).
+        assertFalse(ready(typedFp = fp.take(33)))
     }
 }

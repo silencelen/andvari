@@ -84,17 +84,22 @@ object Escrow {
     fun fingerprint(crypto: CryptoProvider, publicKey: ByteArray): String =
         Bytes.toHexLower(crypto.sha256(publicKey))
 
+    /**
+     * The MACHINE short id of the org recovery key — first 16 hex. NOT the human short form (that
+     * moved to 32 hex, [Fingerprint]). This is only the recovery-cli operator display and the
+     * in-person-QR `rfp` compare, neither of which is a human-typed/read anchor; the enrolling
+     * human types the 32-hex short form of the full fingerprint via [shortFormMatches] instead.
+     */
     fun shortFingerprint(crypto: CryptoProvider, publicKey: ByteArray): String =
         fingerprint(crypto, publicKey).take(16)
 
     /**
-     * spec 04 §2(3): the user TYPES the first 16 hex chars of the org recovery fingerprint from
-     * the PRINTED sheet (the UI must NOT display them first, so a compromised server can't get a
-     * lazy eyeball-match). Separators / whitespace are tolerated; exactly 16 hex chars required.
-     * Mirrors the web `shortFormMatches` for cross-client parity (enrollment + F57 re-seal).
+     * spec 04 §2(3): the user TYPES the first 32 hex chars (128 bits) of the org recovery
+     * fingerprint from the PRINTED sheet (the UI must NOT display them first, so a compromised
+     * server can't get a lazy eyeball-match). Separators / whitespace / case are tolerated; exactly
+     * 32 hex chars required. One shared helper ([Fingerprint.matchesShort]) backs both the recovery
+     * (here) and identity short forms; the web twin is `web/src/crypto/escrow.ts`.
      */
-    fun shortFormMatches(entry: String, fullFingerprintHex: String): Boolean {
-        val norm = entry.lowercase().filter { it in "0123456789abcdef" }
-        return norm.length == 16 && fullFingerprintHex.lowercase().take(16) == norm
-    }
+    fun shortFormMatches(entry: String, fullFingerprintHex: String): Boolean =
+        Fingerprint.matchesShort(entry, fullFingerprintHex)
 }

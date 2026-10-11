@@ -68,6 +68,7 @@ import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.VaultListView
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
@@ -492,7 +493,7 @@ private fun ReSealCard(state: DesktopState) {
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(vertical = 6.dp),
                 )
-                Field("First 16 characters from your printed recovery sheet", entry, { entry = it }, mono = true)
+                Field("First 32 characters from your printed recovery sheet", entry, { entry = it }, mono = true)
                 Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Primary("Re-protect account", ok && !state.busy, state.busy) { state.resealEscrow(entry) }
                     Spacer(Modifier.width(8.dp))
@@ -603,7 +604,7 @@ private fun Enroll(state: DesktopState) {
     var password by remember { mutableStateOf("") }
     var confirm by remember { mutableStateOf("") }
     var fpOk by remember { mutableStateOf(false) }
-    // spec 04 §2(3): the user TYPES the first 16 sheet chars — never shown until matched.
+    // spec 04 §2(3): the user TYPES the first 32 sheet chars (128-bit short form) — never shown until matched.
     var shortFp by remember { mutableStateOf("") }
     // §F.1 posture (the waived toggle, [enrollPosture] — web Enroll parity): no sheet ⇒ WAIVED by
     // default (per-member piece only, no admin backstop), sheet declared ⇒ the typed-sheet
@@ -749,7 +750,7 @@ private fun Enroll(state: DesktopState) {
                         // Deliberately NOT displayed until typed — showing it above the input would
                         // reduce the check to transcription (spec 04 §2(3); web Enroll parity; the
                         // F57 re-seal card already works this way).
-                        Text("Recovery check — type the FIRST 16 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Recovery check — type the FIRST 32 characters of the fingerprint on your printed recovery sheet", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Field("From the sheet, not this screen", shortFp, { shortFp = it }, mono = true, onEnter = submit)
                         if (shortFp.isNotBlank() && !shortOk) {
                             Text("doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -1037,6 +1038,21 @@ private fun RecoverySetupScreen(state: DesktopState) {
                 if (copyFailed) {
                     Text(CLIPBOARD_COPY_FAILED, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
+            }
+        }
+        // spec 04 §6 / spec 01 §5: the sheet also carries this account's identity fingerprint, so it
+        // can anchor a household (admin) recovery later without a separate out-of-band step.
+        state.identityCode()?.let { idShort ->
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Your identity fingerprint (give this to your admin if you ever need a household recovery):",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            SelectionContainer {
+                Text(Fingerprint.groupedShort(idShort), style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+            }
+            state.identityCodeFull()?.let { idFull ->
+                Text("full: ${idFull.chunked(4).joinToString(" ")}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -3142,7 +3158,8 @@ private fun SettingsScreen(state: DesktopState) {
                     )
                     Spacer(Modifier.height(8.dp))
                     SelectionContainer {
-                        Text(idCode.chunked(4).joinToString(" "), style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
+                        // 128-bit short form: 8 groups of 4 on two lines (Fingerprint.groupedShort).
+                        Text(Fingerprint.groupedShort(idCode), style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Monospace)
                     }
                 }
             }

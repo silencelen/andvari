@@ -1749,7 +1749,7 @@ class AndvariViewModel(
         // seals NO org escrow, so there is no fingerprint to attest. An explicit curated error
         // write (not check()) so the sentence reaches the user itself, never via a generic mapper.
         if (!waived && !Escrow.shortFormMatches(typedShortFp, policy.recoveryFingerprint)) {
-            _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 16 characters.")
+            _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters.")
             return@op
         }
         val a = newApi()
@@ -2903,8 +2903,12 @@ class AndvariViewModel(
         val HTML_ENTITY = Regex("""&(amp|lt|gt|quot|#\d+);""")
     }
 
-    /** Seed-derived identity short code (spec 01 §5) — read out during sharing verification. */
+    /** Seed-derived identity short code (spec 01 §5, 32 hex) — read out during sharing verification. */
     fun identityCode(): String? = account?.identityFingerprintShort()
+
+    /** Seed-derived identity FULL fingerprint (spec 01 §5, 64 hex) — printed on the recovery sheet
+     *  (spec 04 §6) beside the short form as the recovery CLI's identity anchor. */
+    fun identityCodeFull(): String? = account?.identityFingerprintFull()
 
     /** Mint the ref for a newly picked file: random id + random per-file key (never logged). */
     fun newAttachmentRef(name: String, size: Long): AttachmentRef? = account?.let {

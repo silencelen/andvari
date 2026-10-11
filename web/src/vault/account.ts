@@ -7,7 +7,7 @@ import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type Kdf
 import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
+import { identityFingerprint, openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { CryptoError } from "../crypto/sodium";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
 import type {
@@ -524,13 +524,19 @@ export class Account {
   }
 
   /**
-   * Short identity fingerprint (spec 01 §5), grouped by the UI as `xxxx xxxx xxxx xxxx`.
+   * Short identity fingerprint (spec 01 §5, 32 hex / 128 bits), displayed as 8 groups of 4.
    * Computed over the SEED-DERIVED identityPub this class holds — enroll/unlock derive
    * it via boxKeypairFromSeed(identitySeed), never from a server-sent value — so a
    * malicious server cannot pass the out-of-band check with a substituted key.
    */
   identityFingerprintShort(): Promise<string> {
     return shortIdentityFingerprint(this.identityPub);
+  }
+
+  /** Full identity fingerprint (spec 01 §5, 64 hex) over the SEED-DERIVED identityPub — printed on
+   *  the per-member recovery sheet (spec 04 §6) beside the short form as the recovery CLI's anchor. */
+  identityFingerprintFull(): Promise<string> {
+    return identityFingerprint(this.identityPub);
   }
 
   /**
