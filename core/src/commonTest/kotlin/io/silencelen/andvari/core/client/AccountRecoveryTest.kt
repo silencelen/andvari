@@ -5,6 +5,8 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.EscrowFormat
+import io.silencelen.andvari.core.crypto.IdentityCheck
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.Keys
 import io.silencelen.andvari.core.crypto.MemberRecovery
@@ -44,7 +46,13 @@ class AccountRecoveryTest {
         assertNotNull(recovery, "member-recovery is mandatory")
 
         // Both blobs open to the SAME UVK (the double-wrap-consistency invariant, §F.8).
-        val uvkFromEscrow = Bytes.fromB64(Escrow.open(crypto, org.publicKey, org.privateKey, Bytes.fromB64(escrow.sealed)).key)
+        val opened = Escrow.open(
+            crypto, org, Bytes.fromB64(escrow.sealed), r.request.userId,
+            Escrow.fingerprint(crypto, Bytes.fromB64(r.request.identityPub)),
+            IdentityCheck(r.request.encryptedIdentitySeed, r.request.identityPub),
+        )
+        assertEquals(EscrowFormat.V2, opened.format, "a new enrolment seals escrow v2 (security review 2026-10, A4)")
+        val uvkFromEscrow = opened.uvk
         val uvkFromPiece = MemberRecovery.openUvk(crypto, r.recoverySecret, recovery.recoveryWrappedUvk, r.request.userId)
         assertTrue(uvkFromEscrow.contentEquals(uvkFromPiece), "escrow and member-recovery wrap the same UVK")
         assertTrue(uvkFromPiece.contentEquals(r.account.uvkCopyForPlatformWrap()), "…which is the live account UVK")

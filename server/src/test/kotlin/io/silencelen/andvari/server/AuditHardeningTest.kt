@@ -307,7 +307,7 @@ class AuditHardeningTest : P4TestSupport() {
         // sealed UVK, exactly what a conforming client re-uploads.
         val put = client.put("/api/v1/escrow/self") {
             contentType(ContentType.Application.Json); authed(admin)
-            setBody(EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, admin.userId, crypto.randomBytes(32))), fingerprint))
+            setBody(EscrowUpload(Bytes.toB64(Escrow.sealUvkV1(crypto, recovery.publicKey, admin.userId, crypto.randomBytes(32))), fingerprint))
         }
         assertEquals(HttpStatusCode.OK, put.status, put.bodyAsText())
 
@@ -332,7 +332,7 @@ class AuditHardeningTest : P4TestSupport() {
             val resp = client.put("/api/v1/escrow/self") {
                 contentType(ContentType.Application.Json); authed(admin)
                 headers.forEach { (k, v) -> header(k, v) }
-                setBody(EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, admin.userId, crypto.randomBytes(32))), fingerprint))
+                setBody(EscrowUpload(Bytes.toB64(Escrow.sealUvkV1(crypto, recovery.publicKey, admin.userId, crypto.randomBytes(32))), fingerprint))
             }
             assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
             return client.auditRows(admin, "escrow_self_upload").first().ip // DESC → latest

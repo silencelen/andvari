@@ -133,15 +133,17 @@ class VectorsTest {
             assertContentEquals(case.b("plaintextB64"), crypto.sealOpen(kp.publicKey, kp.privateKey, case.b("sealedB64")))
         }
         val escrow = v.getValue("escrowUvk").jsonObject
-        val payload = Escrow.open(crypto, kp.publicKey, kp.privateKey, escrow.b("sealedB64"))
+        // The v1 legacy blob: its PAYLOAD layout is pinned here; recovering it (anchor + identity check)
+        // is graded by escrow-v2.json, where this very blob is the member's legacy escrow.
+        val payload = Escrow.parseV1(crypto, crypto.sealOpen(kp.publicKey, kp.privateKey, escrow.b("sealedB64")))
         assertEquals(escrow.s("userId"), payload.userId)
         assertEquals(Escrow.KEY_TYPE_UVK, payload.keyType)
         assertContentEquals(escrow.b("uvkB64"), Bytes.fromB64(payload.key))
 
         val canary = v.getValue("canary").jsonObject
-        val canaryPayload = Escrow.open(crypto, kp.publicKey, kp.privateKey, canary.b("sealedB64"))
-        assertEquals(canary.s("expectedUserId"), canaryPayload.userId)
-        assertContentEquals(canary.b("expectedKeyB64"), Bytes.fromB64(canaryPayload.key))
+        assertEquals(Escrow.CANARY_USER_ID, canary.s("expectedUserId"))
+        assertContentEquals(Escrow.CANARY_KEY, canary.b("expectedKeyB64"))
+        Escrow.openCanary(crypto, kp, canary.b("sealedB64")) // throws unless it is exactly the fixed canary
 
         val reject = v.getValue("rejectWrongKey").jsonObject
         val wrong = crypto.boxKeypairFromSeed(reject.b("wrongSeedB64"))

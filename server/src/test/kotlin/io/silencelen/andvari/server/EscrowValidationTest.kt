@@ -42,7 +42,7 @@ class EscrowValidationTest : P4TestSupport() {
         client.register(vc, bootstrapToken)
 
         // A real client re-upload (what a future UVK change would send): passes.
-        val valid = EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, vc.userId, vc.uvk)), fingerprint)
+        val valid = EscrowUpload(Bytes.toB64(Escrow.sealUvkV1(crypto, recovery.publicKey, vc.userId, vc.uvk)), fingerprint)
         assertEquals(HttpStatusCode.OK, client.escrowSelf(vc, valid).status)
 
         // Not base64url at all.
@@ -70,9 +70,15 @@ class EscrowValidationTest : P4TestSupport() {
         assertEquals("escrow_fingerprint_mismatch", errorOf(wrongFp))
 
         // The stored blob is still the valid one (garbage never replaced it): admin fetch + offline open.
-        val sealed = client.get("/api/v1/admin/users/${vc.userId}/escrow") { authed(vc) }.bodyAsText()
-        val payload = Escrow.open(crypto, recovery.publicKey, recovery.privateKey, Bytes.fromB64(sealed))
-        assertEquals(vc.userId, payload.userId)
+        val dl = kotlinx.serialization.json.Json.decodeFromString(
+            io.silencelen.andvari.core.model.AdminEscrowDownload.serializer(),
+            client.get("/api/v1/admin/users/${vc.userId}/escrow") { authed(vc) }.bodyAsText(),
+        )
+        val opened = Escrow.open(
+            crypto, recovery, Bytes.fromB64(dl.sealed), vc.userId, Escrow.fingerprint(crypto, vc.identityPub),
+            io.silencelen.andvari.core.crypto.IdentityCheck(dl.encryptedIdentitySeed, dl.identityPub),
+        )
+        assertEquals(vc.userId, opened.userId)
     }
 
     @Test
@@ -164,7 +170,7 @@ class EscrowValidationTest : P4TestSupport() {
 
         // A perfectly-formed blob sealed to the REAL org key, with the REAL public fingerprint —
         // everything the old route checked — is refused on the persisted posture alone.
-        val real = EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, waived.userId, waived.uvk)), fingerprint)
+        val real = EscrowUpload(Bytes.toB64(Escrow.sealUvkV1(crypto, recovery.publicKey, waived.userId, waived.uvk)), fingerprint)
         val refused = client.escrowSelf(waived, real)
         assertEquals(HttpStatusCode.BadRequest, refused.status, refused.bodyAsText())
         assertEquals("escrow_not_allowed_when_waived", errorOf(refused))
@@ -177,7 +183,7 @@ class EscrowValidationTest : P4TestSupport() {
         )
 
         // The gate is polarity-only: a `required` account (the admin itself) still uploads.
-        assertEquals(HttpStatusCode.OK, client.escrowSelf(admin, EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, admin.userId, admin.uvk)), fingerprint)).status)
+        assertEquals(HttpStatusCode.OK, client.escrowSelf(admin, EscrowUpload(Bytes.toB64(Escrow.sealUvkV1(crypto, recovery.publicKey, admin.userId, admin.uvk)), fingerprint)).status)
     }
 
     /**
@@ -200,7 +206,7 @@ class EscrowValidationTest : P4TestSupport() {
         testApplication {
             application { andvariModule(buildServices(config(escrowConfigured = false, dbPath = configured.dbPath), Notifier())) }
             val client = jsonClient(this)
-            val resp = client.escrowSelf(vc, EscrowUpload(Bytes.toB64(Escrow.sealUvk(crypto, recovery.publicKey, vc.userId, vc.uvk)), ""))
+            val resp = client.escrowSelf(vc, EscrowUpload(Bytes.toB64(Escrow.sealUvkV1(crypto, recovery.publicKey, vc.userId, vc.uvk)), ""))
             assertEquals(HttpStatusCode.ServiceUnavailable, resp.status, resp.bodyAsText())
             assertEquals("escrow_not_configured", errorOf(resp))
         }

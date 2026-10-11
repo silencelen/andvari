@@ -114,6 +114,12 @@ data class AccountKeys(
     // setupMemberRecovery, flips it true server-side). recoverySetupNeeded stays informational. Additive,
     // defaulted false so older clients ignore it and a rollback server that omits it is safe.
     val recoveryConfirmed: Boolean = false,
+    // Escrow v2 migration (security review 2026-10, root cause A §8.4): true when this account's
+    // escrow blob is a v1 (legacy) seal to the CURRENT org key, i.e. the client should re-seal v2
+    // after the member confirms the org key from the sheet ("Confirm your household recovery key").
+    // A server HINT only: a lie costs availability of the migration prompt, never a key (v1 stays
+    // recoverable under the identity check, Q3). Additive, defaulted false for old servers/clients.
+    val escrowNeedsV2: Boolean = false,
 )
 
 @Serializable
@@ -579,6 +585,33 @@ data class RecoveryUpload(
     val tempKdfSalt: String,
     val tempKdfParams: KdfParams,
 )
+
+/**
+ * `GET /admin/users/{id}/escrow` (design §2.5): the sealed blob PLUS the account's identity file, which
+ * the offline recovery CLI checks the escrowed key against (`--identity-file`). All server-supplied;
+ * none of it is trusted without the out-of-band identity anchor. [legacySealed] is the previous blob
+ * the server retains until a fleet drill passes on [sealed] (§8.4), null when there is none.
+ */
+@Serializable
+data class AdminEscrowDownload(
+    val userId: String,
+    val sealed: String,
+    val encryptedIdentitySeed: String,
+    val identityPub: String,
+    val legacySealed: String? = null,
+)
+
+/** One account the offline fleet drill proved recoverable: [sealedSha256] = hex SHA-256 of the drilled blob bytes. */
+@Serializable
+data class EscrowDrillPass(val userId: String, val sealedSha256: String)
+
+/** `POST /admin/escrow/drill` — the drill receipt the recovery CLI's `verify` prints (§8.4 drill hook). */
+@Serializable
+data class EscrowDrillReceipt(val passed: List<EscrowDrillPass>)
+
+/** Which accounts had their retained legacy blob dropped, and which kept it (current blob not the drilled one). */
+@Serializable
+data class EscrowDrillResult(val dropped: List<String>, val kept: List<String>)
 
 @Serializable
 data class AdminDeviceSummary(

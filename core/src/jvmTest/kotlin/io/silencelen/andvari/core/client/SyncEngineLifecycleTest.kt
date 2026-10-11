@@ -39,6 +39,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -457,7 +458,9 @@ class SyncEngineLifecycleTest {
         val fp1 = Escrow.fingerprint(crypto, rec1.publicKey)
         val (reg, account) = Account.enroll("inv", "u@e.com", "u", "pw", kdf, rec1.publicKey, fp1, "dev", crypto)
         // Oracle: the UVK recovered from the ORIGINAL escrow (sealed to key #1).
-        val uvkFrom1 = Escrow.open(crypto, rec1.publicKey, rec1.privateKey, Bytes.fromB64(reg.escrow!!.sealed))
+        val anchor = Escrow.fingerprint(crypto, Bytes.fromB64(reg.identityPub))
+        val idCheck = io.silencelen.andvari.core.crypto.IdentityCheck(reg.encryptedIdentitySeed, reg.identityPub)
+        val uvkFrom1 = Escrow.open(crypto, rec1, Bytes.fromB64(reg.escrow!!.sealed), reg.userId, anchor, idCheck).uvk
 
         // Re-ceremony rotates to recovery key #2. The user confirmed fp2 against the new sheet.
         val rec2 = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
@@ -465,8 +468,9 @@ class SyncEngineLifecycleTest {
         val upload = account.resealEscrowFor(Bytes.toB64(rec2.publicKey), fp2)
         assertEquals(fp2, upload.fingerprint)
         // The re-sealed blob opens with key #2 and yields the SAME UVK (data stays recoverable).
-        val uvkFrom2 = Escrow.open(crypto, rec2.publicKey, rec2.privateKey, Bytes.fromB64(upload.sealed))
-        assertEquals(uvkFrom1.key, uvkFrom2.key, "re-sealed escrow must recover the identical UVK")
+        val opened2 = Escrow.open(crypto, rec2, Bytes.fromB64(upload.sealed), reg.userId, anchor, idCheck)
+        assertEquals(io.silencelen.andvari.core.crypto.EscrowFormat.V2, opened2.format, "the re-seal is escrow v2")
+        assertContentEquals(uvkFrom1, opened2.uvk, "re-sealed escrow must recover the identical UVK")
 
         // SECURITY: refuse to seal if the fetched pubkey doesn't match the sheet-verified
         // fingerprint — a hostile server cannot redirect the UVK escrow to an attacker key.

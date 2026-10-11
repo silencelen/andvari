@@ -312,7 +312,7 @@ private fun seal(): JsonObject = buildJsonObject {
     putJsonObject("escrowUvk") {
         put("userId", escrowUserId)
         put("uvkB64", b64(escrowUvk))
-        put("sealedB64", b64(Escrow.sealUvk(crypto, recovery.publicKey, escrowUserId, escrowUvk)))
+        put("sealedB64", b64(Escrow.sealUvkV1(crypto, recovery.publicKey, escrowUserId, escrowUvk)))
     }
     putJsonObject("canary") {
         put("sealedB64", b64(Escrow.sealCanary(crypto, recovery.publicKey)))

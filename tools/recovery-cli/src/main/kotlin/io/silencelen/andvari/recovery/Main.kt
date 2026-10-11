@@ -35,7 +35,10 @@ import java.time.LocalDate
  *   verify <seedFile> <dumpJson>        fleet canary: unseal EVERY escrow blob from a sqlite dump,
  *                                       PASS/FAIL per user, exit 1 on any FAIL (the drill is
  *                                       docs/drills/escrow-canary-drill.md — recorded elsewhere)
- *   recover <sealedBlobB64>             unseal a user's UVK and emit an admin recovery upload bundle
+ *   recover --user <uuid> --identity-fp <hex> --identity-file <download.json> [<sealedBlobB64>]
+ *                                       open ONE named member's escrow (v2 signed, or v1 legacy under the
+ *                                       mandatory identity check), confirm, and emit an admin recovery
+ *                                       upload bundle (spec 04 §4; security review 2026-10, root cause A)
  */
 
 private val crypto = createCryptoProvider()
@@ -57,7 +60,7 @@ fun main(args: Array<String>) {
                 else -> die("usage: canary make <pubkeyB64> | canary verify <sealedB64>")
             }
             "verify" -> verifyDump(argOrDie(args, 1, "seedFile"), argOrDie(args, 2, "escrowDumpJson"))
-            "recover" -> recover(argOrDie(args, 1, "sealedBlobB64"))
+            "recover" -> recover(args.drop(1))
             else -> die(
                 """
                 andvari recovery-cli (OFFLINE — run air-gapped)
@@ -66,7 +69,7 @@ fun main(args: Array<String>) {
                   canary make <pubkeyB64>
                   canary verify <sealedB64>
                   verify <seedFile> <escrowDumpJson>
-                  recover <sealedBlobB64>
+                  recover --user <uuid> (--identity-fp <32+ hex> | --no-identity-anchor) --identity-file <escrow-download.json> [--legacy] [<sealedBlobB64>]
                 """.trimIndent(),
             )
         }
@@ -139,7 +142,9 @@ internal fun keygenSheet(seed: ByteArray, generatedOn: LocalDate = LocalDate.now
     appendLine("      'canary make <pubkey>' and store the sealed blob server-side, then")
     appendLine("      'canary verify <sealed>' FROM THE PRINTED SEED before any real account.")
     appendLine()
-    appendLine("Recovery (when a member is locked out): run 'recovery-cli recover' and follow prompts.")
+    appendLine("Recovery (when a member is locked out): run 'recovery-cli recover --user <their id>")
+    appendLine("      --identity-fp <their identity fingerprint, 32+ hex> --identity-file <admin escrow download>'")
+    appendLine("      and follow prompts. The identity fingerprint comes from YOUR pin of them or their own sheet.")
 }
 
 private fun fingerprint(pubB64: String) {
@@ -160,10 +165,7 @@ private fun canaryVerify(sealedB64: String) {
     val seedB64 = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
     val seed = Bytes.fromB64(seedB64.trim())
     val kp = crypto.boxKeypairFromSeed(seed)
-    val payload = Escrow.open(crypto, kp.publicKey, kp.privateKey, Bytes.fromB64(sealedB64))
-    require(payload.keyType == Escrow.KEY_TYPE_CANARY) { "not a canary blob (keyType=${payload.keyType})" }
-    require(payload.userId == Escrow.CANARY_USER_ID) { "canary userId mismatch" }
-    require(Bytes.fromB64(payload.key).contentEquals(Escrow.CANARY_KEY)) { "canary key mismatch" }
+    Escrow.openCanary(crypto, kp, Bytes.fromB64(sealedB64))
     println("CANARY VERIFIED ✓  print → restore → unseal works end-to-end.")
     println("Fingerprint of the sheet's key: ${Escrow.fingerprint(crypto, kp.publicKey)}")
 }
@@ -182,7 +184,7 @@ private fun verifyDump(seedFile: String, dumpFile: String) {
     val seed = Bytes.fromB64(File(seedFile).readText().trim())
     require(seed.size == 32) { "seed file must contain a base64url 32-byte seed" }
     val rows = EscrowVerify.parseDump(File(dumpFile).readText())
-    if (rows.isEmpty()) die("no escrow rows in $dumpFile — export with: sqlite3 -json <db> \"SELECT userId, sealed, fingerprint, updatedAt FROM escrow\"")
+    if (rows.isEmpty()) die("no escrow rows in $dumpFile — export with: sqlite3 -json <db> \"${EscrowVerify.DUMP_SQL}\"")
 
     val kp = crypto.boxKeypairFromSeed(seed)
     println("Escrow fleet verify — recovery key ${Escrow.shortFingerprint(crypto, kp.publicKey)} (${rows.size} blob(s))")
@@ -193,18 +195,43 @@ private fun verifyDump(seedFile: String, dumpFile: String) {
     val fails = results.count { !it.pass }
     println()
     println("${results.size - fails}/${results.size} PASS")
+    // §8.4 drill hook: the receipt lets the server drop each PASSED account's retained legacy blob.
+    // Printed even on a partial failure — it lists only the accounts that passed.
+    println()
+    println("Drill receipt — upload in the web admin panel (Admin → \"Record a fleet drill\") or POST it to")
+    println("/api/v1/admin/escrow/drill as admin; it holds only userIds and blob hashes:")
+    println(EscrowVerify.receipt(results))
     if (fails > 0) die("$fails escrow blob(s) FAILED — those accounts are NOT recoverable with this key (spec 04 §4: P1 incident, re-ceremony + re-escrow)")
     println("All escrowed accounts are recoverable with this sheet.")
 }
 
-private fun recover(sealedBlobB64: String) {
+private fun recover(args: List<String>) {
+    val opts = try {
+        RecoverCommand.parse(args)
+    } catch (e: RecoverRefused) {
+        die(e.message ?: RecoverCommand.USAGE)
+    }
+    val (identityCheck, sealedB64) = try {
+        RecoverCommand.readIdentityFile(File(opts.identityFile).readText(), opts)
+    } catch (e: RecoverRefused) {
+        die(e.message ?: "bad --identity-file")
+    }
     val seedB64 = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
     val seed = Bytes.fromB64(seedB64.trim())
     val kp = crypto.boxKeypairFromSeed(seed)
-    val payload = Escrow.open(crypto, kp.publicKey, kp.privateKey, Bytes.fromB64(sealedBlobB64))
-    require(payload.keyType == Escrow.KEY_TYPE_UVK) { "not a UVK escrow blob (keyType=${payload.keyType})" }
-    val uvk = Bytes.fromB64(payload.key)
-    val userId = payload.userId
+    seed.fill(0)
+    val opened = try {
+        RecoverCommand.openAndConfirm(crypto, kp, opts, identityCheck, sealedB64, ::readlnOrNull) { System.err.println(it) }
+    } catch (e: RecoverRefused) {
+        die(e.message ?: "refused")
+    } finally {
+        kp.privateKey.fill(0)
+    }
+    // Step 13: only now generate the temp password, derive, and wrap the UVK under Ad.uvk(--user).
+    val uvk = opened.uvk
+    opened.wipe()
+    val userId = opts.userId // the account the admin named — proven, never read from the payload
+    val anchored = opened.anchored
 
     // Generate a one-time temporary password + fresh KDF material, re-wrap UVK under it.
     val tempPassword = humanTempPassword()
@@ -233,7 +260,12 @@ private fun recover(sealedBlobB64: String) {
     val bundleJson = json.encodeToString(RecoveryUpload.serializer(), bundle)
 
     println()
-    println("RECOVERY BUNDLE for userId=$userId")
+    if (!anchored) {
+        println("!!! UNANCHORED RECOVERY — no identity fingerprint was checked (design §2.3, Q2). Before handing")
+        println("!!! over the password, have the member compare their identity fingerprint on a device that")
+        println("!!! still knows it; any device that unlocked this account before refuses a swapped identity.")
+    }
+    println("RECOVERY BUNDLE for userId=$userId${if (anchored) "" else "  [UNANCHORED]"}")
     println("UVK was unsealed offline; it never touches the online machine except re-wrapped.")
     println()
     println("1. Give the user this ONE-TIME temporary password (out-of-band, e.g. in person):")
@@ -247,7 +279,7 @@ private fun recover(sealedBlobB64: String) {
     println(bundleJson)
     println()
     println("3. User logs in with the temp password on any client → forced password change.")
-    val bundleFile = writeBundleOwnerOnly(Path.of("andvari-recovery-$userId.json"), bundleJson + "\n")
+    val bundleFile = writeBundleOwnerOnly(Path.of("andvari-recovery-$userId${if (anchored) "" else "-UNANCHORED"}.json"), bundleJson + "\n")
     println("(also written to $bundleFile, owner-only 0600)")
     println("   DELETE that file once the upload is accepted: it carries tempAuthKey, which is the")
     println("   account's live login credential until the member completes the forced change.")

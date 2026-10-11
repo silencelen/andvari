@@ -932,6 +932,7 @@ class Service(
     private fun buildAccountKeys(u: UserRow): AccountKeys = AccountKeys(
         u.kdfSalt, u.kdfParams, u.wrappedUvk, u.encryptedIdentitySeed, u.identityPub, config.recoveryFingerprint,
         escrowStale = escrowStale(u.userId), recoverySetupNeeded = !repo.hasMemberRecovery(u.userId),
+        escrowNeedsV2 = escrowNeedsV2(u.userId),
         // §F.9: read straight off the users row; a fresh register reads back false (capture not yet
         // confirmed), driving the client's capture-and-confirm gate on first vault entry.
         recoveryConfirmed = repo.isRecoveryConfirmed(u.userId),
@@ -947,6 +948,23 @@ class Service(
         if (!config.escrowConfigured) return false
         val fp = repo.db.read { c -> c.queryOne("SELECT fingerprint FROM escrow WHERE userId=?", userId) { it.getString(1) } }
         return fp != null && fp != config.recoveryFingerprint
+    }
+
+    /**
+     * Escrow v2 migration hint (security review 2026-10, root cause A §8.4): the account holds an escrow
+     * blob sealed to the CURRENT org key whose length is exactly a v1 seal's ([ESCROW_V1_SEALED_BYTES]:
+     * the v1 canonical payload is fixed-width), so its client should offer the v2 re-seal. A stale blob
+     * (old org key) is F57's prompt instead, which re-seals v2 anyway. Length is the only signal a
+     * zero-knowledge server has; it is a hint, never a security input.
+     */
+    private fun escrowNeedsV2(userId: String): Boolean {
+        if (!config.escrowConfigured) return false
+        val row = repo.db.read { c ->
+            c.queryOne("SELECT sealed, fingerprint FROM escrow WHERE userId=?", userId) { it.getString(1) to it.getString(2) }
+        } ?: return false
+        if (row.second != config.recoveryFingerprint) return false
+        val len = runCatching { Bytes.fromB64(row.first).size }.getOrNull() ?: return false
+        return len == ESCROW_V1_SEALED_BYTES
     }
 
     /** Resolve a Bearer access token → Principal (or null). */
