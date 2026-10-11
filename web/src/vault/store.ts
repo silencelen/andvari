@@ -206,6 +206,11 @@ export const HELD_KEYS_KEY = "grant.held.keys";
 export const LEFT_UNPROVEN = "unproven";
 /** LifecycleNotice.reason on a `replay-denied` raised by a consumed removal nonce (§6.3 step 5). Core `REMOVAL_REPLAY`. */
 export const REMOVAL_REPLAY = "removal";
+/** LifecycleNotice.reason on a removed/left notice whose nonce another of this user's devices already consumed (only in
+ *  account state; A7 review MEDIUM-2). Core `ALREADY_RECORDED`. */
+export const ALREADY_RECORDED = "already-recorded";
+/** LifecycleNotice.reason on a `removed` notice attributed by a v1 (legacy) proof, in-window (A7 review LOW-3). */
+export const REMOVED_LEGACY = "legacy";
 
 /** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
 export interface DeletedVaultInfo {
@@ -831,11 +836,14 @@ export class VaultStore {
     }
   }
 
-  /** The consumed set §6.3 step 5 checks: this device's ∪ the account state's, for `vaultId`. */
+  /** §6.3 step 5: THIS device's consumed nonces for `vaultId`. */
   private consumedFor(vaultId: string): Set<string> {
-    const out = new Set<string>(this.consumedNonces.get(vaultId)?.keys() ?? []);
-    for (const [n] of this.accountState.doc.consumedNonces[vaultId] ?? []) out.add(n);
-    return out;
+    return new Set<string>(this.consumedNonces.get(vaultId)?.keys() ?? []);
+  }
+
+  /** A7 review MEDIUM-2: the account state's consumed nonces for `vaultId` (other devices of this user). */
+  private accountConsumedFor(vaultId: string): Set<string> {
+    return new Set((this.accountState.doc.consumedNonces[vaultId] ?? []).map(([n]) => n));
   }
 
   /** Re-run §1.4 for rows whose key is not held (pending, refused) or held only from a v1 seal; make the items of
@@ -2315,13 +2323,14 @@ export class VaultStore {
     // Unverifiable: the VK was not held before this pull (fresh device, F20-hidden grant, or a
     // since=0 / resync pull) → silent no-op. Drop any stray unusable row.
     if (cachedName === undefined || since === 0 || resyncing) {
-      this.hardDropLocal(vaultId);
+      this.hardDropLocal(vaultId, selfInitiated);
       return;
     }
 
-    // This device initiated the delete/leave — drop cleanly, no banner (§4 / §13).
+    // This device initiated the delete/leave — drop cleanly, no banner (§4 / §13). The user's own action is the one
+    // drop that clears this device's key memory for the vault (A7 review MEDIUM-1).
     if (selfInitiated) {
-      this.hardDropLocal(vaultId);
+      this.hardDropLocal(vaultId, true);
       return;
     }
 
@@ -2371,6 +2380,7 @@ export class VaultStore {
         nonce: info?.removeNonce ?? null,
         issuedAt: info?.issuedAt ?? null,
         consumed: this.consumedFor(vaultId),
+        consumedAccount: this.accountConsumedFor(vaultId),
         liveSince: this.liveSince.get(vaultId) ?? null,
         now: Date.now(),
       });
@@ -2388,8 +2398,15 @@ export class VaultStore {
     const base = { id: crypto.randomUUID(), vaultId, vaultName: cachedName };
     switch (decision.verdict) {
       case "valid":
-      case "valid_legacy":
         this.pushNotice({ ...base, kind: reason === "left" ? "left" : "removed" });
+        break;
+      case "valid_legacy":
+        // A7 review LOW-3: a v1 proof is qualified ("sent by an older app version"), never shown as fully genuine.
+        this.pushNotice({ ...base, kind: "removed", reason: REMOVED_LEGACY });
+        break;
+      case "already_recorded":
+        // A7 review MEDIUM-2: another of this user's devices already consumed this genuine proof. Calm.
+        this.pushNotice({ ...base, kind: reason === "left" ? "left" : "removed", reason: ALREADY_RECORDED });
         break;
       case "left_unproven":
         this.pushNotice({ ...base, kind: "left", reason: LEFT_UNPROVEN });
@@ -2490,8 +2507,13 @@ export class VaultStore {
   }
 
   /** Drop a vault from the LIVE view: its items, undecryptables, vault row, wire grant, key,
-   *  AND its queued mutations. */
-  private hardDropLocal(vaultId: string): void {
+   *  AND its queued mutations.
+   *
+   *  A7 review MEDIUM-1 (core twin): the device's KEY MEMORY for the vault (the §8.2 vouch and the held-key tag)
+   *  survives every server-driven drop — every removal verdict, the silent resync drop — or the server could reset it
+   *  and re-add the vault under a key it chose. Only a drop the USER initiated here (`forgetKeyMemory`: their own leave
+   *  or delete) clears it, keeping "leave it and ask its owner to add you again" a working vk_mismatch recovery. */
+  private hardDropLocal(vaultId: string, forgetKeyMemory = false): void {
     for (const it of [...this.itemsById.values()]) if (it.vaultId === vaultId) this.itemsById.delete(it.itemId);
     for (const it of [...this.undecryptableById.values()]) if (it.vaultId === vaultId) this.undecryptableById.delete(it.itemId);
     for (const it of [...this.missingVkById.values()]) if (it.vaultId === vaultId) this.missingVkById.delete(it.itemId);
@@ -2500,14 +2522,15 @@ export class VaultStore {
     this.incomingByVault.delete(vaultId);
     this.undecryptableGrants.delete(vaultId); // F20: access gone → the "can't open" warning is moot
     this.account.removeVault(vaultId);
-    // A vouched-for legacy key dies with the vault: a later v1 grant for the same vaultId (a re-add, or a server
-    // replay) starts read-only again instead of inheriting this device's old trust.
-    const vouches = this.persistedVouches();
-    if (vouches.delete(vaultId)) this.persistVouches(vouches);
-    // A7: so does the held-key memory, and the vault is no longer live on this device (§6.3 liveSince).
-    const held = this.persistedSet(HELD_KEYS_KEY);
-    const keep = new Set([...held].filter((l) => !l.startsWith(`${vaultId}|`)));
-    if (keep.size !== held.size) this.persistSet(HELD_KEYS_KEY, keep);
+    if (forgetKeyMemory) {
+      this.account.forgetKeyMemory(vaultId);
+      const vouches = this.persistedVouches();
+      if (vouches.delete(vaultId)) this.persistVouches(vouches);
+      const held = this.persistedSet(HELD_KEYS_KEY);
+      const keep = new Set([...held].filter((l) => !l.startsWith(`${vaultId}|`)));
+      if (keep.size !== held.size) this.persistSet(HELD_KEYS_KEY, keep);
+    }
+    // The vault is no longer live on this device (§6.3 liveSince).
     this.liveSince.delete(vaultId);
     if (this.liveSincePersisted.delete(vaultId)) this.recordPullOp((b) => b.setLiveSince(vaultId, null));
     // §D.1: inside a pull, mirror the drop to disk (grant + vault row + items — the
@@ -3401,7 +3424,7 @@ export class VaultStore {
       try {
         await this.sync();
       } catch {
-        this.hardDropLocal(vaultId);
+        this.hardDropLocal(vaultId, true);
       }
     } finally {
       this.suppressDrop.delete(vaultId); // #4: never outlives the action's own reconcile
@@ -3474,7 +3497,7 @@ export class VaultStore {
       try {
         await this.sync();
       } catch {
-        this.hardDropLocal(vaultId);
+        this.hardDropLocal(vaultId, true);
       }
     } finally {
       this.suppressDrop.delete(vaultId); // #4: never outlives the action's own reconcile

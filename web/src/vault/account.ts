@@ -626,6 +626,7 @@ export class Account {
           // vouch is never promoted, even when a verified grant carries that same key.
           if (ctEquals(o.vk, held) && this.vouchGate(grant.vaultId, held) !== "mismatch") {
             this.keySources.set(grant.vaultId, "signed-grant");
+            this.recordHeldKey(grant.vaultId, held, "signed-grant"); // LOW-1: now a trusted key
             this.signedGrantFrom.set(grant.vaultId, o.from);
             this.pendingGrantsByVault.delete(grant.vaultId);
             this.grantAnomaliesByVault.delete(grant.vaultId);
@@ -664,7 +665,7 @@ export class Account {
       throw e;
     }
     const viaSeal = opened.source === "legacy-seal" || opened.source === "signed-grant";
-    this.recordHeldKey(grant.vaultId, opened.vk);
+    this.recordHeldKey(grant.vaultId, opened.vk, opened.source);
     this.vaultKeys.set(grant.vaultId, opened.vk);
     this.keySources.set(grant.vaultId, opened.source);
     if (opened.from) this.signedGrantFrom.set(grant.vaultId, opened.from);
@@ -798,9 +799,13 @@ export class Account {
     return new Map(this.heldKeyTags);
   }
 
-  /** Record the tag of a key just adopted for `vaultId`, unless one is recorded or the key contradicts the gate. */
-  private recordHeldKey(vaultId: string, vk: Uint8Array): void {
-    if (this.heldKeyTags.has(vaultId) || this.vouchGate(vaultId, vk) === "mismatch") return;
+  /** Record the tag of a key just adopted for `vaultId` from a TRUSTED source (A7 review LOW-1; core twin): our own
+   *  UVK wrap, a verified v2 grant, a vouched legacy key, or a vault this device created. An unvouched read-only v1
+   *  seal records nothing (its vouch records it then). No-op when a tag is recorded or the key contradicts the gate. */
+  private recordHeldKey(vaultId: string, vk: Uint8Array, source: KeySource): void {
+    const mode = source === "legacy-seal" ? this.legacyModeFor(vaultId, vk) : null;
+    const trusted = source === "uvk-wrap" || source === "signed-grant" || mode === "frozen" || mode === "confirmed";
+    if (!trusted || this.heldKeyTags.has(vaultId) || this.vouchGate(vaultId, vk) === "mismatch") return;
     this.heldKeyTags.set(vaultId, legacyTagOf(vk));
   }
 
@@ -928,6 +933,8 @@ export class Account {
     const t = tag ?? this.legacyKeyTag(vaultId);
     if (!t || !/^[0-9a-f]{64}$/.test(t)) return;
     this.legacyVouches.set(vaultId, { tag: t, kind });
+    // A7 review LOW-1: a vouched key is a trusted key; its tag joins the held-key memory (never overwriting one).
+    if (!this.heldKeyTags.has(vaultId)) this.heldKeyTags.set(vaultId, t);
   }
 
   /** The vouch recorded for `vaultId`, for the store to persist. */
@@ -1026,6 +1033,13 @@ export class Account {
     return this.vaultRoles.get(vaultId) ?? null;
   }
 
+  /** A7 review MEDIUM-1 (core twin): forget this device's key memory for `vaultId` (the §8.2 vouch and the held-key
+   *  tag). Only for a drop the USER initiated here (their own leave or delete); a server-driven drop keeps both. */
+  forgetKeyMemory(vaultId: string): void {
+    this.legacyVouches.delete(vaultId);
+    this.heldKeyTags.delete(vaultId);
+  }
+
   /** Membership revoked (sync `removedGrants`): forget the VK and the role. */
   removeVault(vaultId: string) {
     this.vaultKeys.delete(vaultId);
@@ -1036,8 +1050,7 @@ export class Account {
     this.unreadableKeyVaults.delete(vaultId);
     this.keySources.delete(vaultId);
     this.signedGrantFrom.delete(vaultId);
-    this.legacyVouches.delete(vaultId);
-    this.heldKeyTags.delete(vaultId); // A7: the held-key memory dies with the vault, like a vouch
+    // A7 review MEDIUM-1: the vouch and the held-key tag are NOT dropped here; see forgetKeyMemory.
     this.pendingGrantsByVault.delete(vaultId);
     this.grantAnomaliesByVault.delete(vaultId);
   }

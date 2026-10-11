@@ -12,12 +12,14 @@ import type { Account } from "../vault/account";
 import { CARD_CREATE_ENABLED, brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, expiryLabel, groupNumber, isExpired, luhnValid, padMonth, yearTo4 } from "../vault/card";
 import {
   CopyDeniedError,
+  ALREADY_RECORDED,
   ItemChangedError,
   LEFT_UNPROVEN,
   type LifecycleNotice,
   type MoveGesture,
   type PendingUpload,
   REMOVAL_REPLAY,
+  REMOVED_LEGACY,
   type VaultInfo,
   type VaultItem,
   type VaultStore,
@@ -901,11 +903,17 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
           (n.parkedCount ? ` ${n.parkedCount} of your edits hadn’t synced — they’ll be recovered if the vault is restored this week.` : ""),
       };
     case "removed":
+      // A7 review MEDIUM-2 / LOW-3: TWINS of core HouseholdCopy.removalAlreadyRecordedNotice / removedLegacyNotice,
+      // byte-equal (pinned by vault-copy.test.ts).
+      if (n.reason === ALREADY_RECORDED) return { warn: false, body: `Your access to “${name}” was removed — already recorded on another of your devices.` };
+      if (n.reason === REMOVED_LEGACY) return { warn: false, body: `Your access to “${name}” was removed (sent by an older app version).` };
       return { warn: false, body: `Your access to “${name}” was removed.` };
     case "left":
       // Root cause A §8.6 (branch A7): a leave with no proof, in the compatibility window, adds the one line that
       // lets the human catch a forged one. TWIN of core HouseholdCopy.leftUnprovenNotice, byte-equal (pinned).
       if (n.reason === LEFT_UNPROVEN) return { warn: true, body: `You left “${name}”. Didn't do this? Tell your admin.` };
+      // A7 review MEDIUM-2: TWIN of core HouseholdCopy.leftAlreadyRecordedNotice, byte-equal.
+      if (n.reason === ALREADY_RECORDED) return { warn: false, body: `You left “${name}” — already recorded on another of your devices.` };
       return { warn: false, body: `You left “${name}”.` };
     case "restored":
       return { warn: false, body: `“${name}” was restored.` };

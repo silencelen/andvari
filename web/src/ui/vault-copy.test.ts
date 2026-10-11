@@ -208,3 +208,14 @@ describe("Vault.tsx removal-proof v2 notices — the core HouseholdCopy twins", 
     expect(vaultTsx).toContain(asTemplate(m![1]!));
   });
 });
+
+/** A7 review MEDIUM-2 / LOW-3: the already-recorded (both kinds) and legacy-removal sentences, byte-equal to core. */
+describe("Vault.tsx A7 review notices — the core HouseholdCopy twins", () => {
+  for (const fn of ["removalAlreadyRecordedNotice", "leftAlreadyRecordedNotice", "removedLegacyNotice"]) {
+    it(`carries ${fn} byte-equal to the canon`, () => {
+      const m = householdKt.match(new RegExp(`fun ${fn}\\(vaultName: String\\): String = "([^"]+)"`));
+      expect(m, `HouseholdCopy.${fn} moved or was renamed — update the pin`).not.toBeNull();
+      expect(vaultTsx).toContain(asTemplate(m![1]!));
+    });
+  }
+});

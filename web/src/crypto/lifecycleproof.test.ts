@@ -90,6 +90,7 @@ describe("lifecycle-proof vectors", () => {
         nonce: c.nonce as string | null,
         issuedAt: c.issuedAt as number | null,
         consumed: new Set(c.consumed as string[]),
+        consumedAccount: new Set(c.consumedAccount as string[]),
         liveSince: c.liveSince as number | null,
         now: c.now as number,
       });
