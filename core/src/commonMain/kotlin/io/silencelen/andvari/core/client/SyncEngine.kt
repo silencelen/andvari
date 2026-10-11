@@ -8,7 +8,6 @@ import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PushRequest
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.RemovedGrantInfo
-import io.silencelen.andvari.core.model.SelfWrapRequest
 import io.silencelen.andvari.core.model.TransferAcceptRequest
 import io.silencelen.andvari.core.model.TransferOfferRequest
 import io.silencelen.andvari.core.model.VaultDeleteRequest
@@ -188,8 +187,6 @@ class SyncEngine(
     private val noticeList = mutableListOf<LifecycleNotice>()
     /** "kind|vaultId" key anomalies already surfaced this engine (root cause A §3.1: show once). */
     private val keyAnomaliesShown = mutableSetOf<String>()
-    /** Vaults whose member self-wrap this engine already tried to post (root cause A §3.2). */
-    private val selfWrapAttempted = mutableSetOf<String>()
     /** Vaults this device just deleted/left — drop them cleanly on the reconcile pull (no
      *  banner). One-shot AND scoped to the action's own reconcile (removed in a finally
      *  there), so a failed reconcile can never leave a stale entry that would misread a
@@ -451,7 +448,11 @@ class SyncEngine(
         flushQueue()
         pull()
         surfaceStagedDenials()
-        postSelfWraps()
+        // Member self-wrap (root cause A §3.2) is deliberately NOT posted here yet. The only key a
+        // member can wrap today came from a v1 seal, which the server can mint: wrapping it under
+        // our UVK would launder a server-chosen key into the canonical slot for every device, and
+        // a member row carrying a wrap weakens the H64 personal-vault refusal until the §4
+        // personal wrap lands. Posting waits for a verified v2 grant or a confirmed legacy one.
     }
 
     /**
@@ -596,21 +597,6 @@ class SyncEngine(
             if (!keyAnomaliesShown.add("key-unreadable|$vaultId")) continue
             // No key, so the name cannot be decrypted: the copy falls back to "a vault".
             pushNotice(LifecycleNotice(account.newItemId(), vaultId, "", "key-unreadable"))
-        }
-    }
-
-    /**
-     * Member self-wrap (root cause A §3.2): for every vault whose key this device adopted from a
-     * v1 seal while our row carries no UVK wrap, build the wrap ([Account.buildSelfWrap], round-trip
-     * verified) and store it with `PUT /vaults/{id}/grant/self-wrap`. Best effort and tried once
-     * per vault per engine: a failure (an older server without the route, the public origin,
-     * offline) leaves the seal path working exactly as before, and the next session retries.
-     * The server's grant-rev bump re-delivers the row to every device of this account.
-     */
-    private suspend fun postSelfWraps() {
-        for (g in cache.grants()) {
-            if (!account.needsSelfWrap(g) || !selfWrapAttempted.add(g.vaultId)) continue
-            runCatching { api.putGrantSelfWrap(g.vaultId, SelfWrapRequest(account.buildSelfWrap(g.vaultId))) }
         }
     }
 
