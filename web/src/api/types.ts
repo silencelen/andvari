@@ -29,6 +29,10 @@ export interface AccountKeys {
   // and must be re-sealed to the current one. `escrowFingerprint` is the CURRENT org fingerprint
   // (the re-seal target + pubkey-verification anchor). Optional for back-compat with old servers.
   escrowStale?: boolean;
+  /** Escrow v2 migration (security review 2026-10, root cause A §8.4): this account's escrow is still a
+   *  v1 seal under the current org key — offer "Confirm your household recovery key" and re-seal v2.
+   *  A server HINT (never a security input). Additive; old servers omit it (⇒ false). */
+  escrowNeedsV2?: boolean;
   /** design §F.2: true when this existing account has NO member_recovery row yet (migration nudge).
    *  On the next full-password unlock the client offers "set up your recovery phrase"
    *  (PUT /recovery/self-setup). Additive/defaulted — old servers omit it (⇒ treated as false). */
