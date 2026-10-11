@@ -193,7 +193,13 @@ ledger). Residuals accepted: (a) **designation is a human choice** (spec 02 §4,
 predates the wrap, or a fresh device the server withholds the wrap from, is ASKED which vault is personal;
 the server's label never picks or orders the choices and nothing is minted without the answer. A human who
 picks a vault co-members can read gets exactly that; re-designation (fresh password reauth, Q9) repairs it.
-A device that cached a wrap reports a withheld one as an anomaly and keeps its cache. (b) **account-state availability**: the account-state
+A device that cached a wrap reports a withheld one as an anomaly and keeps its cache; that cache outlives the
+offline cache on every client (A5b). Every choice shows its co-holders and whether it was created here or
+received by transfer, and a designation mints only after a confirmation naming the vault and its co-holders.
+A served wrap naming another vault than the device's (a change elsewhere, or an older wrap replayed) is a
+notice the human confirms, never a silent switch; a junk wrap never displaces a valid cached one. The
+co-holder list is server-reported: a server that hides a member shortens the list, which is why the
+confirmation, not the list, is the control. (b) **account-state availability**: the account-state
 blob (contact pins, the verified org fingerprint, consumed nonces) is UVK-sealed, so the server cannot
 add to it, but it can withhold it or roll it back; each device keeps a high-water seq and its own sealed
 copy and refuses the rollback, but a device that never held a newer copy cannot tell, and loses pins
