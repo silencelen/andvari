@@ -221,8 +221,8 @@ class SyncEngine(
         const val VAULT_NAME_FALLBACK = "(vault)"
 
         // Root cause A §8.2 (branch A6), in the cache's client state (which survives a resync).
-        /** v1-only vault keys this device vouches for (pre-upgrade evidence, or the human's Accept), as
-         *  `vaultId|sha256(VK)` lines: the vouch covers that exact key, not whatever the server serves next. */
+        /** v1-only vault keys this device vouches for, as `vaultId|sha256(VK)|frozen|confirmed` lines (pre-upgrade
+         *  evidence, or the human's Accept): the vouch covers that exact key, not whatever the server serves next. */
         internal const val LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized"
         /** Set once the §8.2 freeze ran (or was ruled out) on this cache: later v1 grants are never frozen. */
         internal const val FREEZE_DONE_KEY = "grant.freeze.done"
@@ -482,7 +482,7 @@ class SyncEngine(
     // ---- personal vault identity + account state (security review 2026-10, root cause A §4, §8.5) ----
 
     /** The account-state blob (contact pins). Refreshed best-effort on every [sync]. */
-    val accountState: AccountStateSync = AccountStateSync(api, account, cache)
+    val accountState: AccountStateSync = AccountStateSync(api, account, cache, deviceState = deviceState)
 
     init {
         // Root cause A §1.4 step 7: the grant verifier picks the pin by the sender the statement NAMES, from this
@@ -493,8 +493,9 @@ class SyncEngine(
             }
         }
         for (entry in persistedSet(LEGACY_AUTHORIZED_KEY)) {
-            val (id, tag) = entry.split('|', limit = 2).let { it[0] to it.getOrNull(1) }
-            if (tag != null) account.authorizeLegacyKey(id, tag) // bound to the exact key vouched for
+            val parts = entry.split('|')
+            val tag = parts.getOrNull(1) ?: continue // bound to the exact key vouched for; no tag, no vouch
+            account.authorizeLegacyKey(parts[0], tag, frozen = parts.getOrNull(2) == "frozen")
         }
     }
 
@@ -720,16 +721,16 @@ class SyncEngine(
                     account.keySource(g.vaultId) == Account.KeySource.LEGACY_SEAL
             }
             .map { it.vaultId }
-        for (id in evidence) vouchLegacy(id)
+        for (id in evidence) vouchLegacy(id, frozen = true)
         cache.setClientState(FREEZE_DONE_KEY, "1")
     }
 
     /** Persist and apply a §8.2 vouch for the key [vaultId] holds NOW (bound to that key's tag). */
-    private fun vouchLegacy(vaultId: String) {
+    private fun vouchLegacy(vaultId: String, frozen: Boolean) {
         val tag = account.legacyKeyTag(vaultId) ?: return
         val others = persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }
-        persistSet(LEGACY_AUTHORIZED_KEY, (others + "$vaultId|$tag").toSet())
-        account.authorizeLegacyKey(vaultId, tag)
+        persistSet(LEGACY_AUTHORIZED_KEY, (others + "$vaultId|$tag|${if (frozen) "frozen" else "confirmed"}").toSet())
+        account.authorizeLegacyKey(vaultId, tag, frozen)
     }
 
     /** Re-run §1.4 for cached rows whose key is not held (pending, refused) or held only from a v1 seal; decrypt
@@ -777,7 +778,11 @@ class SyncEngine(
     /** Pending invitations the human has not declined. */
     fun pendingInvitations(): List<PendingInvitation> {
         val declined = persistedSet(DECLINED_KEY)
-        return account.pendingGrants().filter { it.grantIdB64 !in declined && !account.hasVault(it.vaultId) }
+        // A vault held only through an unvouched legacy seal whose row now carries a pending v2 grant is listed
+        // too: verifying the sender confirms the key (it is off the review card, A6 review LOW-2).
+        return account.pendingGrants().filter {
+            it.grantIdB64 !in declined && (!account.hasVault(it.vaultId) || account.isLegacyReadOnly(it.vaultId))
+        }
             .map { PendingInvitation(it.vaultId, it.fromUserId, it.grantIdB64) }
     }
 
@@ -819,7 +824,8 @@ class SyncEngine(
 
     /** §8.2 "Review your shared vaults": the vaults readable only through an unconfirmed v1 seal. */
     fun legacyReviewVaults(): List<LegacyVaultReview> {
-        val ids = account.legacyReadOnlyVaultIds()
+        // A6 review LOW-2: vaults whose v2 field failed or awaits verification are not offered for trust on first use.
+        val ids = account.legacyReadOnlyVaultIds() - account.grantAnomalies().keys - account.pendingGrants().map { it.vaultId }.toSet()
         if (ids.isEmpty()) return emptyList()
         val counts = items().groupingBy { it.vaultId }.eachCount()
         return cache.vaults().filter { it.vaultId in ids }.map { v ->
@@ -837,7 +843,11 @@ class SyncEngine(
      */
     suspend fun acceptLegacyVault(vaultId: String) {
         check(account.isLegacyReadOnly(vaultId)) { "vault $vaultId is not awaiting review" }
-        vouchLegacy(vaultId)
+        // A6 review LOW-2: a row whose v2 field failed or awaits verification is never an "Accept anyway".
+        check(vaultId !in account.grantAnomalies() && account.pendingGrants().none { it.vaultId == vaultId }) {
+            "vault $vaultId has a grant that failed verification or awaits it; it cannot be accepted on trust"
+        }
+        vouchLegacy(vaultId, frozen = false)
         cache.grants().firstOrNull { it.vaultId == vaultId }?.let { postSelfWrapIfAuthorized(it) }
     }
 

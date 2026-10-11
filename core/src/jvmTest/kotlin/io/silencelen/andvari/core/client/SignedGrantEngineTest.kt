@@ -451,20 +451,202 @@ class SignedGrantEngineTest {
         assertTrue(bAccount.hasVault(w.vaultId))
     }
 
+    /**
+     * A6 review MED-1: the earlier high-water rule could be stepped up by a server serving OLDER authentic blobs in
+     * ascending order (each above the last mark), so a later-tombstoned pin became "current". The rule now: a pin
+     * is current on a device only when a human made or re-confirmed it ON THAT DEVICE.
+     */
     @Test
-    fun aPinAddedElsewhereAfterThisDeviceEstablishedItsMarkIsCurrent() = runBlocking<Unit> {
+    fun anAscendingReplayOfOlderBlobsNeverMakesAPinCurrent() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val a = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        a.sync()
+        a.accountState.pin(Contact("44444444-4444-4444-8444-444444444444", Bytes.toB64(crypto.randomBytes(32)), "Other", 1, Contact.METHOD_TYPED))
+        val blob1 = server.accountState to server.accountSeq
+        a.accountState.pin(pinOf(w.owner, "Owner"))
+        val blob2 = server.accountState to server.accountSeq
+        a.accountState.unpin(w.owner.userId) // the genuine latest state: the owner's pin is tombstoned
+
+        val bAccount = unlock(w.member)
+        val b = SyncEngine(api(server), bAccount, InMemoryVaultCache())
+        server.accountState = blob1.first; server.accountSeq = blob1.second
+        b.sync() // establishes a mark on the older blob
+        server.accountState = blob2.first; server.accountSeq = blob2.second
+        server.feed = feed(w, 9, memberRow(w, 9, v1Seal(w), ownerSignedGrant(w)))
+        b.sync() // a higher (but still stale) seq: the stale pin reappears
+        assertNotNull(b.accountState.doc.contact(w.owner.userId))
+        assertNull(b.accountState.currentPin(w.owner.userId), "never confirmed on this device: not current")
+        assertFalse(bAccount.hasVault(w.vaultId))
+        assertEquals(w.owner.userId, b.pendingInvitations().single().fromUserId)
+    }
+
+    @Test
+    fun aPinAddedOnAnotherDeviceIsNotCurrentHereUntilVerifiedHere() = runBlocking<Unit> {
         val w = world()
         val server = FakeServer(feed(w, 5, null))
         val bAccount = unlock(w.member)
         val b = SyncEngine(api(server), bAccount, InMemoryVaultCache())
         b.sync()
         b.accountState.pin(Contact("44444444-4444-4444-8444-444444444444", Bytes.toB64(crypto.randomBytes(32)), "Someone", 1, Contact.METHOD_TYPED))
-        // Another device of this account pins the owner later.
         val a = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
         a.sync()
         a.accountState.pin(pinOf(w.owner, "Owner"))
+        assertNotNull(a.accountState.currentPin(w.owner.userId), "made by a human on device A: current there")
         b.sync()
-        assertNotNull(b.accountState.currentPin(w.owner.userId))
+        assertNotNull(b.accountState.doc.contact(w.owner.userId))
+        assertNull(b.accountState.currentPin(w.owner.userId), "synced, not confirmed here")
+        assertEquals(SyncEngine.MemberPinState.NEEDS_VERIFICATION, b.memberPinState(served(w.owner, "Owner")))
+        assertNotNull(b.verifyMemberTyped(served(w.owner, "Owner"), w.owner.account.identityFingerprintShort()))
+        assertNotNull(b.accountState.currentPin(w.owner.userId), "re-confirmed on this device")
+    }
+
+    @Test
+    fun aConfirmationForAnotherIdentityKeyDoesNotCount() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val cache = InMemoryVaultCache()
+        val b = SyncEngine(api(server), unlock(w.member), cache)
+        b.sync()
+        // This device confirmed the owner's userId with ANOTHER key once (e.g. before a re-enrolment).
+        val oldKey = Bytes.toB64(crypto.randomBytes(32))
+        b.accountState.pin(Contact(w.owner.userId, oldKey, "Owner", 1_000, Contact.METHOD_TYPED))
+        // Another device later pins the owner's real key; it syncs here.
+        val a = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        a.sync()
+        a.accountState.pin(pinOf(w.owner, "Owner").copy(verifiedAt = 2_000))
+        b.sync()
+        assertEquals(w.owner.reg.identityPub, b.accountState.doc.contact(w.owner.userId)!!.identityPub)
+        assertNull(b.accountState.currentPin(w.owner.userId), "the local confirmation was for a different key")
+    }
+
+    @Test
+    fun aTombstoneStillWinsOverALocalConfirmation() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val b = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        b.sync()
+        b.accountState.pin(pinOf(w.owner, "Owner"))
+        val a = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        a.sync()
+        a.accountState.unpin(w.owner.userId)
+        b.sync()
+        assertNull(b.accountState.currentPin(w.owner.userId))
+    }
+
+    // ---- A6 review MED-2: a v2 grant never silently replaces a legacy-held key ----
+
+    @Test
+    fun aDifferentKeyV2GrantBesideAVouchedLegacyKeyIsAnAnomalyAndTheHeldKeyStays() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        engine.acceptLegacyVault(w.vaultId)
+        engine.accountState.pin(pinOf(w.owner, "Owner"))
+        // A pinned contact (the owner, or anyone this account pinned) signs a grant carrying ANOTHER key.
+        val otherVk = crypto.randomBytes(32)
+        val forged = forgeSigned(w, w.owner, otherVk)
+        server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), forged))
+        engine.sync()
+        assertEquals("vk_mismatch", engine.notices().single { it.kind == "grant-anomaly" }.reason)
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId), "no silent switch")
+        assertFalse(device.isLegacyReadOnly(w.vaultId), "the vouched key stays in force")
+        assertEquals("Household", device.decryptVaultName(w.vaultId, w.metaBlob), "the held key is the original")
+    }
+
+    @Test
+    fun aDifferentKeyV2GrantBesideAnUnvouchedLegacyKeyIsAnAnomalyAndStaysReadOnly() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        engine.accountState.pin(pinOf(w.owner, "Owner"))
+        server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), forgeSigned(w, w.owner, crypto.randomBytes(32))))
+        engine.sync()
+        assertEquals("vk_mismatch", engine.notices().single { it.kind == "grant-anomaly" }.reason)
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId))
+        assertTrue(device.isLegacyReadOnly(w.vaultId))
+        assertEquals("Household", device.decryptVaultName(w.vaultId, w.metaBlob))
+        assertTrue(server.selfWraps.isEmpty())
+    }
+
+    /** Cold start: the vouched v1 key wins over a verified v2 grant naming a different key (anomaly). */
+    @Test
+    fun onColdStartAVouchedLegacyKeyIsNotReplacedByADifferentV2Key() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val cache = InMemoryVaultCache()
+        val first = SyncEngine(api(server), unlock(w.member), cache)
+        first.sync()
+        first.acceptLegacyVault(w.vaultId)
+        first.accountState.pin(pinOf(w.owner, "Owner"))
+        val restartCache = InMemoryVaultCache()
+        for (k in listOf("grant.legacy.authorized", "grant.freeze.done", "acctstate.copy", "acctstate.hw", "pins.confirmed")) {
+            restartCache.setClientState(k, cache.clientState(k))
+        }
+        server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), forgeSigned(w, w.owner, crypto.randomBytes(32))))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, restartCache)
+        engine.hydrate()
+        engine.sync()
+        assertEquals(Account.KeySource.LEGACY_SEAL, device.keySource(w.vaultId))
+        assertEquals("Household", device.decryptVaultName(w.vaultId, w.metaBlob))
+        assertTrue(engine.notices().any { it.kind == "grant-anomaly" && it.reason == "vk_mismatch" })
+    }
+
+    // ---- A6 review LOW-2: a present-but-broken v2 field is never an "Accept anyway" ----
+
+    @Test
+    fun aGarbageSignedGrantBesideAV1SealIsAnAnomalyNotAReviewCard() = runBlocking<Unit> {
+        val w = world()
+        val garbage = Bytes.toB64(crypto.sealTo(Bytes.fromB64(w.member.reg.identityPub), "not a frame".encodeToByteArray()))
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), garbage)))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        assertFalse(device.hasVault(w.vaultId), "no v1 fallback")
+        assertTrue(engine.legacyReviewVaults().isEmpty())
+        assertEquals("bad_frame", engine.notices().single { it.kind == "grant-anomaly" }.reason)
+        assertFailsWith<IllegalStateException> { engine.acceptLegacyVault(w.vaultId) }
+    }
+
+    @Test
+    fun anUndecodableSignedGrantIsAnAnomalyToo() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), "!!not-base64!!")))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        assertFalse(device.hasVault(w.vaultId))
+        assertEquals("unopenable", engine.notices().single { it.kind == "grant-anomaly" }.reason)
+    }
+
+    /** A held, unvouched legacy vault whose row now carries a v2 grant from an UNPINNED sender is an invitation
+     *  (verify to confirm), not a review card and not stuck on neither (web parity). */
+    @Test
+    fun aHeldLegacyVaultWithAPendingV2GrantIsAnInvitationNotAReviewCard() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, v1Seal(w), null)))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        server.feed = feed(w, 12, memberRow(w, 12, v1Seal(w), ownerSignedGrant(w)))
+        engine.sync()
+        assertTrue(device.isLegacyReadOnly(w.vaultId))
+        assertTrue(engine.legacyReviewVaults().isEmpty())
+        assertEquals(listOf(w.vaultId), engine.pendingInvitations().map { it.vaultId })
+    }
+
+    private fun forgeSigned(w: World, signer: Enrolled, vk: ByteArray): String {
+        val sign = crypto.signKeypairFromSeed(seedOf(signer))
+        val frame = SignedGrant.buildFrame(
+            crypto, sign,
+            Statement.VaultGrant(signer.userId, w.member.userId, Bytes.fromB64(w.member.reg.identityPub), w.vaultId, crypto.randomBytes(16), 1_791_590_400_000, vk),
+        )
+        return Bytes.toB64(crypto.sealTo(Bytes.fromB64(w.member.reg.identityPub), frame))
     }
 
     // ---- §1.5: owner side ----

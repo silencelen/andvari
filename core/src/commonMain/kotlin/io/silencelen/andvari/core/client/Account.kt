@@ -431,12 +431,25 @@ class Account private constructor(
      * [legacyKeyTag] of the EXACT key vouched for. Binding the decision to the key means a server that later
      * swaps the seal for the same vaultId (before the self-wrap reached the row) is not covered by it.
      */
-    private val legacyAuthorized: MutableMap<String, String> = mutableMapOf()
+    private val legacyAuthorized: MutableMap<String, LegacyVouch> = mutableMapOf()
+
+    /** A §8.2 vouch: the tag of the exact key, and whether it came from pre-upgrade evidence or the human. */
+    class LegacyVouch(val tag: String, val frozen: Boolean)
 
     private fun tagOf(vk: ByteArray): String = Bytes.toHexLower(crypto.sha256(vk))
 
+    /**
+     * The §8.2 / §8.6 decision for a v1-only key, routed through the graded [LegacyGrant.decide] (A6 review LOW-3;
+     * `sharedgrant.json` → `legacyMode`): evidence and confirmation count only for the EXACT key vouched for.
+     */
+    private fun legacyMode(vaultId: String, vk: ByteArray?): LegacyGrant.Mode {
+        val v = legacyAuthorized[vaultId]
+        val matches = vk != null && v != null && v.tag == tagOf(vk)
+        return LegacyGrant.decide(LegacyGrant.IN_WINDOW, preUpgradeEvidence = matches && v!!.frozen, confirmed = matches && !v!!.frozen)
+    }
+
     private fun legacyVouched(vaultId: String, vk: ByteArray?): Boolean =
-        vk != null && legacyAuthorized[vaultId]?.let { it == tagOf(vk) } == true
+        legacyMode(vaultId, vk).let { it == LegacyGrant.Mode.FROZEN || it == LegacyGrant.Mode.CONFIRMED }
 
     /** SHA-256 (hex) of the held key for [vaultId]: what a host persists beside a §8.2 vouch. Null when not held. */
     fun legacyKeyTag(vaultId: String): String? = vaultKeys[vaultId]?.let { tagOf(it) }
@@ -888,13 +901,16 @@ class Account private constructor(
         if (held != null) {
             // A key held ONLY from a v1 seal is confirmed (same key) by a verified v2 grant on a re-delivered row:
             // the owner's re-issue, root cause A §8.2 step 3 first bullet. A verified grant naming a DIFFERENT key
-            // replaces the unauthenticated one (then the v1 seal was the forgery) and the mismatch is flagged.
+            // never replaces it (A6 review MED-2: any pinned contact can sign a grant, and nothing yet binds a grant
+            // to the vault's owner): it is the vk_mismatch anomaly, the held key stays, and an unvouched one stays
+            // read-only.
             if (keySources[grant.vaultId] == KeySource.LEGACY_SEAL && !grant.signedGrant.isNullOrEmpty()) {
                 when (val o = openSigned(grant, heldVk = null)) {
                     is GrantOutcome.Adopted -> {
                         if (!Bytes.ctEquals(o.vk, held)) {
-                            vaultKeys[grant.vaultId] = o.vk
+                            grantAnomalies[grant.vaultId] = GrantVerdict.VK_MISMATCH
                             vkMismatchVaults.add(grant.vaultId)
+                            return
                         }
                         keySources[grant.vaultId] = KeySource.SIGNED_GRANT
                         signedGrantFrom[grant.vaultId] = o.from
@@ -903,7 +919,8 @@ class Account private constructor(
                         return
                     }
                     is GrantOutcome.Pending -> pendingGrants[grant.vaultId] = PendingGrant(grant.vaultId, o.from, o.grantIdB64)
-                    is GrantOutcome.Refused -> if (o.verdict.anomaly) grantAnomalies[grant.vaultId] = o.verdict
+                    // A6 review LOW-2: a present v2 field that fails any step is an anomaly here too.
+                    is GrantOutcome.Refused -> grantAnomalies[grant.vaultId] = o.verdict
                 }
             }
             // Already held: the row cannot change our key (the warm-session guard), but a
@@ -941,6 +958,7 @@ class Account private constructor(
         grantAnomalies.remove(grant.vaultId)
         unreadableKeyVaults.remove(grant.vaultId)
         if (opened.sealMismatch) vkMismatchVaults.add(grant.vaultId)
+        opened.anomaly?.let { grantAnomalies[grant.vaultId] = it }
         if (opened.source == KeySource.UVK_WRAP && grant.userId == userId) uvkWrappedVaults.add(grant.vaultId)
         // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and NOT
         // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
@@ -970,7 +988,14 @@ class Account private constructor(
 
     /** A key opened from a grant row, with how it was reached ([viaSeal]) and whether a seal on
      *  the same row opened to a different key ([sealMismatch], the §3.1 anomaly). */
-    private class OpenedVk(val vk: ByteArray, val source: KeySource, val sealMismatch: Boolean, val from: String? = null) {
+    private class OpenedVk(
+        val vk: ByteArray,
+        val source: KeySource,
+        val sealMismatch: Boolean,
+        val from: String? = null,
+        /** A §1.4 anomaly recorded although a key was adopted (the vouched legacy key kept over a different v2 key). */
+        val anomaly: GrantVerdict? = null,
+    ) {
         val viaSeal: Boolean get() = source == KeySource.LEGACY_SEAL || source == KeySource.SIGNED_GRANT
     }
 
@@ -1019,7 +1044,17 @@ class Account private constructor(
         // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
         if (!grant.signedGrant.isNullOrEmpty()) {
             when (val o = openSigned(grant, heldVk = null)) {
-                is GrantOutcome.Adopted -> return OpenedVk(o.vk, KeySource.SIGNED_GRANT, sealMismatch = false, from = o.from)
+                is GrantOutcome.Adopted -> {
+                    // A6 review MED-2, cold start: a vault this device vouched for keeps its vouched v1 key when a
+                    // verified grant names a DIFFERENT key (an anomaly, never a silent switch).
+                    if (grant.vaultId in legacyAuthorized && !sealed.isNullOrEmpty()) {
+                        val vouched = openSealOrNull(grant.vaultId, sealed)?.takeIf { legacyVouched(grant.vaultId, it) }
+                        if (vouched != null && !Bytes.ctEquals(vouched, o.vk)) {
+                            return OpenedVk(vouched, KeySource.LEGACY_SEAL, sealMismatch = true, anomaly = GrantVerdict.VK_MISMATCH)
+                        }
+                    }
+                    return OpenedVk(o.vk, KeySource.SIGNED_GRANT, sealMismatch = false, from = o.from)
+                }
                 is GrantOutcome.Pending -> {
                     // A pending invitation is never satisfied by the v1 seal on the same row, EXCEPT for a vault
                     // this device already vouched for (§8.2 freeze or the human's Accept) whose self-wrap has not
@@ -1031,18 +1066,19 @@ class Account private constructor(
                     throw GrantPendingException(PendingGrant(grant.vaultId, o.from, o.grantIdB64))
                 }
                 is GrantOutcome.Refused ->
-                    // An anomaly (misaddressed, wrong vault, wrong signer, bad signature) refuses the ROW: the
-                    // server tampered, so the v1 seal beside it is no fallback. A field that does not open or
-                    // parse at all is ignored (§1.4 "ignore row") and the legacy rule below decides.
-                    if (o.verdict.anomaly) throw GrantRefusedException(o.verdict)
+                    // Any refusal refuses the ROW, and the v1 seal beside it is no fallback: an anomaly (misaddressed,
+                    // wrong vault, wrong signer, bad signature) means the server tampered; a field that is PRESENT but
+                    // does not open or parse (A6 review LOW-2) must not turn into an "Accept anyway" on the seal.
+                    // Only an ABSENT field leaves the decision to the legacy rule below (Q7).
+                    throw GrantRefusedException(o.verdict)
             }
         }
-        // (4) v1 `sealedVk`, compatibility window only: LEGACY_SEAL, read-only until vouched for (§8.2).
-        if (!sealed.isNullOrEmpty() && LegacyGrant.IN_WINDOW) {
-            return OpenedVk(
-                SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed)),
-                KeySource.LEGACY_SEAL, sealMismatch = false,
-            )
+        // (4) v1 `sealedVk`: LEGACY_SEAL, read-only until vouched for (§8.2); the graded decision refuses it once
+        // the compatibility window closes (A8), unless this device holds evidence for that exact key.
+        if (!sealed.isNullOrEmpty()) {
+            val vk = SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed))
+            if (legacyMode(grant.vaultId, vk) == LegacyGrant.Mode.REFUSED) throw CryptoException("legacy grant refused outside the compatibility window")
+            return OpenedVk(vk, KeySource.LEGACY_SEAL, sealMismatch = false)
         }
         throw CryptoException("grant for ${grant.vaultId} carries no key")
     }
@@ -1115,9 +1151,9 @@ class Account private constructor(
      * freeze) or because the human accepted it on the review card (trust on first use). The host persists the
      * decision; this lifts the read-only state and permits the self-wrap.
      */
-    fun authorizeLegacyKey(vaultId: String, keyTag: String? = null) {
+    fun authorizeLegacyKey(vaultId: String, keyTag: String? = null, frozen: Boolean = false) {
         val tag = keyTag ?: legacyKeyTag(vaultId) ?: return
-        legacyAuthorized[vaultId] = tag
+        legacyAuthorized[vaultId] = LegacyVouch(tag, frozen)
     }
 
     /** The sender the VERIFIED v2 grant for [vaultId] names (null unless the key came from one). */
