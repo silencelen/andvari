@@ -122,6 +122,7 @@ class SyncEngineMetaVTest {
         val engine = SyncEngine(server.api(), member, cache, log)
         server.queue.add(SyncResponse(5, true, listOf(vault), listOf(grant), listOf(item), emptyList()))
         runBlocking { engine.sync() }
+        runBlocking { engine.acceptLegacyVault(vaultId) } // A6 §8.2: an accepted v1 vault (else read-only)
         return Seed(owner, member, engine, server, cache, log, vaultId, vault, grant, item)
     }
 

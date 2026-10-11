@@ -186,6 +186,13 @@ export interface VaultCache {
   setCursor(rev: number): Promise<void>;
   /** kv:lastSyncAt — restored by hydrate so "vault as of last sync <t>" stays honest (§D.4). */
   lastSyncAt(): Promise<number | null>;
+  /**
+   * kv:grantFreezeDone (security review 2026-10, root cause A §8.2, A6 review LOW-1): set once the legacy-grant
+   * freeze ran (or was ruled out) over THIS cache. It lives WITH the rows it describes, so clearing localStorage
+   * cannot make post-upgrade rows count as pre-upgrade evidence. Survives the §D.1 clear; dies with wipe().
+   */
+  freezeDone(): Promise<boolean>;
+  setFreezeDone(): Promise<void>;
 
   /** WIRE row only — no decrypted twin at rest (§B.3; A2). Tombstone handling
    *  (delete vs upsert) is the caller's pull logic, as in core SyncEngine. */
@@ -631,6 +638,16 @@ export class IdbVaultCache implements VaultCache {
     });
   }
 
+  freezeDone(): Promise<boolean> {
+    return this.read([STORE_KV], false, async (tx) => kvValue(await req(tx.objectStore(STORE_KV).get("grantFreezeDone"))) === 1);
+  }
+
+  setFreezeDone(): Promise<void> {
+    return this.write([STORE_KV], (tx) => {
+      tx.objectStore(STORE_KV).put({ key: "grantFreezeDone", value: 1 } satisfies KvRow);
+    });
+  }
+
   // -- items (wire envelopes only) --
 
   upsertItem(wire: WireItem): Promise<void> {
@@ -964,6 +981,11 @@ export class NullCache implements VaultCache {
   async lastSyncAt(): Promise<number | null> {
     return null;
   }
+  /** No durable rows, so nothing here can ever be pre-upgrade evidence. */
+  async freezeDone(): Promise<boolean> {
+    return true;
+  }
+  async setFreezeDone(): Promise<void> {}
 
   async upsertItem(_wire: WireItem): Promise<void> {}
   async deleteItem(_itemId: string): Promise<void> {}

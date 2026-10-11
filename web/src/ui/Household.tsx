@@ -9,7 +9,7 @@ import { Account } from "../vault/account";
 import type { Contact } from "../vault/accountstate";
 import { composeIdentityQr, parseIdentityQr, pinFromQr, pinFromTyped } from "../vault/contacts";
 import type { PersonalChoiceInfo, PersonalVaultProposal } from "../vault/personalvault";
-import type { VaultStore } from "../vault/store";
+import type { PersonalChangeDetails, VaultStore } from "../vault/store";
 import { Busy } from "./Busy";
 import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
@@ -117,9 +117,25 @@ function QrScanner({ onScan, onCancel }: { onScan: (text: string) => void; onCan
  * Either way the comparison is against SHA-256 of the key the server serves for them; on a match exactly
  * that key is pinned. Nothing is pinned from the lookup alone.
  */
-export function VerifyMemberPanel({ client, account, store, onDone, initialEmail }: { client: ApiClient; account: Account; store: VaultStore; onDone: (c: Contact | null) => void; initialEmail?: string }) {
+export function VerifyMemberPanel({
+  client,
+  account,
+  store,
+  onDone,
+  initialEmail,
+  presetServed,
+}: {
+  client: ApiClient;
+  account: Account;
+  store: VaultStore;
+  onDone: (c: Contact | null) => void;
+  initialEmail?: string;
+  /** A6 (members-list one-tap pin, pending invitations): the account is already known — skip the email lookup and
+   *  compare against THIS served key (still untrusted until the human's comparison matches). */
+  presetServed?: UserLookupResponse;
+}) {
   const [email, setEmail] = useState(initialEmail ?? "");
-  const [served, setServed] = useState<UserLookupResponse | null>(null);
+  const [served, setServed] = useState<UserLookupResponse | null>(presetServed ?? null);
   const [typed, setTyped] = useState("");
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -271,6 +287,9 @@ export function HouseholdCard({ client, account, store }: { client: ApiClient; a
           {contacts.map((c) => (
             <li key={c.userId} style={{ marginBottom: 6 }}>
               <strong>{c.label}</strong> <span className="muted">· {METHOD_LABEL[c.method] ?? c.method} · {fmtDate(c.verifiedAt)}</span>
+              {/* A5 review L-3 (A6): a pin this browser only read from the server-held list, before it had a copy of
+                  its own, may be one you later removed elsewhere — it cannot stand in for a check until re-verified. */}
+              {!store.accountState.isCurrent(c) && <span className="tag">verify again on this device</span>}
               <div className="mono muted" style={{ whiteSpace: "pre-line" }}>{fps[c.userId] ? groupedShort(fps[c.userId]!) : "…"}</div>
               <button type="button" className="link" disabled={busy} onClick={() => void remove(c.userId)}>Remove</button>
             </li>
@@ -300,10 +319,11 @@ export function HouseholdCard({ client, account, store }: { client: ApiClient; a
  */
 export function personalChoiceDetail(info: PersonalChoiceInfo | null | undefined): string {
   if (!info) return "";
-  const origin = info.origin === "received" ? "Received from someone else by transfer" : "Created by this account";
+  // A5b review LOW-2 (A6): the origin and the co-holders are what the SERVER reports; say so.
+  const origin = info.origin === "received" ? "received from someone else by transfer" : "created by this account";
   const h = info.coHolders;
   const holders = h === null ? "couldn't check who else holds it" : h.length === 0 ? "nobody else holds it" : `also held by ${h.map((c) => `${c.displayName} (${c.role})`).join(", ")}`;
-  return `${origin} · ${holders}${info.onThisDevice ? " · this device's personal vault" : ""}`;
+  return `As reported by the server: ${origin} · ${holders}${info.onThisDevice ? " · this device's personal vault" : ""}`;
 }
 
 /** The confirmation every designation goes through (A5b, M-2): it names the vault and everyone else on it. */
@@ -315,10 +335,10 @@ function ConfirmPersonalText({ p }: { p: PersonalVaultProposal }) {
         <div>The server reports nobody else on this vault.</div>
       ) : (
         <div>
-          <strong>These people can also read everything in it:</strong> {p.coHolders.map((c) => `${c.displayName} (${c.email})`).join(", ")}. Choose it only if that is what you want.
+          <strong>As reported by the server, these people can also read everything in it:</strong> {p.coHolders.map((c) => `${c.displayName} (${c.email})`).join(", ")}. Choose it only if that is what you want.
         </div>
       )}
-      {p.origin === "received" && <div>Someone else created this vault and transferred it to you.</div>}
+      {p.origin === "received" && <div>As reported by the server, someone else created this vault and transferred it to you.</div>}
     </>
   );
 }
@@ -430,7 +450,7 @@ export function PersonalVaultCard({ client, account, store }: { client: ApiClien
  * before anything is minted. A withheld or unreadable wrap with a good local copy is an anomaly; a served wrap
  * naming another vault than this browser's is a change the human confirms, never a silent switch.
  */
-export function PersonalVaultBanner({ account, store, onChanged }: { account: Account; store: VaultStore; onChanged: () => void }) {
+export function PersonalVaultBanner({ account, store, onChanged, client }: { account: Account; store: VaultStore; onChanged: () => void; client?: ApiClient }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [proposal, setProposal] = useState<PersonalVaultProposal | null>(null);
@@ -438,7 +458,13 @@ export function PersonalVaultBanner({ account, store, onChanged }: { account: Ac
   const status = account.personalStatus;
   const choices = status === "absent" ? (store.personalVaultChoices ?? []) : [];
   const change = status === "changed" ? store.personalChange() : null;
-  const detailIds = change ? change.servedVaultId : choices.map((c) => c.vaultId).join(",");
+  const detailIds = change ? "" : choices.map((c) => c.vaultId).join(",");
+  // A5b review LOW-1 (A6): "Use new" is offered only once the NEW vault's co-holders loaded.
+  const [changeDetails, setChangeDetails] = useState<PersonalChangeDetails | null>(null);
+  const [changeLookupFailed, setChangeLookupFailed] = useState(false);
+  const [keeping, setKeeping] = useState(false);
+  const [keepPassword, setKeepPassword] = useState("");
+  const changeKey = change ? `${change.currentVaultId}|${change.servedVaultId}` : "";
 
   useEffect(() => {
     if (!detailIds) return;
@@ -448,6 +474,20 @@ export function PersonalVaultBanner({ account, store, onChanged }: { account: Ac
       live = false;
     };
   }, [detailIds, store]);
+
+  useEffect(() => {
+    setChangeDetails(null);
+    setChangeLookupFailed(false);
+    if (!changeKey) return;
+    let live = true;
+    store.describePersonalChange().then(
+      (d) => live && setChangeDetails(d),
+      () => live && setChangeLookupFailed(true),
+    );
+    return () => {
+      live = false;
+    };
+  }, [changeKey, store]);
 
   if (status === "confirmed") return null;
   if (status === "withheld") {
@@ -469,7 +509,8 @@ export function PersonalVaultBanner({ account, store, onChanged }: { account: Ac
     );
   }
   if (change) {
-    // A5b M-2 / L-2: never a silent switch.
+    // A5b M-2 / L-2: never a silent switch. A5b review LOW-1 (A6): keeping the current vault comes FIRST; "Use new" is
+    // offered only once the new vault's co-holders loaded. LOW-2: those details are labelled server-reported.
     const newName = nameOf(change.servedVaultId);
     const oldName = nameOf(change.currentVaultId);
     const accept = () => {
@@ -481,14 +522,59 @@ export function PersonalVaultBanner({ account, store, onChanged }: { account: Ac
         setErr("Couldn't switch. Try again.");
       }
     };
+    const keep = async () => {
+      if (!client) return;
+      setBusy(true);
+      setErr("");
+      try {
+        const p = await store.proposePersonalVault(change.currentVaultId);
+        const keys = await client.accountKeys();
+        const authKey = await Account.deriveAuthKey(keepPassword, keys.kdfSalt, keys.kdfParams);
+        await store.confirmPersonalVault(p, authKey);
+        setKeeping(false);
+        setKeepPassword("");
+        onChanged();
+      } catch (e) {
+        setErr(e instanceof ApiError && e.status === 401 ? "Wrong master password." : "Couldn't keep it. Try again when you're connected.");
+      } finally {
+        setBusy(false);
+      }
+    };
+    const served = changeDetails?.servedCoHolders;
     return (
       <div className="msg err" style={{ display: "block" }} role="alert">
         <strong>Your personal vault was changed to {newName}.</strong> Another of your devices changed it, or the server sent an older record. This device still uses {oldName} until you decide.
-        <div>{newName}: {personalChoiceDetail(store.personalChoiceInfo(change.servedVaultId))}</div>
         <div style={{ marginTop: 6 }}>
-          <button type="button" className="ghost" onClick={accept}>Use {newName}</button>
+          {client ? (
+            keeping ? (
+              <>
+                <Field label={`Master password (to keep ${oldName})`}>
+                  <input type="password" autoComplete="current-password" value={keepPassword} onChange={(e) => setKeepPassword(e.target.value)} />
+                </Field>
+                <button type="button" className="primary" disabled={busy || !keepPassword} onClick={() => void keep()}>{busy ? <Busy>Saving…</Busy> : `Keep ${oldName}`}</button>{" "}
+                <button type="button" className="link" onClick={() => setKeeping(false)}>Cancel</button>
+              </>
+            ) : (
+              <button type="button" className="primary" onClick={() => setKeeping(true)}>Keep {oldName}</button>
+            )
+          ) : (
+            <span>To keep {oldName}, choose it again in Settings, Personal vault (it asks for your master password).</span>
+          )}
         </div>
-        <div>If you didn't do this, keep {oldName}: choose it again in Settings, Personal vault (it asks for your master password), and tell your admin.</div>
+        {changeDetails && served ? (
+          <div style={{ marginTop: 6 }}>
+            <div>
+              As reported by the server, {newName} was {changeDetails.servedOrigin === "received" ? "received from someone else by transfer" : "created by this account"} and{" "}
+              {served.length === 0 ? "nobody else holds it." : `is also held by ${served.map((c) => `${c.displayName} (${c.role})`).join(", ")}.`}
+            </div>
+            <button type="button" className="ghost" disabled={busy} onClick={accept}>Use {newName}</button>
+          </div>
+        ) : changeLookupFailed ? (
+          <div>Couldn't check who else holds {newName}, so it can't be chosen from here. Try again when you're connected.</div>
+        ) : (
+          <div className="muted"><Busy>Checking who else holds {newName}…</Busy></div>
+        )}
+        <div>If you didn't do this, keep {oldName} and tell your admin.</div>
         {err && <div>{err}</div>}
       </div>
     );

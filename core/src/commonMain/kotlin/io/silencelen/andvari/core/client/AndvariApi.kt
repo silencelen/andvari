@@ -447,6 +447,10 @@ class AndvariApi(
     suspend fun putGrantSelfWrap(vaultId: String, req: SelfWrapRequest): CreateVaultResponse =
         call("PUT", "/api/v1/vaults/${pathSeg(vaultId)}/grant/self-wrap", req)
 
+    /** Owner re-issue of a member's grant as v2 with the same vault key (root cause A §8.2 step 4). */
+    suspend fun reissueGrant(vaultId: String, userId: String, req: io.silencelen.andvari.core.model.GrantReissueRequest): CreateVaultResponse =
+        call("PUT", "/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}/grant", req)
+
     // ---- attachments (spec 02 §6: body = header || ciphertext chunks) ----
 
     suspend fun uploadAttachment(attachmentId: String, itemId: String, vaultId: String, body: ByteArray): AttachmentMeta {

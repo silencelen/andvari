@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { UserLookupResponse, VaultMemberSummary } from "../api/types";
-import { fromB64 } from "../crypto/bytes";
-import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import type { Account } from "../vault/account";
-import type { DeletedVaultInfo, IncomingTransfer, VaultInfo, VaultStore } from "../vault/store";
+import { type DeletedVaultInfo, type IncomingTransfer, MemberNotVerifiedError, type VaultInfo, type VaultStore } from "../vault/store";
+import { VerifyMemberPanel } from "./Household";
+import { LegacyReviewCard, PendingInvitationsCard } from "./SignedGrantCards";
 import { UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDay } from "./format";
@@ -124,6 +124,11 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
         <IncomingTransferCard key={t.vaultId} offer={t} account={account} store={store} client={client} onChanged={refresh} />
       ))}
 
+      {/* Root cause A §1.6 / §8.2 (A6): invitations from people not yet verified, and vaults an older grant
+          format delivered (read-only until reviewed). Above the branch, like the warning below. */}
+      <PendingInvitationsCard account={account} store={store} client={client} onChanged={refresh} />
+      <LegacyReviewCard store={store} onChanged={refresh} />
+
       <UndecryptableGrantsWarning store={store} />
 
       {settingsVault && settingsContent !== null ? (
@@ -153,7 +158,7 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
           ) : (
             <>
               {/* F20: non-owners see WHO ELSE is in a shared vault they belong to (read-only). */}
-              <MemberRosterPanel key={settingsVault.vaultId} vault={settingsVault} client={client} />
+              <MemberRosterPanel key={settingsVault.vaultId} vault={settingsVault} account={account} store={store} client={client} />
               {/* DN-1: Leave, re-homed off the vault row into the member vault's settings. */}
               <div className="sheet">
                 <LeaveControl vault={settingsVault} store={store} onChanged={refresh} />
@@ -188,6 +193,8 @@ export function Sharing({ account, store, client, onSynced, onBackup, settingsVa
                     <div className="sub">{v.type === "personal" ? "personal vault" : "shared vault"}</div>
                   </span>
                   <span className="tag">{v.role ?? "member"}</span>
+                  {/* A6 §8.2: an older-format grant nobody vouched for yet — read-only until reviewed above. */}
+                  {account.isLegacyReadOnly(v.vaultId) && <span className="tag">not yet verified</span>}
                   {/* DN-1: shared vaults (owner and member alike) manage their lifecycle in the
                       settings layer; personal vaults have no lifecycle ops, so no button. Leave
                       moved off the row into settings — the row keeps its role tag. */}
@@ -337,6 +344,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [removing, setRemoving] = useState<string | null>(null); // userId pending remove confirm
+  const [verifyingId, setVerifyingId] = useState<string | null>(null); // A6: one-tap pin from this list
 
   const load = () =>
     client
@@ -402,6 +410,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
               <span className="attach-name">
                 {m.displayName} <span className="muted">{m.email}</span>
                 {(m.status ?? "active") !== "active" && <span className="tag" style={{ color: "var(--danger)" }}>disabled</span>}
+                <MemberPinTag store={store} account={account} m={m} onVerify={() => setVerifyingId(m.userId)} />
               </span>
               {m.role === "owner" ? (
                 <span className="tag">owner</span>
@@ -431,6 +440,25 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
         </div>
       )}
 
+      {verifyingId && members?.some((m) => m.userId === verifyingId) && (
+        <VerifyMemberPanel
+          client={client}
+          account={account}
+          store={store}
+          presetServed={(() => {
+            const m = members.find((x) => x.userId === verifyingId)!;
+            return { userId: m.userId, displayName: m.displayName, identityPub: m.identityPub };
+          })()}
+          onDone={() => {
+            setVerifyingId(null);
+            // A pinned legacy member is re-issued a signed grant on the next sync (§8.2 step 4).
+            void store.sync().catch(() => {}).then(() => { void load(); onChanged(); });
+          }}
+        />
+      )}
+
+      <LegacyGrantsNote store={store} vaultId={vault.vaultId} />
+
       {pending ? (
         <div className="msg info" style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
           <span style={{ flex: 1 }}>
@@ -447,6 +475,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
       <AddMember
         vaultId={vault.vaultId}
         account={account}
+        store={store}
         client={client}
         onAdded={async () => {
           await store.sync();
@@ -469,9 +498,11 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
  * no role selects, no remove, no transfer, no add, no delete. Management stays owner-only in
  * MemberPanel above.
  */
-function MemberRosterPanel({ vault, client }: { vault: VaultInfo; client: ApiClient }) {
+function MemberRosterPanel({ vault, account, store, client }: { vault: VaultInfo; account: Account; store: VaultStore; client: ApiClient }) {
   const [members, setMembers] = useState<VaultMemberSummary[] | null>(null);
   const [err, setErr] = useState("");
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [, setTick] = useState(0);
 
   useEffect(() => {
     client
@@ -498,12 +529,63 @@ function MemberRosterPanel({ vault, client }: { vault: VaultInfo; client: ApiCli
               <span className="attach-name">
                 {m.displayName} <span className="muted">{m.email}</span>
                 {(m.status ?? "active") !== "active" && <span className="tag" style={{ color: "var(--danger)" }}>disabled</span>}
+                <MemberPinTag store={store} account={account} m={m} onVerify={() => setVerifyingId(m.userId)} />
               </span>
               <span className="tag">{m.role}</span>
             </div>
           ))}
         </div>
       )}
+      {verifyingId && members?.some((m) => m.userId === verifyingId) && (
+        <VerifyMemberPanel
+          client={client}
+          account={account}
+          store={store}
+          presetServed={(() => {
+            const m = members.find((x) => x.userId === verifyingId)!;
+            return { userId: m.userId, displayName: m.displayName, identityPub: m.identityPub };
+          })()}
+          onDone={() => {
+            setVerifyingId(null);
+            setTick((t) => t + 1);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Members-list one-tap pin (security review 2026-10, root cause A §8.2 step 6, A6): "Verified" for a member pinned
+ * and current on this device with the key the server serves for them; "key changed" (danger) when the served key
+ * differs from the pin; otherwise a one-tap "Verify" that opens the household verification ceremony against this
+ * row's key. Nothing here pins a key by itself.
+ */
+function MemberPinTag({ store, account, m, onVerify }: { store: VaultStore; account: Account; m: VaultMemberSummary; onVerify: () => void }) {
+  if (m.userId === account.userId) return null;
+  const st = store.memberPinState(m.userId, m.identityPub);
+  if (st === "pinned") return <span className="tag">verified</span>;
+  if (st === "key-changed") return <span className="tag" style={{ color: "var(--danger)" }}>key changed — verify in person</span>;
+  return (
+    <button type="button" className="link" onClick={onVerify}>
+      Verify
+    </button>
+  );
+}
+
+/** §8.2 step 4: members still on an older-format grant whom this browser couldn't re-issue to (not verified here). */
+function LegacyGrantsNote({ store, vaultId }: { store: VaultStore; vaultId: string }) {
+  const legacy = store.legacyGrantMembers(vaultId);
+  if (legacy.length === 0) return null;
+  return (
+    <div className="msg info" style={{ display: "block", marginTop: 14 }}>
+      <strong>Legacy grants.</strong> These members still hold this vault through the older grant format, which can't prove it came
+      from you. Verify each one (the Verify link above) to secure their access; andvari then re-issues their grant automatically.
+      <ul className="plain-list" style={{ marginTop: 6 }}>
+        {legacy.map((m) => (
+          <li key={m.userId}>Verify {m.displayName} to secure their access.</li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -907,21 +989,26 @@ function RecentlyDeleted({ store, refreshKey, onChanged, onLoaded }: { store: Va
 }
 
 /**
- * Add-member flow: lookup by email → MANDATORY out-of-band fingerprint verification
- * (spec 01 §5 — the only defense against a server substituting its own pubkey) →
- * seal the VK to the verified identity key → grant.
+ * Add-member flow (security review 2026-10, root cause A §1.5, §7.2; branch A6): lookup by email, then
+ *  - a member PINNED and current on this browser with the key the server serves: no fingerprint step ("Verified");
+ *  - a member whose served key differs from the pin: refused (verify again in person; their key changed, or the
+ *    server is substituting one);
+ *  - anyone else: the household verification ceremony first (they read THEIR 32-hex code from THEIR screen; it is
+ *    compared with SHA-256 of the served key, and on a match they are pinned).
+ * The store then signs a v2 grant to the PIN key and dual-sends the v1 seal (also to the pin) for older clients.
  */
-function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; account: Account; client: ApiClient; onAdded: () => Promise<void> }) {
+function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: string; account: Account; store: VaultStore; client: ApiClient; onAdded: () => Promise<void> }) {
   const [email, setEmail] = useState("");
-  const [found, setFound] = useState<(UserLookupResponse & { code: string }) | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
+  const [found, setFound] = useState<UserLookupResponse | null>(null);
+  const [verifying, setVerifying] = useState(false);
   const [role, setRole] = useState("writer");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [, setTick] = useState(0);
 
   const reset = () => {
     setFound(null);
-    setConfirmed(false);
+    setVerifying(false);
     setRole("writer");
   };
 
@@ -937,8 +1024,7 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
         setErr("That's your own account — you already own this vault.");
         return;
       }
-      const fp = await shortIdentityFingerprint(fromB64(u.identityPub));
-      setFound({ ...u, code: fp.match(/.{4}/g)!.join(" ") });
+      setFound(u);
     } catch (err) {
       setErr(friendlyError(err));
     } finally {
@@ -951,17 +1037,18 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
     setBusy(true);
     setErr("");
     try {
-      const sealedVk = account.wrapVkForMember(fromB64(found.identityPub), vaultId);
-      await client.addVaultMember(vaultId, { userId: found.userId, role, sealedVk });
+      await store.addVaultMember(vaultId, found.userId, role);
       setEmail("");
       reset();
       await onAdded();
     } catch (err) {
-      setErr(friendlyError(err));
+      setErr(err instanceof MemberNotVerifiedError ? err.message : friendlyError(err));
     } finally {
       setBusy(false);
     }
   };
+
+  const pinState = found ? store.memberPinState(found.userId, found.identityPub) : null;
 
   return (
     <div style={{ marginTop: 18 }}>
@@ -985,22 +1072,41 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
         </div>
       </form>
 
-      {found && (
-        <>
+      {found && pinState === "key-changed" && (
+        <Msg kind="err">
+          The server now holds a different identity key for {found.displayName} than the one you verified. Don't add them: check
+          their code in person again (Settings, Household members), and tell your admin.
+        </Msg>
+      )}
+
+      {found && pinState === "needs-verification" && (
+        verifying ? (
+          <VerifyMemberPanel
+            client={client}
+            account={account}
+            store={store}
+            presetServed={found}
+            onDone={() => {
+              setVerifying(false);
+              setTick((t) => t + 1); // re-read the pin state: verified → the add controls below
+            }}
+          />
+        ) : (
           <div className="field">
-            {/* Audit F10: heads a read-only .fingerprint block — there is no control here to
-                label, so it is a heading. */}
-            <div className="field-head">{found.displayName}'s identity code</div>
-            <div className="fingerprint" style={{ fontSize: 18, letterSpacing: "0.08em" }}>{found.code}</div>
             <p className="muted" style={{ marginTop: 6 }}>
-              Ask {found.displayName} to read out the identity code shown in THEIR app's
-              Settings. If it doesn't match exactly, stop — do not add them.
+              You haven't verified {found.displayName} on this device yet. Do it together, in person or on a call you trust: they
+              read the identity code from THEIR screen and you type it here. You do this once per person, not once per vault.
             </p>
+            <button type="button" className="primary" onClick={() => setVerifying(true)}>Verify {found.displayName}</button>
           </div>
-          <label className="check">
-            <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-            <span>I confirmed this code with {found.displayName} in person or by phone</span>
-          </label>
+        )
+      )}
+
+      {found && pinState === "pinned" && (
+        <>
+          <p className="muted" style={{ marginTop: 6 }}>
+            <span className="tag">verified</span> You've verified {found.displayName}; no code check needed.
+          </p>
           <Field label="Role">
             <select value={role} onChange={(e) => setRole(e.target.value)} style={{ width: "auto" }}>
               <option value="writer">writer — can add and edit items</option>
@@ -1008,7 +1114,7 @@ function AddMember({ vaultId, account, client, onAdded }: { vaultId: string; acc
             </select>
           </Field>
           <div className="actions">
-            <button type="button" className="primary" disabled={busy || !confirmed} onClick={add}>
+            <button type="button" className="primary" disabled={busy} onClick={add}>
               {busy ? "Sealing…" : "Add to vault"}
             </button>
           </div>

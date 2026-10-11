@@ -626,7 +626,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
       {/* Security review 2026-10, root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default
           destination, usage paused, and (when the migration needs the human) "Which vault is your Personal vault?". */}
-      <PersonalVaultBanner account={account} store={store} onChanged={refresh} />
+      <PersonalVaultBanner account={account} store={store} onChanged={refresh} client={client} />
 
       {/* §C6 (design 2026-07-13-web-offline-cache): an OFFLINE unlock with cached
           recoveryConfirmed !== true PROCEEDS with this persistent, non-dismissable REMINDER —
@@ -979,7 +979,9 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return { warn: true, body: `${lead} — ${why} ${tail}` };
     }
     case "added":
-      return { warn: false, body: `You were added to “${name}”.` };
+      // Root cause A §1.6 (A6): a verified grant names the PINNED contact who signed it. TWIN of core
+      // HouseholdCopy.addedNotice, byte-equal, pinned by vault-copy.test.ts.
+      return { warn: false, body: n.byLabel ? `You were added to “${name}” by ${n.byLabel}.` : `You were added to “${name}”.` };
     case "transfer-complete":
       return { warn: false, body: n.becameMine ? `You are now the owner of “${name}”.` : `“${name}” now has a new owner.` };
     case "transfer-anomaly":
@@ -1011,6 +1013,20 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return {
         warn: true,
         body: "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made.",
+      };
+    case "grant-anomaly":
+      // Root cause A §1.4 (A6): a v2 grant failed a check only a misbehaving server explains; nothing was adopted.
+      // TWINS of core HouseholdCopy.GRANT_VK_MISMATCH_NOTICE (with the recovery path, A6 re-review LOW-C) and
+      // GRANT_ANOMALY_NOTICE, byte-equal, pinned by vault-copy.test.ts.
+      if (n.reason === "vk_mismatch") {
+        return {
+          warn: true,
+          body: "A shared-vault invitation named a different key than the one this device already trusts for that vault, so andvari kept its own key and changed nothing. If the vault looks wrong or empty, leave it and ask its owner to add you again (the key this device trusted before the upgrade may itself be the wrong one), and tell your admin — the server may be misbehaving.",
+        };
+      }
+      return {
+        warn: true,
+        body: "A shared-vault invitation could not be verified, so andvari ignored it and changed nothing. Tell your admin — the server may be misbehaving.",
       };
     case "meta-regression":
       // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV regressed below the

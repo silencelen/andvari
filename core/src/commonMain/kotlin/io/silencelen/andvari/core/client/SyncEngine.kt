@@ -3,6 +3,7 @@ package io.silencelen.andvari.core.client
 import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.GrantPin
 import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PushRequest
@@ -16,6 +17,10 @@ import io.silencelen.andvari.core.model.VaultRestoreRequest
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
 import io.silencelen.andvari.core.model.WireGrant
+import io.silencelen.andvari.core.model.GrantReissueRequest
+import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultMemberAdd
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.io.IOException
@@ -74,6 +79,35 @@ data class LifecycleNotice(
     /** transfer-complete/-anomaly: who now owns the vault, and whether that is us. */
     val newOwnerUserId: String? = null,
     val becameMine: Boolean = false,
+    /** `added` from a VERIFIED v2 grant (root cause A §1.6): the label of the PINNED contact who signed it, for
+     *  "You were added to <vault> by <contact>". Null for a legacy add (no sender was authenticated). */
+    val byLabel: String? = null,
+)
+
+/** §1.6: a v2 grant from someone this account has not verified (or not on this device). The vault is NOT
+ *  adopted and its name is not shown (it would decrypt under a key nobody authenticated). [fromUserId] is
+ *  unverified routing data: whom the human should verify. */
+data class PendingInvitation(val vaultId: String, val fromUserId: String, val grantIdB64: String)
+
+/** §8.2 "Review your shared vaults": a vault readable only through a v1 seal nobody vouched for yet. The name
+ *  decrypts under that unauthenticated key, so the card badges it "not yet verified". */
+data class LegacyVaultReview(val vaultId: String, val name: String?, val itemCount: Int)
+
+/** The owner's add-member flow refused a member who is not pinned (or not current) on this device (§1.5):
+ *  run "Verify a household member" first. */
+class MemberNotVerifiedException(val userId: String) :
+    Exception("verify this member before sharing with them (their identity code is not confirmed on this device)")
+
+/** A5b review LOW-1/LOW-2 (closed in A6): what "Use the new personal vault" would mean, loaded BEFORE it is
+ *  offered. The co-holder lists and origin are what the SERVER reports. */
+data class PersonalChangeDetails(
+    val currentVaultId: String,
+    val currentName: String?,
+    val servedVaultId: String,
+    val servedName: String?,
+    /** Who else the server reports holding the NEW vault (the lookup must succeed for "Use new" to be offered). */
+    val servedCoHolders: List<CoHolder>,
+    val servedOrigin: PersonalChoiceInfo.Origin,
 )
 
 /** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
@@ -185,6 +219,15 @@ class SyncEngine(
          *  genuinely NAMED "(vault)" is relabelled Personal/Shared on both engines alike.
          *  Dropping that sentinel is a two-engine change; the constant is not. */
         const val VAULT_NAME_FALLBACK = "(vault)"
+
+        // Root cause A §8.2 (branch A6), in the cache's client state (which survives a resync).
+        /** v1-only vault keys this device vouches for, as `vaultId|sha256(VK)|frozen|confirmed` lines (pre-upgrade
+         *  evidence, or the human's Accept): the vouch covers that exact key, not whatever the server serves next. */
+        internal const val LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized"
+        /** Set once the §8.2 freeze ran (or was ruled out) on this cache: later v1 grants are never frozen. */
+        internal const val FREEZE_DONE_KEY = "grant.freeze.done"
+        /** grantIds of pending invitations the human declined. */
+        internal const val DECLINED_KEY = "grant.declined"
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -439,7 +482,22 @@ class SyncEngine(
     // ---- personal vault identity + account state (security review 2026-10, root cause A §4, §8.5) ----
 
     /** The account-state blob (contact pins). Refreshed best-effort on every [sync]. */
-    val accountState: AccountStateSync = AccountStateSync(api, account, cache)
+    val accountState: AccountStateSync = AccountStateSync(api, account, cache, deviceState = deviceState)
+
+    init {
+        // Root cause A §1.4 step 7: the grant verifier picks the pin by the sender the statement NAMES, from this
+        // account's human-verified contacts, and learns whether that pin is current on this device (L-3).
+        account.grantPins = { uid ->
+            accountState.doc.contact(uid)?.let { c ->
+                runCatching { GrantPin(Bytes.fromB64(c.identityPub), accountState.isCurrent(c)) }.getOrNull()
+            }
+        }
+        for (entry in persistedSet(LEGACY_AUTHORIZED_KEY)) {
+            val parts = entry.split('|')
+            val tag = parts.getOrNull(1) ?: continue // bound to the exact key vouched for; no tag, no vouch
+            account.authorizeLegacyKey(parts[0], tag, frozen = parts.getOrNull(2) == "frozen")
+        }
+    }
 
     /** Called after a personal wrap is stored server-side, so a native host can update its cached
      *  `AccountKeys` (an offline cold start then knows the personal vault without the network). */
@@ -630,9 +688,267 @@ class SyncEngine(
      * ([proposePersonalVault] + [redesignatePersonalVault]), which replaces the server's copy.
      */
     fun acceptPersonalChange() {
+        val change = personalChange()
+        check(change != null && personalChangeDescribed == change.servedVaultId) {
+            "\"Use the new personal vault\" is offered only after its co-holders were loaded (describePersonalChange)"
+        }
+        personalChangeDescribed = null
         account.acceptPersonalChange()
         account.personalWrap?.let { rememberPersonalWrap(it) } // before deciding, or it would read as a change again
         decidePersonalLocally()
+    }
+
+    // ---- signed grants (security review 2026-10, root cause A §1.4–§1.6, §3.2, §8.2; branch A6) ----
+
+    private fun persistedSet(key: String): Set<String> =
+        cache.clientState(key)?.split('\n')?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+
+    private fun persistSet(key: String, set: Set<String>) {
+        cache.setClientState(key, if (set.isEmpty()) null else set.sorted().joinToString("\n"))
+    }
+
+    /**
+     * §8.2 step 3, once per cache: a v1-only key is FROZEN (self-wrapped silently) when this cache already held
+     * the vault's grant row AND an item that decrypted under it before this release ran here. The server would
+     * have had to forge the grant before the upgrade: the trust-on-first-use the household already had. Every
+     * v1-only vault that arrives later is legacy-read-only until the human accepts it (or the owner re-issues).
+     */
+    private fun freezeOnce(decryptedVaults: Set<String>) {
+        if (cache.clientState(FREEZE_DONE_KEY) != null) return
+        val evidence = cache.grants()
+            .filter { g ->
+                g.userId == account.userId && g.vaultId in decryptedVaults &&
+                    account.keySource(g.vaultId) == Account.KeySource.LEGACY_SEAL
+            }
+            .map { it.vaultId }
+        for (id in evidence) vouchLegacy(id, frozen = true)
+        cache.setClientState(FREEZE_DONE_KEY, "1")
+    }
+
+    /** Persist and apply a §8.2 vouch for the key [vaultId] holds NOW (bound to that key's tag). */
+    private fun vouchLegacy(vaultId: String, frozen: Boolean) {
+        val tag = account.legacyKeyTag(vaultId) ?: return
+        val others = persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }
+        persistSet(LEGACY_AUTHORIZED_KEY, (others + "$vaultId|$tag|${if (frozen) "frozen" else "confirmed"}").toSet())
+        account.authorizeLegacyKey(vaultId, tag, frozen)
+    }
+
+    /** Re-run §1.4 for cached rows whose key is not held (pending, refused) or held only from a v1 seal; decrypt
+     *  the cached items of any vault that became readable. */
+    private fun reevaluateGrants() {
+        val newlyHeld = HashSet<String>()
+        for (g in cache.grants()) {
+            if (g.userId != account.userId) continue
+            val held = account.hasVault(g.vaultId)
+            val retry = !held || (account.keySource(g.vaultId) == Account.KeySource.LEGACY_SEAL && !g.signedGrant.isNullOrEmpty())
+            if (!retry || cache.getHeld(g.vaultId) != null) continue
+            runCatching { account.addGrant(g) }
+            if (!held && account.hasVault(g.vaultId)) newlyHeld.add(g.vaultId)
+        }
+        if (newlyHeld.isEmpty()) return
+        for (w in cache.envelopes()) {
+            if (w.deleted || w.vaultId !in newlyHeld) continue
+            runCatching { cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w))) }
+        }
+    }
+
+    /** §1.4 anomalies, once per vault per engine ("the server may be misbehaving — tell your admin"). */
+    private fun surfaceGrantStates() {
+        for ((vaultId, verdict) in account.grantAnomalies()) {
+            if (!keyAnomaliesShown.add("grant-anomaly|$vaultId|${verdict.code}")) continue
+            pushNotice(LifecycleNotice(account.newItemId(), vaultId, "", "grant-anomaly", reason = verdict.code))
+        }
+    }
+
+    private val selfWrapsPosted = mutableSetOf<String>()
+
+    /** §3.2: post the member self-wrap for every held key [Account.selfWrapAuthorized] vouches for. Best effort. */
+    private suspend fun postAuthorizedSelfWraps() {
+        for (g in cache.grants()) postSelfWrapIfAuthorized(g)
+    }
+
+    private suspend fun postSelfWrapIfAuthorized(g: WireGrant): Boolean {
+        if (g.vaultId in selfWrapsPosted || !account.needsSelfWrap(g) || !account.selfWrapAuthorized(g.vaultId)) return false
+        return runCatching {
+            api.putGrantSelfWrap(g.vaultId, io.silencelen.andvari.core.model.SelfWrapRequest(account.buildSelfWrap(g.vaultId)))
+            selfWrapsPosted.add(g.vaultId)
+        }.isSuccess
+    }
+
+    /** Pending invitations the human has not declined. */
+    fun pendingInvitations(): List<PendingInvitation> {
+        val declined = persistedSet(DECLINED_KEY)
+        // A vault held only through an unvouched legacy seal whose row now carries a pending v2 grant is listed
+        // too: verifying the sender confirms the key (it is off the review card, A6 review LOW-2).
+        return account.pendingGrants().filter {
+            it.grantIdB64 !in declined && (!account.hasVault(it.vaultId) || account.isLegacyReadOnly(it.vaultId))
+        }
+            .map { PendingInvitation(it.vaultId, it.fromUserId, it.grantIdB64) }
+    }
+
+    /** Who the SERVER says sent [inv] (display name + the key a human must verify). Untrusted. */
+    suspend fun invitationSender(inv: PendingInvitation): UserLookupResponse = api.userIdentity(inv.fromUserId)
+
+    /**
+     * Accept [inv] (§1.6): run the verification ceremony for its sender (the human TYPED the sender's 32-hex code,
+     * read from THEIR screen), then re-run §1.4. True only when the grant now verifies and the vault is adopted.
+     * A wrong code pins nothing and adopts nothing.
+     */
+    suspend fun acceptInvitation(inv: PendingInvitation, typedCode: String): Boolean {
+        val served = api.userIdentity(inv.fromUserId)
+        if (served.userId != inv.fromUserId) return false
+        verifyMemberTyped(served, typedCode) ?: return false
+        return afterInvitationPin(inv)
+    }
+
+    /** As [acceptInvitation], with a scan of the sender's identity QR (full-length compare). */
+    suspend fun acceptInvitationQr(inv: PendingInvitation, qrPayload: String): Boolean {
+        val served = api.userIdentity(inv.fromUserId)
+        if (served.userId != inv.fromUserId) return false
+        verifyMemberQr(served, qrPayload) ?: return false
+        return afterInvitationPin(inv)
+    }
+
+    private suspend fun afterInvitationPin(inv: PendingInvitation): Boolean {
+        reevaluateGrants()
+        surfaceGrantStates()
+        val adopted = account.hasVault(inv.vaultId) && account.keySource(inv.vaultId) == Account.KeySource.SIGNED_GRANT
+        if (adopted) cache.grants().firstOrNull { it.vaultId == inv.vaultId }?.let { postSelfWrapIfAuthorized(it) }
+        return adopted
+    }
+
+    /** "Decline": hide [inv] on this device (by grantId, so a re-issued grant asks again). */
+    fun declineInvitation(inv: PendingInvitation) {
+        persistSet(DECLINED_KEY, persistedSet(DECLINED_KEY) + inv.grantIdB64)
+    }
+
+    /** §8.2 "Review your shared vaults": the vaults readable only through an unconfirmed v1 seal. */
+    fun legacyReviewVaults(): List<LegacyVaultReview> {
+        // A6 review LOW-2: vaults whose v2 field failed or awaits verification are not offered for trust on first use.
+        val ids = (account.legacyReadOnlyVaultIds() - account.grantAnomalies().keys - account.pendingGrants().map { it.vaultId }.toSet())
+            .filterNot { account.heldKeyContradictsVouch(it) }.toSet() // round 3: the vouch gate
+        if (ids.isEmpty()) return emptyList()
+        val counts = items().groupingBy { it.vaultId }.eachCount()
+        return cache.vaults().filter { it.vaultId in ids }.map { v ->
+            LegacyVaultReview(v.vaultId, account.decryptVaultName(v.vaultId, v.metaBlob)?.takeIf { it != VAULT_NAME_FALLBACK }, counts[v.vaultId] ?: 0)
+        }.sortedBy { it.vaultId }
+    }
+
+    /** The owner the SERVER reports for [vaultId] (the review card labels it as server-reported). */
+    suspend fun reportedOwner(vaultId: String): CoHolder? =
+        api.vaultMembers(vaultId).firstOrNull { it.role == "owner" }?.let { CoHolder(it.userId, it.displayName, it.email, it.role) }
+
+    /**
+     * The human pressed "Accept" on the review card (Q7, trust on first use): this device vouches for the v1-only
+     * key of [vaultId]. Persisted, the read-only state lifts, and the self-wrap is posted.
+     */
+    suspend fun acceptLegacyVault(vaultId: String) {
+        check(account.isLegacyReadOnly(vaultId)) { "vault $vaultId is not awaiting review" }
+        // A6 review LOW-2: a row whose v2 field failed or awaits verification is never an "Accept anyway".
+        check(!account.heldKeyContradictsVouch(vaultId)) { "vault $vaultId holds a key this device's earlier vouch contradicts" }
+        check(vaultId !in account.grantAnomalies() && account.pendingGrants().none { it.vaultId == vaultId }) {
+            "vault $vaultId has a grant that failed verification or awaits it; it cannot be accepted on trust"
+        }
+        vouchLegacy(vaultId, frozen = false)
+        cache.grants().firstOrNull { it.vaultId == vaultId }?.let { postSelfWrapIfAuthorized(it) }
+    }
+
+    // ---- owner side (§1.5, §8.2 step 4) ----
+
+    /** How a served identity relates to this device's pins, for the add-member flow (§1.5, §7.2). */
+    enum class MemberPinState {
+        /** Pinned, current on this device, and the served key is the pinned key: no fingerprint step. */
+        PINNED,
+
+        /** Pinned, but the server now serves ANOTHER key for them: refuse, and verify again in person. */
+        KEY_CHANGED,
+
+        /** Not pinned here (or the pin is not current on this device, L-3): run the verification ceremony. */
+        NEEDS_VERIFICATION,
+    }
+
+    fun memberPinState(served: UserLookupResponse): MemberPinState = memberPinState(served.userId, served.identityPub)
+
+    fun memberPinState(userId: String, servedIdentityPub: String): MemberPinState {
+        val pin = accountState.currentPin(userId) ?: return MemberPinState.NEEDS_VERIFICATION
+        return when (ContactPin.pinState(accountState.doc, ServedIdentity(userId, servedIdentityPub))) {
+            ContactPin.PinState.PINNED_MATCH -> if (pin.userId == userId) MemberPinState.PINNED else MemberPinState.NEEDS_VERIFICATION
+            ContactPin.PinState.PINNED_MISMATCH -> MemberPinState.KEY_CHANGED
+            ContactPin.PinState.UNPINNED -> MemberPinState.NEEDS_VERIFICATION
+        }
+    }
+
+    /**
+     * Add [userId] to [vaultId] (owner, §1.5). Only a member PINNED and current on this device; the v2 grant and,
+     * in the compatibility window, the dual-sent v1 seal are both sealed to the PIN key. Throws
+     * [MemberNotVerifiedException] otherwise (the UI runs "Verify a household member" first).
+     */
+    suspend fun addVaultMember(vaultId: String, userId: String, role: String) {
+        val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
+        val signed = account.buildSignedGrant(vaultId, pin)
+        val sealed = account.wrapVkForMember(Bytes.fromB64(pin.identityPub), vaultId)
+        api.addVaultMember(vaultId, VaultMemberAdd(userId, role, sealed, signed))
+    }
+
+    /** §8.2 step 4: re-issue [userId]'s grant for [vaultId] as v2 with the SAME key (owner, pinned member). */
+    suspend fun reissueGrant(vaultId: String, userId: String) {
+        val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
+        api.reissueGrant(vaultId, userId, GrantReissueRequest(account.buildSignedGrant(vaultId, pin)))
+        reissuedThisSession.add("$vaultId|$userId")
+    }
+
+    private val reissuedThisSession = mutableSetOf<String>()
+    private val legacyMembersByVault = HashMap<String, List<VaultMemberSummary>>()
+    private val reissueCheckedWith = HashMap<String, String>()
+
+    /**
+     * §8.2 step 4, best effort: for every shared vault this account OWNS, re-issue v2 to each member the server
+     * hints still has a legacy grant (a hint only) and whom this device has pinned (current, same key). Members
+     * that are not pinned stay in [legacyGrantMembers] ("Verify <name> to secure their access"). The member list
+     * is re-read when this device's current pins change, not on every poll.
+     */
+    private suspend fun reissueLegacyGrants() {
+        val pinsTag = accountState.doc.contacts.filter { accountState.isCurrent(it) }.joinToString(",") { it.userId + ":" + it.identityPub }
+        for (v in cache.vaults()) {
+            val vaultId = v.vaultId
+            if (!account.hasVault(vaultId) || vaultId == account.personalVaultId) continue
+            if (account.serverRoleFor(vaultId) != "owner" || account.isLegacyReadOnly(vaultId)) continue
+            if (reissueCheckedWith[vaultId] == pinsTag) continue
+            val members = runCatching { api.vaultMembers(vaultId) }.getOrNull() ?: continue
+            reissueCheckedWith[vaultId] = pinsTag
+            val legacy = members.filter { it.legacyGrant == true && it.role != "owner" && it.userId != account.userId }
+            val left = mutableListOf<VaultMemberSummary>()
+            for (m in legacy) {
+                if ("$vaultId|${m.userId}" in reissuedThisSession) continue
+                if (memberPinState(m.userId, m.identityPub) == MemberPinState.PINNED && runCatching { reissueGrant(vaultId, m.userId) }.isSuccess) continue
+                left.add(m)
+            }
+            legacyMembersByVault[vaultId] = left
+        }
+    }
+
+    /** The "legacy grants" list for an owned vault: members still holding only a v1 grant whom this device could
+     *  not re-issue to (not pinned, key changed). From the last check; empty until one ran. */
+    fun legacyGrantMembers(vaultId: String): List<VaultMemberSummary> = legacyMembersByVault[vaultId].orEmpty()
+
+    // ---- A5b review LOW-1 / LOW-2: "Use the new personal vault" only once its co-holders loaded ----
+
+    private var personalChangeDescribed: String? = null
+
+    /**
+     * Load what "Use the new personal vault" would mean: the new vault's co-holders (as the server reports them)
+     * and origin. THROWS when the member lookup fails, and then [acceptPersonalChange] stays refused: the human
+     * may only switch to a vault whose co-holders they were shown. Keeping the current vault needs nothing.
+     */
+    suspend fun describePersonalChange(): PersonalChangeDetails {
+        personalChangeDescribed = null
+        val change = personalChange() ?: throw IllegalStateException("no personal-vault change is pending")
+        val coHolders = loadCoHolders(change.servedVaultId)
+        val nameOf = { id: String ->
+            cache.vaults().firstOrNull { it.vaultId == id }?.let { account.decryptVaultName(id, it.metaBlob) }?.takeIf { it != VAULT_NAME_FALLBACK }
+        }
+        personalChangeDescribed = change.servedVaultId
+        return PersonalChangeDetails(change.currentVaultId, nameOf(change.currentVaultId), change.servedVaultId, nameOf(change.servedVaultId), coHolders, originOf(change.servedVaultId))
     }
 
     // ---- "Verify a household member" (root cause A §7.2), shared by the native screens ----
@@ -659,6 +975,11 @@ class SyncEngine(
         accountState.pin(c)
         return c
     }
+
+    /** One-tap pin from a members list (§8.2 step 6): the same typed comparison, against the key the member row
+     *  carries. Nothing is pinned on a mismatch. */
+    suspend fun verifyMemberTyped(member: VaultMemberSummary, typed: String): Contact? =
+        verifyMemberTyped(UserLookupResponse(member.userId, member.displayName, member.identityPub), typed)
 
     /** Remove a pin (tombstoned). */
     suspend fun unpinMember(userId: String) = accountState.unpin(userId)
@@ -694,11 +1015,14 @@ class SyncEngine(
         // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
         decidePersonalLocally()
         runCatching { accountState.refresh() }
-        // Member self-wrap (root cause A §3.2) is deliberately NOT posted here yet. The only key a
-        // member can wrap today came from a v1 seal, which the server can mint: wrapping it under
-        // our UVK would launder a server-chosen key into the canonical slot for every device, and
-        // a member row carrying a wrap weakens the H64 personal-vault refusal until the §4
-        // personal wrap lands. Posting waits for a verified v2 grant or a confirmed legacy one.
+        // Root cause A (branch A6). Pins may have changed: re-run §1.4 for rows not yet adopted (pending
+        // invitations, legacy keys an owner re-issued). Then the member self-wrap (§3.2), minted ONLY for a key
+        // from a verified v2 grant or a v1 key this device froze or the human confirmed (never for a key only an
+        // unconfirmed v1 seal vouches for: the A1 laundering bug). Then the owner's §8.2 step 4 re-issue.
+        reevaluateGrants()
+        surfaceGrantStates()
+        postAuthorizedSelfWraps()
+        runCatching { reissueLegacyGrants() }
     }
 
     /**
@@ -716,12 +1040,15 @@ class SyncEngine(
         // against the wrap this device cached (withheld, junk, or naming another vault). With no wrap anywhere
         // the human is asked; nothing is picked automatically and the server's `type` label is not an input.
         decidePersonalLocally()
+        val decryptedVaults = HashSet<String>()
         for (w in cache.envelopes()) {
             if (w.deleted || !account.hasVault(w.vaultId)) continue
             runCatching {
                 cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
+                decryptedVaults.add(w.vaultId)
             }
         }
+        freezeOnce(decryptedVaults)
         // Reload durably staged denials (F21): a process death between a denial and the
         // pull that classifies it must not destroy the edit. stagedBefore=0 → the first
         // completed pull after this restart is fresh enough to classify them.
@@ -750,6 +1077,10 @@ class SyncEngine(
     fun close() = cache.close()
 
     private suspend fun pull() {
+        // §8.2 (A6 re-review LOW-D): evidence is what THIS cache held before the upgrade. Every pull (sync, an
+        // import, a write's reconcile) marks the freeze as done FIRST, so if no hydrate looked at the cache, nothing
+        // this engine pulls from now on can count as pre-upgrade evidence.
+        if (cache.clientState(FREEZE_DONE_KEY) == null) cache.setClientState(FREEZE_DONE_KEY, "1")
         // Epoch guard (#0 belt): stamp the START of this pull before anything is fetched.
         // surfaceStagedDenials only classifies denials staged BEFORE a completed pull's
         // start — i.e. verdicts always come from a snapshot fetched after the denial.
@@ -927,7 +1258,9 @@ class SyncEngine(
                 if (account.roleFor(vaultId) == "owner") continue
                 addedNoticed.add(vaultId)
                 val name = account.decryptVaultName(vaultId, v.metaBlob) ?: VAULT_NAME_FALLBACK
-                pendingAddedNotices.add(LifecycleNotice(account.newItemId(), vaultId, name, "added"))
+                // §1.6: a verified grant names the PINNED contact who signed it; a legacy add names no one.
+                val by = account.signedGrantSender(vaultId)?.let { accountState.doc.contact(it)?.label }
+                pendingAddedNotices.add(LifecycleNotice(account.newItemId(), vaultId, name, "added", byLabel = by))
             }
             for (item in resp.items) {
                 if (item.deleted) {
@@ -1154,6 +1487,9 @@ class SyncEngine(
         cache.dropPending(vaultId)
         account.removeVault(vaultId)
         incomingByVault.remove(vaultId)
+        // A vouched-for legacy key dies with the vault: a later v1 grant for the same vaultId (a re-add, or a
+        // server replay) starts read-only again instead of inheriting this device's old trust.
+        persistSet(LEGACY_AUTHORIZED_KEY, persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }.toSet())
     }
 
     /** Expunge holding-area entries past their deadline (purgeAt / +30d, design §6). */

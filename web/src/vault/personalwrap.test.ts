@@ -227,6 +227,7 @@ async function h1Feed() {
   // The decoy's VK reaches the victim as a bare UVK self-wrap on an owner-labelled row, seal stripped:
   // the victim's own client wrapped it (buildSelfWrap) after a member grant, and the server kept only that.
   victim.account.addGrant({ vaultId: decoy.vaultId, userId: victim.userId, role: "writer", wrappedVk: "", rev: 4, sealedVk: mate.account.wrapVkForMember(victim.account.identityPub, decoy.vaultId) });
+  victim.account.authorizeLegacyKey(decoy.vaultId); // A6: a self-wrap is minted only for a vouched-for key
   const selfWrap = victim.account.buildSelfWrap(decoy.vaultId);
   const rows = feed(
     [personalRow(victim, "shared"), { vaultId: decoy.vaultId, type: "personal", rev: 5, metaBlob: decoy.request.metaBlob, createdAt: 0 }],

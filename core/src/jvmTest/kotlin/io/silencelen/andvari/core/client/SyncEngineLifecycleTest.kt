@@ -237,6 +237,9 @@ class SyncEngineLifecycleTest {
         val engine = SyncEngine(server.api(), member, cache)
         server.queue.add(SyncResponse(5, true, listOf(vault), listOf(grant), listOf(item), emptyList()))
         runBlocking { engine.sync() }
+        // Root cause A §8.2 (A6): a key only a v1 seal vouches for is read-only until the member accepts it (or a
+        // verified v2 grant / pre-upgrade evidence vouches for it). These lifecycle tests model an accepted vault.
+        runBlocking { engine.acceptLegacyVault(vaultId) }
         return Seed(owner, member, engine, server, cache, vaultId, itemId, vault, grant, item)
     }
 
@@ -654,6 +657,7 @@ class SyncEngineLifecycleTest {
             ),
         )
         engine1.sync()
+        engine1.acceptLegacyVault(vaultId) // A6 §8.2: the member vouches for the v1-only key (persisted in the cache)
         assertNotNull(engine1.pendingTransferFor(vaultId), "the owner-chip surface reads through the durable cache")
         assertEquals(listOf(vaultId), engine1.incomingTransfers().map { it.vaultId })
         engine1.close() // "process death" mid-offer
@@ -895,6 +899,7 @@ class SyncEngineLifecycleTest {
         val engine1 = SyncEngine(server.api(), member, cache1)
         server.queue.add(SyncResponse(5, true, listOf(vault), listOf(grant), listOf(item), emptyList()))
         engine1.sync()
+        engine1.acceptLegacyVault(vaultId) // A6 §8.2: an accepted (vouched-for) v1 vault, so the edit is attempted
 
         // The denial lands, but its classifying pull FAILS — then the process dies.
         server.denyVaults.add(vaultId)

@@ -65,9 +65,12 @@ existing vaults are member-verifiable — the server never holds VK and cannot m
 can still WITHHOLD, delay, or serve stale state (availability-class, accepted). Replay is
 bounded by expiry+seq binding and by soft-hide-until-purgeAt; residuals: a device offline
 since before the newest verified seq may be shown stale-but-genuine older state; proofs are
-keyholder-forgeable (server authz is the gate). Grant injection for NEW vaults (F16) remains
-an accepted residual until P6 owner-signed grants — the "you were added to <vault>" notice is
-transparency for honest servers only and is NOT an F16 defense. Shared-vault membership
+keyholder-forgeable (server authz is the gate). Grant injection for NEW vaults (F16) is closed for
+v2 grants by owner-signed grants (security review 2026-10, root cause A, branch A6; spec 01 §6): a
+key is adopted only from a grant signed by the identity this account PINNED for the sender it names,
+and "You were added to <vault> by <contact>" names that verified contact. It remains open, as a
+bounded residual, only through the compatibility window's v1 seals (R15); it is retired when branch
+A8 closes the window. Shared-vault membership
 topology (which userId holds which role on which vaultId) is server-visible metadata,
 subsumed by A6/R4.
 **R8 extended (per-member recovery `rfp`, spec 04 §6.5):** the emailed enroll link is
@@ -207,6 +210,38 @@ copy and refuses the rollback, but a device that never held a newer copy cannot 
 verification per pair; no admin-signed introductions. (d) The enrolment pin rests on the human typing
 the in-person code from the admin's screen (spec 04 §6.5); a member who types a code read to them by
 someone other than the admin, in person, gives that person the admin's slot.
+
+**R15 (signed grants and the compatibility window — security review 2026-10, root cause A §1.4–§1.7, §8.2;
+branch A6).** Residuals accepted: (a) **legacy keys** (spec 01 §6): while the window is open a client still
+READS a vault whose key only a v1 seal vouches for (anyone holding the member's public key, the server
+included, can mint one), but writes nothing under it, and self-wraps it only with pre-upgrade evidence on
+that device (the trust on first use the household already had) or after the human accepts it on the review
+card. "Accept" is trust on first use and the copy says so; a member who accepts a server-forged vault reads
+what the server put there, and anything they then save into it is readable by the server. (b) **pin currency is per device**:
+a pin skips verification only on a device where a human made or re-confirmed it; a synced pin does not, so a
+replayed older blob (in any order) cannot bring back a removed pin as trusted. The cost is one re-verification
+per contact per device. A tombstone in the merged state removes the pin everywhere; a device that never saw the
+tombstone (offline across the removal, and served only older blobs since) still trusts the pin IT confirmed:
+the stale-but-genuine residual. On a host whose client state is in memory only (no durable device state),
+confirmations are lost at every restart and pins are never current there until re-confirmed in that session:
+this fails closed (grants go pending, the add-member check runs) and is accepted. A tombstone written on
+ANOTHER device does not clear this device's own confirmation record, so if the SAME key is later re-pinned (on
+any device) it is current here again without a new ceremony here: accepted, because a human on this device
+verified exactly that key. (c) **pending invitations** name a sender the server reports (display name
+and key); the human compares codes before anything is adopted, and the vault's name stays hidden until then.
+(d) **the extension** (owner decision Q8) never opens a grant: a member's new shared vault appears in the
+extension only after a full client verified the grant and posted the self-wrap. (e) **the owner's re-issue**
+trusts the server's `legacyGrant` hint only to decide whom to re-issue to; it signs only to members pinned and
+current on that device, sealed to the pinned key, so a wrong hint costs a redundant grant, never a misdirected
+one. (f) **grant authority is not bound to the vault**: a verified grant proves which PINNED contact signed
+it, not that the signer owns or may share the vault; any pinned household member who holds a vault's key can
+grant it. A verified grant naming a different key than a held one is refused as `vk_mismatch` (never a silent
+switch); binding grants to the vault's owner is an open design follow-up. (g) **no per-vault key memory after
+a self-wrap**: a vault adopted from a verified v2 grant and then self-wrapped keeps no device-local record of its
+key (the vouch tags of §8.2 cover only legacy keys). A server that strips the self-wrap and colludes with a
+pinned contact can therefore have that contact sign a grant for a different key, which the device adopts as a
+fresh v2 grant. Closing it needs per-vault key memory, which interacts with key rotation (branch A7); it is an
+owner / A7 design item.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 

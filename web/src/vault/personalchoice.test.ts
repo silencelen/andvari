@@ -154,6 +154,7 @@ describe("A5b — the personal-vault choice", () => {
     const taxes = h.mate.account.buildCreateSharedVault("Taxes");
     // The mate created "Taxes" and transferred it to the victim; the victim's row is a bare UVK wrap of the VK.
     h.victim.account.addGrant({ vaultId: taxes.vaultId, userId: h.victim.userId, role: "writer", wrappedVk: "", rev: 4, sealedVk: h.mate.account.wrapVkForMember(h.victim.account.identityPub, taxes.vaultId) });
+    h.victim.account.authorizeLegacyKey(taxes.vaultId); // A6: a self-wrap is minted only for a vouched-for key
     const victimWrap = h.victim.account.buildSelfWrap(taxes.vaultId);
     const rows: SyncResponse = {
       ...h.rows,
@@ -197,6 +198,9 @@ describe("A5b — the personal-vault choice", () => {
     expect(local.get("personal.wrap")).toContain(h.victim.personalVaultId);
     expect(api.puts).toHaveLength(0);
 
+    // A5b review LOW-1 (A6): "Use new" only after the new vault's co-holders loaded.
+    expect(() => store.acceptPersonalChange()).toThrow();
+    await store.describePersonalChange();
     store.acceptPersonalChange();
     expect(again.personalStatus).toBe("confirmed");
     expect(again.personalVaultId).toBe(h.sharedId);

@@ -261,6 +261,9 @@ export type Req =
   /** A5b (security review 2026-10, root cause A): the popup confirms that the personal vault changed (a served
    *  wrap named another vault than this browser's). Extension pages only; mints nothing. */
   | { type: "personalAcceptChange" }
+  /** A6 fix round (A5b LOW-1 parity): load who the server reports on the NEW personal vault; "Use new" is
+   *  offered (and accepted by the SW) only after this succeeded for that vault. Extension pages only. */
+  | { type: "personalDescribeChange" }
   | { type: "unlock"; email: string; password: string }
   /** Popup: finish a TOTP-gated sign-in with the authenticator code (0.16.3). Follows an `unlock`
    *  that answered `totp_required`; the SW holds the already-derived keys so no second KDF runs.
@@ -479,9 +482,16 @@ export type Res<T extends Req["type"]> = T extends "status"
       /** A5b: a served personal-vault record names another vault than this browser's; it keeps saving to its
        *  own until the user confirms (popup notice). */
       personalChange: boolean;
+      /** A5b LOW-3 (A6): the notice naming both the current and the new vault; null when nothing pends. */
+      personalChangeText: string | null;
+      /** Root cause A §1.7 (A6): shared vaults whose grant has no UVK wrap yet — the extension never opens a
+       *  grant seal (Q8), so they wait for a full client ("open andvari to review"). */
+      waitingGrants: number;
     }
   : T extends "personalAcceptChange"
-    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" }
+    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" | "coholders_not_loaded" }
+  : T extends "personalDescribeChange"
+    ? { ok: boolean; code?: "locked" | "none" | "not_allowed" | "coholders_unavailable"; coHoldersLine?: string }
   : T extends "unlock"
     ? { ok: boolean; code?: UnlockCode; error?: string }
     : T extends "unlockTotp"

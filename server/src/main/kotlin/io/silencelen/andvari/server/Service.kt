@@ -5,6 +5,7 @@ import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.CreateVaultResponse
 import io.silencelen.andvari.core.model.DeletedItem
+import io.silencelen.andvari.core.model.GrantReissueRequest
 import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.ItemUpload
 import io.silencelen.andvari.core.model.UserLookupResponse
@@ -1484,7 +1485,8 @@ class Service(
     fun listVaultMembers(p: Principal, vaultId: String): List<VaultMemberSummary> = repo.db.read { c ->
         if (repo.grantRole(c, p.userId, vaultId) == null) throw Forbidden("no_grant") // hidden-as-403
         c.queryAll(
-            """SELECT g.userId, g.role, COALESCE(g.addedAt, 0) AS addedAt, u.email, u.displayName, u.identityPub, u.status
+            """SELECT g.userId, g.role, COALESCE(g.addedAt, 0) AS addedAt, u.email, u.displayName, u.identityPub, u.status,
+                      g.wrappedVk, g.signedGrant
                FROM grants g JOIN users u ON u.userId=g.userId
                WHERE g.vaultId=? AND g.revokedAt IS NULL ORDER BY g.rev""",
             vaultId,
@@ -1495,6 +1497,10 @@ class Service(
                 identityPub = rs.getString("identityPub"), addedAt = rs.getLong("addedAt"),
                 // F22 rider (spec 03 §10): disabled badge + transfer target picker input.
                 status = rs.getString("status"),
+                // Root cause A §8.2 step 4 (A6): a HINT for the owner's client — this member's devices hold the
+                // key only from a v1 seal (no v2 grant, no self-wrap on the row). Owners never.
+                legacyGrant = rs.getString("role") != "owner" && rs.getString("signedGrant").isNullOrEmpty() &&
+                    rs.getString("wrappedVk").isNullOrEmpty(),
             )
         }
     }
@@ -1508,6 +1514,8 @@ class Service(
         if (req.role !in setOf("writer", "reader")) throw BadRequest("bad_role")
         if (req.userId == p.userId) throw BadRequest("cannot_target_self")
         requireB64(req.sealedVk, 1024, "sealed_vk")
+        // Grant v2 (root cause A §1.5): optional in the compatibility window (an N-1 owner sends v1 only).
+        req.signedGrant?.let { requireB64(it, SIGNED_GRANT_MAX, "signed_grant") }
         val (rev, notify) = repo.db.tx { c ->
             requireOwnerOfShared(c, p, vaultId)
             val target = c.queryOne("SELECT status FROM users WHERE userId=?", req.userId) { it.getString(1) }
@@ -1517,12 +1525,36 @@ class Service(
             val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
             // Insert, or resurrect a previously-revoked row (PRIMARY KEY(vaultId,userId)).
             c.exec(
-                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,rev,revokedAt,revokedReason,removeProof,removeNonce,addedAt) VALUES(?,?,?,'',?,?,NULL,NULL,NULL,NULL,?)
-                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, rev=excluded.rev, revokedAt=NULL, revokedReason=NULL, removeProof=NULL, removeNonce=NULL, addedAt=excluded.addedAt""",
-                vaultId, req.userId, req.role, req.sealedVk, grantRev, now(),
+                """INSERT INTO grants(vaultId,userId,role,wrappedVk,sealedVk,signedGrant,rev,revokedAt,revokedReason,removeProof,removeNonce,addedAt) VALUES(?,?,?,'',?,?,?,NULL,NULL,NULL,NULL,?)
+                   ON CONFLICT(vaultId,userId) DO UPDATE SET role=excluded.role, wrappedVk='', sealedVk=excluded.sealedVk, signedGrant=excluded.signedGrant, rev=excluded.rev, revokedAt=NULL, revokedReason=NULL, removeProof=NULL, removeNonce=NULL, addedAt=excluded.addedAt""",
+                vaultId, req.userId, req.role, req.sealedVk, req.signedGrant, grantRev, now(),
             )
             repo.auditOn(c, "vault_member_add", p.userId, p.deviceId, ip, "$vaultId:${req.userId}:${req.role}")
             repo.currentRev(c) to vaultMemberIds(c, vaultId)
+        }
+        onChange(notify, rev)
+        return CreateVaultResponse(rev)
+    }
+
+    /**
+     * Owner re-issue (security review 2026-10, root cause A §8.2 step 4, branch A6): store a v2 `signedGrant` on a
+     * member's ACTIVE non-owner grant, so the member's client can confirm the vault key it held only from a v1 seal
+     * (the owner's client signs the SAME key, sealed to the identity it pinned for the member). The server cannot
+     * open or check it; it enforces WHO writes WHICH row: the vault's owner, onto another member's active grant,
+     * ≤ [SIGNED_GRANT_MAX] base64url. The role, sealedVk and any self-wrap are untouched; the grant rev bumps so the
+     * member's devices receive the row. Audited `vault_grant_reissue`.
+     */
+    suspend fun reissueVaultGrant(p: Principal, vaultId: String, targetUserId: String, req: GrantReissueRequest, ip: String): CreateVaultResponse {
+        if (targetUserId == p.userId) throw BadRequest("cannot_target_self")
+        requireB64(req.signedGrant, SIGNED_GRANT_MAX, "signed_grant")
+        val (rev, notify) = repo.db.tx { c ->
+            requireOwnerOfShared(c, p, vaultId)
+            val role = repo.grantRole(c, targetUserId, vaultId) ?: throw NotFound("not_a_member")
+            if (role == "owner") throw BadRequest("cannot_target_owner")
+            val grantRev = repo.nextRev(c, "grant", vaultId, vaultId)
+            c.exec("UPDATE grants SET signedGrant=?, rev=? WHERE vaultId=? AND userId=? AND revokedAt IS NULL", req.signedGrant, grantRev, vaultId, targetUserId)
+            repo.auditOn(c, "vault_grant_reissue", p.userId, p.deviceId, ip, "$vaultId:$targetUserId")
+            repo.currentRev(c) to setOf(targetUserId)
         }
         onChange(notify, rev)
         return CreateVaultResponse(rev)
@@ -2014,5 +2046,8 @@ class Service(
         // A fixed valid argon2id string so unknown-user logins spend the same CPU (timing).
         val DUMMY_VERIFIER: String = ServerCrypto.hashVerifier("andvari-dummy-authkey")
         internal const val DAY_MS = 24L * 3600 * 1000
+        /** Base64url cap for a v2 `signedGrant` (root cause A §1.5): 48 B seal overhead + a ≤ 1125 B frame
+         *  (101 B header + a ≤ 1024 B statement) is ≤ 1564 B, ≤ 2086 chars; real grants are ~600. */
+        internal const val SIGNED_GRANT_MAX = 2100
     }
 }

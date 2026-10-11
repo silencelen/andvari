@@ -68,7 +68,7 @@ class PersonalChoiceHardeningTest {
     }
 
     /** A scripted server: the sync feed, the member lists, and capture of every personal-wrap PUT. */
-    private class FakeServer(val feed: SyncResponse, val members: Map<String, List<VaultMemberSummary>> = emptyMap()) {
+    private class FakeServer(val feed: SyncResponse, val members: Map<String, List<VaultMemberSummary>> = emptyMap(), val failMembers: Boolean = false) {
         val personalWrapPuts = mutableListOf<String>()
         val memberFetches = mutableListOf<String>()
     }
@@ -85,6 +85,8 @@ class PersonalChoiceHardeningTest {
                     server.personalWrapPuts.add((req.body as TextContent).text)
                     respond("ok", HttpStatusCode.OK)
                 }
+                members != null && req.method == HttpMethod.Get && server.failMembers ->
+                    respond("""{"error":"unavailable","message":"no"}""", HttpStatusCode.ServiceUnavailable, ct)
                 members != null && req.method == HttpMethod.Get -> {
                     val id = members.groupValues[1]
                     server.memberFetches.add(id)
@@ -262,7 +264,9 @@ class PersonalChoiceHardeningTest {
         assertTrue(server.personalWrapPuts.isEmpty())
         assertTrue(device.get("personal.wrap")!!.contains(h.victim.reg.personalVault.vaultId), "the cache is not overwritten by the unconfirmed wrap")
 
-        // The human confirms the change: now (and only now) the served wrap is in force and cached.
+        // The human confirms the change: now (and only now) the served wrap is in force and cached. "Use new" is
+        // offered only once the new vault's co-holders loaded (A5b review LOW-1).
+        assertNotNull(engine.describePersonalChange())
         engine.acceptPersonalChange()
         assertEquals(Account.PersonalStatus.CONFIRMED, again.personalStatus)
         assertEquals(h.sharedId, again.personalVaultId)
@@ -294,6 +298,36 @@ class PersonalChoiceHardeningTest {
         assertEquals(Account.PersonalStatus.CONFIRMED, again.personalStatus)
         assertEquals(h.victim.reg.personalVault.vaultId, again.personalVaultId)
         assertEquals("fresh-auth-key", json.decodeFromString(PersonalWrapPut.serializer(), server.personalWrapPuts.single()).currentAuthKey)
+    }
+
+    // ---- A5b review LOW-1 / LOW-2 (carried into A6) ----
+
+    @Test
+    fun low1_useNewIsRefusedUntilTheNewVaultsCoHoldersLoaded() = runBlocking<Unit> {
+        val h = household()
+        val device = MemoryDeviceState()
+        val first = unlock(h.victim, h.victim.reg.personalWrap)
+        SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device).sync()
+
+        val again = unlock(h.victim, h.sharedWrap)
+        // The member lookup for the NEW vault fails (the server withholds it).
+        val failing = FakeServer(h.feed, failMembers = true)
+        val engine = SyncEngine(api(failing), again, InMemoryVaultCache(), deviceState = device)
+        engine.sync()
+        assertEquals(Account.PersonalStatus.CHANGED, again.personalStatus)
+        assertFailsWith<Exception> { engine.describePersonalChange() }
+        assertFailsWith<IllegalStateException>("no co-holder list, no \"Use new\"") { engine.acceptPersonalChange() }
+        assertEquals(h.victim.reg.personalVault.vaultId, again.personalVaultId)
+
+        // Once the lookup succeeds, the details name the co-holders (server-reported) and "Use new" works.
+        val ok = FakeServer(h.feed, mapOf(h.sharedId to listOf(member(h.mate, "writer", "Mate"))))
+        val e2 = SyncEngine(api(ok), again, InMemoryVaultCache(), deviceState = device)
+        val details = e2.describePersonalChange()
+        assertEquals(h.sharedId, details.servedVaultId)
+        assertEquals(listOf("Mate"), details.servedCoHolders.map { it.displayName })
+        assertEquals(h.victim.reg.personalVault.vaultId, details.currentVaultId)
+        e2.acceptPersonalChange()
+        assertEquals(h.sharedId, again.personalVaultId)
     }
 
     // ---- L-1: a junk served wrap keeps the valid cached one ----

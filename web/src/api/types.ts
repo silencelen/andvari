@@ -149,6 +149,9 @@ export interface WireGrant {
   rev: number;
   /** Member grants (spec 01 §6): crypto_box_seal to the member identityPub; owner/personal use wrappedVk. */
   sealedVk?: string | null;
+  /** Grant v2 (security review 2026-10, root cause A §1.5, A6): crypto_box_seal(memberIdentityPub, SignedStatement
+   *  vault-grant), verified per §1.4 against our PIN for its `from`. Additive: an old client ignores it. */
+  signedGrant?: string | null;
 }
 
 export interface WireItem {
@@ -225,7 +228,10 @@ export interface UserLookupResponse {
 export interface VaultMemberAdd {
   userId: string;
   role: string;
+  /** v1 seal, dual-sent in the compatibility window. Sealed to the PINNED key, like signedGrant. */
   sealedVk: string;
+  /** Grant v2 (root cause A §1.5): the owner's joint-key signed grant, sealed to the member's PINNED key. */
+  signedGrant?: string;
 }
 
 export interface VaultMemberSummary {
@@ -238,6 +244,8 @@ export interface VaultMemberSummary {
   /** F22 rider (spec 03 §10): account status ('active'|'disabled') — additive; feeds the
    *  transfer target picker and the disabled-member badge. */
   status?: string | null;
+  /** Root cause A §8.2 step 4 (A6): server HINT that this member's grant has neither a v2 grant nor a self-wrap. */
+  legacyGrant?: boolean | null;
 }
 
 // ---- vault lifecycle (spec 03 §11) ----

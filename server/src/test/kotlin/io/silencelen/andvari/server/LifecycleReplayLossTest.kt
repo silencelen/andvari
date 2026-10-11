@@ -99,6 +99,7 @@ class LifecycleReplayLossTest {
             VaultMemberAdd(member.userId, "writer", owner.wrapVkForMember(Bytes.fromB64(info.identityPub), nv.vaultId)),
         )
         engineMember.sync()
+        engineMember.acceptLegacyVault(nv.vaultId) // root cause A §8.2 (A6): a v1-only grant, accepted by the member
         val item = engineMember.items().single { it.doc.name == "wifi" }
 
         // Owner deletes; the member edits anyway — the write is denied, then PARKED (F21).
@@ -155,6 +156,7 @@ class LifecycleReplayLossTest {
         val sealed = owner.wrapVkForMember(Bytes.fromB64(info.identityPub), nv.vaultId)
         apiOwner.addVaultMember(nv.vaultId, VaultMemberAdd(member.userId, "writer", sealed))
         engineMember.sync()
+        engineMember.acceptLegacyVault(nv.vaultId) // root cause A §8.2 (A6): a v1-only grant, accepted by the member
         val item = engineMember.items().single { it.doc.name == "wifi" }
 
         // Delete → the member's edit parks.

@@ -1,14 +1,16 @@
 import { adAccountState, adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk, adVkPersonal } from "../crypto/ad";
 import { type AccountStateDoc, decodeAccountState, encodeAccountState } from "./accountstate";
 import { usageKey } from "../crypto/usagekey";
-import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
+import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "../crypto/bytes";
 import { open, seal, structuralRefusal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvkV2 } from "../crypto/escrow";
 import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
-import { boxKeypairFromSeed, randomBytes, signKeypairFromSeed } from "../crypto/provider";
+import { boxKeypairFromSeed, randomBytes, sha256Sync, signKeypairFromSeed } from "../crypto/provider";
 import { identityFingerprint, openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
+import { buildGrantFrame, decideLegacyGrant, type GrantOutcome, type GrantPin, type GrantVerdict, LEGACY_IN_WINDOW, type LegacyGrantMode, openSignedGrant, sealGrantFrame } from "../crypto/signedgrant";
+import type { Contact } from "./accountstate";
 import { CryptoError } from "../crypto/sodium";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
 import type {
@@ -114,6 +116,55 @@ export class VaultGrantKeyUnreadableError extends Error {
   }
 }
 
+/**
+ * INV-WRITE-KEY (security review 2026-10, root cause A §5.1, §8.2; branch A6; core `VaultKeyNotVerifiedException`
+ * twin): this vault's key came ONLY from a v1 `sealedVk` (server-mintable) and nobody vouched for it yet — no
+ * verified v2 grant, no pre-upgrade evidence, no human "Accept". Readable; nothing is ever sealed under it. Not a
+ * CryptoError, so no save ladder can read it as "wrong master password".
+ */
+export class VaultKeyNotVerifiedError extends Error {
+  constructor(readonly vaultId: string) {
+    super("This shared vault isn't verified on this device yet, so it is read-only. Review it under Shared vaults first.");
+    this.name = "VaultKeyNotVerifiedError";
+  }
+}
+
+/** How this device vouched for a v1-only key (§8.2): pre-upgrade evidence, or the human's Accept. */
+export type LegacyVouchKind = "frozen" | "confirmed";
+
+/** A vouch is bound to the KEY it was given for: `tag` = lowercase hex SHA-256 of that vault key (A6 review HIGH-1). */
+export interface LegacyVouch {
+  tag: string;
+  kind: LegacyVouchKind;
+}
+
+/** The tag a legacy-key vouch is bound to: lowercase hex SHA-256 of the vault key. */
+export function legacyTagOf(vk: Uint8Array): string {
+  return toHexLower(sha256Sync(vk));
+}
+
+/** Where a held vault key came from (root cause A §3.1 precedence; core `Account.KeySource`). */
+export type KeySource = "personal-wrap" | "uvk-wrap" | "signed-grant" | "legacy-seal";
+
+/** §1.6: a v2 grant from a sender not pinned (or not current) here. Not adopted; `fromUserId` is unverified. */
+export interface PendingGrant {
+  vaultId: string;
+  fromUserId: string;
+  grantIdB64: string;
+}
+
+class GrantPendingSignal extends Error {
+  constructor(readonly pending: PendingGrant) {
+    super("grant pending verification");
+  }
+}
+
+class GrantRefusedSignal extends Error {
+  constructor(readonly verdict: GrantVerdict) {
+    super(`grant refused: ${verdict}`);
+  }
+}
+
 export class VaultKeyDamagedError extends Error {
   constructor(detail: string, cause?: unknown) {
     super(VAULT_KEYS_DAMAGED);
@@ -164,6 +215,23 @@ export class Account {
 
   /** Vaults whose UVK wrap is present but does not open ("key unreadable — tell your admin"). */
   private readonly unreadableKeyVaults = new Set<string>();
+
+  /** Root cause A (branch A6): where each held key came from, recorded when it is adopted. */
+  private readonly keySources = new Map<string, KeySource>();
+  /** For keys from a verified v2 grant: the sender the VERIFIED statement names. */
+  private readonly signedGrantFrom = new Map<string, string>();
+  /** v1-only keys this device vouches for (§8.2), each bound to the key it was given for (HIGH-1). */
+  private readonly legacyVouches = new Map<string, LegacyVouch>();
+  /** §1.6 pending invitations by vaultId. */
+  private readonly pendingGrantsByVault = new Map<string, PendingGrant>();
+  /** §1.4 anomaly verdicts by vaultId (nothing adopted). */
+  private readonly grantAnomaliesByVault = new Map<string, GrantVerdict>();
+
+  /**
+   * Pins as the grant verifier sees them (§1.4 step 7). The store wires this to the account-state contacts,
+   * reporting a pin as current only when it may skip verification on this device (A5 review L-3). Default: no one.
+   */
+  grantPins: (userId: string) => GrantPin | null = () => null;
 
   /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
    *  max(docFloor, this): the server enforces per-item monotonic fv, so an edit must never
@@ -539,22 +607,64 @@ export class Account {
     if (grant.role) this.vaultRoles.set(grant.vaultId, grant.role);
     const held = this.vaultKeys.get(grant.vaultId);
     if (held) {
+      // A key held ONLY from a v1 seal is confirmed by a verified v2 grant carrying the SAME key (the owner's
+      // re-issue, §8.2 step 3). A v2 grant never silently REPLACES a held key (A6 review MED-2): a different key is
+      // the vk_mismatch anomaly, and the held key and its source stay (an unvouched one stays read-only). A field
+      // that is present but fails §1.4 in any way is an anomaly too (LOW-2).
+      if (this.keySources.get(grant.vaultId) === "legacy-seal" && grant.signedGrant) {
+        const o = this.openSigned(grant, null);
+        if (o.verdict === "adopt") {
+          // Round 3 MEDIUM-B: promotion goes through the vouch gate too — a held key that contradicts this device's
+          // vouch is never promoted, even when a verified grant carries that same key.
+          if (ctEquals(o.vk, held) && this.vouchGate(grant.vaultId, held) !== "mismatch") {
+            this.keySources.set(grant.vaultId, "signed-grant");
+            this.signedGrantFrom.set(grant.vaultId, o.from);
+            this.pendingGrantsByVault.delete(grant.vaultId);
+            this.grantAnomaliesByVault.delete(grant.vaultId);
+          } else {
+            this.grantAnomaliesByVault.set(grant.vaultId, "vk_mismatch");
+          }
+          return;
+        }
+        if (o.verdict === "pending_invitation") this.pendingGrantsByVault.set(grant.vaultId, { vaultId: grant.vaultId, fromUserId: o.from, grantIdB64: o.grantIdB64 });
+        else {
+          this.grantAnomaliesByVault.set(grant.vaultId, o.verdict);
+          return;
+        }
+      }
       // Already held: the row cannot change our key, but a re-delivered row that now carries a
       // DIFFERENT key is still worth surfacing.
       if (this.rowCarriesOtherKey(grant, held)) this.vkMismatchVaults.add(grant.vaultId);
       return;
     }
-    let opened: { vk: Uint8Array; viaSeal: boolean; sealMismatch: boolean };
+    let opened: { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string; anomaly?: GrantVerdict };
     try {
       opened = this.openGrantVk(grant);
     } catch (e) {
       if (e instanceof VaultGrantKeyUnreadableError) this.unreadableKeyVaults.add(grant.vaultId);
+      if (e instanceof GrantPendingSignal) {
+        // §1.6: not adopted, and no fallback to the v1 seal on the same row.
+        this.pendingGrantsByVault.set(grant.vaultId, e.pending);
+        this.grantAnomaliesByVault.delete(grant.vaultId);
+        return;
+      }
+      if (e instanceof GrantRefusedSignal) {
+        this.grantAnomaliesByVault.set(grant.vaultId, e.verdict);
+        this.pendingGrantsByVault.delete(grant.vaultId);
+        return;
+      }
       throw e;
     }
+    const viaSeal = opened.source === "legacy-seal" || opened.source === "signed-grant";
     this.vaultKeys.set(grant.vaultId, opened.vk);
+    this.keySources.set(grant.vaultId, opened.source);
+    if (opened.from) this.signedGrantFrom.set(grant.vaultId, opened.from);
+    this.pendingGrantsByVault.delete(grant.vaultId);
+    if (opened.anomaly) this.grantAnomaliesByVault.set(grant.vaultId, opened.anomaly);
+    else this.grantAnomaliesByVault.delete(grant.vaultId);
     this.unreadableKeyVaults.delete(grant.vaultId);
     if (opened.sealMismatch) this.vkMismatchVaults.add(grant.vaultId);
-    if (!opened.viaSeal && grant.userId === this.userId) this.uvkWrappedVaults.add(grant.vaultId);
+    if (opened.source === "uvk-wrap" && grant.userId === this.userId) this.uvkWrappedVaults.add(grant.vaultId);
     // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and never
     // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
     // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer separates
@@ -562,7 +672,21 @@ export class Account {
     // any seal, OR its role is not owner. Only an owner row with a bare UVK wrap and no seal is a
     // personal candidate, which is what enrolment mints. Since root cause A §4 this bit no longer
     // decides "personal" (the personal wrap does); it feeds display and the §8.5 candidate filter.
-    if (opened.viaSeal || !!grant.sealedVk || grant.role !== "owner") this.memberGrantedVaults.add(grant.vaultId);
+    if (viaSeal || !!grant.sealedVk || !!grant.signedGrant || grant.role !== "owner") this.memberGrantedVaults.add(grant.vaultId);
+  }
+
+  /** Run §1.4 on the row's v2 grant; `heldVk` only when held from our OWN wrap. */
+  private openSigned(grant: WireGrant, heldVk: Uint8Array | null): GrantOutcome {
+    let sealed: Uint8Array;
+    try {
+      sealed = fromB64(grant.signedGrant ?? "");
+    } catch {
+      return { verdict: "unopenable", anomaly: false };
+    }
+    return openSignedGrant({
+      myUserId: this.userId, myIdentityPub: this.identityPub, myIdentityPriv: this.identityPriv, rowVaultId: grant.vaultId,
+      sealed, pinFor: this.grantPins, heldVk,
+    });
   }
 
   /**
@@ -575,7 +699,7 @@ export class Account {
    * different → `sealMismatch`, unopenable → ignored). A wrap that is present but does not open
    * throws {@link VaultGrantKeyUnreadableError} and the seal is never tried.
    */
-  private openGrantVk(grant: WireGrant): { vk: Uint8Array; viaSeal: boolean; sealMismatch: boolean } {
+  private openGrantVk(grant: WireGrant): { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string; anomaly?: GrantVerdict } {
     if (grant.wrappedVk) {
       let vk: Uint8Array;
       try {
@@ -591,13 +715,89 @@ export class Account {
       // buggy writer (core audit F32 parity: CryptoError), still terminal, still no seal fallback.
       if (vk.length !== 32) throw new CryptoError(`vault key for ${grant.vaultId} is not 32 bytes`);
       const sealVk = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
-      return { vk, viaSeal: false, sealMismatch: sealVk !== null && !ctEquals(sealVk, vk) };
+      // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it.
+      const signedDiffers = !!grant.signedGrant && this.openSigned(grant, vk).verdict === "vk_mismatch";
+      // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
+      const gate = this.vouchGate(grant.vaultId, vk) === "mismatch" ? ("vk_mismatch" as GrantVerdict) : undefined;
+      return { vk, source: "uvk-wrap", sealMismatch: (sealVk !== null && !ctEquals(sealVk, vk)) || signedDiffers, anomaly: gate };
     }
-    // (3) v2 signed grant: verified per root cause A §1.4 once that construction exists.
+    // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
+    if (grant.signedGrant) {
+      // The v1 seal on this row, only if it opens to the key this device VOUCHED for (HIGH-1: a vouch is bound to
+      // its key; a different v1 key for the same vault is not covered).
+      const vouched = this.vouchedSealKey(grant);
+      const o = this.openSigned(grant, null);
+      if (o.verdict === "adopt") {
+        // MED-2 / re-review MEDIUM-A: decided from the device-local vouch TAG, not from whether the server kept
+        // the v1 seal. A verified grant naming a DIFFERENT key than the vouched one is vk_mismatch: keep the vouched
+        // key when the seal still opens to it, otherwise refuse the row with no key. Never adopt it.
+        if (this.vouchGate(grant.vaultId, o.vk) === "mismatch") {
+          if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false, anomaly: "vk_mismatch" };
+          throw new GrantRefusedSignal("vk_mismatch");
+        }
+        return { vk: o.vk, source: "signed-grant", sealMismatch: false, from: o.from };
+      }
+      if (o.verdict === "pending_invitation") {
+        // Never satisfied by the v1 seal on the same row, EXCEPT for the key this device already vouched for (§8.2
+        // freeze or the human's Accept) whose self-wrap has not reached the row yet.
+        if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false };
+        throw new GrantPendingSignal({ vaultId: grant.vaultId, fromUserId: o.from, grantIdB64: o.grantIdB64 });
+      }
+      // LOW-2: a field that is PRESENT and fails §1.4 in ANY way (anomaly or not) refuses the row: no v1 fallback.
+      throw new GrantRefusedSignal(o.verdict);
+    }
+    // (4) v1 `sealedVk`, compatibility window only: legacy-read-only until vouched for (§8.2). The decision runs
+    // through the graded function (LOW-3): post-window, a key with no pre-upgrade evidence is refused outright.
     if (grant.sealedVk) {
-      return { vk: openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk)), viaSeal: true, sealMismatch: false };
+      const vk = openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk));
+      // Round 3 LOW-E: a seal for another key than this device's vouch is vk_mismatch, not a read-only key waiting
+      // for an "Accept anyway" that would overwrite the vouch.
+      if (this.vouchGate(grant.vaultId, vk) === "mismatch") throw new GrantRefusedSignal("vk_mismatch");
+      if (this.legacyModeFor(grant.vaultId, vk) === "refused") throw new CryptoError(`legacy grant for ${grant.vaultId} refused (compatibility window closed)`);
+      return { vk, source: "legacy-seal", sealMismatch: false };
     }
     throw new CryptoError(`grant for ${grant.vaultId} carries no key`);
+  }
+
+  /**
+   * THE vouch gate (A6 re-review round 3: one rule, every key-source path; core `Account.vouchGate` twin). While
+   * this device holds a §8.2 vouch for `vaultId`, a key whose SHA-256 differs from the vouch tag is "mismatch": it
+   * is never adopted writable, never promoted, never self-wrapped, owner-wrapped, signed onward or transferred, and
+   * never offered for "Accept anyway". Only rule 2 (our own UVK wrap, canonical per A1) still USES such a key, and
+   * flags vk_mismatch. Every key-source decision in this class routes through here.
+   */
+  vouchGate(vaultId: string, key: Uint8Array | null | undefined): "no-vouch" | "ok" | "mismatch" {
+    const v = this.legacyVouches.get(vaultId);
+    if (!v) return "no-vouch";
+    return key && legacyTagOf(key) === v.tag ? "ok" : "mismatch";
+  }
+
+  /** True when the key HELD for `vaultId` contradicts this device's vouch for it. */
+  heldKeyContradictsVouch(vaultId: string): boolean {
+    return this.vaultKeys.has(vaultId) && this.vouchGate(vaultId, this.vaultKeys.get(vaultId)) === "mismatch";
+  }
+
+  /** The row's v1 seal key, only when the gate says it IS the vouched key. */
+  private vouchedSealKey(grant: WireGrant): Uint8Array | null {
+    if (!grant.sealedVk) return null;
+    const k = this.openSealOrNull(grant.vaultId, grant.sealedVk);
+    return k && this.vouchGate(grant.vaultId, k) === "ok" ? k : null;
+  }
+
+  /**
+   * §8.2 / §8.6 (A6 review LOW-3): the legacy decision for [vk] as a v1-only key of [vaultId], routed through the
+   * graded `decideLegacyGrant`. A vouch counts only for the key it was given for (HIGH-1).
+   */
+  private legacyModeFor(vaultId: string, vk: Uint8Array): LegacyGrantMode {
+    const v = this.legacyVouches.get(vaultId);
+    const matches = !!v && legacyTagOf(vk) === v.tag;
+    return decideLegacyGrant(LEGACY_IN_WINDOW, matches && v!.kind === "frozen", matches && v!.kind === "confirmed");
+  }
+
+  private heldLegacyMode(vaultId: string): LegacyGrantMode | null {
+    const held = this.vaultKeys.get(vaultId);
+    if (!held || this.keySources.get(vaultId) !== "legacy-seal") return null;
+    return this.legacyModeFor(vaultId, held);
   }
 
   private openSealOrNull(vaultId: string, sealedVk: string): Uint8Array | null {
@@ -619,7 +819,12 @@ export class Account {
       }
     }
     const fromSeal = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
-    return [fromWrap, fromSeal].some((k) => k !== null && !ctEquals(k, held));
+    let fromSigned: Uint8Array | null = null;
+    if (grant.signedGrant) {
+      const o = this.openSigned(grant, null);
+      if (o.verdict === "adopt") fromSigned = o.vk;
+    }
+    return [fromWrap, fromSeal, fromSigned].some((k) => k !== null && !ctEquals(k, held));
   }
 
   /** True when a row for this vault carried a seal whose key differs from the one we hold (the
@@ -641,11 +846,99 @@ export class Account {
     return [...this.unreadableKeyVaults];
   }
 
-  /** Root cause A §3.2: we hold this vault's key from a v1 seal and our row has no UVK wrap yet — a
-   *  candidate for {@link buildSelfWrap}. NOT a trust signal: a v1 seal is server-mintable, so no
-   *  caller posts on this alone (that waits for v2 verification). Core twin: `Account.needsSelfWrap`. */
+  /** Root cause A §3.2: we hold this vault's key and our row has no UVK wrap yet — a candidate for
+   *  {@link buildSelfWrap}. NOT a trust signal: {@link selfWrapAuthorized} is the gate (a verified v2 grant, or a
+   *  v1 key this device froze or the human confirmed). Core twin: `Account.needsSelfWrap`. */
   needsSelfWrap(grant: WireGrant): boolean {
-    return this.vaultKeys.has(grant.vaultId) && !grant.wrappedVk && !!grant.sealedVk && grant.role !== "owner" && grant.userId === this.userId;
+    return this.vaultKeys.has(grant.vaultId) && !grant.wrappedVk && (!!grant.sealedVk || !!grant.signedGrant) && grant.role !== "owner" && grant.userId === this.userId;
+  }
+
+  /**
+   * Root cause A §3.2 / §8.2, the ONLY gate on minting a member self-wrap (core `selfWrapAuthorized`): a key from
+   * a v2 grant VERIFIED against our pin for its sender, or a v1 key this device vouched for (freeze or Accept). A
+   * key only an unconfirmed v1 seal vouches for is never wrapped (the A1 trust-laundering bug).
+   */
+  selfWrapAuthorized(vaultId: string): boolean {
+    if (!this.vaultKeys.has(vaultId) || this.heldKeyContradictsVouch(vaultId)) return false;
+    const src = this.keySources.get(vaultId);
+    if (src === "signed-grant") return true;
+    const mode = this.heldLegacyMode(vaultId);
+    return mode === "frozen" || mode === "confirmed";
+  }
+
+  /** Where this vault's held key came from (null when not held). */
+  keySource(vaultId: string): KeySource | null {
+    return this.vaultKeys.has(vaultId) ? (this.keySources.get(vaultId) ?? null) : null;
+  }
+
+  /** INV-WRITE-KEY: a key only an unconfirmed v1 seal vouches for. Readable; never written under. */
+  isLegacyReadOnly(vaultId: string): boolean {
+    return this.heldLegacyMode(vaultId) === "read_only";
+  }
+
+  legacyReadOnlyVaultIds(): string[] {
+    return [...this.vaultKeys.keys()].filter((id) => this.isLegacyReadOnly(id));
+  }
+
+  /** The tag of the key held for `vaultId` (lowercase hex SHA-256), or null when none is held. */
+  legacyKeyTag(vaultId: string): string | null {
+    const k = this.vaultKeys.get(vaultId);
+    return k ? legacyTagOf(k) : null;
+  }
+
+  /**
+   * §8.2: this device vouches for the v1-only key of `vaultId` (freeze evidence: "frozen"; the human's Accept:
+   * "confirmed"), BOUND to the key with tag `tag` (default: the key held now). With no tag and no held key nothing is
+   * recorded: a vouch for "whatever key arrives" is exactly what HIGH-1 forbids.
+   */
+  authorizeLegacyKey(vaultId: string, tag?: string, kind: LegacyVouchKind = "confirmed"): void {
+    const t = tag ?? this.legacyKeyTag(vaultId);
+    if (!t || !/^[0-9a-f]{64}$/.test(t)) return;
+    this.legacyVouches.set(vaultId, { tag: t, kind });
+  }
+
+  /** The vouch recorded for `vaultId`, for the store to persist. */
+  legacyVouch(vaultId: string): LegacyVouch | null {
+    return this.legacyVouches.get(vaultId) ?? null;
+  }
+
+  /** True when a v2 grant for `vaultId` is waiting on verification (§1.6). */
+  hasPendingGrant(vaultId: string): boolean {
+    return this.pendingGrantsByVault.has(vaultId);
+  }
+
+  /** True when a v2 grant for `vaultId` failed §1.4 (the review card must not offer TOFU over it, LOW-2). */
+  hasGrantAnomaly(vaultId: string): boolean {
+    return this.grantAnomaliesByVault.has(vaultId);
+  }
+
+  /** The sender the VERIFIED v2 grant for `vaultId` names (null unless the key came from one). */
+  signedGrantSender(vaultId: string): string | null {
+    return this.keySources.get(vaultId) === "signed-grant" ? (this.signedGrantFrom.get(vaultId) ?? null) : null;
+  }
+
+  pendingGrants(): PendingGrant[] {
+    return [...this.pendingGrantsByVault.values()];
+  }
+
+  grantAnomalies(): Map<string, GrantVerdict> {
+    return new Map(this.grantAnomaliesByVault);
+  }
+
+  /**
+   * Owner side (root cause A §1.5): grant v2 for `vaultId` to the member `pin` names — `toKey` is the PINNED key and
+   * the frame is sealed to it, never to a key fresh from `/users/lookup`. Refuses a key this account itself holds only
+   * from an unconfirmed v1 seal (signing it would launder it to the member). The signing secret never leaves here.
+   */
+  buildSignedGrant(vaultId: string, pin: Contact): string {
+    if (this.isLegacyReadOnly(vaultId) || this.heldKeyContradictsVouch(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    if (pin.userId === this.userId) throw new CryptoError("a vault grant cannot be addressed to its sender");
+    const pinKey = fromB64(pin.identityPub);
+    const frame = buildGrantFrame(
+      { publicKey: this.signPub, privateKey: this.signSecret },
+      { purpose: "vault-grant", from: this.userId, to: pin.userId, toKey: pinKey, vaultId, grantId: randomBytes(16), issuedAt: Date.now(), vk: this.vk(vaultId) },
+    );
+    return toB64(sealGrantFrame(pinKey, frame));
   }
 
   /**
@@ -686,8 +979,17 @@ export class Account {
     return open(await usageKey(this.vk(this.personalVaultId)), fromB64(sealedUsage), adUsage(this.userId));
   }
 
-  /** Role from the latest grant for this vault, or null if none seen. */
+  /**
+   * The EFFECTIVE role (core `roleFor` twin): the server-declared role, except that a vault whose key is
+   * legacy-read-only (INV-WRITE-KEY) reads as `reader`, so every write path that refuses readers refuses it too.
+   */
   roleFor(vaultId: string): string | null {
+    if (this.isLegacyReadOnly(vaultId)) return "reader";
+    return this.vaultRoles.get(vaultId) ?? null;
+  }
+
+  /** The role exactly as the server declared it. */
+  serverRoleFor(vaultId: string): string | null {
     return this.vaultRoles.get(vaultId) ?? null;
   }
 
@@ -699,6 +1001,11 @@ export class Account {
     this.uvkWrappedVaults.delete(vaultId);
     this.vkMismatchVaults.delete(vaultId);
     this.unreadableKeyVaults.delete(vaultId);
+    this.keySources.delete(vaultId);
+    this.signedGrantFrom.delete(vaultId);
+    this.legacyVouches.delete(vaultId);
+    this.pendingGrantsByVault.delete(vaultId);
+    this.grantAnomaliesByVault.delete(vaultId);
   }
 
   /**
@@ -726,6 +1033,7 @@ export class Account {
     };
     this.vaultKeys.set(vaultId, vk);
     this.vaultRoles.set(vaultId, "owner");
+    this.keySources.set(vaultId, "uvk-wrap");
     this.uvkWrappedVaults.add(vaultId);
     return { request, vaultId };
   }
@@ -837,6 +1145,7 @@ export class Account {
     const held = this.vaultKeys.get(wrap.vaultId);
     if (held && !ctEquals(held, vk)) this.vkMismatchVaults.add(wrap.vaultId);
     this.vaultKeys.set(wrap.vaultId, vk);
+    this.keySources.set(wrap.vaultId, "personal-wrap");
     this.unreadableKeyVaults.delete(wrap.vaultId);
     this.uvkWrappedVaults.add(wrap.vaultId);
     this.personalVaultIdValue = wrap.vaultId;
@@ -924,6 +1233,21 @@ export class Account {
    * fv and the AD fv come from this ONE computation.
    */
   encryptItem(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
+    if (this.isLegacyReadOnly(vaultId)) throw new VaultKeyNotVerifiedError(vaultId); // INV-WRITE-KEY
+    return this.sealItem(vaultId, itemId, doc);
+  }
+
+  /**
+   * The holding-area snapshot (spec 03 §11, store.moveToHolding): re-seal plaintext that was DECRYPTED from this
+   * vault, under the same key, for this device's own ciphertext-only storage. Never pushed, never a new
+   * provenance, so INV-WRITE-KEY (which guards what the household receives) does not apply: a removed
+   * legacy-read-only vault is parked exactly like any other.
+   */
+  resealForHolding(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
+    return this.sealItem(vaultId, itemId, doc);
+  }
+
+  private sealItem(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
     const fv = Math.max(docFloor(doc), this.itemFv.get(itemId) ?? 1);
     this.itemFv.set(itemId, fv);
     const blob = seal(this.vk(vaultId), utf8(JSON.stringify(doc)), adItem(vaultId, itemId, fv));
@@ -1014,6 +1338,8 @@ export class Account {
    * wrap that would lock the new owner out never gets posted (the "garbage-wrap" break).
    */
   buildOwnerWrap(vaultId: string): string {
+    // A transfer accept must not launder a key only an unconfirmed v1 seal vouches for (root cause A §8.2).
+    if (this.isLegacyReadOnly(vaultId) || this.heldKeyContradictsVouch(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     return this.roundTripWrap(vaultId, "owner wrap");
   }
 
@@ -1025,6 +1351,7 @@ export class Account {
    * authenticated (see needsSelfWrap). Core twin: `Account.buildSelfWrap`.
    */
   buildSelfWrap(vaultId: string): string {
+    if (!this.selfWrapAuthorized(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     return this.roundTripWrap(vaultId, "self wrap");
   }
 
@@ -1044,6 +1371,7 @@ export class Account {
    * stays E2E ciphertext; the server only ever sees an opaque blob.
    */
   buildRenameMeta(vaultId: string, metaBlob: string, newName: string): string {
+    if (this.isLegacyReadOnly(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     const meta = this.decryptVaultMeta(vaultId, metaBlob);
     // spec 02 §4: metaV counts ONLY as a non-negative integer ≤ 2^53 (Number.MAX_SAFE_INTEGER),
     // else 0 — the SAME rule store.ts metaVOf applies, so write and apply agree on every client
