@@ -320,12 +320,61 @@ key signs only through the flows that need it (today: escrow v2).
     ownership transfer (spec 03 §11) the new owner's grant MAY carry both (`wrappedVk`
     current, `sealedVk` retained), and so MAY a member's grant once that member has stored
     its **self-wrap** (below).
+  - **Signed grants, format v2 (NORMATIVE; security review 2026-10, root cause A §1.4–§1.6).**
+    An owner grants a vault ONLY to a member it has PINNED (a human-verified contact, §5 and
+    spec 03 §3; a member who is not pinned, or whose pin is not current on the owner's device,
+    is verified first). The owner builds the §5.1 `vault-grant` statement with `from` = its own
+    userId, `to` = the member, `toKey` = the PINNED identity key (never a key fresh from
+    `/users/lookup`), a fresh 16-byte `grantId`, `issuedAt` and the VK; signs it with its joint
+    key; and stores `signedGrant = crypto_box_seal(pinned key, frame)` on the member's grant.
+    During the compatibility window it ALSO sends the v1 `sealedVk`, sealed to the same pinned
+    key, for older clients. The recipient runs, in order, the first failing step deciding:
+    (1) the seal opens with its identity keypair (`unopenable`: the field is ignored);
+    (2) a v2 frame with purpose `vault-grant` (`bad_frame`); (3) strict canonical parse
+    (`non_canonical`); (4) `v`, purpose, `from != to` (`bad_statement`); (5) `to` is this
+    account and `toKey` its seed-derived identity key (`misaddressed`); (6) `vaultId` is the
+    row's (`vault_mismatch`); (7) the pin is chosen by `contacts[from]` — the sender the
+    statement NAMES — and must exist AND be current on this device, else the grant is a
+    **pending invitation** (not adopted, the vault's name not shown); (8) the signer key maps to
+    that pin's identity key (`signer_not_pinned_key`; this is what refuses a grant that names
+    the owner but is signed by another pinned member); (9) the signature verifies
+    (`bad_signature`); (10) a 32-byte key; (11) when the vault's key is already held from the
+    client's own wrap, the granted key equals it (`vk_mismatch`, the held key wins). Only the
+    VERIFIED statement's fields are used afterwards, and its `from`, `to`, `toKey` and `vaultId`
+    are checked again against the chosen pin, this account and the row. Steps 5, 6, 8, 9 and 11
+    are anomalies (the "the server may be misbehaving" notice); an anomaly refuses the whole row,
+    so the v1 seal beside it is not a fallback either. Accepting a pending invitation runs the
+    verification ceremony for `from` and then re-runs the check from step 7; declining hides it
+    on that device by `grantId`. A pin is CURRENT on a device when the device made it (or
+    re-verified it), or first saw it after it had established its own account-state high-water
+    mark; a pin a device only read while it had no mark of its own (a fresh device, which cannot
+    tell a current blob from an older authentic one carrying a pin later removed) is not current
+    there until re-verified. A grant from a pinned, current contact is adopted with the notice
+    "You were added to <vault> by <contact>" (owner decision Q5). Vectors:
+    `spec/test-vectors/sharedgrant-v2.json`.
+  - **Legacy (v1-only) keys (NORMATIVE in the compatibility window; root cause A §8.2, §8.6).**
+    A key whose only origin is a v1 `sealedVk` is LEGACY-READ-ONLY: readable, but no client
+    seals anything under it (item writes, conflict copies, renames, transfer re-wraps, imports,
+    capture/update targets), and every write path treats the vault as `reader`. It stops being
+    read-only only when (a) a verified v2 grant for the same vault arrives (the owner's re-issue,
+    `PUT /vaults/{id}/members/{userId}/grant`, carries the SAME key; a verified grant carrying a
+    different key replaces the unauthenticated one and raises the mismatch notice), or (b) this
+    device FROZE it: once per cache, on the first run of a release with this rule, a vault whose
+    grant row AND at least one item that decrypted under its key were already in this device's
+    durable cache counts as pre-upgrade evidence, or (c) the human accepts it on the "Review your
+    shared vaults" card (trust on first use; owner decision Q7: "Accept anyway" is allowed for a
+    vault this device does not hold yet, and the copy says the sender cannot be confirmed). A
+    removed vault forgets (b)/(c). After the window closes (branch A8) a v1-only key for a vault
+    with no evidence is refused. Pinned as `sharedgrant.json` → `legacyMode`.
   - **Canonical-key precedence (NORMATIVE; security review 2026-10).** A `sealedVk` is an
     anonymous `crypto_box_seal` to the member's PUBLIC key, so anyone holding that key,
     the server included, can mint one; a `wrappedVk` opens only under the client's own UVK.
     A client therefore takes a vault's VK from the first of these its own grant row
-    carries: (1) the caller's `wrappedVk`; (2) a `sealedVk`, only when the row carries no
-    `wrappedVk`. A seal is never preferred over a wrap. When the wrap opens, a seal on the
+    carries: (1) the caller's `wrappedVk` (the personal wrap above is applied before any row);
+    (2) a `signedGrant` that verifies as above; (3) a `sealedVk`, legacy-read-only, only when the
+    row carries no `wrappedVk` and no `signedGrant` that is pending or anomalous (a pending
+    invitation falls back to the seal only for a vault this device already froze or the human
+    accepted). A seal is never preferred over a wrap. When the wrap opens, a seal on the
     same row MAY still be opened, only to compare: the same VK is silent; a DIFFERENT VK
     keeps the wrapped key, refuses the seal and raises a "vault key mismatch" notice; a
     seal that does not open is ignored (an honest post-transfer row can retain a seal for
@@ -339,12 +388,19 @@ key signs only through the flows that need it (today: escrow v2).
     owner-wrap construction — verify the round trip, and store it on its own grant with
     `PUT /vaults/{id}/grant/self-wrap` (spec 03 §10); from then on every device of that member
     reads the VK from the wrap. A client MUST NOT self-wrap a key whose only origin is a v1
-    `sealedVk`: the seal is server-mintable, and wrapping it would make a server-chosen key the
-    canonical one on every device. Clients therefore do not post a self-wrap yet; it follows
-    verification of an authenticated (v2) grant or an explicit legacy confirmation. Because a member row can now carry a `wrappedVk`, the
+    `sealedVk` nobody vouched for: the seal is server-mintable, and wrapping it would make a
+    server-chosen key the canonical one on every device. A client posts the self-wrap ONLY after
+    it adopted the key from a VERIFIED v2 grant, or after a legacy key was frozen (pre-upgrade
+    evidence) or accepted by the human (above). Because a member row can now carry a `wrappedVk`, the
     "member-granted" display bit (audit H64) treats a row as member-granted when the key came from
-    a seal, when the row carries any `sealedVk`, or when its role is not `owner`. Since the
-    personal wrap (above) it decides nothing about which vault is personal.
+    a seal or a signed grant, when the row carries any `sealedVk` or `signedGrant`, or when its role
+    is not `owner`. Since the personal wrap (above) it decides nothing about which vault is personal.
+  - **Extension (owner decision Q8).** The browser extension NEVER opens a grant seal, v1 or v2,
+    and does not verify signed statements (it ships no Edwards-to-Montgomery conversion, and adding
+    one would be a new dependency). It adopts a vault key only from what opens under the UVK: the
+    personal wrap and the caller's `wrappedVk` (owner wraps and member self-wraps a full client
+    minted). A grant row with no wrap is counted and the popup says "N shared vault(s) waiting —
+    open andvari to review"; after an MV3 eviction (no UVK in memory) nothing new is adopted.
   - Roles: `owner` (exactly one per vault at every instant; reassignable ONLY via the
     two-phase offer/accept transfer of spec 03 §11, in which the new owner's client
     re-wraps VK under its own UVK and the old owner demotes to `writer`, retaining VK —

@@ -230,7 +230,7 @@ cache OFF.
   "rev": 1042,                       // current global max
   "full": false,                     // true when the response is a full snapshot
   "vaults":  [ Vault… ],             // changed vaults (incl. metaBlob)
-  "grants":  [ Grant… ],             // caller's grants only
+  "grants":  [ Grant… ],             // caller's grants only: {vaultId, userId, role, wrappedVk, rev, sealedVk?, signedGrant?}
   "items":   [ Item… ],              // changed items in granted vaults (incl. tombstones)
   "removedGrants": [ vaultId… ],     // caller lost access → client purges local copies
   "removedGrantsInfo": [ RemovedGrantInfo… ]  // additive (§11); companion detail, never the trigger
@@ -674,15 +674,29 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   scan on "Verify a household member"). A client never pins it on its own. Same preamble, bucket and
   audit shape as the lookup above (`user_identity_lookup`).
 - `GET /api/v1/vaults/{vaultId}/members` → `[{ userId, email, displayName, role,
-  identityPub, addedAt, status? }]` (active grants only). Any active member may call
+  identityPub, addedAt, status?, legacyGrant? }]` (active grants only). `legacyGrant` (additive,
+  security review 2026-10, root cause A §8.2 step 4) is `true` when the member's grant carries
+  neither a v2 `signedGrant` nor a self-wrap, so its devices hold the key only from a v1 seal; a
+  HINT for the owner's client (re-issue to pinned members, list the rest), never an input to a
+  security decision; always `false` for the owner. Any active member may call
   (transparency: every member can re-verify who holds the VK). Foreign vaultId → 403
   (hidden-as-403). **Refused on the public break-glass origin** (§11 closed a drift where
   this alone leaked household emails/identity keys from the internet). `status` (additive)
   surfaces a disabled account (feeds the transfer target picker).
-- `POST /api/v1/vaults/{vaultId}/members { userId, role: "writer"|"reader", sealedVk }` →
+- `POST /api/v1/vaults/{vaultId}/members { userId, role: "writer"|"reader", sealedVk, signedGrant? }` →
   `201`. Owner only; target must be an `active` user, not self, with no active grant (a
   previously-revoked grant row is resurrected). `sealedVk` opaque to the server, validated
-  only as base64url ≤ 1 KiB. Audited `vault_member_add`.
+  only as base64url ≤ 1 KiB. `signedGrant` (grant v2, spec 01 §6; schema v14) is equally opaque,
+  base64url ≤ 2100 chars, optional while the compatibility window is open (an older owner client
+  sends v1 only); an N client sends both, sealed to the identity key it PINNED for the member, and
+  the server stores and delivers both on the member's grant. Audited `vault_member_add`.
+- `PUT /api/v1/vaults/{vaultId}/members/{userId}/grant { signedGrant }` → `200 {rev}` (security
+  review 2026-10, root cause A §8.2 step 4). The owner re-issues a member's grant as v2 with the
+  SAME vault key, so a member holding the key only from a v1 seal can confirm it. Owner only;
+  never self (`400 cannot_target_self`) or the owner row (`400 cannot_target_owner`); the target
+  needs an active grant (`404 not_a_member`); `signedGrant` base64url ≤ 2100 chars. Stores only
+  `signedGrant` (role, `sealedVk` and any self-wrap untouched) and bumps the grant rev so the
+  member's devices receive the row. Rate bucket `vault_reissue` (60/h). Audited `vault_grant_reissue`.
 - `PUT /api/v1/vaults/{vaultId}/members/{userId} { role }` → `200`. Owner only; not self.
   Bumps the grant rev (re-delivers the grant so clients update the role). Audited
   `vault_member_role`.
@@ -693,7 +707,7 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   proof, §11) delivered to the victim via `removedGrantsInfo` so a 0.5.0 client can verify
   the removal was a real owner action. Removing (or role-changing) the **pending transfer
   target** clears the pending offer. Audited `vault_member_remove`.
-- All five ring the WS dirty-bell for every affected member.
+- All of them ring the WS dirty-bell for every affected member (the re-issue: the target member).
 
 ## 11. Vault lifecycle (delete / restore / leave / transfer / rename)
 
