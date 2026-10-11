@@ -448,6 +448,29 @@ class Account private constructor(
         return LegacyGrant.decide(LegacyGrant.IN_WINDOW, preUpgradeEvidence = matches && v!!.frozen, confirmed = matches && !v!!.frozen)
     }
 
+    /** The result of [vouchGate]. */
+    enum class VouchGate { NO_VOUCH, OK, MISMATCH }
+
+    /**
+     * THE vouch gate (A6 re-review round 3: one rule, every key-source path). While this device holds a §8.2 vouch
+     * for [vaultId], a [key] whose SHA-256 differs from the vouch tag is MISMATCH: it is never adopted writable,
+     * never promoted, never self-wrapped, owner-wrapped, signed onward or transferred, and never offered for
+     * "Accept anyway". The only path that still USES such a key is rule 2 (our own UVK wrap is canonical, A1), and
+     * it is flagged vk_mismatch. Every key-source decision in this class routes through here.
+     */
+    fun vouchGate(vaultId: String, key: ByteArray?): VouchGate {
+        val v = legacyAuthorized[vaultId] ?: return VouchGate.NO_VOUCH
+        return if (key != null && v.tag == tagOf(key)) VouchGate.OK else VouchGate.MISMATCH
+    }
+
+    /** True when the key HELD for [vaultId] contradicts this device's vouch for it. */
+    fun heldKeyContradictsVouch(vaultId: String): Boolean =
+        vaultKeys.containsKey(vaultId) && vouchGate(vaultId, vaultKeys[vaultId]) == VouchGate.MISMATCH
+
+    /** The row's v1 seal key, only when the gate says it IS the vouched key. */
+    private fun vouchedSealKey(vaultId: String, sealed: String?): ByteArray? =
+        sealed?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(vaultId, it) }?.takeIf { vouchGate(vaultId, it) == VouchGate.OK }
+
     private fun legacyVouched(vaultId: String, vk: ByteArray?): Boolean =
         legacyMode(vaultId, vk).let { it == LegacyGrant.Mode.FROZEN || it == LegacyGrant.Mode.CONFIRMED }
 
@@ -907,7 +930,9 @@ class Account private constructor(
             if (keySources[grant.vaultId] == KeySource.LEGACY_SEAL && !grant.signedGrant.isNullOrEmpty()) {
                 when (val o = openSigned(grant, heldVk = null)) {
                     is GrantOutcome.Adopted -> {
-                        if (!Bytes.ctEquals(o.vk, held)) {
+                        // Round 3 MEDIUM-B: promotion goes through the gate too — a held key that contradicts the
+                        // vouch is never promoted, even when a verified grant carries that same key.
+                        if (!Bytes.ctEquals(o.vk, held) || vouchGate(grant.vaultId, held) == VouchGate.MISMATCH) {
                             grantAnomalies[grant.vaultId] = GrantVerdict.VK_MISMATCH
                             vkMismatchVaults.add(grant.vaultId)
                             return
@@ -1039,7 +1064,9 @@ class Account private constructor(
             val sealVk = if (sealed.isNullOrEmpty()) null else openSealOrNull(grant.vaultId, sealed)
             // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it.
             val signedDiffers = !grant.signedGrant.isNullOrEmpty() && openSigned(grant, heldVk = vk).verdict == GrantVerdict.VK_MISMATCH
-            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers)
+            // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
+            val gateAnomaly = if (vouchGate(grant.vaultId, vk) == VouchGate.MISMATCH) GrantVerdict.VK_MISMATCH else null
+            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers, anomaly = gateAnomaly)
         }
         // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
         if (!grant.signedGrant.isNullOrEmpty()) {
@@ -1049,10 +1076,8 @@ class Account private constructor(
                     // from the device-local vouch TAG, not from whether the server kept the v1 seal. A verified grant
                     // naming a DIFFERENT key than the vouched one is the vk_mismatch anomaly: keep the vouched key
                     // when the row's seal still opens to it, otherwise refuse the row with no key. Never adopt it.
-                    val vouch = legacyAuthorized[grant.vaultId]
-                    if (vouch != null && vouch.tag != tagOf(o.vk)) {
-                        val vouched = sealed?.takeIf { it.isNotEmpty() }?.let { openSealOrNull(grant.vaultId, it) }
-                            ?.takeIf { legacyVouched(grant.vaultId, it) }
+                    if (vouchGate(grant.vaultId, o.vk) == VouchGate.MISMATCH) {
+                        val vouched = vouchedSealKey(grant.vaultId, sealed)
                         if (vouched != null) {
                             return OpenedVk(vouched, KeySource.LEGACY_SEAL, sealMismatch = true, anomaly = GrantVerdict.VK_MISMATCH)
                         }
@@ -1064,10 +1089,7 @@ class Account private constructor(
                     // A pending invitation is never satisfied by the v1 seal on the same row, EXCEPT for a vault
                     // this device already vouched for (§8.2 freeze or the human's Accept) whose self-wrap has not
                     // reached the row yet: that key stays exactly as trusted as it was.
-                    if (grant.vaultId in legacyAuthorized && !sealed.isNullOrEmpty()) {
-                        openSealOrNull(grant.vaultId, sealed)?.takeIf { legacyVouched(grant.vaultId, it) }
-                            ?.let { return OpenedVk(it, KeySource.LEGACY_SEAL, sealMismatch = false) }
-                    }
+                    vouchedSealKey(grant.vaultId, sealed)?.let { return OpenedVk(it, KeySource.LEGACY_SEAL, sealMismatch = false) }
                     throw GrantPendingException(PendingGrant(grant.vaultId, o.from, o.grantIdB64))
                 }
                 is GrantOutcome.Refused ->
@@ -1082,6 +1104,9 @@ class Account private constructor(
         // the compatibility window closes (A8), unless this device holds evidence for that exact key.
         if (!sealed.isNullOrEmpty()) {
             val vk = SharedGrant.open(crypto, identityPub, identityPriv, grant.vaultId, Bytes.fromB64(sealed))
+            // Round 3 LOW-E: a seal for another key than this device's vouch is vk_mismatch, not a read-only key
+            // waiting for an "Accept anyway" that would overwrite the vouch.
+            if (vouchGate(grant.vaultId, vk) == VouchGate.MISMATCH) throw GrantRefusedException(GrantVerdict.VK_MISMATCH)
             if (legacyMode(grant.vaultId, vk) == LegacyGrant.Mode.REFUSED) throw CryptoException("legacy grant refused outside the compatibility window")
             return OpenedVk(vk, KeySource.LEGACY_SEAL, sealMismatch = false)
         }
@@ -1135,7 +1160,7 @@ class Account private constructor(
      * or the human's Accept, [authorizeLegacyKey]). A key only an unconfirmed v1 seal vouches for is never
      * wrapped: that auto-post was the A1 trust-laundering bug.
      */
-    fun selfWrapAuthorized(vaultId: String): Boolean = vaultKeys.containsKey(vaultId) && when (keySources[vaultId]) {
+    fun selfWrapAuthorized(vaultId: String): Boolean = vaultKeys.containsKey(vaultId) && !heldKeyContradictsVouch(vaultId) && when (keySources[vaultId]) {
         KeySource.SIGNED_GRANT -> true
         KeySource.LEGACY_SEAL -> legacyVouched(vaultId, vaultKeys[vaultId])
         else -> false
@@ -1176,7 +1201,7 @@ class Account private constructor(
      * this account itself holds only from an unconfirmed v1 seal (signing it would launder it to the member).
      */
     fun buildSignedGrant(vaultId: String, pin: Contact): String {
-        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        if (isLegacyReadOnly(vaultId) || heldKeyContradictsVouch(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
         if (pin.userId == userId) throw CryptoException("a vault grant cannot be addressed to its sender")
         val pinKey = Bytes.fromB64(pin.identityPub)
         val st = Statement.VaultGrant(
@@ -1433,7 +1458,7 @@ class Account private constructor(
      */
     fun buildOwnerWrap(vaultId: String): String {
         // A transfer accept must not launder a key only an unconfirmed v1 seal vouches for (root cause A §8.2).
-        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        if (isLegacyReadOnly(vaultId) || heldKeyContradictsVouch(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
         return roundTripWrap(vaultId, "owner wrap")
     }
 
