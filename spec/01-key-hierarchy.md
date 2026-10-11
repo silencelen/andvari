@@ -291,8 +291,13 @@ key signs only through the flows that need it (today: escrow v2).
   VK is THE key for that vault (precedence rule 1: held before any grant row is applied, so a row
   can only be compared against it); absent while this device cached a wrap before → the server
   WITHHELD it, an anomaly, and the cached (UVK-sealed) wrap stands; absent and never seen → no
-  personal vault until the HUMAN answers the designation question (spec 02 §4; never an automatic
-  pick); present but unopenable → no personal vault, an anomaly, and no label fallback. "No personal vault" means no default save/import destination and no usage ledger.
+  personal vault until the HUMAN answers, and then CONFIRMS, the designation question (spec 02 §4;
+  never an automatic pick); present but unopenable → an anomaly and no label fallback: the device's
+  cached wrap stays in force if it opens, otherwise no personal vault; present, opens, but names a
+  DIFFERENT vault than the one this device cached (a re-designation elsewhere, or an older wrap
+  replayed) → the device does NOT switch: its cached wrap stays in force until the human confirms the
+  change or re-designates. The cached wrap lives in device state that outlives the offline cache (no
+  cache policy, revocation purge or sign-out removes it). "No personal vault" means no default save/import destination and no usage ledger.
   Vectors: `spec/test-vectors/personalwrap.json`.
 - **Shared vault** (`type=shared`): the creator generates `vaultId`, `VK`, `metaBlob`.
   - The **creator's own grant** uses `wrappedVk = Envelope(key = UVK, plaintext = VK,
