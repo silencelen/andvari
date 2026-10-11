@@ -562,8 +562,9 @@ export class Account {
     return [...this.unreadableKeyVaults];
   }
 
-  /** Root cause A §3.2: we hold this vault's key from a v1 seal and our row has no UVK wrap yet, so
-   *  {@link buildSelfWrap} should be posted. Core twin: `Account.needsSelfWrap`. */
+  /** Root cause A §3.2: we hold this vault's key from a v1 seal and our row has no UVK wrap yet — a
+   *  candidate for {@link buildSelfWrap}. NOT a trust signal: a v1 seal is server-mintable, so no
+   *  caller posts on this alone (that waits for v2 verification). Core twin: `Account.needsSelfWrap`. */
   needsSelfWrap(grant: WireGrant): boolean {
     return this.vaultKeys.has(grant.vaultId) && !grant.wrappedVk && !!grant.sealedVk && grant.role !== "owner" && grant.userId === this.userId;
   }
@@ -843,7 +844,8 @@ export class Account {
    * Member self-wrap (security review 2026-10, root cause A §3.2): the VK this member already holds,
    * wrapped under its OWN UVK exactly as {@link buildOwnerWrap} does, round-trip verified, for
    * `PUT /vaults/{id}/grant/self-wrap`. Once it is on the row every device of this member takes the
-   * key from the wrap and the seal stops being load-bearing. Core twin: `Account.buildSelfWrap`.
+   * key from the wrap and the seal stops being load-bearing. Only for a key whose origin is
+   * authenticated (see needsSelfWrap). Core twin: `Account.buildSelfWrap`.
    */
   buildSelfWrap(vaultId: string): string {
     return this.roundTripWrap(vaultId, "self wrap");

@@ -220,7 +220,7 @@ describe("canonical-key precedence — VaultStore", () => {
     expect(store.undecryptableGrantVaults()).not.toContain(vaultId);
   });
 
-  it("a member posts a self-wrap once; a second device reads the VK from it", async () => {
+  it("a v1-seal key is NOT auto-self-wrapped (no laundering); a wrap on the row is still read first", async () => {
     const owner = await enroll("store-sw-owner@example.com");
     const member = await enroll("store-sw-member@example.com");
     const { request, vaultId } = owner.account.buildCreateSharedVault("Household");
@@ -231,11 +231,12 @@ describe("canonical-key precedence — VaultStore", () => {
     const first = await device(member);
     const store = new VaultStore(api.asClient(), first);
     await store.sync();
-    expect(api.selfWraps.map((w) => w.vaultId)).toEqual([vaultId]);
     await store.sync();
-    expect(api.selfWraps.length).toBe(1);
-    // The posted wrap really is Envelope(UVK, VK, adVk(vaultId, userId)): the second device opens it.
-    const wrap = api.selfWraps[0]!.wrappedVk;
+    expect(first.hasVault(vaultId)).toBe(true);
+    // A seal is server-mintable: wrapping its key under the UVK would make a server-chosen key canonical.
+    expect(api.selfWraps).toEqual([]);
+
+    const wrap = first.buildSelfWrap(vaultId);
     const api2 = new FakeApi();
     api2.queue.push({ rev: 8, full: true, vaults: [vault], grants: [{ ...sealed, wrappedVk: wrap, sealedVk: null, rev: 8 }], items: [], removedGrants: [] });
     const second = await device(member);
