@@ -380,10 +380,14 @@ key signs only through the flows that need it (today: escrow v2).
     transferred, and never offered for "Accept"; a v1 seal or v2 grant carrying it is `vk_mismatch`
     with no key; only the caller's own UVK wrap (rule 1 of the precedence, canonical) is still used,
     and it is flagged `vk_mismatch` (and raises the "vault key mismatch" notice). **Held-key memory
-    (security review 2026-10, root cause A, branch A7):** the same gate also carries, for EVERY vault a
-    device has adopted a key for by any rule (and every vault it created), a device-local tag = SHA-256 of
-    the FIRST key it adopted, stored durably beside the vouches and dropped only when the vault is removed
-    or dropped. No step of root cause A re-keys a vault, so a vault's key never legitimately changes; a later
+    (security review 2026-10, root cause A, branch A7):** the same gate also carries, for every vault a
+    device has adopted a key for from a TRUSTED source (its own UVK wrap, a verified v2 grant, a legacy
+    key this device vouched for — recorded at the freeze or the human's Accept — and every vault it
+    created; never an unvouched read-only v1 seal), a device-local tag = SHA-256 of the FIRST such key,
+    stored durably beside the vouches. The tag AND the vouch survive every server-driven drop (every
+    removal verdict, the resync drop, holding expiry); only a drop the user initiated on this device —
+    their own leave or delete — clears them, which keeps "leave and ask the owner to add you again" the
+    recovery for `vk_mismatch`. No step of root cause A re-keys a vault, so a vault's key never legitimately changes; a later
     different key for that vault meets the gate exactly like a vouch mismatch (never adopted, promoted,
     self-wrapped, owner-wrapped or signed onward; rule 1 still used but flagged). A held-key tag vouches for
     nothing: it never lifts a legacy key's read-only state and never makes a seal key acceptable on its own.
@@ -458,9 +462,12 @@ key signs only through the flows that need it (today: escrow v2).
   `proofV == 2` with every field present (in the compatibility window: a v1 `remove` proof is "valid
   (legacy)" iff its nonce is unconsumed, and a `left` with no proof is shown as "You left" plus
   "Didn't do this? Tell your admin"); the MAC for the reason's domain with target = its own userId
-  (constant time); the nonce absent from the device's consumed set and the account state's
-  (`/account/state`, spec 03 §3) — else `replay-denied`; and `liveSince − 10 min <= issuedAt <= now +
-  10 min`. `liveSince` is the device-local wall-clock time this device last saw the vault go from
+  (constant time); the nonce absent from THIS device's consumed set — else `replay-denied`; and
+  `liveSince − 10 min <= issuedAt <= now + 10 min`; then (A7 review, a refinement of design §6.3
+  step 5) a nonce found only in the account state's consumed set (`/account/state`, spec 03 §3) was
+  consumed by another of the user's devices for the same genuine removal: the calm "already recorded
+  on another of your devices" notice, and it is consumed here too. A "valid (legacy)" v1 verdict is
+  shown qualified: "(sent by an older app version)". `liveSince` is the device-local wall-clock time this device last saw the vault go from
   not-live (absent, held, removed) to live; it is persisted with the device's cache and never comes
   from the server, so a re-add the device saw moves it past every earlier proof. A valid verdict
   records `(vaultId, nonce, issuedAt)` in the device's durable consumed set in the same transaction
