@@ -716,7 +716,8 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   `bad_nonce` / `bad_issued_at` / `bad_proof_version`. The server stores the fields on the revoked
   grant row (schema v15: `removeProofV`, `removeIssuedAt`) and refuses a nonce it already stored
   for that vault, across re-adds (`409 nonce_reused`; table `removal_nonces`; hygiene only, the
-  clients' consumed sets are the defence). Removing (or role-changing) the **pending transfer
+  clients' consumed sets are the defence). A nonce is recorded only when the call actually revoked a
+  grant. Removing (or role-changing) the **pending transfer
   target** clears the pending offer. Audited `vault_member_remove`.
 - All of them ring the WS dirty-bell for every affected member (the re-issue: the target member).
 
@@ -777,7 +778,8 @@ Owner decision Q11: delete, restore and transfer proofs stay MACs.)
   active member; `owner → 400 owner_must_transfer_or_delete`. `revokedReason='member_leave'`; if
   caller == `pendingOwnerId`, clear the pending offer. Idempotent by reason. The body is the
   leaving member's v2 leave proof (branch A7), stored on the revoked grant row and relayed on the
-  `left` row so the member's OTHER devices can verify it; required of v2 clients, while `{}` from an
+  `left` row so the member's OTHER devices can verify it (read whenever a body is sent, with or without
+  a Content-Length); required of v2 clients, while `{}` from an
   older client is still accepted in the compatibility window (its `left` then carries no proof). A
   present body that is not a complete v2 proof is `400 bad_proof_version` / `bad_proof` /
   `bad_nonce` / `bad_issued_at`; a reused nonce is `409 nonce_reused`.
