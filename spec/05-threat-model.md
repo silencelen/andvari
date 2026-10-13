@@ -240,9 +240,7 @@ verified exactly that key. (c) **pending invitations** name a sender the server 
 and key); the human compares codes before anything is adopted, and the vault's name stays hidden until then.
 (d) **the extension** (owner decision Q8) never opens a grant: a member's new shared vault appears in the
 extension only after a full client verified the grant and posted the self-wrap. (e) **the owner's re-issue**
-trusts the server's `legacyGrant` hint only to decide whom to re-issue to; it signs only to members pinned and
-current on that device, sealed to the pinned key, so a wrong hint costs a redundant grant, never a misdirected
-one. (f) **grant authority is not bound to the vault**: a verified grant proves which PINNED contact signed
+— as built in A6 it trusted the server for more than "whom to list": see (h), which corrects it. (f) **grant authority is not bound to the vault**: a verified grant proves which PINNED contact signed
 it, not that the signer owns or may share the vault; any pinned household member who holds a vault's key can
 grant it. A verified grant naming a different key than a held one is refused as `vk_mismatch` (never a silent
 switch); binding grants to the vault's owner is an open design follow-up. (g) **per-vault key memory —
@@ -259,7 +257,20 @@ created; never an unvouched read-only v1 seal, A7 review LOW-1), so a server-for
 not block the genuine key. Residuals: a **fresh device** (or one whose client state was wiped) has no
 memory and adopts whatever verified key it is served first, which is the R15(f) authority question again;
 the first TRUSTED key a device adopted is trusted on first use; and a future VK rotation (P6) must move the
-tag in the same step that installs the new key.
+tag in the same step that installs the new key. (h) **re-issue authority — CLOSED (branch A6b; the HIGH from
+the security review 2026-10 API pass)**: A6 re-issued legacy grants automatically on every sync, to every
+member the SERVER listed as legacy on every vault the SERVER labelled `owner`, gated only by "the member is
+pinned here". A pin proves who a member is, not that this owner ever gave them this vault, so a server
+colluding with one verified member could list that member on any vault the owner's device held and get the
+key signed and sealed to them with no human action. Now (spec 01 §6 "Grant authority"): nothing is re-issued
+by sync; a key is signed or sealed to a user only after a human on the device confirmed that (vault, user)
+pair, or for a pair in the UVK-authenticated issued-grants record for the same identity key; and add member,
+re-issue and transfer offer require the account's own owned-vaults record, never the role label. Residuals
+accepted: a vault created before A6b needs one "You own <vault>?" confirmation (password reauth) on first
+owner action, and a human who confirms ownership of, or a re-share to, something they never shared is not
+stopped (the copy says the list comes from the server); a pre-A6b member must be confirmed once per vault;
+and a forged transfer completion (a co-member holding the key can mint the MAC, R16(a)) can only REMOVE the
+ownership record, which costs a re-confirmation, never a grant.
 
 **R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
 (a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
