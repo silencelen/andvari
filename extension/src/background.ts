@@ -1,3 +1,4 @@
+import { decodeItemHomes, decodePersonalChange, decodePersonalWrap, encodeItemHomes } from "./trustrecords";
 import { pickPersonal, type PersonalWrapWire } from "./personalpick";
 import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, personalProposalNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
 import { admitRows, sealGate, serverItemDecision } from "./itemhome";
@@ -409,6 +410,9 @@ let events: EventsHandle | null = null;
  *  an Authorization header can never cross a baseUrl change; the old instance becomes garbage). */
 function makeApi(url: string): AndvariApi {
   const a = new AndvariApi(url, chrome.runtime.getManifest().version);
+  // A10: served rows with malformed ids were refused at the wire (wireids.ts); the full clients raise the notice,
+  // the worker logs it (no popup surface for key-state anomalies, see personalChangeText).
+  a.onRefusedIds = (endpoint, refused) => console.warn(`[andvari] refused ${refused.length} malformed id(s) on ${endpoint}`);
   // Awaited on every pair mutation — the consumed refresh token must reach the snapshot BEFORE the
   // refresh POST (a stale persisted pair resurrected on SW wake = revoked device). While unlocked it
   // lands in the full SessionSnapshot; DURING a quick-unlock redeem (session still null) it lands in the
@@ -2089,8 +2093,10 @@ export async function pickPersonalVaultId(
   const key = nsk(`personalWrap:${userId}`);
   let cached: PersonalWrapWire | null = null;
   try {
-    const raw = (await chrome.storage.local.get(key))[key] as PersonalWrapWire | undefined;
-    if (raw && typeof raw.vaultId === "string" && typeof raw.wrappedVk === "string") cached = raw;
+    // A10: a strict decode (a UUID vault id and nothing else); a damaged record reads as absent and is cleared.
+    const d = decodePersonalWrap((await chrome.storage.local.get(key))[key]);
+    cached = d.value;
+    if (d.rewrite) await chrome.storage.local.remove(key).catch(() => {});
   } catch {
     cached = null; // storage unavailable: behaves like a device that never saw a wrap (no personal vault)
   }
@@ -2138,8 +2144,10 @@ interface PersonalChangeRecord extends PersonalWrapWire {
 async function readPersonalChange(userId: string): Promise<PersonalChangeRecord | null> {
   try {
     const k = nsk(`personalChange:${userId}`);
-    const raw = (await chrome.storage.local.get(k))[k] as PersonalChangeRecord | undefined;
-    return raw && typeof raw.vaultId === "string" && typeof raw.wrappedVk === "string" ? raw : null;
+    // A10: a strict decode (UUID served vault, UUID-or-empty current vault); a damaged record reads as none and is cleared.
+    const d = decodePersonalChange((await chrome.storage.local.get(k))[k]);
+    if (d.rewrite) await chrome.storage.local.remove(k).catch(() => {});
+    return d.value;
   } catch {
     return null;
   }
@@ -2840,15 +2848,17 @@ const homesKey = (userId: string): string => nsk(`itemHomes:${userId}`);
 async function loadHomes(userId: string): Promise<Map<string, string>> {
   try {
     const k = homesKey(userId);
-    const raw = (await chrome.storage.local.get(k))[k] as Record<string, string> | undefined;
-    return new Map(Object.entries(raw && typeof raw === "object" ? raw : {}).filter(([, v]) => typeof v === "string"));
+    // A10: a strict decode (UUID itemId → UUID vaultId); a cleaned record is re-persisted once.
+    const d = decodeItemHomes((await chrome.storage.local.get(k))[k]);
+    if (d.rewrite) await chrome.storage.local.set({ [k]: encodeItemHomes(d.value) }).catch(() => {});
+    return d.value;
   } catch {
     return new Map(); // storage unavailable: a fresh browser's posture (the residual), never a failed unlock
   }
 }
 
 function saveHomes(userId: string, homes: Map<string, string>): Promise<void> {
-  return chrome.storage.local.set({ [homesKey(userId)]: Object.fromEntries(homes) }).catch(() => {});
+  return chrome.storage.local.set({ [homesKey(userId)]: encodeItemHomes(homes) }).catch(() => {});
 }
 
 /**
