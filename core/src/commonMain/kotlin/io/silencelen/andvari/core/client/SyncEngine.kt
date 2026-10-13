@@ -2358,13 +2358,23 @@ class SyncEngine(
             // re-creating it and just clear the flag. If it is absent (the conflict was caused by a
             // client that didn't materialize) preserve at least this value so clearing the flag
             // doesn't erase the only trace.
-            val mutations = mutableListOf<Mutation>()
-            if (copyId !in known && cache.getItem(copyId) == null) {
-                val copyDoc = doc.copy(name = "${doc.name} (conflict ${isoDate(item.updatedAt)})")
-                mutations += putMutation(provenance, copyId, copyDoc, 0)
+            // A1b review LOW-1 (availability; web twin: the pull's per-row try/catch around materializeConflict): the
+            // copy id is deterministic, so a server can pre-claim home(copyId) under another vault and make this seal
+            // refuse. The refusal is right, but it is THIS ROW's verdict: count it for the wrong-vault notice and
+            // carry on, never let it escape and fail this sync and every later one while the flag stands.
+            try {
+                val mutations = mutableListOf<Mutation>()
+                if (copyId !in known && cache.getItem(copyId) == null) {
+                    val copyDoc = doc.copy(name = "${doc.name} (conflict ${isoDate(item.updatedAt)})")
+                    mutations += putMutation(provenance, copyId, copyDoc, 0)
+                }
+                mutations += putMutation(provenance, item.itemId, doc, item.rev) // clears the flag
+                push(mutations)
+            } catch (e: ItemChangedVaultsException) {
+                wrongVault.note(item.vaultId)
+            } catch (e: VaultKeyNotVerifiedException) {
+                wrongVault.note(item.vaultId)
             }
-            mutations += putMutation(provenance, item.itemId, doc, item.rev) // clears the flag
-            push(mutations)
         }
     }
 
