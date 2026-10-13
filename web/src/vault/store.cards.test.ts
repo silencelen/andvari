@@ -232,13 +232,13 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
 
     // Restoring that version is a plain put — it must go out at 2, not mint a refused
     // fv downgrade because an older archive was merely LOOKED at.
-    await store.save(itemId, versions[0]!.doc);
+    await store.save(itemId, versions[0]!.doc, [], undefined, vaultId);
     expect(api.pushes.at(-1)![0]!.item!.formatVersion).toBe(2);
 
     // The decisive monotonic leg: strip the card so docFloor drops to 1 — the per-item
     // memory ALONE must keep the reseal at 2 (else this very save would be the refused
     // fv_downgrade the server guard exists for).
-    await store.save(itemId, { ...store.get(itemId)!.doc, card: undefined });
+    await store.save(itemId, { ...store.get(itemId)!.doc, card: undefined }, [], undefined, vaultId);
     expect(docFloor(store.get(itemId)!.doc)).toBe(1);
     expect(api.pushes.at(-1)![0]!.item!.formatVersion).toBe(2);
   });

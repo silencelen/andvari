@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { ApiClient } from "../api/client";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
 import type { VaultItem, VaultStore } from "../vault/store";
+import { boundVault } from "../vault/itemhome";
 import { duplicateClusters, planDismiss, planKeep, type DuplicateCluster, type RoleFor } from "./duplicates";
 import { Announcer, Msg } from "./Msg";
 import { ago } from "./format";
@@ -441,7 +442,7 @@ function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem
     setMsg(null);
     try {
       // Survivor first (the runMerge rule): nothing is deleted before the history landed.
-      await store.save(keep.survivorId, keep.doc);
+      await store.save(keep.survivorId, keep.doc, [], undefined, boundVault(items, keep.survivorId));
       for (const id of keep.loserIds) await store.remove(id);
       const n = keep.loserIds.length;
       setMsg({
@@ -469,7 +470,7 @@ function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem
     setMergingId(c.signature);
     setMsg(null);
     try {
-      for (const w of writes) await store.save(w.itemId, w.doc);
+      for (const w of writes) await store.save(w.itemId, w.doc, [], undefined, boundVault(items, w.itemId));
       setMsg(
         restore
           ? { kind: "info", text: "Back on the list." }
@@ -490,7 +491,7 @@ function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem
     setMsg(null);
     try {
       // Survivor first: if anything fails, no copy has been deleted before the union landed.
-      await store.save(plan.survivorId, plan.doc);
+      await store.save(plan.survivorId, plan.doc, [], undefined, boundVault(items, plan.survivorId));
       for (const id of plan.loserIds) await store.remove(id);
       const n = plan.loserIds.length;
       setMsg({ kind: "info", text: `Merged — ${n === 1 ? "the duplicate copy" : `${n} duplicate copies`} moved to Deleted items (kept 30 days).` });

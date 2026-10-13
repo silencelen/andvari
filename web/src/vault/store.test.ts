@@ -293,7 +293,7 @@ describe("VaultStore family sharing (P5)", () => {
     // Our edit — the winner. save() pushes it; the server keeps ours live (LWW) and returns
     // the losing value, so the push side must materialize the copy FROM THE LOSING value.
     const ourDoc: ItemDoc = { type: "login", name: "Shared login", login: { username: "fam", password: "OURS-wins" } };
-    await store.save(s.itemId, ourDoc);
+    await store.save(s.itemId, ourDoc, [], undefined, s.vaultId);
 
     // A copy was pushed, keyed by the deterministic id over the WINNER rev (9) — the SAME id
     // the pull-side fallback uses, so the two converge (spec 03 §5).
@@ -358,7 +358,7 @@ describe("VaultStore family sharing (P5)", () => {
 
     // Restore the older version — an ordinary put over the live item.
     const pushesBefore = api.pushes.length;
-    await store.save(s.itemId, versions[1]!.doc);
+    await store.save(s.itemId, versions[1]!.doc, [], undefined, s.vaultId);
     expect(api.pushes.length).toBeGreaterThan(pushesBefore);
     expect(store.get(s.itemId)?.doc.login?.password).toBe("old-1");
   });
@@ -422,7 +422,7 @@ describe("VaultStore family sharing (P5)", () => {
 
     // Editing an item that lives in the shared vault must push to THAT vault,
     // not personalVaultId (defect #0.1 / server vault_mismatch rule).
-    await store.save(s.itemId, { ...DOC, name: "renamed" });
+    await store.save(s.itemId, { ...DOC, name: "renamed" }, [], undefined, s.vaultId);
     expect(api.pushes.at(-1)![0]!.vaultId).toBe(s.vaultId);
     expect(api.pushes.at(-1)![0]!.itemId).toBe(s.itemId);
 
@@ -812,7 +812,7 @@ describe("VaultStore save() post-push reconcile (mirror of remove())", () => {
 
       // The post-push reconcile pull will be REJECTED by the F31 rev-regression guard.
       api.queue.push({ rev: 3, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
-      await expect(store.save(s.itemId, { ...DOC, name: "renamed" })).resolves.toBeUndefined();
+      await expect(store.save(s.itemId, { ...DOC, name: "renamed" }, [], undefined, s.vaultId)).resolves.toBeUndefined();
 
       expect(api.pushes).toHaveLength(1); // committed exactly once — no retry bait
       expect(store.get(s.itemId)?.doc.name).toBe("renamed"); // optimistic local apply
@@ -834,7 +834,7 @@ describe("VaultStore save() post-push reconcile (mirror of remove())", () => {
       api.sync = async () => {
         throw new TypeError("offline");
       };
-      await expect(store.save(s.itemId, { ...DOC, name: "renamed offline" })).resolves.toBeUndefined();
+      await expect(store.save(s.itemId, { ...DOC, name: "renamed offline" }, [], undefined, s.vaultId)).resolves.toBeUndefined();
       expect(store.get(s.itemId)?.doc.name).toBe("renamed offline");
     } finally {
       warn.mockRestore();

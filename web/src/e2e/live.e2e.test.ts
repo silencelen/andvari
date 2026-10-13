@@ -3,7 +3,7 @@ import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { readFileSync, writeFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiClient } from "../api/client";
-import type { WireItem } from "../api/types";
+import type { ItemDoc, Mutation, WireItem } from "../api/types";
 import { fromB64, toB64 } from "../crypto/bytes";
 import { assertServerKdfParams } from "../crypto/keys";
 import { randomBytes } from "../crypto/provider";
@@ -12,6 +12,12 @@ import { Account, deviceName } from "../vault/account";
 import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { NullCache, openVaultCache, vaultDbName } from "../vault/idbcache";
 import { VaultStore } from "../vault/store";
+
+/** A put for a NEW personal item, built in the test (the store's put builder is private since A1b's INV-SEAL routing). */
+function newPut(account: Account, itemId: string, doc: ItemDoc): Mutation {
+  const up = account.encryptItem(account.personalVaultId, itemId, doc);
+  return { mutationId: crypto.randomUUID(), op: "put", itemId, vaultId: account.personalVaultId, baseItemRev: 0, item: { formatVersion: up.formatVersion, attachmentIds: [], blob: up.blob } };
+}
 
 /**
  * Live end-to-end against a running andvari server (the real shadowJar), reusing the
@@ -208,7 +214,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
 
     // A pushes an item.
     const item1Id = account.newItemId();
-    const m1 = storeA.putMutation(item1Id, account.personalVaultId, { type: "login", name: "GitHub", login: { username: "jacob", password: "s3cret-e2e" } }, 0);
+    const m1 = newPut(account, item1Id, { type: "login", name: "GitHub", login: { username: "jacob", password: "s3cret-e2e" } });
     await clientA.push([m1]);
 
     // B should get a bell, then pull + decrypt the item, within 2s.
@@ -375,7 +381,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     // Re-encrypt the same item under the same itemId + mutationId and re-push.
     // Idempotency contract (spec 03 §5): the server replays the ORIGINAL result
     // verbatim — same status + same newItemRev — and does NOT create a second item.
-    const retry = store.putMutation(state.item1Id, account.personalVaultId, { type: "login", name: "GitHub", login: { username: "jacob", password: "s3cret-e2e" } }, 0);
+    const retry = newPut(account, state.item1Id, { type: "login", name: "GitHub", login: { username: "jacob", password: "s3cret-e2e" } });
     retry.mutationId = state.item1MutationId; // the crash-retry uses the ORIGINAL id
     const resp = await client.push([retry]);
     expect(resp.results[0]?.status, "replay returns the original 'applied' result, not a re-execution").toBe("applied");
