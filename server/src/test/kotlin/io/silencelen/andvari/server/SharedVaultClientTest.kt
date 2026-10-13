@@ -71,9 +71,11 @@ class SharedVaultClientTest {
         engineMember.sync()
 
         // Owner creates the shared vault and puts an item in it BEFORE the member joins.
-        val nv = owner.buildCreateSharedVault("Family")
-        apiOwner.createVault(nv.request)
-        engineOwner.sync()
+        // A6b: created through the engine, which records this account's own evidence that it owns the vault (an
+        // owner-only add is refused on the server's role label alone).
+        val createdId = engineOwner.createSharedVault("Family")
+        val nv = object { val vaultId = createdId }
+        assertTrue(engineOwner.ownsVault(nv.vaultId), "the creator's ownership record")
         engineOwner.save(null, ItemDoc(type = "login", name = "wifi"), vaultId = nv.vaultId)
 
         // Root cause A (A6): each side verifies the other ONCE (each types the other's 32-hex code, read from the

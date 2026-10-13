@@ -2695,6 +2695,35 @@ class DesktopState(
 
     fun personalChange(): io.silencelen.andvari.core.client.PersonalChange? = engine?.personalChange()
 
+    // ---- grant re-issue authority (security review 2026-10, root cause A, branch A6b) ----
+
+    /** The server reports this account as [vaultId]'s owner but this account has no evidence of it ("You own <vault>?"). */
+    fun ownershipNeedsConfirmation(vaultId: String): Boolean = engine?.ownershipNeedsConfirmation(vaultId) == true
+
+    /** "You own <vault>?" step 1 (A6b review MEDIUM-1): load what the dialog shows (server-reported owner, transfer,
+     *  co-holders; this device's member provenance). Mints nothing. */
+    suspend fun describeVaultOwnership(vaultId: String): io.silencelen.andvari.core.client.OwnershipClaim =
+        requireNotNull(engine) { "locked" }.describeOwnership(vaultId)
+
+    fun cancelOwnershipClaim() { engine?.cancelOwnershipClaim() }
+
+    /** Step 2: confirmed with a fresh master-password reauth (checked on this device) and, for a vault received as a
+     *  member, the explicit "This vault's owner transferred it to me". */
+    suspend fun confirmVaultOwnership(claim: io.silencelen.andvari.core.client.OwnershipClaim, password: String, transferredToMe: Boolean) {
+        requireNotNull(engine) { "locked" }.confirmOwnership(claim, password, transferredToMe)
+    }
+
+    /** The "Legacy grants" list for an owned vault (server-listed; each row needs the owner's confirmation). */
+    suspend fun loadLegacyGrants(vaultId: String): List<io.silencelen.andvari.core.client.LegacyGrantRow> =
+        requireNotNull(engine) { "locked" }.loadLegacyGrants(vaultId)
+
+    fun legacyGrantRows(vaultId: String): List<io.silencelen.andvari.core.client.LegacyGrantRow> = engine?.legacyGrantRows(vaultId).orEmpty()
+
+    /** The owner confirmed "Re-share <vault> with <member>?" on [row]: only now is the grant signed. */
+    suspend fun confirmReissue(row: io.silencelen.andvari.core.client.LegacyGrantRow) {
+        requireNotNull(engine) { "locked" }.confirmReissue(row)
+    }
+
     fun acceptPersonalChange() {
         requireNotNull(engine) { "locked" }.acceptPersonalChange()
     }

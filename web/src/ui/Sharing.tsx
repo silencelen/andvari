@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { UserLookupResponse, VaultMemberSummary } from "../api/types";
 import type { Account } from "../vault/account";
-import { type DeletedVaultInfo, type IncomingTransfer, MemberNotVerifiedError, type VaultInfo, type VaultStore } from "../vault/store";
+import { type DeletedVaultInfo, type IncomingTransfer, type LegacyGrantRow, MemberNotVerifiedError, OwnershipNotConfirmedError, type OwnershipClaim, OwnershipTransferAckRequiredError, ReauthFailedError, type VaultInfo, type VaultStore } from "../vault/store";
+import { VaultKeyNotVerifiedError } from "../vault/account";
 import { VerifyMemberPanel } from "./Household";
 import { LegacyReviewCard, PendingInvitationsCard } from "./SignedGrantCards";
 import { UNREACHABLE } from "./errors";
@@ -262,14 +263,13 @@ function NewVaultForm({ account, store, client, onCreated }: { account: Account;
     e.preventDefault();
     setBusy(true);
     setErr("");
-    const { request, vaultId } = account.buildCreateSharedVault(name.trim());
     try {
-      await client.createVault(request);
-      await store.sync();
+      // A6b: the store records this account's own evidence that it owns the new vault (the server's role label is
+      // never that evidence), and rolls back the optimistic local registration if the server refuses the create.
+      await store.createSharedVault(name.trim());
       setName("");
       onCreated();
     } catch (err) {
-      account.removeVault(vaultId); // roll back the optimistic local registration
       // vault-create's rate limit is 5 per hour — say so instead of the generic "wait a bit".
       setErr(
         err instanceof ApiError && err.status === 429
@@ -345,6 +345,7 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
   const [err, setErr] = useState("");
   const [removing, setRemoving] = useState<string | null>(null); // userId pending remove confirm
   const [verifyingId, setVerifyingId] = useState<string | null>(null); // A6: one-tap pin from this list
+  const [legacyTick, setLegacyTick] = useState(0); // A6b: reload the legacy-grants list after a verification
 
   const load = () =>
     client
@@ -392,14 +393,21 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
 
   const pending = store.pendingTransferFor(vault.vaultId);
   const pendingMember = pending && members?.find((m) => m.userId === pending.toUserId);
+  // A6b: owner-only signing actions (add member, re-share, transfer) need this account's OWN evidence that it owns the
+  // vault; the server's role label alone only shows this panel. Until it is confirmed, those controls wait.
+  const [, setOwnTick] = useState(0);
+  const ownershipUnconfirmed = store.ownershipNeedsConfirmation(vault.vaultId);
   // Transfer targets: active members who are not the owner and not disabled.
   const targets = (members ?? []).filter((m) => m.role !== "owner" && (m.status ?? "active") === "active");
 
   return (
     <div className="sheet">
       <RenameHeader vault={vault} store={store} onRenamed={onChanged} />
-      <p className="muted" style={{ marginTop: 0 }}>You own this vault. Writers can add and edit items; readers can only view.</p>
+      <p className="muted" style={{ marginTop: 0 }}>
+        {ownershipUnconfirmed ? "The server reports you as this vault's owner." : "You own this vault."} Writers can add and edit items; readers can only view.
+      </p>
       {err && <Msg kind="err">{err}</Msg>}
+      {ownershipUnconfirmed && <ConfirmOwnership vault={vault} store={store} onConfirmed={() => setOwnTick((t) => t + 1)} />}
 
       {!members ? (
         <p className="muted"><Busy>Loading…</Busy></p>
@@ -451,15 +459,15 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
           })()}
           onDone={() => {
             setVerifyingId(null);
-            // A pinned legacy member is re-issued a signed grant on the next sync (§8.2 step 4).
-            void store.sync().catch(() => {}).then(() => { void load(); onChanged(); });
+            // A6b: a newly verified legacy member shows a "Re-share" row below; nothing is re-issued on its own.
+            void store.sync().catch(() => {}).then(() => { void load(); onChanged(); setLegacyTick((t) => t + 1); });
           }}
         />
       )}
 
-      <LegacyGrantsNote store={store} vaultId={vault.vaultId} />
+      {!ownershipUnconfirmed && <LegacyGrantsPanel store={store} vault={vault} refreshKey={legacyTick} />}
 
-      {pending ? (
+      {ownershipUnconfirmed ? null : pending ? (
         <div className="msg info" style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14 }}>
           <span style={{ flex: 1 }}>
             Ownership offer to {pendingMember?.displayName ?? "a member"} — expires {fmtDay(pending.expiresAt)}
@@ -472,17 +480,19 @@ function MemberPanel({ vault, account, store, client, onChanged, onBackup, copyi
         members && <TransferOfferControl vault={vault} store={store} targets={targets} onOffered={async () => { await load(); onChanged(); }} />
       )}
 
-      <AddMember
-        vaultId={vault.vaultId}
-        account={account}
-        store={store}
-        client={client}
-        onAdded={async () => {
-          await store.sync();
-          await load();
-          onChanged();
-        }}
-      />
+      {!ownershipUnconfirmed && (
+        <AddMember
+          vaultId={vault.vaultId}
+          account={account}
+          store={store}
+          client={client}
+          onAdded={async () => {
+            await store.sync();
+            await load();
+            onChanged();
+          }}
+        />
+      )}
 
       <DeleteVaultControl vault={vault} store={store} onDeleted={onChanged} onDeletedNote={onDeletedNote} onBackup={onBackup} copying={copying} setCopying={setCopying} copiedNote={copiedNote} setCopiedNote={setCopiedNote} />
     </div>
@@ -573,17 +583,159 @@ function MemberPinTag({ store, account, m, onVerify }: { store: VaultStore; acco
   );
 }
 
-/** §8.2 step 4: members still on an older-format grant whom this browser couldn't re-issue to (not verified here). */
-function LegacyGrantsNote({ store, vaultId }: { store: VaultStore; vaultId: string }) {
-  const legacy = store.legacyGrantMembers(vaultId);
-  if (legacy.length === 0) return null;
+/**
+ * "You own <vault>?" (security review 2026-10, root cause A, branch A6b; review MEDIUM-1): the server reports this
+ * account as the owner, but this browser has no record that the account created the vault or that its owner
+ * transferred it here. Like A5b's personal-vault choice, the confirmation first loads and shows what the server
+ * reports (its owner, its last transfer, who else holds the vault), then asks for a fresh master password, checked
+ * against this session's key. A vault this browser first received as a MEMBER also needs the explicit "This vault's
+ * owner transferred it to me". Until then nothing is signed or sealed for it on the strength of the server's label.
+ */
+function ConfirmOwnership({ vault, store, onConfirmed }: { vault: VaultInfo; store: VaultStore; onConfirmed: () => void }) {
+  const [claim, setClaim] = useState<OwnershipClaim | null>(null);
+  const [password, setPassword] = useState("");
+  const [ack, setAck] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const open = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      setClaim(await store.describeOwnership(vault.vaultId));
+    } catch (x) {
+      setErr(x instanceof VaultKeyNotVerifiedError ? "This vault's key did not come from your own account, so it can't be claimed here." : friendlyError(x));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancel = () => {
+    store.cancelOwnershipClaim();
+    setClaim(null);
+    setPassword("");
+    setAck(false);
+    setErr("");
+  };
+  const confirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!claim) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await store.confirmOwnership(claim, password, ack);
+      setPassword("");
+      onConfirmed();
+    } catch (x) {
+      setErr(
+        x instanceof ReauthFailedError ? "That master password isn't right."
+          : x instanceof OwnershipTransferAckRequiredError ? x.message
+          : friendlyError(x),
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const who = (c: { displayName: string; email: string; userId: string }) => (c.displayName ? `${c.displayName} (${c.email})` : "someone this browser can't name");
   return (
     <div className="msg info" style={{ display: "block", marginTop: 14 }}>
-      <strong>Legacy grants.</strong> These members still hold this vault through the older grant format, which can't prove it came
-      from you. Verify each one (the Verify link above) to secure their access; andvari then re-issues their grant automatically.
+      <strong>You own “{vault.name}”?</strong> The server reports you as its owner, but this device has no record that you
+      created this vault or that its owner transferred it to you. Only confirm if you created this vault, or its owner
+      transferred it to you. Otherwise, don't confirm: tell your admin.
+      {err && <Msg kind="err">{err}</Msg>}
+      {!claim ? (
+        <div className="actions" style={{ marginTop: 8 }}>
+          <button type="button" className="ghost" disabled={busy} onClick={() => void open()}>{busy ? <Busy>Loading…</Busy> : `Confirm I own “${vault.name}”…`}</button>
+        </div>
+      ) : (
+        <form onSubmit={confirm} style={{ marginTop: 8 }}>
+          <ul className="plain-list">
+            <li>
+              {claim.lastTransferTo
+                ? <>Last ownership transfer: to {who(claim.lastTransferTo)}, transfer #{claim.lastTransferSeq} <span className="muted">(as reported by the server)</span></>
+                : <>Created by {claim.reportedOwner ? who(claim.reportedOwner) : "an unknown owner"}; no transfer on record <span className="muted">(as reported by the server)</span></>}
+            </li>
+            <li>
+              Also holding this vault: {claim.coHolders.length === 0 ? "no one else" : claim.coHolders.map((c) => `${who(c)}, ${c.role}`).join("; ")}{" "}
+              <span className="muted">(as reported by the server)</span>
+            </li>
+            {claim.receivedAsMember && <li><strong>This device first received this vault as a member.</strong></li>}
+          </ul>
+          {claim.receivedAsMember && (
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} disabled={busy} />
+              This vault's owner transferred it to me
+            </label>
+          )}
+          <div className="field">
+            <label>Your master password</label>
+            <div className="secret-row">
+              <input type="password" autoComplete="current-password" aria-label="Your master password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} />
+              <button className="primary" disabled={busy || !password || (claim.receivedAsMember && !ack)}>{busy ? <Busy>Checking…</Busy> : "Confirm"}</button>
+              <button type="button" className="ghost" disabled={busy} onClick={cancel}>Cancel</button>
+            </div>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/**
+ * §8.2 step 4, "Legacy grants" (A6b): the members the SERVER lists as still on the older grant format. Nothing is
+ * re-shared on its own: the owner confirms each row, which names the vault and the member as this browser verified
+ * them. (A member this account already re-shared with, for the same identity key, is renewed without a prompt.)
+ */
+function LegacyGrantsPanel({ store, vault, refreshKey }: { store: VaultStore; vault: VaultInfo; refreshKey: number }) {
+  const [rows, setRows] = useState<LegacyGrantRow[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let live = true;
+    store.loadLegacyGrants(vault.vaultId).then((r) => { if (live) setRows(r); }).catch(() => { if (live) setRows([]); });
+    return () => { live = false; };
+  }, [store, vault.vaultId, refreshKey]);
+  if (!rows || rows.length === 0) return null;
+  const reshare = async (row: LegacyGrantRow) => {
+    setBusy(row.userId);
+    setErr("");
+    try {
+      await store.confirmReissue(row);
+      setConfirming(null);
+      setRows(store.legacyGrantRows(vault.vaultId));
+    } catch (x) {
+      setErr(x instanceof MemberNotVerifiedError || x instanceof OwnershipNotConfirmedError ? x.message : friendlyError(x));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const vaultName = (r: LegacyGrantRow) => r.vaultName ?? vault.name;
+  return (
+    <div className="msg info" style={{ display: "block", marginTop: 14 }}>
+      <strong>Legacy grants.</strong> The server lists these members as still on the old sharing format. Only confirm people
+      you shared this vault with.
+      {err && <Msg kind="err">{err}</Msg>}
       <ul className="plain-list" style={{ marginTop: 6 }}>
-        {legacy.map((m) => (
-          <li key={m.userId}>Verify {m.displayName} to secure their access.</li>
+        {rows.map((r) => (
+          <li key={r.userId}>
+            {r.pinState === "pinned" && r.verifiedLabel !== null ? (
+              confirming === r.userId ? (
+                <>
+                  Re-share “{vaultName(r)}” with {r.verifiedLabel}?{" "}
+                  <button type="button" className="primary" disabled={busy !== null} onClick={() => void reshare(r)}>{busy === r.userId ? "Re-sharing…" : "Re-share"}</button>{" "}
+                  <button type="button" className="ghost" disabled={busy !== null} onClick={() => setConfirming(null)}>Cancel</button>
+                </>
+              ) : (
+                <>
+                  {r.verifiedLabel} <span className="muted">(verified; the server calls them {r.displayName}, {r.email})</span>{" "}
+                  <button type="button" className="link" onClick={() => setConfirming(r.userId)}>Re-share “{vaultName(r)}”…</button>
+                </>
+              )
+            ) : r.pinState === "key-changed" ? (
+              <span style={{ color: "var(--danger)" }}>{r.displayName}: the server holds a different identity key than the one you verified. Don't re-share; check their code in person again.</span>
+            ) : (
+              <>Verify {r.displayName} ({r.email}) first (the Verify link above), then re-share “{vaultName(r)}” with them here.</>
+            )}
+          </li>
         ))}
       </ul>
     </div>

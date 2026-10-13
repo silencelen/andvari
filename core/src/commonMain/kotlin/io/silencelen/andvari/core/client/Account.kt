@@ -698,6 +698,7 @@ class Account private constructor(
                 account.personalStatus = PersonalStatus.CONFIRMED
                 account.personalWrap = req.personalWrap
                 account.uvkWrappedVaults.add(personalVaultId)
+                account.sessionKdfSalt = req.kdfSalt // A6b review LOW-3
                 signingForCleanup = null // owned by the returned Account now
                 return EnrollResult(req, account, recovery.recoverySecret)
             } finally {
@@ -930,6 +931,7 @@ class Account private constructor(
             val account = Account(crypto, userId, uvk, identity.publicKey, identity.privateKey, signing.publicKey, signing.privateKey, "", mutableMapOf())
             // Root cause A §4.3: the personal vault comes from the UVK-authenticated wrap and nothing else.
             account.applyPersonalWrap(keys.personalWrap)
+            account.sessionKdfSalt = keys.kdfSalt.ifEmpty { null } // A6b review LOW-3: the salt this session unlocked with
             return account
         }
 
@@ -1429,8 +1431,50 @@ class Account private constructor(
      */
     fun roleFor(vaultId: String): String? = if (isLegacyReadOnly(vaultId)) "reader" else vaultRoles[vaultId]
 
-    /** The role exactly as the server declared it. */
+    /**
+     * The role exactly as the server declared it. DISPLAY ONLY (security review 2026-10, root cause A, branch A6b):
+     * it never unlocks an owner-only signing action; the host's owned-vaults record does.
+     */
     fun serverRoleFor(vaultId: String): String? = vaultRoles[vaultId]
+
+    /** A6b review LOW-3: the `kdfSalt` of the AccountKeys this session unlocked (or enrolled) with; null = unknown,
+     *  and then no reauth passes on this session (fail closed; a re-lock after a password change resets it). */
+    private var sessionKdfSalt: String? = null
+
+    /**
+     * A fresh master-password reauth checked ON THIS DEVICE (A6b, "You own <vault>?"): true only when [password]
+     * derives a wrap key that opens [keys]`.wrappedUvk` to the UVK this session already holds. The server serves
+     * [keys], but it cannot make a password it chose pass, because it would need a wrap of OUR UVK. MK and the wrap
+     * key are wiped on the way out (audit H80).
+     */
+    fun verifyPassword(password: String, keys: AccountKeys): Boolean {
+        // A6b review LOW-3: the same KDF floor/ceiling fence unlock applies (throws KdfPolicyViolationException), and
+        // only the salt THIS session unlocked with: a replayed older AccountKeys (before a password change) carries
+        // another salt and a wrap of the same UVK under the OLD password, which must never pass for it.
+        KdfUpgrade.requireServerKdfParams(keys.kdfParams)
+        val salt = sessionKdfSalt ?: return false
+        if (keys.kdfSalt != salt) return false
+        val mk = Keys.masterKey(crypto, password, Bytes.fromB64(keys.kdfSalt), keys.kdfParams)
+        val wrapKey = try {
+            Keys.wrapKey(crypto, mk)
+        } finally {
+            mk.fill(0)
+        }
+        try {
+            val opened = try {
+                Envelope.openB64(crypto, wrapKey, keys.wrappedUvk, Ad.uvk(userId))
+            } catch (e: Exception) {
+                return false
+            }
+            try {
+                return Bytes.ctEquals(opened, uvk)
+            } finally {
+                opened.fill(0)
+            }
+        } finally {
+            wrapKey.fill(0)
+        }
+    }
 
     /**
      * A7 review MEDIUM-1: forget this device's key memory for [vaultId] (the §8.2 vouch and the held-key tag). Only for
