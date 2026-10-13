@@ -378,9 +378,12 @@ key signs only through the flows that need it (today: escrow v2).
     old password pass; the confirmation first loads and shows, "as reported by the server", the vault's
     owner, its last completed transfer and its co-holders, is worded "Only confirm if you created this
     vault, or its owner transferred it to you", and is refused for a vault whose key is not from the
-    account's own UVK wrap; for a vault this device first adopted as a MEMBER (a durable device-local
-    record, not rebuilt from served rows) it also needs the explicit acknowledgement "This vault's owner
-    transferred it to me", which a genuine pre-A6b transfer recipient gives; tombstoned in `ownedTombstones` when the account transfers the vault away,
+    account's own UVK wrap; for a vault this account first adopted as a MEMBER (a durable device-local
+    record, not rebuilt from served rows, OR — since branch A1b, A6b review LOW-R — the account state's
+    add-only `memberReceived` record, which every device that saw member provenance writes, so a fresh
+    device whose first served row is owner-shaped still asks) it also needs the explicit acknowledgement
+    "This vault's owner transferred it to me", which a genuine pre-A6b transfer recipient gives; a reauth
+    against a session whose unlock salt is stale says "Lock and unlock andvari, then try again"; tombstoned in `ownedTombstones` when the account transfers the vault away,
     on a transfer verified under the vault key, or leaves it). The owner wrap is minted only by a transfer
     accept, after the offer verified under the vault key. The server's role label is display only ("as
     reported by the server"); without the record the owner panel shows only "You own <vault>?". The
@@ -505,6 +508,16 @@ key signs only through the flows that need it (today: escrow v2).
   that moves the vault to the holding area, and merges it into account state at the next flush
   (union, never shrunk by a served copy). Every verdict keeps the same data handling: the holding
   area, 30 days.
+
+- **Writes under a vault key (INV-WRITE-KEY; security review 2026-10, root cause A §5.1, branch A1b).** No item
+  is ever sealed under a key that is legacy-read-only or that contradicts this device's vouch / held-key memory
+  (the vouch gate above); such a key is still READ (rule 2 of the precedence keeps our own UVK wrap canonical) but
+  the vault is write-refused until the human resolves the `vk_mismatch` (leave and be re-added). The extension
+  holds only keys that opened under the UVK (root cause A §1.7: it never opens a grant seal and shows "N shared
+  vaults waiting — open andvari to review"), so it never holds a legacy key. Item provenance and the item home
+  are spec 02 §7.2. The precedence, including this column, is graded by `spec/test-vectors/keyprecedence.json`
+  on core and web (the A-1 row: an owner row with a valid wrap plus a forged seal keeps the UVK key and reports
+  `vk_mismatch`).
 
 ## 7. Password change and KDF upgrade
 

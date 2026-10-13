@@ -183,7 +183,9 @@ cache OFF.
   flush, and a served copy never shrinks it), and (branch A6b, spec 01 §6 "Grant authority") the
   issued-grants record (`issuedGrants`, `issuedTombstones`) and the owned-vaults record
   (`ownedVaults`, `ownedTombstones`), both unioned on merge with a not-older tombstone removing an
-  entry, so a rollback cannot shrink them; a document without these keys reads them as empty. Native
+  entry, so a rollback cannot shrink them, and (branch A1b) `memberReceived` (vaultId → ms: vaults some
+  device of the account first adopted the key of as a member), add-only and unioned keeping the larger
+  value; a document without these keys reads them as empty. Native
   clients keep the high-water seq and their sealed copy in the durable device state when the host has
   one, so both survive a restart on a memory-only cache. `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
   lives inside the blob. Clients merge on every read and on a 409 (contacts union by userId, newest
