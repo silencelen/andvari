@@ -375,7 +375,7 @@ class SyncEngineLifecycleTest {
         )
 
         // Must NOT throw — the edit is parked, not lost, and the pull is never aborted.
-        s.engine.save(s.itemId, doc.copy(name = "edited in-flight"))
+        s.engine.save(s.itemId, doc.copy(name = "edited in-flight"), s.vaultId)
         val n = s.engine.notices().find { it.vaultId == s.vaultId }
         assertEquals("deleted", n?.kind)
         assertEquals(1, n?.parkedCount)
@@ -401,7 +401,7 @@ class SyncEngineLifecycleTest {
         val s = seededMember("reader")
         s.server.denyVaults.add(s.vaultId)
         // No delete arrives — the reconcile pull is empty, so the vault stays live.
-        val e = assertFailsWith<ApiException> { s.engine.save(s.itemId, doc.copy(name = "reader edit")) }
+        val e = assertFailsWith<ApiException> { s.engine.save(s.itemId, doc.copy(name = "reader edit"), s.vaultId) }
         assertEquals("denied", e.code)
         assertTrue(s.engine.heldVaultInfos().isEmpty())
     }
@@ -421,7 +421,7 @@ class SyncEngineLifecycleTest {
 
         // Our edit — the winner. save() pushes it; the server keeps ours live (LWW) and returns
         // the losing value, so the push side must materialize the copy FROM THE LOSING value.
-        s.engine.save(s.itemId, doc.copy(login = LoginData(username = "fam", password = "OURS-wins")))
+        s.engine.save(s.itemId, doc.copy(login = LoginData(username = "fam", password = "OURS-wins")), s.vaultId)
 
         // A copy was pushed, keyed by the deterministic id over the WINNER rev (9) — the SAME id
         // the pull-side fallback uses, so the two converge (spec 03 §5, PDD-1).
@@ -837,7 +837,7 @@ class SyncEngineLifecycleTest {
 
         val a = async { runCatching { s.engine.sync() } }
         entered.await() // A is mid-pull (holding the sync serialization)
-        val b = async { runCatching { s.engine.save(s.itemId, doc.copy(name = "mid-flight edit")) } }
+        val b = async { runCatching { s.engine.save(s.itemId, doc.copy(name = "mid-flight edit"), s.vaultId) } }
         delay(50) // give B every chance to misbehave if serialization were missing
         release.complete(Unit)
         assertTrue(a.await().isSuccess)
@@ -906,7 +906,7 @@ class SyncEngineLifecycleTest {
         // The denial lands, but its classifying pull FAILS — then the process dies.
         server.denyVaults.add(vaultId)
         server.failNextSync = true
-        assertFailsWith<ApiException> { engine1.save(itemId, doc.copy(name = "edited before death")) }
+        assertFailsWith<ApiException> { engine1.save(itemId, doc.copy(name = "edited before death"), vaultId) }
         assertEquals(1, cache1.stagedDenied().size) // durably staged, not lost with the dequeue
         engine1.close() // "process death"
 
@@ -944,7 +944,7 @@ class SyncEngineLifecycleTest {
                 listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = System.currentTimeMillis() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
             ),
         )
-        s.engine.save(s.itemId, doc.copy(name = "edited in-flight")) // parked, not thrown
+        s.engine.save(s.itemId, doc.copy(name = "edited in-flight"), s.vaultId) // parked, not thrown
 
         // Restore arrives but our grant comes back as READER — the replay will be denied.
         val restoredVault = s.vault.copy(rev = 8, restoreProof = LifecycleProof.restore(crypto, s.key(), s.vaultId, deleteId), deleteId = deleteId)
