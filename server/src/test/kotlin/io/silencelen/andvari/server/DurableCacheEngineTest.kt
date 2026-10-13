@@ -27,6 +27,11 @@ import kotlin.test.assertTrue
  * queue survival, transactional 410 resync, and the rev-regression guard.
  */
 class DurableCacheEngineTest {
+    /** A queued put for a NEW personal item (the engine's own put builder is private since A1b's INV-SEAL routing). */
+    private fun queuedPut(account: io.silencelen.andvari.core.client.Account, doc: ItemDoc): io.silencelen.andvari.core.model.Mutation {
+        val id = account.newItemId()
+        return io.silencelen.andvari.core.model.Mutation(account.newItemId(), "put", id, account.personalVaultId, 0, account.encryptItem(account.personalVaultId, id, doc))
+    }
     private val crypto = createCryptoProvider()
     private val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
     private val fingerprint = Escrow.fingerprint(crypto, recovery.publicKey)
@@ -104,7 +109,7 @@ class DurableCacheEngineTest {
         val engine1 = SyncEngine(api1, account, cache1).also { it.hydrate() }
         engine1.sync()
         // Enqueue WITHOUT flushing (simulate crash-before-send), then "die".
-        cache1.enqueue(engine1.putMutation(account.newItemId(), account.personalVaultId, ItemDoc(type = "note", name = "pending"), 0))
+        cache1.enqueue(queuedPut(account, ItemDoc(type = "note", name = "pending")))
         assertEquals(1, cache1.pending().size)
         engine1.close()
 
@@ -134,7 +139,7 @@ class DurableCacheEngineTest {
         // Force the server to 410 the client's cursor (its cursor now predates retained history),
         // and queue a mutation that must survive the resync and flush on top.
         services.repo.setMeta("oldestRetainedRev", (cache.cursor() + 1).toString())
-        cache.enqueue(engine.putMutation(account.newItemId(), account.personalVaultId, ItemDoc(type = "note", name = "queued-through-resync"), 0))
+        cache.enqueue(queuedPut(account, ItemDoc(type = "note", name = "queued-through-resync")))
         engine.sync() // flushQueue (drains the queued one) → pull → 410 → transactional full re-pull
 
         assertTrue(cache.pending().isEmpty())

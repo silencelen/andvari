@@ -473,4 +473,44 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(claim.receivedAsMember, "the durable provenance outlives the served row").toBe(true);
     await expect(reloaded.confirmOwnership(claim, w.member.password)).rejects.toBeInstanceOf(OwnershipTransferAckRequiredError);
   });
+
+  it("LOW-R (A1b): a fresh device still needs the transfer ack when another device recorded member provenance", async () => {
+    const w = await world(KDF, FLOOR);
+    const vk = open(await uvkOfE(w.owner), fromB64(w.ownerWrap), adVk(w.vaultId, w.owner.userId));
+    const selfWrap = toB64(seal(await uvkOfE(w.member), vk, adVk(w.vaultId, w.member.userId)));
+    const signed = w.owner.account.buildSignedGrant(w.vaultId, pinOf(w.member, "Member"));
+    const server = new FakeServer({
+      rev: 9, full: true, vaults: [personalRow(w.member), sharedRow(w, 9)],
+      grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "writer", wrappedVk: selfWrap, rev: 9, sealedVk: null, signedGrant: signed }],
+      items: [], removedGrants: [],
+    });
+    server.keys = w.member.keys;
+    server.members[w.vaultId] = [summary(w.member, "Member", "owner")];
+    await new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState()).sync();
+    server.feed = {
+      rev: 12, full: true, vaults: [personalRow(w.member), sharedRow(w, 12)],
+      grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "owner", wrappedVk: selfWrap, rev: 12, sealedVk: null }],
+      items: [], removedGrants: [],
+    };
+    // Another browser of the same member: nothing local, and its FIRST served row is owner-shaped.
+    const fresh = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await fresh.sync();
+    const claim = await fresh.describeOwnership(w.vaultId);
+    expect(claim.receivedAsMember, "the account-state record reaches a device that never saw the member row").toBe(true);
+    await expect(fresh.confirmOwnership(claim, w.member.password)).rejects.toBeInstanceOf(OwnershipTransferAckRequiredError);
+  });
+
+  it("copy (A1b): a reauth against a stale session salt says to lock and unlock, byte-identical with core", async () => {
+    const w = await world(FLOOR);
+    const uvk = await uvkOfE(w.owner);
+    const newSalt = randomBytes(16);
+    const newWrap = toB64(seal(await wrapKey(masterKey("the new password", newSalt, FLOOR)), uvk, adUvk(w.owner.userId)));
+    const server = new FakeServer(ownerFeed(w));
+    server.keys = { ...w.owner.keys, kdfSalt: toB64(newSalt), wrappedUvk: newWrap };
+    const store = new VaultStore(server.asClient(), await unlock(w.owner), undefined, memoryClientState());
+    await store.sync();
+    const claim = await store.describeOwnership(w.vaultId);
+    await expect(store.confirmOwnership(claim, "the new password")).rejects.toThrow(/^Lock and unlock andvari, then try again\.$/);
+    expect(store.ownsVault(w.vaultId)).toBe(false);
+  });
 });

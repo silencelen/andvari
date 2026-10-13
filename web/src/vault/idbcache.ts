@@ -81,6 +81,10 @@ const STORE_TRANSFER = "transferSeq";
 /** Root cause A, branch A7: kv-row prefixes (no new object store, so DB_VERSION stays 1). */
 const KV_CONSUMED_NONCE = "consumedNonce:";
 const KV_LIVE_SINCE = "liveSince:";
+/** Root cause A §5.1 INV-HOME (branch A1b): kv-row prefixes, again no new object store. Both survive the §D.1 clear
+ *  (a server-triggered 410 wipes the row stores, never the homes) and die with wipe(). */
+const KV_ITEM_HOME = "itemHome:";
+const KV_QUARANTINE = "quarantine:";
 
 /** Every §B.2 store — all created in version 1, all spanned by the pull tx. */
 const ALL_STORES = [
@@ -174,6 +178,10 @@ export interface PullBatch {
   addConsumedNonce(vaultId: string, nonce: string, issuedAt: number): void;
   /** Root cause A §6.3 (branch A7): this device's liveSince for a vault (null clears it). */
   setLiveSince(vaultId: string, at: number | null): void;
+  /** Root cause A §5.1 INV-HOME (branch A1b): record an itemId's home (only ever written while absent). */
+  setItemHome(itemId: string, vaultId: string): void;
+  /** Root cause A §5.1 INV-HOME (branch A1b): one served row refused by INV-HOME (ciphertext, never applied). */
+  addQuarantined(item: WireItem): void;
 }
 
 /**
@@ -268,6 +276,10 @@ export interface VaultCache {
    *  survive a resync `clear()` (which enumerates items/grants/vaults + kv:cursor only). Never server values. */
   consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]>;
   liveSinces(): Promise<{ vaultId: string; at: number }[]>;
+  /** Root cause A §5.1 INV-HOME (branch A1b; core `VaultCache.itemHome` twin): every recorded home, for hydrate. */
+  itemHomes(): Promise<{ itemId: string; vaultId: string }[]>;
+  /** Root cause A §5.1 INV-HOME (branch A1b): the quarantined rows, for diagnosis only (never listed or exported). */
+  quarantined(): Promise<WireItem[]>;
 
   /** Cached server accountKeys payload (§A row 6) — the offline-unlock input.
    *  Returned RAW: the C3 read-time `assertServerKdfParams` gate belongs to
@@ -769,6 +781,15 @@ export class IdbVaultCache implements VaultCache {
           if (at === null) tx.objectStore(STORE_KV).delete(`${KV_LIVE_SINCE}${vaultId}`);
           else tx.objectStore(STORE_KV).put({ key: `${KV_LIVE_SINCE}${vaultId}`, value: at } satisfies KvRow);
         }),
+      setItemHome: (itemId, vaultId) =>
+        ops.push((tx) => {
+          tx.objectStore(STORE_KV).put({ key: `${KV_ITEM_HOME}${itemId}`, value: vaultId } satisfies KvRow);
+        }),
+      addQuarantined: (item) =>
+        ops.push((tx) => {
+          // One row per itemId (the newest refusal): bounded by the homes this device holds, whatever the server sends.
+          tx.objectStore(STORE_KV).put({ key: `${KV_QUARANTINE}${item.itemId}`, value: item } satisfies KvRow);
+        }),
     };
     fn(batch); // pure buffering — a throw here commits nothing and is not a storage strike
     if (this.closed) return; // §D.2a
@@ -911,6 +932,22 @@ export class IdbVaultCache implements VaultCache {
     });
   }
 
+  itemHomes(): Promise<{ itemId: string; vaultId: string }[]> {
+    return this.read([STORE_KV], [], async (tx) => {
+      const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
+      return rows
+        .filter((r) => r.key.startsWith(KV_ITEM_HOME) && typeof r.value === "string")
+        .map((r) => ({ itemId: r.key.slice(KV_ITEM_HOME.length), vaultId: r.value as string }));
+    });
+  }
+
+  quarantined(): Promise<WireItem[]> {
+    return this.read([STORE_KV], [], async (tx) => {
+      const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
+      return rows.filter((r) => r.key.startsWith(KV_QUARANTINE) && r.value && typeof r.value === "object").map((r) => r.value as WireItem);
+    });
+  }
+
   liveSinces(): Promise<{ vaultId: string; at: number }[]> {
     return this.read([STORE_KV], [], async (tx) => {
       const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
@@ -1006,6 +1043,8 @@ const NOOP_BATCH: PullBatch = {
   setLastVerifiedTransferSeq: () => {},
   addConsumedNonce: () => {},
   setLiveSince: () => {},
+  setItemHome: () => {},
+  addQuarantined: () => {},
 };
 
 /**
@@ -1098,6 +1137,12 @@ export class NullCache implements VaultCache {
     return [];
   }
   async liveSinces(): Promise<{ vaultId: string; at: number }[]> {
+    return [];
+  }
+  async itemHomes(): Promise<{ itemId: string; vaultId: string }[]> {
+    return [];
+  }
+  async quarantined(): Promise<WireItem[]> {
     return [];
   }
 

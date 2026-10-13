@@ -1447,6 +1447,13 @@ class Account private constructor(
      * [keys], but it cannot make a password it chose pass, because it would need a wrap of OUR UVK. MK and the wrap
      * key are wiped on the way out (audit H80).
      */
+    /**
+     * A6b carry-forward (A1b): true when [keys] carry the salt THIS session unlocked with. After an in-session password
+     * change or KDF upgrade they do not, so [verifyPassword] fails closed; callers tell the human to lock and unlock
+     * ([ReauthStaleSessionException]) instead of blaming the password.
+     */
+    fun sessionSaltCurrent(keys: AccountKeys): Boolean = sessionKdfSalt != null && keys.kdfSalt == sessionKdfSalt
+
     fun verifyPassword(password: String, keys: AccountKeys): Boolean {
         // A6b review LOW-3: the same KDF floor/ceiling fence unlock applies (throws KdfPolicyViolationException), and
         // only the salt THIS session unlocked with: a replayed older AccountKeys (before a password change) carries
@@ -1655,14 +1662,31 @@ class Account private constructor(
      *  cache stores envelopes, and hydrate decrypts every held envelope before any reseal. */
     private val itemFv = mutableMapOf<String, Int>()
 
+    /** INV-WRITE-KEY as a question: may an item be sealed under [vaultId]'s held key at all? */
+    fun canSealUnder(vaultId: String): Boolean = !isLegacyReadOnly(vaultId) && !heldKeyContradictsVouch(vaultId)
+
     /**
-     * Seal an item doc under its vault VK. The formatVersion — also bound into the AD —
-     * is maxOf([docFloor], the fv this itemId was last decrypted/sealed at), so callers
-     * never thread fv explicitly: new docs seal at their floor, existing items re-seal
-     * monotonically ([decryptItem]/[decryptItemVersion] feed the per-item memory).
+     * THE item seal (security review 2026-10, root cause A §5.1 INV-SEAL; branch A1b): item plaintext is sealed under
+     * `VK_v` only for its provenance vault `v` ([SealProvenance]), and never under a key INV-WRITE-KEY refuses. The
+     * formatVersion — also bound into the AD — is maxOf([docFloor], the fv this itemId was last decrypted/sealed at),
+     * so callers never thread fv explicitly: new docs seal at their floor, existing items re-seal monotonically
+     * ([decryptItem]/[decryptItemVersion] feed the per-item memory).
      */
-    fun encryptItem(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload {
-        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId) // INV-WRITE-KEY
+    fun sealItem(provenance: SealProvenance, itemId: String, doc: ItemDoc): ItemUpload {
+        val vaultId = provenance.vaultId
+        // INV-WRITE-KEY (root cause A §5.1, A1b): never under a key only an unconfirmed v1 seal vouches for, and never
+        // under a key that contradicts this device's vouch / held-key memory (vouchGate), on any path.
+        if (!canSealUnder(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        return sealUnder(vaultId, itemId, doc)
+    }
+
+    /**
+     * Test and fixture shim for [sealItem]: the plaintext's provenance is whatever the CALLER asserts [vaultId] is, so
+     * product code never calls this (a source tripwire, `ItemSealRoutingTest`, fails the build if it does).
+     */
+    fun encryptItem(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload = sealItem(SealProvenance.Chosen(vaultId), itemId, doc)
+
+    private fun sealUnder(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload {
         val fv = maxOf(docFloor(doc), itemFv[itemId] ?: 1)
         itemFv[itemId] = fv
         val blob = Envelope.sealB64(crypto, vk(vaultId), json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray(), Ad.item(vaultId, itemId, fv))

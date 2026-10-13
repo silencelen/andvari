@@ -331,7 +331,7 @@ class SyncEngineQueueDrainTest {
         assertNotNull(s.engine.item(row.itemId))
         // An offline EDIT of the queued (never-sent) item is the SAME new item: the newer doc
         // supersedes the queued one — one row, not two puts that would land as a conflict copy.
-        assertEquals(SaveOutcome.QUEUED, s.engine.save(row.itemId, doc.copy(name = "train wifi 2")))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(row.itemId, doc.copy(name = "train wifi 2"), s.account.personalVaultId))
         assertEquals("train wifi 2", s.engine.item(row.itemId)?.doc?.name)
         assertEquals(1, s.cache.pending().size, "the older queued put of a never-sent new item is coalesced away")
         // Reconnect: the drain sends the row; the mark clears.
@@ -367,7 +367,7 @@ class SyncEngineQueueDrainTest {
         assertEquals("Router", s.engine.item(id)?.doc?.name)
 
         s.server.offline = true
-        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "Router (edited offline)")))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "Router (edited offline)"), s.account.personalVaultId))
         assertEquals("Router (edited offline)", s.engine.item(id)?.doc?.name, "the queued edit overlays the cached row")
         assertEquals(6, s.engine.item(id)?.rev, "the overlay keeps the server rev — LWW stays server-relative")
         assertEquals(SaveOutcome.QUEUED, s.engine.remove(id))
@@ -406,8 +406,8 @@ class SyncEngineQueueDrainTest {
         val pushesBefore = s.server.pushes.size
 
         s.server.offline = true
-        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 1")))
-        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 2")))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 1"), s.account.personalVaultId))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 2"), s.account.personalVaultId))
         assertEquals(1, s.cache.pending().size, "the two queued puts of one item coalesce into one")
         assertEquals("draft 2", s.engine.item(id)?.doc?.name, "the list shows the LATEST draft")
 
@@ -438,7 +438,7 @@ class SyncEngineQueueDrainTest {
         s.seedItem(id)
 
         s.server.offline = true
-        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 1")))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 1"), s.account.personalVaultId))
         // Stand in for a pull that succeeded while the push leg stayed down: the peer's row is
         // now the cache's truth AND the server's, but our queued put still carries base 6.
         val peerUp = s.account.encryptItem(s.account.personalVaultId, id, doc.copy(name = "peer edit"))
@@ -447,7 +447,7 @@ class SyncEngineQueueDrainTest {
         s.server.itemRows[id] = peerRow
         s.server.rev = 9
 
-        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 2")))
+        assertEquals(SaveOutcome.QUEUED, s.engine.save(id, doc.copy(name = "draft 2"), s.account.personalVaultId))
         assertEquals(1, s.cache.pending().size)
         assertEquals(6L, s.cache.pending().single().baseItemRev, "the burst's original base, NOT the peer's rev 9")
 

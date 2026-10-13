@@ -1,0 +1,152 @@
+{
+  "comment": "Security review 2026-10, root cause A §3.1 canonical-key precedence as it stands after A6/A7 (branch A1b). HAND-AUTHORED decision table, written from the design text and graded against the functions production calls: core Account.addGrant + Account.sealItem, web Account.addGrant + Account.sealItem (the extension takes UVK wraps only, design §1.7, pinned by its own grantkeys tests). Symbols: A = the vault's genuine key, B = a different key the server chose. A row field is null when absent. wrappedVk: our own UVK wrap of A or B, or 'damaged' (a wrap of A with its tag flipped). sealedVk: a v1 seal of A or B to our identity key, or 'foreign' (sealed to someone else). signedGrant: a v2 grant {by, vk}: by 'owner' = signed by the PINNED vault owner, 'unpinned' = signed by a sender this account has not pinned (a pending invitation), 'impostor' = signed by a stranger but naming the owner as sender. held: this device's memory before the rows apply: {vouch: A|B, kind: frozen|confirmed} (a §8.2 vouch) or {heldTag: A|B} (A7 held-key memory). vault 'personal' = the account's personal vault, installed from the personal wrap at unlock (key A). rows apply in order. expect: key (A, B or null = not adopted), source (personal_wrap | uvk_wrap | signed_grant | legacy_seal | null), vkMismatch (the 'vault key mismatch' anomaly), keyUnreadable (our wrap is present and does not open; no seal fallback), pending (a pending invitation), anomaly (the §1.4 verdict recorded for the vault, or null), legacyReadOnly (INV-WRITE-KEY's read-only state) and writable (Account.sealItem succeeds under the vault: INV-WRITE-KEY, which since A1b also refuses a key that contradicts the vouch / held-key memory).",
+  "cases": [
+    {
+      "name": "owner row, our wrap only",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "owner", "wrappedVk": "A", "sealedVk": null, "signedGrant": null }],
+      "expect": { "key": "A", "source": "uvk_wrap", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "THE A-1 ROW: owner row with a valid wrap plus a forged seal keeps the UVK key and reports vk_mismatch",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "owner", "wrappedVk": "A", "sealedVk": "B", "signedGrant": null }],
+      "expect": { "key": "A", "source": "uvk_wrap", "vkMismatch": true, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "a seal of the same key beside our wrap is silent (an honest post-transfer row)",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "owner", "wrappedVk": "A", "sealedVk": "A", "signedGrant": null }],
+      "expect": { "key": "A", "source": "uvk_wrap", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "a seal that does not open beside our wrap is ignored",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "owner", "wrappedVk": "A", "sealedVk": "foreign", "signedGrant": null }],
+      "expect": { "key": "A", "source": "uvk_wrap", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "a damaged wrap never falls back to a seal",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "owner", "wrappedVk": "damaged", "sealedVk": "A", "signedGrant": null }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": true, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "member row: a v2 grant verified against the pinned owner (v1 dual-sent)",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": { "by": "owner", "vk": "A" } }],
+      "expect": { "key": "A", "source": "signed_grant", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "a v2 grant from an unpinned sender is a pending invitation; the v1 seal beside it is no fallback",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": { "by": "unpinned", "vk": "A" } }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": false, "pending": true, "anomaly": null, "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "a v2 grant naming the owner but signed by someone else is refused; the v1 seal beside it is no fallback",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "B", "signedGrant": { "by": "impostor", "vk": "B" } }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": "signer_not_pinned_key", "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "in-window, a v1 seal alone is legacy-read-only: readable, never written under",
+      "vault": "shared", "held": null,
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": null }],
+      "expect": { "key": "A", "source": "legacy_seal", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": true, "writable": false }
+    },
+    {
+      "name": "a v1 seal of the key the human accepted (vouch, confirmed) is writable",
+      "vault": "shared", "held": { "vouch": "A", "kind": "confirmed" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": null }],
+      "expect": { "key": "A", "source": "legacy_seal", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "a v1 seal of the key the §8.2 freeze vouched for (frozen) is writable",
+      "vault": "shared", "held": { "vouch": "A", "kind": "frozen" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": null }],
+      "expect": { "key": "A", "source": "legacy_seal", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "vouchGate: a v1 seal of ANOTHER key than the vouch is refused as vk_mismatch",
+      "vault": "shared", "held": { "vouch": "A", "kind": "confirmed" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "B", "signedGrant": null }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "vouchGate: a verified v2 grant for ANOTHER key keeps the vouched seal key and reports vk_mismatch",
+      "vault": "shared", "held": { "vouch": "A", "kind": "confirmed" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": { "by": "owner", "vk": "B" } }],
+      "expect": { "key": "A", "source": "legacy_seal", "vkMismatch": true, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "vouchGate: a verified v2 grant for ANOTHER key with no seal to keep is refused",
+      "vault": "shared", "held": { "vouch": "A", "kind": "confirmed" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": null, "signedGrant": { "by": "owner", "vk": "B" } }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "a vouched vault whose self-wrap has not landed yet keeps its key through a pending v2 grant",
+      "vault": "shared", "held": { "vouch": "A", "kind": "confirmed" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": { "by": "unpinned", "vk": "A" } }],
+      "expect": { "key": "A", "source": "legacy_seal", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "held-key memory (A7): our own wrap of ANOTHER key than the remembered one is used (canonical) but flagged, and nothing is sealed under it (INV-WRITE-KEY, A1b)",
+      "vault": "shared", "held": { "heldTag": "B" },
+      "rows": [{ "role": "owner", "wrappedVk": "A", "sealedVk": null, "signedGrant": null }],
+      "expect": { "key": "A", "source": "uvk_wrap", "vkMismatch": true, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "held-key memory (A7): a v1 seal of another key is refused as vk_mismatch",
+      "vault": "shared", "held": { "heldTag": "A" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "B", "signedGrant": null }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "held-key memory (A7): a verified v2 grant of the remembered key is adopted",
+      "vault": "shared", "held": { "heldTag": "A" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": null, "signedGrant": { "by": "owner", "vk": "A" } }],
+      "expect": { "key": "A", "source": "signed_grant", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "held-key memory (A7): a verified v2 grant of another key is refused (a held tag alone never makes a seal key acceptable)",
+      "vault": "shared", "held": { "heldTag": "A" },
+      "rows": [{ "role": "writer", "wrappedVk": null, "sealedVk": "B", "signedGrant": { "by": "owner", "vk": "B" } }],
+      "expect": { "key": null, "source": null, "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": false, "writable": false }
+    },
+    {
+      "name": "personal wrap (rule 1): the personal row's forged seal is a mismatch; the personal key stands",
+      "vault": "personal", "held": null,
+      "rows": [{ "role": "owner", "wrappedVk": "A", "sealedVk": "B", "signedGrant": null }],
+      "expect": { "key": "A", "source": "personal_wrap", "vkMismatch": true, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "warm session: a re-delivered row carrying only a seal of another key cannot change the held key",
+      "vault": "shared", "held": null,
+      "rows": [
+        { "role": "owner", "wrappedVk": "A", "sealedVk": null, "signedGrant": null },
+        { "role": "owner", "wrappedVk": null, "sealedVk": "B", "signedGrant": null }
+      ],
+      "expect": { "key": "A", "source": "uvk_wrap", "vkMismatch": true, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "§8.2 step 3: a read-only v1 key is confirmed (same key) by a verified v2 grant on a re-delivered row",
+      "vault": "shared", "held": null,
+      "rows": [
+        { "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": null },
+        { "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": { "by": "owner", "vk": "A" } }
+      ],
+      "expect": { "key": "A", "source": "signed_grant", "vkMismatch": false, "keyUnreadable": false, "pending": false, "anomaly": null, "legacyReadOnly": false, "writable": true }
+    },
+    {
+      "name": "a verified v2 grant for ANOTHER key never replaces a held v1 key: vk_mismatch, and it stays read-only",
+      "vault": "shared", "held": null,
+      "rows": [
+        { "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": null },
+        { "role": "writer", "wrappedVk": null, "sealedVk": "A", "signedGrant": { "by": "owner", "vk": "B" } }
+      ],
+      "expect": { "key": "A", "source": "legacy_seal", "vkMismatch": true, "keyUnreadable": false, "pending": false, "anomaly": "vk_mismatch", "legacyReadOnly": true, "writable": false }
+    }
+  ]
+}

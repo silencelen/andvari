@@ -30,8 +30,21 @@ import {
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256, sha256Sync } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
-import { ITEM_FORMAT_VERSION, type Account, type LegacyVouchKind, VaultKeyNotVerifiedError } from "./account";
-import { type ConsumedNonce, type Contact, withIssued, withoutIssued, withOwned, withoutOwned } from "./accountstate";
+import { ITEM_FORMAT_VERSION, type Account, type ItemUpload, type LegacyVouchKind, VaultKeyNotVerifiedError } from "./account";
+import { type ConsumedNonce, type Contact, withIssued, withMemberReceived, withoutIssued, withOwned, withoutOwned } from "./accountstate";
+import {
+  admitRow,
+  chosenProvenance,
+  conflictDecision,
+  editDecision,
+  editorProvenance,
+  envelopeProvenance,
+  ItemChangedVaultsError,
+  sealDecision,
+  type SealProvenance,
+  serverItemDecision,
+  WrongVaultTally,
+} from "./itemhome";
 import { pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
 import { type CoHolder, type PersonalCandidate, type PersonalChange, type PersonalChoiceInfo, type PersonalVaultProposal, personalVaultChoices } from "./personalvault";
@@ -98,6 +111,13 @@ export function conflictCopyId(itemId: string, rev: number): Promise<string> {
   return uuidFromLabel(`conflict|${itemId}|${rev}`);
 }
 
+/** PDD-1: a server-returned displaced value, the winner's rev, and the vault the losing put was pushed to (A1b). */
+interface Displaced {
+  item: WireItem;
+  winnerRev: number;
+  pushedVaultId: string;
+}
+
 /** The reason a grant went away (spec 03 §11), as delivered in removedGrantsInfo. */
 export type RemovedReason = "removed" | "left" | "deleted" | "transferred";
 
@@ -129,7 +149,11 @@ export interface LifecycleNotice {
     | "key-unreadable"
     // Root cause A §1.4 (A6): a v2 grant failed a check that only a misbehaving server explains; nothing was
     // adopted. `reason` carries the verdict code; vaultName is "" (no authenticated key, no name).
-    | "grant-anomaly";
+    | "grant-anomaly"
+    // Root cause A §5.1 INV-HOME (A1b): the server sent an item under another vault than the one this device holds it
+    // in (or a conflict row disagreeing about its vault); NOT applied. One per pull; vaultId = the first offending
+    // row's vault, parkedCount = how many rows were refused; vaultName "".
+    | "wrong-vault";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
   /** verified delete: N of the member's edits parked for replay on restore (F21).
@@ -216,13 +240,26 @@ export class ReissueNotAuthorizedError extends Error {
   }
 }
 
-/** A6b: the master password given for a reauth does not open this account's key. */
+/** A6b: the master password given for a reauth does not open this account's key. Core twin
+ *  `HouseholdCopy.REAUTH_FAILED`, byte-equal (vault-copy.test.ts). */
 export class ReauthFailedError extends Error {
   constructor() {
     super("That master password isn't right.");
     this.name = "ReauthFailedError";
   }
 }
+
+/** A6b carry-forward (A1b): the reauth could not be checked because this session unlocked with a salt the account no
+ *  longer has (a password change or a KDF upgrade since). Core twin `ReauthStaleSessionException` /
+ *  `HouseholdCopy.REAUTH_STALE_SESSION`, byte-equal (vault-copy.test.ts). */
+export class ReauthStaleSessionError extends Error {
+  constructor() {
+    super("Lock and unlock andvari, then try again.");
+    this.name = "ReauthStaleSessionError";
+  }
+}
+
+export { ItemChangedVaultsError } from "./itemhome";
 
 /**
  * One row of the "Legacy grants" list (§8.2 step 4, A6b; core `LegacyGrantRow` twin). Everything but `verifiedLabel`
@@ -502,6 +539,17 @@ export class VaultStore {
   private undecryptableGrants = new Set<string>();
   /** "kind|vaultId" key anomalies already surfaced this session (root cause A §3.1: show once). */
   private readonly keyAnomaliesShown = new Set<string>();
+
+  // ---- item home (security review 2026-10, root cause A §5.1 INV-HOME; branch A1b; core SyncEngine twin) ----
+  /** itemId → the vaultId of the FIRST envelope this device applied for it (or this device's own first seal of a new
+   *  id). Never cleared by a resync; rebuilt from the cache's kv rows on hydrate. */
+  private readonly homes = new Map<string, string>();
+  /** Homes recorded outside a pull (hydrate, a save): persisted by the next pull's tx. */
+  private readonly homesUnpersisted = new Set<string>();
+  /** Rows refused by INV-HOME, itemId → the newest refused row (ciphertext; never listed, searched, exported or filled). */
+  private readonly quarantinedRows = new Map<string, WireItem>();
+  /** This pull's refusals (INV-HOME and INV-CONFLICT), surfaced as ONE "wrong vault" notice. */
+  private wrongVault = new WrongVaultTally();
 
   // ---- durable offline cache (design 2026-07-13 §D) ----
   /** §D.1: the in-flight pull's buffered cache ops. Helpers reached from the pull
@@ -1111,7 +1159,20 @@ export class VaultStore {
 
   /** A6b review MEDIUM-1: this browser first adopted `vaultId`'s key as a MEMBER, now or in an earlier session. */
   receivedAsMember(vaultId: string): boolean {
-    return this.account.keyArrivedByMemberGrant(vaultId) || this.persistedSet(MEMBER_GRANTED_KEY).has(vaultId);
+    return this.account.keyArrivedByMemberGrant(vaultId) || this.persistedSet(MEMBER_GRANTED_KEY).has(vaultId) ||
+      this.accountState.doc.memberReceived[vaultId] !== undefined;
+  }
+
+  /**
+   * A6b carry-forward LOW-R (A1b; core `flushMemberReceived` twin): every vault THIS browser recorded as received-as-member
+   * joins the account state too (UVK-sealed, union-merged, add-only), so a fresh device of the same account whose first
+   * served row is owner-shaped still asks for the transfer acknowledgement. Best effort; retried next sync.
+   */
+  private async flushMemberReceived(): Promise<void> {
+    const local = [...this.persistedSet(MEMBER_GRANTED_KEY)].filter((id) => this.accountState.doc.memberReceived[id] === undefined);
+    if (local.length === 0) return;
+    const at = Date.now();
+    await this.accountState.update((d) => withMemberReceived(d, local, at)).catch(() => {});
   }
 
   private persistMemberGranted(): void {
@@ -1176,6 +1237,8 @@ export class VaultStore {
     if (!this.ownershipBasisOk(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     if (this.receivedAsMember(vaultId) && !transferredToMe) throw new OwnershipTransferAckRequiredError(vaultId);
     const keys = await this.api.accountKeys();
+    // A6b carry-forward (A1b): a salt this session did not unlock with can never verify; say how to recover.
+    if (!this.account.sessionSaltCurrent(keys)) throw new ReauthStaleSessionError();
     if (!(await this.account.verifyPassword(password, keys))) throw new ReauthFailedError();
     this.pendingOwnershipClaim = null;
     await this.accountState.update((d) => withOwned(d, vaultId, Date.now()));
@@ -1465,6 +1528,7 @@ export class VaultStore {
     this.surfaceGrantStates();
     await this.postAuthorizedSelfWraps();
     await this.flushOwnershipReleases();
+    await this.flushMemberReceived();
     try {
       await this.surfaceStagedDenials();
     } finally {
@@ -1579,6 +1643,12 @@ export class VaultStore {
     // hydrates from the DISK cursor and its first pull re-fetches the whole gap.
     const ops: Array<(b: PullBatch) => void> = [];
     this.pullOps = ops;
+    // A1b: homes recorded outside a pull (hydrate of an upgraded cache, a save's first seal) land in this tx.
+    for (const itemId of this.homesUnpersisted) {
+      const vaultId = this.homes.get(itemId);
+      if (vaultId) ops.push((b) => b.setItemHome(itemId, vaultId));
+    }
+    this.homesUnpersisted.clear();
 
     if (resyncing) {
       // resync-from-0 re-delivers everything — reset so nothing double-counts.
@@ -1681,6 +1751,9 @@ export class VaultStore {
 
     const conflictsToMaterialize: WireItem[] = [];
     for (const item of resp.items) {
+      // INV-HOME first (A1b): a row under another vault than this item's home is not applied at all (not even a
+      // tombstone) and never reaches the cache, the working set, search, export or autofill.
+      if (!this.admitHome(item)) continue;
       // §D.1 disk twin first: tombstone ⇒ delete, else the WIRE row — persisted even when
       // the VK is missing or the decrypt fails (everything at rest is ciphertext; hydrate
       // re-runs the same tri-state below, retrying undecryptables — §D.4).
@@ -1708,7 +1781,7 @@ export class VaultStore {
       }
       // Belt: rehydrate any held ciphertext item the backfill did not re-deliver.
       for (const wi of held.items) {
-        if (this.itemsById.has(wi.itemId)) continue;
+        if (this.itemsById.has(wi.itemId) || !this.admitHome(wi)) continue;
         try {
           this.itemsById.set(wi.itemId, {
             itemId: wi.itemId,
@@ -1772,6 +1845,8 @@ export class VaultStore {
       }
     }
 
+    // A1b: this pull's INV-HOME / INV-CONFLICT refusals, as ONE "the server sent an item under the wrong vault" notice.
+    this.surfaceWrongVault();
     // A7: liveSince for every vault that went live in this pull, and the held-key memory, before the cursor.
     this.markLiveVaults();
     this.persistHeldKeys();
@@ -1814,11 +1889,11 @@ export class VaultStore {
           // NullCache: the buffered enqueue was a no-op — send the in-memory copies directly
           // through the same result-settling path (memory-only stores keep replay-on-restore;
           // a transport loss here is the pre-cache posture, nothing durable exists to keep).
-          const displaced: { item: WireItem; winnerRev: number }[] = [];
+          const displaced: Displaced[] = [];
           for (let i = 0; i < replayMutations.length; i += VaultStore.SERVER_BATCH_MAX) {
             await this.flushChunk(replayMutations.slice(i, i + VaultStore.SERVER_BATCH_MAX), displaced);
           }
-          for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+          for (const d of displaced) await this.materializeConflictFromServerItem(d);
         }
       } catch (e) {
         console.warn("reinstate replay flush failed — the replayed edits stay queued for the next sync", e);
@@ -1853,14 +1928,14 @@ export class VaultStore {
   }
 
   private async flushQueueOnce(): Promise<void> {
-    const displaced: { item: WireItem; winnerRev: number }[] = []; // PDD-1: (losing serverItem, winner rev)
+    const displaced: Displaced[] = []; // PDD-1: (losing serverItem, winner rev)
     for (;;) {
       const chunk = (await this.cache.pending()).slice(0, VaultStore.SERVER_BATCH_MAX);
       if (chunk.length === 0) break;
       const progressed = await this.flushChunk(chunk, displaced); // rejects offline → propagates
       if (!progressed) break; // defensive: the server returns one result per mutation
     }
-    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+    for (const d of displaced) await this.materializeConflictFromServerItem(d);
   }
 
   /**
@@ -1873,7 +1948,7 @@ export class VaultStore {
    * caller after the drain). On a NullCache, markStagedDenied/dequeue are no-ops, but the
    * in-memory preParkedByVault staging still drives surfaceStagedDenials the same way.
    */
-  private async flushChunk(chunk: Mutation[], displaced: { item: WireItem; winnerRev: number }[]): Promise<boolean> {
+  private async flushChunk(chunk: Mutation[], displaced: Displaced[]): Promise<boolean> {
     let resp: PushResponse;
     try {
       resp = await this.api.push(chunk); // rejects offline → propagates; rows stay queued
@@ -1934,7 +2009,7 @@ export class VaultStore {
         // sees only the winner). Guard op==="put": a losing DELETE's serverItem is the
         // SURVIVING winner, not a displaced value — copying it would spawn a spurious dup.
         if (r.status === "conflict" && m.op === "put" && r.serverItem && r.newItemRev != null) {
-          displaced.push({ item: r.serverItem, winnerRev: r.newItemRev });
+          displaced.push({ item: r.serverItem, winnerRev: r.newItemRev, pushedVaultId: m.vaultId });
         }
         await this.cache.dequeue(m.mutationId); // applied / duplicate / handled conflict — definitive
         this.pendingSyncItemIds.delete(m.itemId);
@@ -2184,7 +2259,13 @@ export class VaultStore {
     // Root cause A §4.3: the personal vault came from the personal wrap at unlock; only without one does
     // the §8.5 rule run, offline, over the replayed provenance (core hydrate parity).
     this.decidePersonalLocally();
-    for (const item of await this.cache.envelopes()) this.applyWireItem(item);
+    // A1b INV-HOME: the recorded homes first, then every cached row is admitted against them (an upgraded cache records
+    // its homes here, persisted by the next pull); a cached row contradicting a home is quarantined, never applied.
+    for (const h of await this.cache.itemHomes()) this.homes.set(h.itemId, h.vaultId);
+    for (const q of await this.cache.quarantined()) this.quarantinedRows.set(q.itemId, q);
+    for (const item of await this.cache.envelopes()) {
+      if (this.admitHome(item)) this.applyWireItem(item);
+    }
     await this.freezeOnce();
     for (const rec of await this.cache.heldVaults()) {
       this.holding.set(rec.vault.vaultId, { ...rec, cachedName: this.peekHeldName(rec) });
@@ -2477,23 +2558,40 @@ export class VaultStore {
   }
 
   private async materializeConflict(item: WireItem): Promise<void> {
-    const winner = this.itemsById.get(item.itemId);
-    if (!winner) return;
+    // INV-WRITE-KEY: never under a key we may not seal with (a reader was already skipped by the caller).
+    if (!this.account.canSealUnder(item.vaultId)) return;
+    // INV-CONFLICT (root cause A §5.1, A1b; the campaign HIGH A-4): the in-memory twin and the home must both agree
+    // with the flagged row's vault, or NOTHING is pushed and the pull raises its wrong-vault anomaly. (INV-HOME already
+    // keeps a wrong-vault row out; this is the second lock.)
+    const twin = this.itemsById.get(item.itemId);
+    if (conflictDecision(twin?.vaultId, item.vaultId, this.homes.get(item.itemId)) === "abort") {
+      this.wrongVault.note(item.vaultId);
+      return;
+    }
+    // BOTH mutations come from decrypt(flagged), sealed under flagged.vaultId (provenance (a)) — never from a twin
+    // looked up by itemId, which is exactly how the locally held plaintext of another vault used to be re-sealed here.
+    let doc: ItemDoc;
+    try {
+      doc = this.account.decryptItem(item);
+    } catch {
+      return; // undecryptable here — the flag waits
+    }
+    const provenance = envelopeProvenance(item.vaultId);
     // PDD-1: the CORRECT conflict copy is built from the DISPLACED (losing) version, which
     // only the pushing client receives (materializeConflictFromServerItem, below). On a plain
-    // pull we hold only the winner, so this path is a FALLBACK plus the flag-clearer: if the
-    // push side already materialized the copy (deterministic id over (itemId, rev), spec 03
-    // §5), skip re-creating it and just clear the flag with the live winner; otherwise (the
-    // conflict was caused by a client that didn't materialize) preserve at least the winner so
-    // clearing the flag doesn't erase the only trace.
+    // pull we hold only the flagged value, so this path is a FALLBACK plus the flag-clearer: if
+    // the push side already materialized the copy (deterministic id over (itemId, rev), spec 03
+    // §5), skip re-creating it and just clear the flag; otherwise (the conflict was caused by a
+    // client that didn't materialize) preserve at least this value so clearing the flag doesn't
+    // erase the only trace.
     const copyId = await conflictCopyId(item.itemId, item.rev);
     const mutations: Mutation[] = [];
     if (!this.itemsById.has(copyId)) {
       const stamp = new Date(item.updatedAt).toISOString().slice(0, 10);
-      const copyDoc: ItemDoc = { ...winner.doc, name: `${winner.doc.name} (conflict ${stamp})` };
-      mutations.push(this.putMutation(copyId, item.vaultId, copyDoc, 0));
+      const copyDoc: ItemDoc = { ...doc, name: `${doc.name} (conflict ${stamp})` };
+      mutations.push(this.putMutation(provenance, copyId, copyDoc, 0));
     }
-    mutations.push(this.putMutation(item.itemId, item.vaultId, winner.doc, winner.rev)); // clears conflict flag
+    mutations.push(this.putMutation(provenance, item.itemId, doc, item.rev)); // clears conflict flag
     await this.push(mutations);
   }
 
@@ -2507,19 +2605,77 @@ export class VaultStore {
    * pull side uses — so a copy already present (our retry, a peer, or the pull fallback) is a
    * no-op.
    */
-  private async materializeConflictFromServerItem(losing: WireItem, winnerRev: number): Promise<void> {
-    if (this.account.roleFor(losing.vaultId) === "reader") return; // a reader's push would be denied
+  private async materializeConflictFromServerItem(d: Displaced): Promise<void> {
+    const losing = d.item;
+    if (this.account.roleFor(losing.vaultId) === "reader" || !this.account.canSealUnder(losing.vaultId)) return; // a reader's push would be denied
+    // INV-CONFLICT (A1b): the displaced value must be the item we wrote, in the vault we wrote it to and its home; its
+    // AD vault is then the vault the copy is sealed under (provenance (a)).
+    if (serverItemDecision(d.pushedVaultId, losing.vaultId, this.homes.get(losing.itemId)) === "abort") {
+      this.wrongVault.note(losing.vaultId);
+      return;
+    }
     let losingDoc: ItemDoc;
     try {
       losingDoc = this.account.decryptItem(losing);
     } catch {
       return; // losing version under a held key (formatVersion too new) — nothing safe to copy
     }
-    const copyId = await conflictCopyId(losing.itemId, winnerRev);
+    const copyId = await conflictCopyId(losing.itemId, d.winnerRev);
     if (this.itemsById.has(copyId)) return; // already materialized
     const stamp = new Date(losing.updatedAt).toISOString().slice(0, 10);
     const copyDoc: ItemDoc = { ...losingDoc, name: `${losingDoc.name} (conflict ${stamp})` };
-    await this.push([this.putMutation(copyId, losing.vaultId, copyDoc, 0)]);
+    await this.push([this.putMutation(envelopeProvenance(losing.vaultId), copyId, copyDoc, 0)]);
+  }
+
+  /**
+   * INV-HOME (security review 2026-10, root cause A §5.1; branch A1b): admit one served or cached row against
+   * `home(itemId)`. The first row for an itemId records its home; a later row (live or tombstone) under another vault is
+   * NOT applied: it is quarantined and counted for this pull's single "wrong vault" anomaly.
+   */
+  private admitHome(item: WireItem): boolean {
+    const verdict = admitRow(this.homes.get(item.itemId), item.vaultId);
+    if (verdict === "new_home") {
+      this.recordHome(item.itemId, item.vaultId);
+      return true;
+    }
+    if (verdict === "home") return true;
+    this.quarantinedRows.set(item.itemId, item);
+    this.recordPullOp((b) => b.addQuarantined(item));
+    this.wrongVault.note(item.vaultId);
+    return false;
+  }
+
+  private recordHome(itemId: string, vaultId: string): void {
+    this.homes.set(itemId, vaultId);
+    if (this.pullOps) this.pullOps.push((b) => b.setItemHome(itemId, vaultId));
+    else this.homesUnpersisted.add(itemId);
+  }
+
+  private surfaceWrongVault(): void {
+    const t = this.wrongVault;
+    this.wrongVault = new WrongVaultTally();
+    if (t.anomalies() === 0) return;
+    this.pushNotice({ id: crypto.randomUUID(), vaultId: t.firstVaultId ?? "", vaultName: "", kind: "wrong-vault", parkedCount: t.refused });
+  }
+
+  /** Rows refused by INV-HOME on this device (ciphertext, never applied), for diagnosis. */
+  quarantinedItems(): WireItem[] {
+    return [...this.quarantinedRows.values()];
+  }
+
+  /**
+   * INV-SEAL (root cause A §5.1; branch A1b; core `SyncEngine.sealFor` twin): the ONE item seal for a push.
+   * `provenance` names where the plaintext came from, and so the only vault it may be sealed under; the item must live
+   * there (its home), or have no home yet (a fresh id: a copy, an import row, a new item), which this seal then
+   * records. `Account.sealItem` adds INV-WRITE-KEY. A refusal throws {@link ItemChangedVaultsError}; nothing is
+   * re-targeted.
+   */
+  private sealFor(provenance: SealProvenance, itemId: string, doc: ItemDoc): ItemUpload {
+    const home = this.homes.get(itemId);
+    if (sealDecision(home, provenance.vaultId) === "refuse") throw new ItemChangedVaultsError();
+    const upload = this.account.sealItem(provenance, itemId, doc);
+    if (home === undefined) this.recordHome(itemId, provenance.vaultId);
+    return upload;
   }
 
   // ==== vault lifecycle: sync-time handling (spec 03 §11) ====
@@ -2990,15 +3146,16 @@ export class VaultStore {
     }
   }
 
-  putMutation(itemId: string, vaultId: string, doc: ItemDoc, baseItemRev: number): Mutation {
-    // The wire fv is read back from the upload — ONE encryptItem computes it (per-doc floor,
+  /** A put sealed through {@link sealFor} (INV-SEAL / INV-HOME / INV-WRITE-KEY): the vault IS the provenance's. */
+  private putMutation(provenance: SealProvenance, itemId: string, doc: ItemDoc, baseItemRev: number): Mutation {
+    // The wire fv is read back from the upload — ONE seal computes it (per-doc floor,
     // monotonic reseal) and binds it into the AD, so the two can never diverge.
-    const upload = this.account.encryptItem(vaultId, itemId, doc);
+    const upload = this.sealFor(provenance, itemId, doc);
     return {
       mutationId: crypto.randomUUID(),
       op: "put",
       itemId,
-      vaultId,
+      vaultId: provenance.vaultId,
       baseItemRev,
       item: {
         formatVersion: upload.formatVersion,
@@ -3061,7 +3218,7 @@ export class VaultStore {
   private durablePreEdit(pre: VaultItem | null, op: "put" | "delete", optimisticRev: number, optimisticUpdatedAt: number): QueuedPreEdit | undefined {
     try {
       if (!pre) return { op, pre: null, optimisticRev, optimisticUpdatedAt };
-      const up = this.account.encryptItem(pre.vaultId, pre.itemId, pre.doc);
+      const up = this.account.resealLocal(pre.vaultId, pre.itemId, pre.doc); // local snapshot, never pushed
       return {
         op,
         pre: {
@@ -3165,7 +3322,7 @@ export class VaultStore {
       this.undecryptableById.delete(id);
       this.missingVkById.delete(id);
       try {
-        const up = this.account.encryptItem(existing.vaultId, id, existing.doc); // re-seal the pre-edit value
+        const up = this.account.resealLocal(existing.vaultId, id, existing.doc); // re-seal the pre-edit value (local, never pushed)
         await this.cache.upsertItem({
           itemId: id,
           vaultId: existing.vaultId,
@@ -3204,8 +3361,9 @@ export class VaultStore {
    *    (breaker #1 persist-gate); otherwise, and for a save carrying `newFiles`, today's
    *    push-or-throw stands (attachments are online-only; we cache no blob bytes).
    *
-   * An EXISTING item always stays in its own vault (the server enforces `vault_mismatch`);
-   * a new item goes to [vaultId] when given, else the personal vault.
+   * An EXISTING item always stays in its own vault (the server enforces `vault_mismatch`): an edit passes the vault
+   * its editor opened on as `vaultId` (INV-EDIT, required), and a home that differs now refuses the save with
+   * {@link ItemChangedVaultsError}; a new item goes to `vaultId` when given, else the personal vault.
    */
   async save(
     itemId: string | null,
@@ -3221,7 +3379,20 @@ export class VaultStore {
     if (itemId !== null && !existing) {
       throw new ApiError(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.");
     }
-    const targetVaultId = existing?.vaultId ?? vaultId ?? this.account.personalVaultId;
+    // INV-EDIT / INV-SEAL (root cause A §5.1, A1b; core saveWithUploads twin). An EDIT is sealed under the vault its
+    // editor was bound to when it OPENED (`vaultId`, provenance (b)); it is never looked up by itemId here. If the item's
+    // home is another vault now, the save is refused ("reopen it"), never re-targeted. A NEW item goes to the
+    // destination the user chose (`vaultId`, default the personal vault, provenance (c)).
+    let provenance: SealProvenance;
+    if (itemId !== null) {
+      const verdict = editDecision(this.homes.get(itemId) ?? existing?.vaultId, vaultId);
+      if (verdict === "unbound") throw new Error("an edit must name the vault its editor opened on");
+      if (verdict === "changed_vaults") throw new ItemChangedVaultsError();
+      provenance = editorProvenance(vaultId!);
+    } else {
+      provenance = chosenProvenance(vaultId ?? this.account.personalVaultId);
+    }
+    const targetVaultId = provenance.vaultId;
     const id = itemId ?? this.account.newItemId();
 
     // Scope guard (§D.3): a save carrying new attachment blobs is ONLINE-ONLY in v1 — the
@@ -3242,7 +3413,7 @@ export class VaultStore {
     // H37: fold this item's own unsent queued puts into THIS one first — the folded base rev
     // (and the folded pre-edit truth) then ride the mutation below. See coalesceQueuedPuts.
     const folded = await this.coalesceQueuedPuts(id);
-    const m = this.putMutation(id, targetVaultId, doc, folded ? folded.baseItemRev : (existing?.rev ?? 0));
+    const m = this.putMutation(provenance, id, doc, folded ? folded.baseItemRev : (existing?.rev ?? 0));
     let mayQueue = newFiles.length === 0 && (await this.offlineQueueAllowed());
 
     const committedAt = Date.now();
@@ -3288,7 +3459,7 @@ export class VaultStore {
     // had just made impossible.) Only the
     // NullCache path (enqueue is a no-op) sends m directly via flushChunk. Either way a
     // `denied` result is STAGED (not thrown) and an OFFLINE reject propagates.
-    const displaced: { item: WireItem; winnerRev: number }[] = [];
+    const displaced: Displaced[] = [];
     try {
       if (this.cache.durable && enqueued) {
         await this.flushQueue(); // materializes its own displaced conflicts internally
@@ -3314,7 +3485,7 @@ export class VaultStore {
       await this.revertOptimisticSave(id, preEdit ?? undefined); // H37: the burst's original value, not the folded draft
       throw e;
     }
-    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+    for (const d of displaced) await this.materializeConflictFromServerItem(d);
     await this.throwIfRejected(m);
 
     // m settled (applied → dequeued; or denied → staged) — or, if this call joined a drain
@@ -3399,7 +3570,8 @@ export class VaultStore {
     // attachment refs; carrying them back would leave dangling/broken download links. The passwords,
     // notes, and other fields come back; attachments do not (design doc: undelete limitation).
     const restored: ItemDoc = { ...doc, attachments: undefined };
-    const upload = this.account.encryptItem(vaultId, itemId, restored);
+    // INV-SEAL (a): the doc was decrypted from this item's archived envelope under `vaultId`; INV-HOME: only at home.
+    const upload = this.sealFor(envelopeProvenance(vaultId), itemId, restored);
     await this.api.restoreItem(itemId, {
       formatVersion: upload.formatVersion,
       attachmentIds: [],
@@ -3470,7 +3642,7 @@ export class VaultStore {
     for (let start = 0; start < items.length; start += VaultStore.SERVER_BATCH_MAX) {
       const chunk = items.slice(start, start + VaultStore.SERVER_BATCH_MAX);
       const mutations: Mutation[] = chunk.map(({ itemId, doc }): Mutation => {
-        const upload = this.account.encryptItem(vaultId, itemId, doc);
+        const upload = this.sealFor(chosenProvenance(vaultId), itemId, doc); // INV-SEAL (c): the chosen destination
         return {
           mutationId: itemId, // stable id → idempotent retry of the same plan
           op: "put",
@@ -3539,7 +3711,7 @@ export class VaultStore {
     }
     // C3 FIFO: durable cache ⇒ the send rides flushQueue (older queued rows drain first,
     // single-flighted, lock-wrapped); direct flushChunk only on NullCache (no-op enqueue).
-    const displaced: { item: WireItem; winnerRev: number }[] = [];
+    const displaced: Displaced[] = [];
     try {
       if (this.cache.durable && enqueued) {
         await this.flushQueue();
@@ -3556,7 +3728,7 @@ export class VaultStore {
       await this.restoreRemoved(itemId, existing);
       throw e;
     }
-    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+    for (const d of displaced) await this.materializeConflictFromServerItem(d);
     await this.throwIfRejected(m);
     try {
       await this.sync();
@@ -3587,7 +3759,7 @@ export class VaultStore {
     this.undecryptableById.delete(itemId);
     this.missingVkById.delete(itemId);
     try {
-      const up = this.account.encryptItem(existing.vaultId, itemId, existing.doc);
+      const up = this.account.resealLocal(existing.vaultId, itemId, existing.doc); // local, never pushed
       await this.cache.upsertItem({ itemId, vaultId: existing.vaultId, rev: existing.rev, createdAt: 0, updatedAt: existing.updatedAt, deleted: false, conflict: false, formatVersion: up.formatVersion, attachmentIds: existing.doc.attachments?.map((a) => a.id) ?? [], blob: up.blob });
     } catch {
       /* best-effort — the next successful pull re-delivers the true row */
@@ -3859,6 +4031,8 @@ export class VaultStore {
   async runGesture(g: MoveGesture, onProgress?: (done: number, total: number) => void, finalSync = true): Promise<void> {
     const src = this.itemsById.get(g.sourceItemId);
     if (!src) throw new Error("The item to move is no longer here — it may have changed or been removed.");
+    // INV-HOME (A1b; core twin): the gesture was minted for the source in its vault; never run against another's copy.
+    if (src.vaultId !== g.sourceVaultId) throw new ItemChangedVaultsError();
 
     // --- COPY LEG ---
     const newDoc: ItemDoc = structuredClone(src.doc);
@@ -3877,7 +4051,7 @@ export class VaultStore {
       }
       newDoc.attachments = newRefs;
     }
-    const copyUpload = this.account.encryptItem(g.targetVaultId, g.newItemId, newDoc);
+    const copyUpload = this.sealFor(chosenProvenance(g.targetVaultId), g.newItemId, newDoc); // INV-SEAL (c): the chosen destination
     const copyResp = await this.api.push([
       {
         mutationId: await this.gestureMutationId(g.gestureId, "copy"),
@@ -3987,15 +4161,16 @@ export class VaultStore {
     // loses to a newer edit (edit-beats-delete) ALSO returns conflict+serverItem, but there
     // serverItem is the SURVIVING winner, not a losing value — copying it would spawn a
     // spurious duplicate of the still-live item.
-    const opById = new Map(mutations.map((m) => [m.mutationId, m.op]));
-    const displaced: { item: WireItem; winnerRev: number }[] = [];
+    const byId = new Map(mutations.map((m) => [m.mutationId, m]));
+    const displaced: Displaced[] = [];
     for (const r of resp.results) {
       if (r.status === "denied") throw new ApiError(403, "denied", "write denied");
-      if (r.status === "conflict" && opById.get(r.mutationId) === "put" && r.serverItem && r.newItemRev != null) {
-        displaced.push({ item: r.serverItem, winnerRev: r.newItemRev });
+      const m = byId.get(r.mutationId);
+      if (r.status === "conflict" && m?.op === "put" && r.serverItem && r.newItemRev != null) {
+        displaced.push({ item: r.serverItem, winnerRev: r.newItemRev, pushedVaultId: m.vaultId });
       }
     }
-    for (const d of displaced) await this.materializeConflictFromServerItem(d.item, d.winnerRev);
+    for (const d of displaced) await this.materializeConflictFromServerItem(d);
     return resp;
   }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { VaultItem, VaultStore } from "../vault/store";
+import { boundVault } from "../vault/itemhome";
 import { ago, fmtDay } from "./format";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED } from "./errors";
 import { Announcer, Msg } from "./Msg";
@@ -155,7 +156,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
     setBusy(true);
     setMsg(null);
     try {
-      await store.save(plan.write.itemId, plan.write.doc);
+      await store.save(plan.write.itemId, plan.write.doc, [], undefined, boundVault(items, plan.write.itemId));
       // One offer at a time: each verdict's follow-up replaces the previous one, so the card
       // never stacks two "what now?" rows for two different logins.
       setOfferDelete(result === "gone" ? itemId : null);
@@ -179,7 +180,7 @@ export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearS
     if (!plan.write) return;
     setBusy(true);
     try {
-      await store.save(plan.write.itemId, plan.write.doc);
+      await store.save(plan.write.itemId, plan.write.doc, [], undefined, boundVault(items, plan.write.itemId));
       setMsg({ kind: "info", text: "Back on the list." });
     } catch {
       setMsg({ kind: "err", text: "Couldn't clear the snooze — try again." });

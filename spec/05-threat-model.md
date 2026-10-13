@@ -74,7 +74,14 @@ account state) and checks it against its OWN `liveSince` window, and neither the
 consumed set ever comes from the server. It remains open, as a bounded residual, only through the
 compatibility window's legacy rows (a v1 removal proof is "valid (legacy)" iff its nonce is unconsumed;
 a `left` with no proof is shown as "You left" plus "Didn't do this? Tell your admin"); branch A8
-retires both with the window. Grant injection for NEW vaults (F16) is closed for
+retires both with the window. **Cross-vault re-seal (review A-4, the campaign HIGH "web conflict-sync
+re-seal", and its core twin) — CLOSED (branch A1b; spec 02 §7.2):** a served row can no longer move an item
+this device holds into another vault, so a conflict row the server flags under a vault it (or a colluding
+co-member) keys can no longer make a client re-seal another vault's plaintext under that key and push it.
+Every client records each item's home vault (INV-HOME), seals plaintext only under its provenance vault
+(INV-SEAL), builds conflict copies from the flagged envelope itself (INV-CONFLICT), binds an editor to the
+vault it opened on (INV-EDIT), and never seals under a legacy-read-only key or one that contradicts the
+device's vouch / held-key memory (INV-WRITE-KEY); residuals in R17. Grant injection for NEW vaults (F16) is closed for
 v2 grants by owner-signed grants (security review 2026-10, root cause A, branch A6; spec 01 §6): a
 key is adopted only from a grant signed by the identity this account PINNED for the sender it names,
 and "You were added to <vault> by <contact>" names that verified contact. It remains open, as a
@@ -276,7 +283,13 @@ adopted as a member needs the explicit "This vault's owner transferred it to me"
 the dialog shows the server-reported owner, transfer and co-holders; a member on a FRESH device whose served
 row the server has stripped to an owner shape has no such provenance and gets only the single confirm (still
 a password reauth, an assertion worded "Only confirm if you created this vault, or its owner transferred it to
-you", and the server-reported co-holders on screen). (ii) **a fresh device adopting an older authentic
+you", and the server-reported co-holders on screen). **Narrowed in branch A1b (A6b review LOW-R):** the
+"received as a member" provenance now also rides the account state (`memberReceived`, spec 03 §3: UVK-sealed,
+union-merged, add-only), and `receivedAsMember` is the device record OR the account-state record, so a fresh
+device of a member still needs the transfer acknowledgement when ANY device of the account ever recorded member
+provenance. What remains: a member none of whose devices ever saw a member-shaped row (every row it was ever
+served was already stripped to an owner shape), and a fresh device the server withholds or rolls back the
+account state from (R14(b): it can remove the record from what that device sees, never add one). (ii) **a fresh device adopting an older authentic
 account-state blob** (no local copy, no high-water mark yet) can bring back an issued-grant or ownership entry
 that a later tombstone removed, until it merges with a newer copy; the entry is genuine (this account wrote
 it) and a resurrected issued-grant entry only renews a grant this owner once signed to that same key. The
@@ -285,8 +298,9 @@ written once may still hold the resurrected entry from its first merge, so it wo
 (iii) **transfer accept records ownership** for an offer a colluding vault-key holder could have minted (the
 offer is a MAC, R16(a)); it still needs the target's explicit "Become the owner", and the vault key it then
 owns is one the target already held, so it adds a sharing authority, not a key. (iv) the reauth is refused
-on a session whose unlock salt is unknown or stale (after an in-session password change) until the next
-unlock: fail closed.
+on a session whose unlock salt is unknown or stale (after an in-session password change or a KDF upgrade)
+until the next unlock: fail closed. Since branch A1b the refusal says how to recover, "Lock and unlock andvari,
+then try again", byte-identical on every client, instead of "That master password isn't right".
 
 **R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
 (a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
@@ -314,6 +328,26 @@ device's first `liveSince` is set at upgrade** (A7 review LOW-4): a device that 
 a release with removal proofs v2 stamps `liveSince` at its first run of that release, so a genuine v2 removal
 issued while that device was offline before its upgrade (more than 10 minutes before the upgrade) shows the
 anomaly warning instead of the attributed notice. Wording only, fail-closed.
+
+**R17 (item home — security review 2026-10, root cause A §5; branch A1b; spec 02 §7.2).** Closes review A-4.
+Residuals accepted: (a) **the home is device-local**, so the server chooses the FIRST home of an itemId on a
+fresh device (or one whose cache was wiped: sign-out, a policy purge, a demoted web cache), exactly as it
+already chooses which rows a fresh device sees; from then on no served row moves the item. The same holds for
+every SESSION of a client with no durable cache: cache-less web (`NullCache`, the default until the per-device
+opt-in, spec 02 §8.1) and a native host on the in-memory cache (desktop before cache consent, org-forbid mode)
+hold their homes in memory only, so each unlock starts fresh and the server picks the first home of every item
+in each such session. Confidentiality holds there as well: a served row under the server's vault that wins the
+first-home race leaves the genuine row QUARANTINED, never decrypted into the working set, so no plaintext of the
+genuine vault is ever sealed under the server's key; what the user sees is the server's own plaintext, and the
+wrong-vault notice is raised on that pull. A server that serves
+a fresh device an item ONLY under a vault it keys reads nothing new (the plaintext it serves is its own). (b)
+**the extension keeps its homes per server origin and user in browser storage** and rebuilds them from the
+first snapshot after that storage is cleared. (c) **quarantined rows are kept as ciphertext** for diagnosis
+only (native: the newest 256; web: one per item), never decrypted into a list, search, export, fill or capture
+target. (d) **one notice per pull**, however many rows were refused, so a server that keeps re-serving the
+same row raises the notice again on each pull (it is never silent). (e) a capture or editor that opened BEFORE
+an item's home was recorded on this device (an upgrade mid-session) binds to the vault the item showed then,
+which is the item's recorded home from that point on.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 

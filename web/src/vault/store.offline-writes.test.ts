@@ -336,7 +336,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(false);
     api.offline = true;
-    await expect(store.save(s.itemId, { ...DOC, name: "renamed offline" })).rejects.toThrow();
+    await expect(store.save(s.itemId, { ...DOC, name: "renamed offline" }, [], undefined, s.vaultId)).rejects.toThrow();
     expect(store.get(s.itemId)?.doc.name).toBe(DOC.name); // pre-edit value restored
     expect(await cache.pending()).toHaveLength(0);
   });
@@ -478,7 +478,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // The edit is denied (flush) then PARKED (the same cycle's pull moves the vault to holding)
     // — never surfaced as a hard failure.
-    await expect(store.save(s.itemId, { ...DOC, name: "edited before delete" })).resolves.toBeUndefined();
+    await expect(store.save(s.itemId, { ...DOC, name: "edited before delete" }, [], undefined, s.vaultId)).resolves.toBeUndefined();
     const held = await cache.getHeld(s.vaultId);
     expect(held?.parked.map((p) => p.itemId)).toEqual([s.itemId]); // parked for restore replay
     expect(await cache.stagedDenied()).toEqual([]); // its queue row dropped in the SAME tx (no double-load)
@@ -517,7 +517,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
       removedGrants: [s.vaultId],
       removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 7 * 86_400_000 }],
     });
-    await store.save(s.itemId, { ...DOC, name: "parked edit" });
+    await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId);
 
     // On disk: the mutation lives ONLY in held.parked; the staged queue row was dropped in the
     // fold tx. So hydrate can't reload it into preParkedByVault (the double-load the S2 note warns of).
@@ -542,7 +542,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, store } = await seeded("reader");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId); // a live vault the reader can't write
-    await expect(store.save(s.itemId, { ...DOC, name: "reader tried" })).rejects.toMatchObject({ code: "denied" });
+    await expect(store.save(s.itemId, { ...DOC, name: "reader tried" }, [], undefined, s.vaultId)).rejects.toMatchObject({ code: "denied" });
     expect(store.get(s.itemId)?.doc.name).toBe(DOC.name); // reverted to the live value
   });
 
@@ -577,7 +577,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
     await queueVerifiedDelete(s, api, 6);
-    await store.save(s.itemId, { ...DOC, name: "edited before delete" }); // denied → parked (F21)
+    await store.save(s.itemId, { ...DOC, name: "edited before delete" }, [], undefined, s.vaultId); // denied → parked (F21)
     const parkedId = (await cache.getHeld(s.vaultId))!.parked[0]!.mutationId;
 
     // The owner restores the vault, but the replay PUSH dies on the network (the pull itself
@@ -616,7 +616,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
     await queueVerifiedDelete(s, api, 6);
-    await store.save(s.itemId, { ...DOC, name: "parked edit" });
+    await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId);
     const parkedId = (await cache.getHeld(s.vaultId))!.parked[0]!.mutationId;
 
     // Restore arrives but the vault is ALREADY going back in-grace server-side: the replay
@@ -641,7 +641,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
     await queueVerifiedDelete(s, api, 6);
-    await store.save(s.itemId, { ...DOC, name: "parked edit" });
+    await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId);
 
     // Restore arrives; the replay is denied (the member came back as effectively read-only),
     // and the vault STAYS live — the next cycle classifies it as a wasReplay denial.
@@ -659,7 +659,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "renamed offline" }); // success-as-QUEUED
+    await store.save(s.itemId, { ...DOC, name: "renamed offline" }, [], undefined, s.vaultId); // success-as-QUEUED
     expect(store.get(s.itemId)?.doc.name).toBe("renamed offline"); // optimistic apply
 
     // Reconnect — but the member's write access was revoked while offline (no removedGrants:
@@ -718,7 +718,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     // sync JOINS X, whose completion is NOT fresh enough to classify (2 > 2 is false).
     // Pre-fix, save() returned SUCCESS here for a denied write. Post-fix it runs ONE more
     // cycle, whose fresh pull classifies the denial: revert + notice + thrown `denied`.
-    const saveP = store.save(s.itemId, { ...DOC, name: "denied mid-flight" }).then(() => "ok", (e) => e);
+    const saveP = store.save(s.itemId, { ...DOC, name: "denied mid-flight" }, [], undefined, s.vaultId).then(() => "ok", (e) => e);
     await waitFor(async () => (await cache.stagedDenied()).length === 1);
     api.releaseSync();
     expect(await pollP).toBe("ok"); // X itself declines the too-fresh entry
@@ -741,9 +741,9 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+    await store.save(s.itemId, { ...DOC, name: "draft 1" }, [], undefined, s.vaultId);
     expect(await cache.pending()).toHaveLength(1);
-    await store.save(s.itemId, { ...DOC, name: "draft 2" });
+    await store.save(s.itemId, { ...DOC, name: "draft 2" }, [], undefined, s.vaultId);
     const queued = await cache.pending();
     expect(queued).toHaveLength(1); // coalesced — one row, the newest draft
     expect(queued[0]!.baseItemRev).toBe(4); // the rev the burst was minted against
@@ -752,7 +752,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     // Online save e3 of the SAME item folds the backlog in too: one put, the newest doc, still
     // at base 4 — which is what the server actually holds, so it applies CLEANLY.
     api.offline = false;
-    await store.save(s.itemId, { ...DOC, name: "final" });
+    await store.save(s.itemId, { ...DOC, name: "final" }, [], undefined, s.vaultId);
     expect(api.pushes.flat()).toHaveLength(1);
     expect(api.pushes[0]![0]!.baseItemRev).toBe(4);
     expect(store.get(s.itemId)?.doc.name).toBe("final"); // the newest edit is the live value
@@ -769,11 +769,11 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     api.offline = true;
     await store.save(null, { ...DOC, name: "other item" }, [], undefined, s.vaultId);
     const other = (await cache.pending())[0]!;
-    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+    await store.save(s.itemId, { ...DOC, name: "draft 1" }, [], undefined, s.vaultId);
     expect(await cache.pending()).toHaveLength(2);
 
     api.offline = false;
-    await store.save(s.itemId, { ...DOC, name: "final" });
+    await store.save(s.itemId, { ...DOC, name: "final" }, [], undefined, s.vaultId);
     const sent = api.pushes[0]!;
     expect(sent).toHaveLength(2); // the other item's row + the folded edit — ONE FIFO batch
     expect(sent[0]!.mutationId).toBe(other.mutationId);
@@ -792,14 +792,14 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "draft 1" });
-    await store.save(s.itemId, { ...DOC, name: "draft 2" }); // folds draft 1 away
+    await store.save(s.itemId, { ...DOC, name: "draft 1" }, [], undefined, s.vaultId);
+    await store.save(s.itemId, { ...DOC, name: "draft 2" }, [], undefined, s.vaultId); // folds draft 1 away
     expect(await cache.pending()).toHaveLength(1);
 
     // Back online, and the vault now refuses our writes (a grant revoked while we were away).
     api.offline = false;
     api.denyVaults.add(s.vaultId);
-    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }).then(() => "ok", (e) => e);
+    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }, [], undefined, s.vaultId).then(() => "ok", (e) => e);
     expect(res).toBeInstanceOf(ApiError);
     expect((res as ApiError).code).toBe("denied");
     // The SEEDED value, not "draft 1" and not "draft 2".
@@ -820,13 +820,13 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "draft 1" });
-    await store.save(s.itemId, { ...DOC, name: "draft 2" });
+    await store.save(s.itemId, { ...DOC, name: "draft 1" }, [], undefined, s.vaultId);
+    await store.save(s.itemId, { ...DOC, name: "draft 2" }, [], undefined, s.vaultId);
     expect(await cache.pending()).toHaveLength(1);
 
     api.offline = false;
     api.refuseWithStatus = { status: 503, code: "unavailable" }; // TRANSIENT — a verdict on nothing
-    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }).then(() => "ok", (e) => e);
+    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }, [], undefined, s.vaultId).then(() => "ok", (e) => e);
     expect(res).toBeInstanceOf(ApiError);
 
     // The backlog is still queued and still sendable — one row, the folded draft, at the base
@@ -850,13 +850,13 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "draft 1" });
+    await store.save(s.itemId, { ...DOC, name: "draft 1" }, [], undefined, s.vaultId);
 
     // A peer's edit is now the server's truth at global rev 9 (our push leg was down for it).
     const peerBlob = s.owner.account.encryptItem(s.vaultId, s.itemId, { ...DOC, name: "peer edit" }).blob;
     api.seedItemRow({ ...s.item, rev: 9, blob: peerBlob });
 
-    await store.save(s.itemId, { ...DOC, name: "draft 2" });
+    await store.save(s.itemId, { ...DOC, name: "draft 2" }, [], undefined, s.vaultId);
     expect((await cache.pending())[0]!.baseItemRev).toBe(4); // NOT bumped to 5, and not the peer's 9
 
     api.offline = false;
@@ -889,7 +889,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
       return realApply(fn);
     });
 
-    await store.save(s.itemId, { ...DOC, name: "parked edit" }); // denied → folded → held (F21)
+    await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId); // denied → folded → held (F21)
     const held = await cache.getHeld(s.vaultId);
     expect(held?.parked.map((m) => m.itemId)).toEqual([s.itemId]); // only the folded edit parked
     expect(await cache.stagedDenied()).toEqual([]); // the folded row's dequeue rode the tx (id-scoped)
@@ -940,7 +940,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "renamed offline" }); // success-as-QUEUED
+    await store.save(s.itemId, { ...DOC, name: "renamed offline" }, [], undefined, s.vaultId); // success-as-QUEUED
     expect(store.get(s.itemId)?.doc.name).toBe("renamed offline");
 
     // Close the browser: a NEW store hydrates from disk — the in-memory C2 snapshot is gone,
@@ -1007,7 +1007,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.offline = true;
-    await store.save(s.itemId, { ...DOC, name: "renamed offline" });
+    await store.save(s.itemId, { ...DOC, name: "renamed offline" }, [], undefined, s.vaultId);
     // Simulate a row enqueued by a pre-M2 build: re-enqueue bare (INSERT OR REPLACE sheds
     // the snapshot) — the row itself reads back fine, its preEdit reads undefined.
     const row = (await cache.pending())[0]!;
@@ -1088,7 +1088,7 @@ describe("VaultStore poison rows (H03/H19) and the in-flight bell (H38)", () => 
     stubPersisted(true);
     api.rejectItems.set(s.itemId, "attachment_mismatch");
 
-    await expect(store.save(s.itemId, { ...DOC, name: "stale ref" })).rejects.toMatchObject({ status: 400, code: "attachment_mismatch" });
+    await expect(store.save(s.itemId, { ...DOC, name: "stale ref" }, [], undefined, s.vaultId)).rejects.toMatchObject({ status: 400, code: "attachment_mismatch" });
 
     expect(store.get(s.itemId)?.doc.name).toBe(DOC.name); // pre-edit value restored
     expect(await cache.pending()).toHaveLength(0);
