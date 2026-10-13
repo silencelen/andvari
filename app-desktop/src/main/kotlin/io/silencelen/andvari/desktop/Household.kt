@@ -35,6 +35,7 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AccountStateSync
 import io.silencelen.andvari.core.client.PersonalChoiceInfo
 import io.silencelen.andvari.core.client.PersonalVaultProposal
+import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.model.UserLookupResponse
 import kotlinx.coroutines.launch
@@ -193,6 +194,15 @@ private fun ConfirmPersonalText(p: PersonalVaultProposal) {
     }
 }
 
+/**
+ * The vault the "Personal vault" card names: selected by the wrap-decided [personalVaultId] (security review
+ * 2026-10, A5c — API review LOW item 7), never by the `type` label. Core derives that label from the same id today
+ * (SyncEngine.vaultInfos, A5); reading the id directly means the card cannot regress if `type` ever becomes a
+ * copied server label again. An empty id (no confirmed personal vault) selects nothing.
+ */
+internal fun personalVaultCardCurrent(choices: List<VaultInfo>, personalVaultId: String): VaultInfo? =
+    personalVaultId.takeIf { it.isNotEmpty() }?.let { id -> choices.firstOrNull { it.vaultId == id } }
+
 /** Settings: which vault is personal, and the Q9 re-designation (confirmed, with a master-password reauth). */
 @Composable
 fun PersonalVaultCard(vm: DesktopState) {
@@ -205,7 +215,7 @@ fun PersonalVaultCard(vm: DesktopState) {
     var busy by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
     val choices = remember(tick, open) { vm.personalRedesignationChoices() }
-    val current = choices.firstOrNull { it.type == "personal" }
+    val current = personalVaultCardCurrent(choices, vm.personalVaultId())
     LaunchedEffect(open) { if (open) { vm.refreshPersonalChoiceDetails(choices.map { it.vaultId }); tick++ } }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {

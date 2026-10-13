@@ -52,14 +52,21 @@ describe("contact pins come only from a human", () => {
     expect(parseIdentityQr(qr.toUpperCase())).toBeNull();
   });
 
-  it("enrolment: only under the typed in-person code, never a server-chosen key", async () => {
+  it("enrolment: only under the typed in-person code AND the in-person affirmation, never a server-chosen key", async () => {
     const p: EnrollPayload = { v: 1, o: "https://vault.example", t: "t", e: "e", ifp: beaFp, iu: BEA };
-    expect(await pinFromEnrolLink(p, false, served(), "Admin", 1)).toBeNull();
-    expect((await pinFromEnrolLink(p, true, served(), "Admin", 1))?.method).toBe("enrol");
-    expect(await pinFromEnrolLink(p, true, substituted(), "Admin", 1)).toBeNull();
     const code = (await enrollCheckCode(p))!;
+    // A5c (security review 2026-10, API review #4): the code is an unkeyed hash of the link itself, so whoever
+    // composed the link (the server emails invites) can hand the invitee "the code" through the same channel.
+    // A navigated link plus a correct code is NOT in-person evidence on its own; the human's first-person
+    // in-person affirmation is required too, and this layer re-checks the code from the raw typed entry.
+    expect(await pinFromEnrolLink(p, { typedCode: code, inPersonAffirmed: false }, served(), "Admin", 1)).toBeNull(); // navigated link + correct code, no affirmation
+    expect(await pinFromEnrolLink(p, { typedCode: "", inPersonAffirmed: true }, served(), "Admin", 1)).toBeNull(); // affirmation without the code
+    expect(await pinFromEnrolLink(p, { typedCode: code.slice(0, 16), inPersonAffirmed: true }, served(), "Admin", 1)).toBeNull(); // a prefix is not the code
+    expect((await pinFromEnrolLink(p, { typedCode: code, inPersonAffirmed: true }, served(), "Admin", 1))?.method).toBe("enrol"); // the genuine in-person path
+    expect(await pinFromEnrolLink(p, { typedCode: code, inPersonAffirmed: true }, substituted(), "Admin", 1)).toBeNull();
     const forged: EnrollPayload = { ...p, ifp: await identityFingerprint(mallory.publicKey) };
     expect(await enrollCheckCodeMatches(forged, code)).toBe(false); // a server-composed link fails the admin's on-screen code
+    expect(await pinFromEnrolLink(forged, { typedCode: code, inPersonAffirmed: true }, served(), "Admin", 1)).toBeNull();
   });
 
   it("pinState detects a key change", () => {

@@ -38,6 +38,7 @@ import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.EnrollLink
+import io.silencelen.andvari.core.client.EnrollPayload
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.InMemoryVaultCache
@@ -63,6 +64,7 @@ import java.io.File
 import java.io.IOException
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
@@ -708,6 +710,24 @@ internal fun affirmableRfp(rfp: String?, provenance: InviteProvenance): String? 
  */
 internal fun affirmRfpMatches(rfp: String?, serverFullFp: String): Boolean =
     !rfp.isNullOrEmpty() && io.silencelen.andvari.core.crypto.Fingerprint.matchesFull(rfp, serverFullFp)
+
+/**
+ * The in-person VERDICT (security review 2026-10, root cause A, A5c — API review LOW item 8), re-asserted at the
+ * state layer from the raw inputs rather than taken from the composable as a boolean: the link's in-person code
+ * ([EnrollLink.checkCodeMatches]) is an unkeyed hash of the link, so a link plus a correct code — both of which
+ * the server that composed the link can supply — is never in-person evidence on its own. In person means all
+ * three: a channel that carries provenance ([InviteProvenance], H66 — a typed/pasted link has none), the human's
+ * first-person affirmation that they are reading the admin's screen right now, and the code they typed from it.
+ * Pure and total (a missing link is simply not in person), the shape [enrollReady] and `enrollOp` both consume.
+ */
+internal fun inPersonVerdict(
+    crypto: CryptoProvider,
+    payload: EnrollPayload?,
+    typedCode: String,
+    affirmed: Boolean,
+    provenance: InviteProvenance,
+): Boolean =
+    provenance != InviteProvenance.Typed && affirmed && payload != null && EnrollLink.checkCodeMatches(crypto, payload, typedCode)
 
 /**
  * The anti-phishing Trust Gate's render decision (design 2026-07-15 §4.3) — pure so the IDN /
@@ -1730,16 +1750,22 @@ class AndvariViewModel(
         } else toVault()
     }
 
-    fun enroll(
+    // internal (A5c): the raw in-person evidence names the module-private [InviteProvenance]; the form is the only caller.
+    internal fun enroll(
         invite: String,
         email: String,
         name: String,
         password: String,
         waived: Boolean,
         typedShortFp: String,
-        // A5: the required-affirm leg — the link's FULL rfp and whether the human typed the in-person code.
+        // A5: the required-affirm leg — the link's FULL rfp.
         affirmedRfp: String? = null,
-        inPersonVerified: Boolean = false,
+        // A5c: the in-person evidence, RAW — the link, the code the human typed, their first-person affirmation
+        // and the field's provenance. enrollOp derives the verdict itself ([inPersonVerdict]); no UI boolean.
+        linkPayload: EnrollPayload? = null,
+        inPersonEntry: String = "",
+        inPersonAffirmed: Boolean = false,
+        inviteProvenance: InviteProvenance = InviteProvenance.Typed,
     ) {
         // State-layer re-assert (the S2-review race class: a Compose enabled flag lags a
         // frame while onClick reads live fields). Busy first — op() sets busy but never
@@ -1757,7 +1783,7 @@ class AndvariViewModel(
         // (setBaseUrl re-probe, Activity-recreation re-probe under the rememberSaveable-preserved
         // form). Threading the gate-time snapshot makes the typed-fingerprint re-assert and the
         // escrow seal bind to the SAME policy — the desktop DesktopState.enrollOp guarantee.
-        enrollOp(invite, email, name, password, waived, typedShortFp, _ui.value.policy, affirmedRfp, inPersonVerified)
+        enrollOp(invite, email, name, password, waived, typedShortFp, _ui.value.policy, affirmedRfp, linkPayload, inPersonEntry, inPersonAffirmed, inviteProvenance)
     }
 
     // F26: the enroll surface's mapper, NOT op()'s default. Register is the one call whose
@@ -1776,7 +1802,10 @@ class AndvariViewModel(
         typedShortFp: String,
         gatePolicy: ClientPolicy?,
         affirmedRfp: String? = null,
-        inPersonVerified: Boolean = false,
+        linkPayload: EnrollPayload? = null,
+        inPersonEntry: String = "",
+        inPersonAffirmed: Boolean = false,
+        inviteProvenance: InviteProvenance = InviteProvenance.Typed,
     ) = op(mapError = HouseholdCopy::forEnrollError) {
         // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
         // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
@@ -1799,7 +1828,10 @@ class AndvariViewModel(
         // seals NO org escrow, so there is no fingerprint to attest. An explicit curated error
         // write (not check()) so the sentence reaches the user itself, never via a generic mapper.
         // A5: the required-affirm leg compares the link's rfp at FULL length (a machine value), and only
-        // after the human typed the in-person code; the typed-sheet leg keeps the 32-hex human compare.
+        // on in-person evidence; the typed-sheet leg keeps the 32-hex human compare.
+        // A5c: that evidence is RE-DERIVED here from the raw inputs (provenance, the typed code, the
+        // first-person affirmation) — the composable's own verdict is not consulted.
+        val inPersonVerified = inPersonVerdict(createCryptoProvider(), linkPayload, inPersonEntry, inPersonAffirmed, inviteProvenance)
         val anchorOk = if (affirmedRfp != null) inPersonVerified && affirmRfpMatches(affirmedRfp, policy.recoveryFingerprint)
         else Escrow.shortFormMatches(typedShortFp, policy.recoveryFingerprint)
         if (!waived && !anchorOk) {

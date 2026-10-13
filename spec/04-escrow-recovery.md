@@ -300,13 +300,24 @@ The invariant (build-contract §F.1, CRITICAL):
   full 64-hex fingerprint, and the admin's own client stamps it as the enroll link's `rfp` — never a
   `/admin/status` or `/client-policy` fetch, never a short id. The QR also carries the admin's own
   identity (`ifp`, `iu`), and the admin's screen shows the link's **in-person code** (spec 03 §7).
-  The invitee scans the QR and TYPES the in-person code from the admin's screen; only then does the
-  client honour the link: the served recovery key must hash to `rfp` at FULL length, the escrow seal's
-  verified fingerprint is that `rfp`, and the admin is pinned as a household contact (`method:
-  "enrol"`) iff the key served for `iu` hashes to `ifp` at full length. The enrolment ends on the
-  invitee's identity QR for the admin to scan (or type), pinning the invitee: one in-person
-  enrolment, a mutual pin. Until A5 the invitee eyeball-confirmed a 16-hex `rfp` on any NAVIGATED
-  link, which a server-composed link could satisfy; the typed code is the provenance it lacked.
+  The invitee scans the QR and TYPES the in-person code from the admin's screen, and affirms, first
+  person and under a stop warning ("Only type a code you are reading from your admin's screen right
+  now. Never use a code from an email or message."), that they are reading that screen in person;
+  only on both does the client honour the link: the served recovery key must hash to `rfp` at FULL
+  length, the escrow seal's verified fingerprint is that `rfp`, and the admin is pinned as a household
+  contact (`method: "enrol"`) iff the key served for `iu` hashes to `ifp` at full length. The
+  enrolment ends on the invitee's identity QR for the admin to scan (or type), pinning the invitee:
+  one in-person enrolment, a mutual pin. Until A5 the invitee eyeball-confirmed a 16-hex `rfp` on any
+  NAVIGATED link, which a server-composed link could satisfy; the typed code is the provenance it
+  lacked. **The code alone is not that provenance (security review 2026-10, A5c):** it is an unkeyed
+  hash of the link's own fields, so whoever composed a navigated link (the server emails invites) can
+  deliver "the code" through the same channel, and nothing the invitee's client could verify instead
+  is beyond that server's reach (its only inputs are the link and what the server serves). The anchor
+  is therefore the human's comparison, and the client re-checks both acts from the raw inputs — the
+  typed code and the affirmation — never a UI boolean. **Without both, the enrolment registers with
+  NO admin pin** and the admin is shown as a pending verification (closed later through "Verify a
+  household member"), never as an error; in the waived posture the code field sits behind the
+  affirmation, so the default for a link that merely arrived is pending.
 - **Emailed / remote (server-composed):** the emailed link is composed on the server, so a
   hostile server could stamp a fingerprint it controls — TOFU-from-server, only as
   trustworthy as the server at compose time (spec 05 R8/T1). Therefore the server-composed
@@ -317,7 +328,8 @@ The invariant (build-contract §F.1, CRITICAL):
   discourages it.
 - **Fail-safe polarity:** a **missing** `rfp` ⇒ fall back to the typed-sheet ceremony (or,
   if waived, to nothing) — **NEVER** auto-trust the server pubkey. A **present** `rfp` is
-  honored only via the in-person affirmation above, i.e. after the typed in-person code matches. The server can force "missing" (safe)
+  honored only via the in-person affirmation above, i.e. after the typed in-person code matches AND
+  the invitee has affirmed in-person reading (A5c). The server can force "missing" (safe)
   but can never force silent auto-trust. The invitee client cannot cryptographically tell a
   client-composed link from a server-composed one (no shared enroll secret; identity keys
   are box, not signing, keys), so provenance is a **human** decision the UI surfaces, never
