@@ -83,6 +83,11 @@ drill happened to run. An org-key rotation is a config change, so at every start
 each `escrow_legacy` row whose fingerprint is not the current one (one audit row `escrow_legacy_purged`
 per account), and the admin download joins `escrow_legacy` on the current fingerprint, so a row an older
 build left behind, or a database restored across a rotation, is never served even before that purge.
+Because that purge keys on the configured string, the server checks at load that
+`ANDVARI_RECOVERY_FINGERPRINT` is the SHA-256 of `ANDVARI_RECOVERY_PUBKEY` (§1) and REFUSES TO START
+otherwise (A10 review LOW-2): a typo'd fingerprint would refuse every member's re-seal and purge every
+retained blob under the real key. An instance with no key or no fingerprint is unconfigured, not
+mismatched, and starts with the escrow routes off and the purge a no-op.
 
 ## 4. Ceremony & flows (normative steps; an instance's own operator runbook wraps them)
 
