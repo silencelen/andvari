@@ -5,7 +5,8 @@ import { groupedShort } from "../crypto/fingerprint";
 import { identityFingerprint } from "../crypto/sharedgrant";
 import { fromB64 } from "../crypto/bytes";
 import { qrModules } from "../vendor/qrcode-generator";
-import { Account } from "../vault/account";
+import { Account, ReauthStaleSessionError } from "../vault/account";
+import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import type { Contact } from "../vault/accountstate";
 import { composeIdentityQr, parseIdentityQr, pinFromQr, pinFromTyped } from "../vault/contacts";
 import type { PersonalChoiceInfo, PersonalVaultProposal } from "../vault/personalvault";
@@ -389,15 +390,13 @@ export function PersonalVaultCard({ client, account, store }: { client: ApiClien
     setBusy(true);
     setMsg(null);
     try {
-      const keys = await client.accountKeys();
-      const authKey = await Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams);
-      await store.confirmPersonalVault(proposal, authKey);
+      await store.redesignatePersonalVault(proposal, password); // A9 (M-1): the fenced reauth derivation
       setProposal(null);
       setOpen(false);
       setPassword("");
       setMsg({ kind: "info", text: "Saved. New items now go to this vault by default." });
     } catch (e) {
-      setMsg({ kind: "err", text: e instanceof ApiError && e.status === 401 ? "Wrong master password." : e instanceof ApiError ? "The server refused the change." : UNREACHABLE });
+      setMsg({ kind: "err", text: redesignationError(e, UNREACHABLE) });
     } finally {
       setBusy(false);
     }
@@ -457,7 +456,7 @@ export function PersonalVaultBanner({ account, store, onChanged, client }: { acc
   const [, setTick] = useState(0);
   const status = account.personalStatus;
   const choices = status === "absent" ? (store.personalVaultChoices ?? []) : [];
-  const change = status === "changed" ? store.personalChange() : null;
+  const change = status === "changed" || status === "proposed" ? store.personalChange() : null;
   const detailIds = change ? "" : choices.map((c) => c.vaultId).join(",");
   // A5b review LOW-1 (A6): "Use new" is offered only once the NEW vault's co-holders loaded.
   const [changeDetails, setChangeDetails] = useState<PersonalChangeDetails | null>(null);
@@ -528,24 +527,37 @@ export function PersonalVaultBanner({ account, store, onChanged, client }: { acc
       setErr("");
       try {
         const p = await store.proposePersonalVault(change.currentVaultId);
-        const keys = await client.accountKeys();
-        const authKey = await Account.deriveAuthKey(keepPassword, keys.kdfSalt, keys.kdfParams);
-        await store.confirmPersonalVault(p, authKey);
+        await store.redesignatePersonalVault(p, keepPassword); // A9 (M-1): the fenced reauth derivation
         setKeeping(false);
         setKeepPassword("");
         onChanged();
       } catch (e) {
-        setErr(e instanceof ApiError && e.status === 401 ? "Wrong master password." : "Couldn't keep it. Try again when you're connected.");
+        setErr(redesignationError(e, "Couldn't keep it. Try again when you're connected."));
       } finally {
         setBusy(false);
       }
     };
     const served = changeDetails?.servedCoHolders;
+    // A9 (M-2): "proposed" = nothing is in force on this device (no cached wrap; no account designation, or one for
+    // another vault). The headline says so, "Keep" is offered only when there is a designation to keep, and "Use" only
+    // after the co-holders loaded, exactly as for a change.
+    const proposed = status === "proposed";
+    const designated = proposed && change.currentVaultId ? oldName : null;
     return (
       <div className="msg err" style={{ display: "block" }} role="alert">
-        <strong>Your personal vault was changed to {newName}.</strong> Another of your devices changed it, or the server sent an older record. This device still uses {oldName} until you decide.
+        {proposed ? (
+          designated ? (
+            <><strong>Your account's personal vault is {designated}, but the server sent {newName}.</strong> Another of your devices chose {designated}, or the server sent an older record. This device uses no personal vault until you decide.</>
+          ) : (
+            <><strong>The server says your personal vault is {newName}.</strong> This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items need a vault picked by hand.</>
+          )
+        ) : (
+          <><strong>Your personal vault was changed to {newName}.</strong> Another of your devices changed it, or the server sent an older record. This device still uses {oldName} until you decide.</>
+        )}
         <div style={{ marginTop: 6 }}>
-          {client ? (
+          {proposed && !designated ? (
+            <span>To use another vault instead, choose it in Settings, Personal vault (it asks for your master password).</span>
+          ) : client ? (
             keeping ? (
               <>
                 <Field label={`Master password (to keep ${oldName})`}>
@@ -574,7 +586,7 @@ export function PersonalVaultBanner({ account, store, onChanged, client }: { acc
         ) : (
           <div className="muted"><Busy>Checking who else holds {newName}…</Busy></div>
         )}
-        <div>If you didn't do this, keep {oldName} and tell your admin.</div>
+        {proposed && !designated ? null : <div>If you didn't do this, keep {oldName} and tell your admin.</div>}
         {err && <div>{err}</div>}
       </div>
     );
@@ -637,4 +649,13 @@ export function PersonalVaultBanner({ account, store, onChanged, client }: { acc
       {err && <div>{err}</div>}
     </div>
   );
+}
+
+/** A9 (M-1): the re-designation reauth is fenced; say what happened instead of blaming the password for a stale session. */
+function redesignationError(e: unknown, fallback: string): string {
+  if (e instanceof ReauthStaleSessionError) return e.message;
+  if (e instanceof KdfPolicyError) return WEAK_KDF_MESSAGE;
+  if (e instanceof ApiError && e.status === 401) return "Wrong master password.";
+  if (e instanceof ApiError) return "The server refused the change.";
+  return fallback;
 }

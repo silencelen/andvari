@@ -481,7 +481,10 @@ describe("A5b review LOW-1 (carried into A6): Use new only after the co-holders 
     };
     const sharedWrap = victim.account.buildPersonalWrap(shared.vaultId);
     const local = memoryClientState();
-    await new VaultStore(new FakeServer(rows).asClient(), await Account.unlock(victim.userId, victim.password, victim.keys), undefined, local).sync();
+    const s1 = new VaultStore(new FakeServer(rows).asClient(), await Account.unlock(victim.userId, victim.password, victim.keys), undefined, local);
+    await s1.sync();
+    await s1.describePersonalChange();
+    s1.acceptPersonalChange(); // A9 (M-2): confirmed once on a device with no designation on record
 
     const again = await Account.unlock(victim.userId, victim.password, { ...victim.keys, personalWrap: sharedWrap });
     const failing = new FakeServer(rows);

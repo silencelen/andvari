@@ -227,6 +227,7 @@ describe("Vault.tsx A7 review notices — the core HouseholdCopy twins", () => {
  */
 describe("A1b item home + reauth copy — the core HouseholdCopy twins", () => {
   const storeTs = readFileSync(here("../vault/store.ts"), "utf8");
+  const accountTs = readFileSync(here("../vault/account.ts"), "utf8"); // A9: ReauthStaleSessionError lives beside reauthAuthKey
   const itemHomeTs = readFileSync(here("../vault/itemhome.ts"), "utf8");
   const kt = (name: string): string => {
     const m = householdKt.match(new RegExp(`const val ${name}(?:: String)? =\\s*"([^"]+)"`));
@@ -244,7 +245,8 @@ describe("A1b item home + reauth copy — the core HouseholdCopy twins", () => {
 
   it("the stale-salt reauth says how to recover, byte-equal with HouseholdCopy.REAUTH_STALE_SESSION", () => {
     expect(kt("REAUTH_STALE_SESSION")).toBe("Lock and unlock andvari, then try again.");
-    expect(storeTs).toContain(`super(${JSON.stringify(kt("REAUTH_STALE_SESSION"))});`);
+    expect(accountTs).toContain(`super(${JSON.stringify(kt("REAUTH_STALE_SESSION"))});`);
+    expect(storeTs).toContain("export { ReauthStaleSessionError };");
   });
 
   it("the wrong-password reauth is HouseholdCopy.REAUTH_FAILED byte-equal", () => {

@@ -3,10 +3,11 @@
  * home cross-check; branch A1b). Pure, so `spec/test-vectors/itemhome.json` grades exactly what store.ts calls. Twin of
  * core `ItemHome` (and the extension's `itemhome.ts`), code for code.
  *
- * `home(itemId)` is the vaultId of the FIRST envelope this device applied for that itemId. It is device-local and never
- * a server value after that first row: the server can choose the first home on a fresh device (a stated residual), but
- * it can never move an item this device already holds into another vault. No legitimate flow re-homes an itemId: move
- * and copy mint fresh ids and then delete the source.
+ * `home(itemId)` is the vaultId of the FIRST envelope this device APPLIED for that itemId (A9 L-1: applied, not merely
+ * served: a tombstone or a row under a vault this device holds no key for never homes an item). It is device-local and
+ * never a server value after that first row: the server can choose the first home on a fresh device among the rows it
+ * can apply (a stated residual), but it can never move an item this device already holds into another vault. No
+ * legitimate flow re-homes an itemId: move and copy mint fresh ids and then delete the source.
  */
 
 /**
@@ -25,12 +26,16 @@ export const envelopeProvenance = (vaultId: string): SealProvenance => ({ kind: 
 export const editorProvenance = (vaultId: string): SealProvenance => ({ kind: "editor", vaultId });
 export const chosenProvenance = (vaultId: string): SealProvenance => ({ kind: "chosen", vaultId });
 
-/** What to do with one served row (live or tombstone): `new_home` (no home yet: this row's vault becomes it, and the row
- *  applies), `home` (the row is under the home: it applies), `quarantine` (another vault: not applied). */
-export type Admit = "new_home" | "home" | "quarantine";
+/** What to do with one served row (live or tombstone): `new_home` (no home yet and the row can be applied here: this
+ *  row's vault becomes it, and the row applies), `skip` (no home yet but the row CANNOT be applied on this device — a
+ *  tombstone, a vault whose key this device does not hold, an envelope that does not open: NO home is recorded, no
+ *  anomaly, the row's own handling proceeds; security review 2026-10, A9 L-1), `home` (the row is under the home: it
+ *  applies), `quarantine` (another vault: not applied). */
+export type Admit = "new_home" | "skip" | "home" | "quarantine";
 
-export function admitRow(home: string | null | undefined, rowVaultId: string): Admit {
-  if (home === null || home === undefined) return "new_home";
+/** `applies`: whether this device can apply the row now (live, key held, and it opens). Only an unhomed row reads it. */
+export function admitRow(home: string | null | undefined, rowVaultId: string, applies = true): Admit {
+  if (home === null || home === undefined) return applies ? "new_home" : "skip";
   return home === rowVaultId ? "home" : "quarantine";
 }
 

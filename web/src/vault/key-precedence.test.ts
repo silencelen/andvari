@@ -115,7 +115,9 @@ describe("canonical-key precedence — Account", () => {
     const up = d.encryptItem(vaultId, itemId, { type: "login", name: "x" });
     expect(() => open(serverVk, fromB64(up.blob), adItem(vaultId, itemId, up.formatVersion))).toThrow();
     expect(d.vkMismatch(vaultId)).toBe(true);
-    expect(d.keyArrivedByMemberGrant(vaultId)).toBe(true); // a row with any seal is never a personal candidate (H64)
+    // A9 (L-2): the bit comes from an ADOPTION through a seal or a verified grant, never from a seal the server attached
+    // beside our own wrap (it was ignored above); the personal-candidate filter refuses the row on its seal regardless.
+    expect(d.keyArrivedByMemberGrant(vaultId)).toBe(false);
   });
 
   it("a matching seal is silent; an unopenable seal is ignored", async () => {
@@ -164,7 +166,9 @@ describe("canonical-key precedence — Account", () => {
     const second = await device(member);
     second.addGrant({ ...row, wrappedVk: wrap, sealedVk: null, rev: 5 });
     expect(second.decryptVaultName(vaultId, request.metaBlob)).toBe("Household");
-    expect(second.keyArrivedByMemberGrant(vaultId)).toBe(true); // H64 holds without the seal
+    // A9 (L-2): a bare self-wrap row sets nothing on a second device (the row's shape is not provenance); the device that
+    // adopted the key through the seal recorded it, durably and in account state (LOW-R).
+    expect(second.keyArrivedByMemberGrant(vaultId)).toBe(false);
     // Root cause A §4 (A5): "personal" comes only from the personal wrap; no grant row can make it so.
     expect(second.personalVaultId).toBe("");
 

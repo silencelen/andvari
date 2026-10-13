@@ -10,7 +10,7 @@ import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
 import { memoryClientState } from "./accountstatesync";
 import type { Contact } from "./accountstate";
-import { OwnershipNotConfirmedError, OwnershipTransferAckRequiredError, ReauthFailedError, ReissueNotAuthorizedError, VaultStore } from "./store";
+import { OwnershipNotConfirmedError, OwnershipTransferAckRequiredError, ReauthFailedError, VaultStore } from "./store";
 import { VaultKeyNotVerifiedError } from "./account";
 import { issuedFor, ownsVault } from "./accountstate";
 import { adIdkey, adUvk, adVk } from "../crypto/ad";
@@ -218,7 +218,6 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(store.ownershipNeedsConfirmation(w.vaultId), "the owner UI asks 'You own <vault>?' first").toBe(true);
     await expect(store.addVaultMember(w.vaultId, colluder.userId, "writer")).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     await expect(store.offerTransfer(w.vaultId, colluder.userId)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
-    await expect(store.reissueGrant(w.vaultId, colluder.userId)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     // The list may SHOW the row (the server listed it), but its confirmation refuses without ownership evidence.
     const rows = await store.loadLegacyGrants(w.vaultId);
     expect(rows).toHaveLength(1);
@@ -283,7 +282,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(server.reissues, "sync() adds nothing").toHaveLength(1);
   });
 
-  it("a recorded pair re-issues silently, and the same pair with another identity key does not", async () => {
+  it("a recorded pair only annotates the row; every re-issue is the owner's tap (A9, M-3)", async () => {
     const owner = await enroll("a6b-owner");
     const member = await enroll("a6b-member");
     const { store, server, vaultId } = await ownerWithCreatedVault(owner);
@@ -292,8 +291,15 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     const rec = store.accountState.issued(vaultId, member.userId);
     expect(rec?.keyHash).toBe(toHexLower(sha256Sync(fromB64(member.identityPub))));
 
+    // The server now lists the member as legacy (a key-format migration). Before A9 the recorded pair was re-issued
+    // without a prompt (rule b); the record is relayed by the server, which can withhold a removal tombstone from a
+    // device that never saw it, so the record is now a hint on the row and the owner taps.
     server.members[vaultId] = [summary(owner, "Owner", "owner"), summary(member, "Member", "writer", true)];
-    expect(await store.loadLegacyGrants(vaultId), "nothing to confirm").toEqual([]);
+    const first = await store.loadLegacyGrants(vaultId);
+    expect(server.reissues, "a recorded pair is never re-issued without the owner's confirmation").toEqual([]);
+    expect(first).toHaveLength(1);
+    expect(first[0]!.previouslySharedAt, "the record annotates: 'you shared this vault with them on …'").toBe(rec!.at);
+    await store.confirmReissue(first[0]!);
     expect(server.reissues.map((r) => [r.vaultId, r.userId])).toEqual([[vaultId, member.userId]]);
     expect((await opensForMember(member, owner, vaultId, server.reissues[0]!.signedGrant)).length).toBe(32);
 
@@ -301,7 +307,6 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     const newKey = boxKeypairFromSeed(randomBytes(32)).publicKey;
     await store.accountState.pin({ userId: member.userId, identityPub: toB64(newKey), label: "Member", verifiedAt: 2000, method: "typed" });
     server.members[vaultId] = [summary(owner, "Owner", "owner"), { ...summary(member, "Member", "writer", true), identityPub: toB64(newKey) }];
-    await expect(store.reissueGrant(vaultId, member.userId)).rejects.toBeInstanceOf(ReissueNotAuthorizedError);
     const rows = await store.loadLegacyGrants(vaultId);
     expect(rows.map((r) => r.userId)).toEqual([member.userId]);
     expect(server.reissues, "a different identity key is never re-issued silently").toHaveLength(1);
@@ -414,6 +419,9 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     server.keys = w.member.keys;
     server.members[w.vaultId] = [summary(w.member, "Member", "owner"), summary(w.owner, "Owner", "writer")];
     const store = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    // A9 (L-2): the member-granted bit comes from authenticated provenance, here the owner's VERIFIED v2 grant beside the
+    // self-wrap, which needs the owner pinned on this device (as it was when the member accepted the grant).
+    await store.accountState.pin(pinOf(w.owner, "Owner"));
     await store.sync();
     return { store, server };
   }
@@ -461,7 +469,9 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     server.keys = w.member.keys;
     server.members[w.vaultId] = [summary(w.member, "Member", "owner")];
     const local = memoryClientState();
-    await new VaultStore(server.asClient(), await unlock(w.member), undefined, local).sync();
+    const s1 = new VaultStore(server.asClient(), await unlock(w.member), undefined, local);
+    await s1.accountState.pin(pinOf(w.owner, "Owner")); // A9 (L-2): the grant verifies
+    await s1.sync();
     server.feed = {
       rev: 12, full: true, vaults: [personalRow(w.member), sharedRow(w, 12)],
       grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "owner", wrappedVk: selfWrap, rev: 12, sealedVk: null }],
@@ -486,7 +496,9 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     });
     server.keys = w.member.keys;
     server.members[w.vaultId] = [summary(w.member, "Member", "owner")];
-    await new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState()).sync();
+    const s1 = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await s1.accountState.pin(pinOf(w.owner, "Owner")); // A9 (L-2): the grant verifies
+    await s1.sync();
     server.feed = {
       rev: 12, full: true, vaults: [personalRow(w.member), sharedRow(w, 12)],
       grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "owner", wrappedVk: selfWrap, rev: 12, sealedVk: null }],
