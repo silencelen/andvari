@@ -106,7 +106,7 @@ class SharedVaultClientTest {
         engineOwner.sync()
         val fromKid = engineOwner.items().single { it.doc.name == "from-kid" }
         assertEquals(nv.vaultId, fromKid.vaultId)
-        engineOwner.save(fromKid.itemId, fromKid.doc.copy(name = "from-kid-edited"))
+        engineOwner.save(fromKid.itemId, fromKid.doc.copy(name = "from-kid-edited"), fromKid.vaultId)
         engineMember.sync()
         val edited = engineMember.items().single { it.doc.name == "from-kid-edited" }
         assertEquals(nv.vaultId, edited.vaultId, "an edit never moves an item out of its vault")

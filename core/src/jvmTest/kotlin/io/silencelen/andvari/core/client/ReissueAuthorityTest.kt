@@ -535,4 +535,52 @@ class ReissueAuthorityTest {
         assertTrue(claim.receivedAsMember, "the durable provenance outlives the served row")
         assertFailsWith<OwnershipTransferAckRequiredException> { restarted.confirmOwnership(claim, password) }
     }
+
+    /**
+     * A6b carry-forward LOW-R (branch A1b): the "received as a member" provenance also rides account state (UVK-sealed,
+     * union-merged, add-only), so a fresh device of the member whose FIRST served row is owner-shaped still needs the
+     * transfer acknowledgement when another device of the same account recorded member provenance.
+     */
+    @Test
+    fun aFreshDeviceStillNeedsTheTransferAckWhenAnotherDeviceRecordedMemberProvenance() = runBlocking<Unit> {
+        val w = world(memberParams = floor)
+        val vk = Envelope.openB64(crypto, uvkOf(w.owner), w.ownerWrap, Ad.vk(w.vaultId, w.owner.userId))
+        val selfWrap = Envelope.sealB64(crypto, uvkOf(w.member), vk, Ad.vk(w.vaultId, w.member.userId))
+        val signed = w.owner.account.buildSignedGrant(w.vaultId, pinOf(w.member, "Member"))
+        val server = FakeServer(
+            SyncResponse(9, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 9, w.metaBlob, 0)),
+                listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "writer", selfWrap, 9, null, signed)), emptyList(), emptyList()),
+            keys = w.member.keys,
+        )
+        server.members[w.vaultId] = listOf(summary(w.member, "Member", "owner"))
+        SyncEngine(api(server), unlock(w.member), InMemoryVaultCache(), deviceState = MemoryDeviceState()).sync()
+        // Another device of the same member: nothing local, and its FIRST served row is owner-shaped.
+        server.feed = SyncResponse(12, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 12, w.metaBlob, 0)),
+            listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "owner", selfWrap, 12, null)), emptyList(), emptyList())
+        val fresh = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache(), deviceState = MemoryDeviceState())
+        fresh.sync()
+        val claim = fresh.describeOwnership(w.vaultId)
+        assertTrue(claim.receivedAsMember, "the account-state record reaches a device that never saw the member row")
+        assertFailsWith<OwnershipTransferAckRequiredException> { fresh.confirmOwnership(claim, password) }
+    }
+
+    /**
+     * A6b carry-forward (copy, branch A1b): after a password change or a KDF upgrade the session's salt is stale, so the
+     * reauth fails closed. It must say how to recover ("Lock and unlock andvari, then try again"), not blame the
+     * password. Byte-identical with web (`ReauthStaleSessionError`).
+     */
+    @Test
+    fun aReauthAgainstAStaleSessionSaltSaysLockAndUnlock() = runBlocking<Unit> {
+        val params = KdfParams(ops = KdfUpgrade.MIN_OPS, memBytes = KdfUpgrade.MIN_MEM_BYTES)
+        val w = world(params)
+        val newSalt = crypto.randomBytes(16)
+        val newWrap = Envelope.sealB64(crypto, Keys.wrapKey(crypto, Keys.masterKey(crypto, "the new password", newSalt, params)), uvkOf(w.owner), Ad.uvk(w.owner.userId))
+        val server = FakeServer(ownerFeed(w), keys = w.owner.keys.copy(kdfSalt = Bytes.toB64(newSalt), wrappedUvk = newWrap))
+        val engine = SyncEngine(api(server), unlock(w.owner), InMemoryVaultCache())
+        engine.sync()
+        val claim = engine.describeOwnership(w.vaultId)
+        val e = assertFailsWith<Exception> { engine.confirmOwnership(claim, "the new password") }
+        assertEquals("Lock and unlock andvari, then try again.", e.message)
+        assertFalse(engine.ownsVault(w.vaultId))
+    }
 }

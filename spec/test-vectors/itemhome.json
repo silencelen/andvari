@@ -1,0 +1,97 @@
+{
+  "comment": "Security review 2026-10, root cause A §5 (branch A1b). HAND-AUTHORED decision rows for the item-home invariants, written from the design text, graded against the functions production calls: core ItemHome (SyncEngine), web vault/itemhome.ts (store.ts) and extension/src/itemhome.ts (background.ts). Ids are opaque symbols: P = the vault this device holds the item in, S = another vault (one the server or a colluding co-member keys), X/Y/Z = itemIds. home(itemId) is the vaultId of the FIRST envelope this device applied for that itemId (device-local; a fresh device's first home is the server's choice, a stated residual). Sections: admit (one row against a home), pulls (a pull's rows in order: per-row verdicts, the homes after, the single wrong-vault anomaly, and which flagged rows reach materialization), conflict (INV-CONFLICT), serverItem (the push-side copy from a displaced value), edit (INV-EDIT) and seal (the INV-SEAL home cross-check every item seal for a push runs).",
+  "admit": [
+    { "name": "no home yet: the row's vault becomes the home", "home": null, "vaultId": "P", "expect": "new_home" },
+    { "name": "a row under the home applies", "home": "P", "vaultId": "P", "expect": "home" },
+    { "name": "a row under another vault is quarantined", "home": "P", "vaultId": "S", "expect": "quarantine" },
+    { "name": "a tombstone under another vault is quarantined too (it is a row like any other)", "home": "P", "vaultId": "S", "deleted": true, "expect": "quarantine" },
+    { "name": "a tombstone under the home applies", "home": "P", "vaultId": "P", "deleted": true, "expect": "home" }
+  ],
+  "pulls": [
+    {
+      "name": "§5.3 fixture, flagged row FIRST, on a device that holds X in P",
+      "homes": { "X": "P" },
+      "rows": [
+        { "itemId": "X", "vaultId": "S", "conflict": true },
+        { "itemId": "X", "vaultId": "P" }
+      ],
+      "expect": { "verdicts": ["quarantine", "home"], "homes": { "X": "P" }, "anomalies": 1, "materialize": [] }
+    },
+    {
+      "name": "§5.3 fixture, genuine row FIRST, on a device that holds X in P",
+      "homes": { "X": "P" },
+      "rows": [
+        { "itemId": "X", "vaultId": "P" },
+        { "itemId": "X", "vaultId": "S", "conflict": true }
+      ],
+      "expect": { "verdicts": ["home", "quarantine"], "homes": { "X": "P" }, "anomalies": 1, "materialize": [] }
+    },
+    {
+      "name": "residual: on a FRESH device the server chooses the first home (flagged row first)",
+      "homes": {},
+      "rows": [
+        { "itemId": "X", "vaultId": "S", "conflict": true },
+        { "itemId": "X", "vaultId": "P" }
+      ],
+      "expect": { "verdicts": ["new_home", "quarantine"], "homes": { "X": "S" }, "anomalies": 1, "materialize": [{ "itemId": "X", "vaultId": "S" }] }
+    },
+    {
+      "name": "residual: on a FRESH device the server chooses the first home (genuine row first)",
+      "homes": {},
+      "rows": [
+        { "itemId": "X", "vaultId": "P" },
+        { "itemId": "X", "vaultId": "S", "conflict": true }
+      ],
+      "expect": { "verdicts": ["new_home", "quarantine"], "homes": { "X": "P" }, "anomalies": 1, "materialize": [] }
+    },
+    {
+      "name": "a served tombstone under the wrong vault does not delete X",
+      "homes": { "X": "P" },
+      "rows": [{ "itemId": "X", "vaultId": "S", "deleted": true }],
+      "expect": { "verdicts": ["quarantine"], "homes": { "X": "P" }, "anomalies": 1, "materialize": [] }
+    },
+    {
+      "name": "several wrong-vault rows in one pull raise ONE anomaly",
+      "homes": { "X": "P", "Y": "P" },
+      "rows": [
+        { "itemId": "X", "vaultId": "S" },
+        { "itemId": "Y", "vaultId": "S", "conflict": true },
+        { "itemId": "Z", "vaultId": "S" }
+      ],
+      "expect": { "verdicts": ["quarantine", "quarantine", "new_home"], "homes": { "X": "P", "Y": "P", "Z": "S" }, "anomalies": 1, "materialize": [] }
+    },
+    {
+      "name": "an honest pull: new items take their homes, a flagged row at home materializes, nothing is refused",
+      "homes": { "X": "P" },
+      "rows": [
+        { "itemId": "X", "vaultId": "P", "conflict": true },
+        { "itemId": "Y", "vaultId": "S" }
+      ],
+      "expect": { "verdicts": ["home", "new_home"], "homes": { "X": "P", "Y": "S" }, "anomalies": 0, "materialize": [{ "itemId": "X", "vaultId": "P" }] }
+    }
+  ],
+  "conflict": [
+    { "name": "twin and home agree with the flagged row: materialize from decrypt(flagged)", "twin": "P", "flagged": "P", "home": "P", "expect": "materialize" },
+    { "name": "no twin (undecryptable), home agrees", "twin": null, "flagged": "P", "home": "P", "expect": "materialize" },
+    { "name": "the A-4 shape: an in-memory twin in P, a flagged row under S: abort, no push", "twin": "P", "flagged": "S", "home": null, "expect": "abort" },
+    { "name": "the twin agrees but the home does not: abort (INV-HOME's second lock)", "twin": "S", "flagged": "S", "home": "P", "expect": "abort" },
+    { "name": "no twin, home disagrees: abort", "twin": null, "flagged": "S", "home": "P", "expect": "abort" }
+  ],
+  "serverItem": [
+    { "name": "the displaced value of the item we wrote, in the vault we wrote it to: copy it there", "pushed": "P", "losing": "P", "home": "P", "expect": "copy" },
+    { "name": "a displaced value under another vault than the pushed one: abort", "pushed": "P", "losing": "S", "home": "P", "expect": "abort" },
+    { "name": "pushed and losing agree but the home is elsewhere: abort", "pushed": "S", "losing": "S", "home": "P", "expect": "abort" },
+    { "name": "a fresh id with no home yet: copy", "pushed": "P", "losing": "P", "home": null, "expect": "copy" }
+  ],
+  "edit": [
+    { "name": "the editor's vault is the home: save", "home": "P", "editor": "P", "expect": "ok" },
+    { "name": "the item changed vaults since the editor opened: refuse, never re-target", "home": "S", "editor": "P", "expect": "changed_vaults" },
+    { "name": "no home recorded (a queued-only new item's first edit): save under the editor's vault", "home": null, "editor": "P", "expect": "ok" },
+    { "name": "an edit that names no editor vault is a programming error", "home": "P", "editor": null, "expect": "unbound" }
+  ],
+  "seal": [
+    { "name": "a fresh id (copy, import row, new item, conflict copy) takes the provenance vault as its home", "home": null, "vaultId": "P", "expect": "new_home" },
+    { "name": "a seal at the home", "home": "P", "vaultId": "P", "expect": "ok" },
+    { "name": "a seal of X under any other vault is refused", "home": "P", "vaultId": "S", "expect": "refuse" }
+  ]
+}

@@ -99,7 +99,8 @@ class ContactPinTest {
             when {
                 req.url.encodedPath == "/api/v1/sync" -> respond(json.encodeToString(SyncResponse.serializer(), feed), HttpStatusCode.OK, ct)
                 req.url.encodedPath == "/api/v1/account/state" && req.method == HttpMethod.Put -> {
-                    stateWrites.add("put"); respond("""{"sealedState":null,"seq":1}""", HttpStatusCode.OK, ct)
+                    val put = json.decodeFromString(io.silencelen.andvari.core.model.AccountStatePut.serializer(), (req.body as io.ktor.http.content.TextContent).text)
+                    stateWrites.add(put.sealedState); respond("""{"sealedState":null,"seq":1}""", HttpStatusCode.OK, ct)
                 }
                 req.url.encodedPath == "/api/v1/account/state" -> respond("""{"sealedState":null,"seq":0}""", HttpStatusCode.OK, ct)
                 else -> respond("""{"error":"not_found","message":"x"}""", HttpStatusCode.NotFound, ct)
@@ -109,6 +110,11 @@ class ContactPinTest {
         sync.sync()
         assertTrue(victim.hasVault(shared.vaultId))
         assertTrue(sync.accountState.contacts().isEmpty(), "the owner's served key is NOT a contact")
-        assertTrue(stateWrites.isEmpty(), "nothing to write: no human verified anyone")
+        // The only write a sync makes on its own is the A1b (LOW-R) member-provenance record: never a contact.
+        for (w in stateWrites) {
+            val doc = victim.openAccountState(w)
+            assertTrue(doc.contacts.isEmpty(), "nothing pinned: no human verified anyone")
+            assertEquals(setOf(shared.vaultId), doc.memberReceived.keys, "only the member provenance is recorded")
+        }
     }
 }

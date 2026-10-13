@@ -97,6 +97,9 @@ data class AccountStateDoc(
     val ownedVaults: Map<String, Long> = emptyMap(),
     /** A6b: vaultId → ms; written when the account transfers the vault away or leaves it. */
     val ownedTombstones: Map<String, Long> = emptyMap(),
+    /** A1b (A6b review LOW-R): vaults some device of this account first adopted the key of AS A MEMBER, vaultId → ms.
+     *  Add-only (no tombstones), union-merged keeping the larger `at`, like [ownedVaults]. */
+    val memberReceived: Map<String, Long> = emptyMap(),
 ) {
     fun contact(userId: String): Contact? = contacts.firstOrNull { it.userId == userId }
 
@@ -108,9 +111,13 @@ data class AccountStateDoc(
     /** True when this account's own evidence says it owns [vaultId]. */
     fun owns(vaultId: String): Boolean = ownedVaults[vaultId]?.let { it > (ownedTombstones[vaultId] ?: -1L) } == true
 
+    /** True when some device of this account recorded that it received [vaultId]'s key as a member (A1b, LOW-R). */
+    fun receivedAsMember(vaultId: String): Boolean = memberReceived.containsKey(vaultId)
+
     /** True when there is nothing in the document worth writing. */
     fun isBlank(): Boolean = contacts.isEmpty() && consumedNonces.isEmpty() && orgRecoveryFp == null &&
-        issuedGrants.isEmpty() && issuedTombstones.isEmpty() && ownedVaults.isEmpty() && ownedTombstones.isEmpty()
+        issuedGrants.isEmpty() && issuedTombstones.isEmpty() && ownedVaults.isEmpty() && ownedTombstones.isEmpty() &&
+        memberReceived.isEmpty()
 }
 
 class AccountStateException(message: String) : Exception(message)
@@ -170,6 +177,10 @@ object AccountState {
         for ((k, at) in doc.ownedVaults) {
             if (!UUID_RE.matches(k)) throw AccountStateException("owned vault id is not a uuid")
             if (at < 0) throw AccountStateException("owned vault at is negative")
+        }
+        for ((k, at) in doc.memberReceived) {
+            if (!UUID_RE.matches(k)) throw AccountStateException("member-received vault id is not a uuid")
+            if (at < 0) throw AccountStateException("member-received at is negative")
         }
         return doc
     }
@@ -253,12 +264,15 @@ object AccountState {
         val owned = HashMap<String, Long>()
         for ((k, t) in docs.flatMap { it.ownedVaults.entries }) owned[k] = maxOf(owned[k] ?: t, t)
         val ownedLive = owned.filter { (k, t) -> (ownedTomb[k] ?: Long.MIN_VALUE) < t }
+        // A1b (LOW-R): add-only union, the larger `at` per vault.
+        val memberReceived = HashMap<String, Long>()
+        for ((k, t) in docs.flatMap { it.memberReceived.entries }) memberReceived[k] = maxOf(memberReceived[k] ?: t, t)
 
         val seq = maxOf(localSeq, servedSeq, highWater, 0)
         return Merged(
             AccountStateDoc(
                 VERSION, userId, seq, contacts, tombstones.toSortedMap(), fp, cappedNonces,
-                issued, issuedTomb.toSortedMap(), ownedLive.toSortedMap(), ownedTomb.toSortedMap(),
+                issued, issuedTomb.toSortedMap(), ownedLive.toSortedMap(), ownedTomb.toSortedMap(), memberReceived.toSortedMap(),
             ),
             rollback,
         )
@@ -295,6 +309,13 @@ object AccountState {
     fun withOwned(doc: AccountStateDoc, vaultId: String, at: Long): AccountStateDoc {
         val t = maxOf(at, (doc.ownedTombstones[vaultId] ?: -1L) + 1, doc.ownedVaults[vaultId] ?: -1L)
         return doc.copy(ownedVaults = (doc.ownedVaults + (vaultId to t)).toSortedMap())
+    }
+
+    /** Record that some device of this account received [vaultIds] as a member (A1b, LOW-R). Add-only. */
+    fun withMemberReceived(doc: AccountStateDoc, vaultIds: Collection<String>, at: Long): AccountStateDoc {
+        val m = doc.memberReceived.toMutableMap()
+        for (id in vaultIds) m[id] = maxOf(m[id] ?: at, at)
+        return doc.copy(memberReceived = m.toSortedMap())
     }
 
     /** Tombstone ownership of [vaultId]: the account transferred it away or left it (A6b). */
