@@ -186,6 +186,28 @@ export class OwnershipNotConfirmedError extends Error {
   }
 }
 
+/** A6b review MEDIUM-1: the vault's key reached this browser as a MEMBER; claiming it needs the explicit
+ *  "This vault's owner transferred it to me" on top of the password. */
+export class OwnershipTransferAckRequiredError extends Error {
+  constructor(readonly vaultId: string) {
+    super("This device received this vault as a member: confirm that its owner transferred it to you.");
+    this.name = "OwnershipTransferAckRequiredError";
+  }
+}
+
+/** What "You own <vault>?" shows (A6b review MEDIUM-1; core `OwnershipClaim` twin). All but `receivedAsMember` is AS
+ *  REPORTED BY THE SERVER. */
+export interface OwnershipClaim {
+  vaultId: string;
+  vaultName: string | null;
+  reportedOwner: CoHolder | null;
+  lastTransferTo: CoHolder | null;
+  lastTransferSeq: number | null;
+  coHolders: CoHolder[];
+  origin: "created" | "received";
+  receivedAsMember: boolean;
+}
+
 /** A6b: a re-issue with no human confirmation and no matching issued-grants record. */
 export class ReissueNotAuthorizedError extends Error {
   constructor(readonly vaultId: string, readonly userId: string) {
@@ -249,6 +271,8 @@ const LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized";
 const DECLINED_KEY = "grant.declined";
 /** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches (core twin). */
 export const HELD_KEYS_KEY = "grant.held.keys";
+/** A6b review MEDIUM-1: vaults this browser first adopted a key for as a MEMBER (durable provenance). */
+export const MEMBER_GRANTED_KEY = "grant.member.granted";
 /** LifecycleNotice.reason on a `left` notice whose leave carried no proof (in-window, §8.6). Core `LEFT_UNPROVEN`. */
 export const LEFT_UNPROVEN = "unproven";
 /** LifecycleNotice.reason on a `replay-denied` raised by a consumed removal nonce (§6.3 step 5). Core `REMOVAL_REPLAY`. */
@@ -858,6 +882,7 @@ export class VaultStore {
       changed = true;
     }
     if (changed) this.persistSet(HELD_KEYS_KEY, persisted);
+    this.persistMemberGranted();
   }
 
   // ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7; core SyncEngine twin) ----
@@ -1082,18 +1107,77 @@ export class VaultStore {
     if (!this.ownsVault(vaultId)) throw new OwnershipNotConfirmedError(vaultId);
   }
 
-  /**
-   * "You own <vault>?" confirmed (A6b): a fresh master-password reauth, checked in this browser against the UVK this
-   * session holds, records `vaultId` as owned. Refuses a vault whose key does not come from this account's own UVK
-   * wrap (a seal-only or contradicted key is never a basis to own).
-   */
-  async confirmOwnership(vaultId: string, password: string): Promise<void> {
-    if (!this.account.hasVault(vaultId) || !this.account.keyFromOwnUvkWrap(vaultId) || this.account.isLegacyReadOnly(vaultId) ||
-      this.account.heldKeyContradictsVouch(vaultId)) {
-      throw new VaultKeyNotVerifiedError(vaultId);
+  private pendingOwnershipClaim: OwnershipClaim | null = null;
+
+  /** A6b review MEDIUM-1: this browser first adopted `vaultId`'s key as a MEMBER, now or in an earlier session. */
+  receivedAsMember(vaultId: string): boolean {
+    return this.account.keyArrivedByMemberGrant(vaultId) || this.persistedSet(MEMBER_GRANTED_KEY).has(vaultId);
+  }
+
+  private persistMemberGranted(): void {
+    const persisted = this.persistedSet(MEMBER_GRANTED_KEY);
+    let changed = false;
+    for (const vaultId of this.vaultsById.keys()) {
+      if (persisted.has(vaultId) || !this.account.keyArrivedByMemberGrant(vaultId)) continue;
+      persisted.add(vaultId);
+      changed = true;
     }
+    if (changed) this.persistSet(MEMBER_GRANTED_KEY, persisted);
+  }
+
+  private ownershipBasisOk(vaultId: string): boolean {
+    return this.account.hasVault(vaultId) && this.account.keyFromOwnUvkWrap(vaultId) && !this.account.isLegacyReadOnly(vaultId) &&
+      !this.account.heldKeyContradictsVouch(vaultId);
+  }
+
+  /**
+   * Step 1 of "You own <vault>?" (A6b review MEDIUM-1; core twin): what the confirmation shows, loaded BEFORE it is
+   * offered. All but `receivedAsMember` is AS REPORTED BY THE SERVER. Mints nothing; throws when the members cannot be
+   * loaded. Supersedes any earlier claim.
+   */
+  async describeOwnership(vaultId: string): Promise<OwnershipClaim> {
+    this.pendingOwnershipClaim = null;
+    if (!this.ownershipBasisOk(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    const members = (await this.api.vaultMembers(vaultId)).map((m) => ({ userId: m.userId, displayName: m.displayName, email: m.email, role: m.role }));
+    const row = this.vaultsById.get(vaultId);
+    const lt = row?.lastTransfer ?? null;
+    let vaultName: string | null = null;
+    if (row) {
+      const n = this.account.decryptVaultName(vaultId, row.metaBlob);
+      vaultName = n && n !== "(vault)" ? n : null;
+    }
+    const claim: OwnershipClaim = {
+      vaultId,
+      vaultName,
+      reportedOwner: members.find((m) => m.role === "owner") ?? null,
+      lastTransferTo: lt ? (members.find((m) => m.userId === lt.newOwnerUserId) ?? { userId: lt.newOwnerUserId, displayName: "", email: "", role: "" }) : null,
+      lastTransferSeq: lt ? lt.seq : null,
+      coHolders: members.filter((m) => m.userId !== this.account.userId),
+      origin: lt?.newOwnerUserId === this.account.userId ? "received" : "created",
+      receivedAsMember: this.receivedAsMember(vaultId),
+    };
+    this.pendingOwnershipClaim = claim;
+    return claim;
+  }
+
+  cancelOwnershipClaim(): void {
+    this.pendingOwnershipClaim = null;
+  }
+
+  /**
+   * Step 2, "You own <vault>?" confirmed (A6b): only the claim this store described and still holds; a fresh
+   * master-password reauth checked in this browser against the session's UVK; and, for a vault this browser received
+   * as a MEMBER, the explicit `transferredToMe` acknowledgement ("This vault's owner transferred it to me"; a genuine
+   * pre-A6b transfer recipient is in exactly this state, so it is not refused outright). Records the ownership.
+   */
+  async confirmOwnership(claim: OwnershipClaim, password: string, transferredToMe = false): Promise<void> {
+    if (claim !== this.pendingOwnershipClaim) throw new Error("that ownership confirmation was not described here (or is stale)");
+    const vaultId = claim.vaultId;
+    if (!this.ownershipBasisOk(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    if (this.receivedAsMember(vaultId) && !transferredToMe) throw new OwnershipTransferAckRequiredError(vaultId);
     const keys = await this.api.accountKeys();
     if (!(await this.account.verifyPassword(password, keys))) throw new ReauthFailedError();
+    this.pendingOwnershipClaim = null;
     await this.accountState.update((d) => withOwned(d, vaultId, Date.now()));
   }
 
