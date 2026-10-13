@@ -1,3 +1,4 @@
+import { refusedSession, sanitizeAccountKeys, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids.ts";
 import type { KdfParams } from "./crypto";
 
 /**
@@ -166,6 +167,19 @@ export interface WsTicketResponse {
 }
 
 export class AndvariApi {
+  /**
+   * Security review 2026-10 (plugin scan F1/F2, branch A10): every server-supplied id is checked against the UUID
+   * grammar here, at the wire boundary (wireids.ts); a row with a malformed id is dropped before any caller sees it
+   * and reported here as `(endpoint, refusals)`. A session with a malformed user or device id is refused outright
+   * (`bad_wire_id`), before any token is held.
+   */
+  onRefusedIds: ((endpoint: string, refused: Refusal[]) => void) | null = null;
+
+  private reported<T>(endpoint: string, s: Sanitized<T>): T {
+    if (s.refused.length > 0) this.onRefusedIds?.(endpoint, s.refused);
+    return s.value;
+  }
+
   private baseUrl: string;
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
@@ -312,21 +326,29 @@ export class AndvariApi {
   }
 
   /** Login with the derived authKey (base64). Returns tokens + the account's wrapped keys. */
-  login(email: string, authKey: string, totp?: string): Promise<SessionResponse> {
-    return this.json("POST", "/api/v1/auth/login", {
+  async login(email: string, authKey: string, totp?: string): Promise<SessionResponse> {
+    const s = await this.json<SessionResponse>("POST", "/api/v1/auth/login", {
       email,
       authKey,
       device: { platform: "web", name: "Browser extension" },
       ...(totp ? { totp } : {}),
     });
+    // A10: the id grammar BEFORE the caller installs the session (the user id is the storage namespace key).
+    const r = refusedSession(s);
+    if (r) {
+      this.onRefusedIds?.("login", [r]);
+      throw new ApiError(0, "bad_wire_id", `the server sent a malformed ${r.field} on login`);
+    }
+    const accountKeys = this.reported("login", sanitizeAccountKeys(s.accountKeys));
+    return accountKeys === s.accountKeys ? s : { ...s, accountKeys };
   }
 
   /** The account's wrapped keys (spec 03 — same bundle the login response carries). The extension's
    *  quick-unlock redeem (spec 01 §8.4) consumes this with the tokens it already holds instead of a
    *  fresh login: unwrap encryptedIdentitySeed under the recovered UVK + hard-compare identityPub.
    *  Rides json(), so the Bearer header, the 401→refresh→retry, and ApiError parsing all apply. */
-  getAccountKeys(): Promise<AccountKeys> {
-    return this.json("GET", "/api/v1/account/keys");
+  async getAccountKeys(): Promise<AccountKeys> {
+    return this.reported("accountKeys", sanitizeAccountKeys(await this.json<AccountKeys>("GET", "/api/v1/account/keys")));
   }
 
   /**
@@ -375,13 +397,14 @@ export class AndvariApi {
 
   /** Who the SERVER reports on a vault (spec 03 §10). Read only to show the co-holders of a new personal
    *  vault before "Use the new personal vault" is offered (security review 2026-10, A6, A5b LOW-1 parity). */
-  vaultMembers(vaultId: string): Promise<VaultMemberSummary[]> {
-    return this.json("GET", `/api/v1/vaults/${encodeURIComponent(vaultId)}/members`);
+  async vaultMembers(vaultId: string): Promise<VaultMemberSummary[]> {
+    return this.reported("members", sanitizeMembers(await this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${encodeURIComponent(vaultId)}/members`)));
   }
 
-  /** Full snapshot when since=0: vaults/grants/items as deltas over the global rev. */
-  sync(since = 0): Promise<SyncResponse> {
-    return this.json("GET", `/api/v1/sync?since=${since}`);
+  /** Full snapshot when since=0: vaults/grants/items as deltas over the global rev. A10: rows whose ids are not
+   *  UUIDs are dropped here, before the worker keys anything on them. */
+  async sync(since = 0): Promise<SyncResponse> {
+    return this.reported("sync", sanitizeSync(await this.json<SyncResponse>("GET", `/api/v1/sync?since=${since}`)));
   }
 
   /** Save/update flow: push put/delete mutations (the client-encrypted item rides in item.blob).

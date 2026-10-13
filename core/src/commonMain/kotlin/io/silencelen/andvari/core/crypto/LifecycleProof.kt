@@ -105,6 +105,16 @@ object LifecycleProof {
     /** A fresh v2 nonce: 16 CSPRNG bytes, base64url unpadded (22 chars). */
     fun newNonce(crypto: CryptoProvider): String = Bytes.toB64(crypto.randomBytes(16))
 
+    /**
+     * The grammar a v1 (legacy) removal nonce must have to be VERIFIED at all (A10 review LOW-1): the token grammar
+     * the consumed record stores (`TrustRecords.ConsumedNonce`, `[A-Za-z0-9_-]{1,128}`). Pre-A7 clients minted a
+     * UUID, the vectors carry base64url too; both fit. A nonce the consumed record could not represent would be
+     * verified but never consumed, and so replay on that device — it is refused before any MAC instead.
+     */
+    val LEGACY_NONCE_RE = Regex("^[A-Za-z0-9_-]{1,128}$")
+
+    fun isLegacyNonce(nonce: String): Boolean = LEGACY_NONCE_RE.matches(nonce)
+
     /** True for a well-formed v2 nonce: base64url that decodes to exactly 16 bytes and re-encodes to itself. */
     fun isV2Nonce(nonce: String): Boolean {
         val raw = runCatching { Bytes.fromB64(nonce) }.getOrNull() ?: return false

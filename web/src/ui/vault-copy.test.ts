@@ -239,6 +239,10 @@ describe("A1b item home + reauth copy — the core HouseholdCopy twins", () => {
     expect(vaultTsx).toContain(JSON.stringify(kt("WRONG_VAULT_NOTICE")));
   });
 
+  it("bad-id carries HouseholdCopy.BAD_ID_NOTICE byte-equal (security review 2026-10 plugin scan F1, A10)", () => {
+    expect(vaultTsx).toContain(JSON.stringify(kt("BAD_ID_NOTICE")));
+  });
+
   it("the INV-EDIT refusal is HouseholdCopy.ITEM_CHANGED_VAULTS byte-equal", () => {
     expect(itemHomeTs).toContain(`export const ITEM_CHANGED_VAULTS = ${JSON.stringify(kt("ITEM_CHANGED_VAULTS"))};`);
   });

@@ -1221,7 +1221,87 @@ class SignedGrantEngineTest {
         assertFalse(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains(w.vaultId))
         engine.acceptLegacyVault(w.vaultId)
         engine.sync()
-        assertTrue(cache.clientState(SyncEngine.HELD_KEYS_KEY).orEmpty().contains("${w.vaultId}|${tag(w.vk)}"))
+        // A10: the held-key memory is a JSON record (no delimiter-joined lines).
+        assertEquals(listOf(TrustRecords.HeldKey(w.vaultId, tag(w.vk))), TrustRecords.decodeHeldKeys(cache.clientState(SyncEngine.HELD_KEYS_KEY)).rows)
+    }
+
+    // ---- security review 2026-10, plugin scan (branch A10): wire-boundary ids + structured trust records ----
+
+    /** A second shared vault of the owner's, sealed v1 to the member with key [vk]. */
+    private fun targetVault(w: World, name: String): Triple<String, String, ByteArray> {
+        val shared = w.owner.account.buildCreateSharedVault(name)
+        val vk = Envelope.openB64(crypto, ownerUvk(w.owner), shared.request.wrappedVk, Ad.vk(shared.vaultId, w.owner.userId))
+        return Triple(shared.vaultId, shared.request.metaBlob, vk)
+    }
+
+    @Test
+    fun aLegacyVouchRecordWithAForgedLineIsIgnoredOnMigration_andTheGenuineVouchSurvives() = runBlocking<Unit> {
+        val w = world()
+        val (targetId, targetMeta, targetVk) = targetVault(w, "Target")
+        val decoy = "44444444-4444-4444-8444-444444444444"
+        val cache = InMemoryVaultCache()
+        // A pre-A10 line record: the human's genuine Accept of "Household", and the line the scan's decoy wrote (its
+        // vaultId carried a line break and a forged `TARGET|sha256(Z)|confirmed` for the vault the server wants).
+        cache.setClientState(
+            SyncEngine.LEGACY_AUTHORIZED_KEY,
+            listOf("${w.vaultId}|${tag(w.vk)}|confirmed", "$decoy\n$targetId|${tag(targetVk)}|confirmed|${"c".repeat(64)}|confirmed").joinToString("\n"),
+        )
+        cache.setClientState(SyncEngine.HELD_KEYS_KEY, "${w.vaultId}|${tag(w.vk)}\n$decoy\n$targetId|${tag(targetVk)}|x")
+        val server = FakeServer(
+            SyncResponse(
+                rev = 9, full = true,
+                vaults = listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 3, w.metaBlob, 0), WireVault(targetId, "shared", 3, targetMeta, 0)),
+                grants = listOf(personalGrant(w.member), memberRow(w, 9, v1Seal(w), null), WireGrant(targetId, w.member.userId, "writer", "", 9, Bytes.toB64(SharedGrant.seal(crypto, Bytes.fromB64(w.member.reg.identityPub), targetId, targetVk)), null)),
+                items = emptyList(), removedGrants = emptyList(),
+            ),
+        )
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, cache)
+        // Migration happened at construction: JSON, only the well-formed line.
+        val migrated = cache.clientState(SyncEngine.LEGACY_AUTHORIZED_KEY)!!
+        assertTrue(migrated.startsWith("["), migrated)
+        assertEquals(listOf(TrustRecords.Vouch(w.vaultId, tag(w.vk), "confirmed")), TrustRecords.decodeVouches(migrated).rows)
+        assertEquals(listOf(TrustRecords.HeldKey(w.vaultId, tag(w.vk))), TrustRecords.decodeHeldKeys(cache.clientState(SyncEngine.HELD_KEYS_KEY)).rows)
+        engine.sync()
+        assertFalse(device.isLegacyReadOnly(w.vaultId), "the genuine vouch survives the migration")
+        assertTrue(device.isLegacyReadOnly(targetId), "the forged line vouched for nothing")
+        assertEquals(listOf(w.vaultId), server.selfWraps.map { it.first }, "no self-wrap for the vault the server chose a key for")
+        assertEquals(listOf(targetId), engine.legacyReviewVaults().map { it.vaultId })
+    }
+
+    @Test
+    fun aDecoyVaultWhoseIdCarriesALineBreakIsRefusedAtTheWire_andAcceptWritesNothingForOtherVaults() = runBlocking<Unit> {
+        val w = world()
+        val (targetId, targetMeta, targetVk) = targetVault(w, "Target")
+        // The decoy: a vault id that is a UUID, a line break, then a forged vouch line for TARGET. Its grant is v1-sealed
+        // to the member under a key the server knows, with the SAME string as the sealed payload's vaultId.
+        val decoyKey = crypto.randomBytes(32)
+        val decoyId = "44444444-4444-4444-8444-444444444444\n$targetId|${tag(targetVk)}|confirmed"
+        val server = FakeServer(
+            SyncResponse(
+                rev = 9, full = true,
+                vaults = listOf(personalRow(w.member), WireVault(decoyId, "shared", 3, w.metaBlob, 0), WireVault(targetId, "shared", 3, targetMeta, 0)),
+                grants = listOf(
+                    personalGrant(w.member),
+                    WireGrant(decoyId, w.member.userId, "writer", "", 9, Bytes.toB64(SharedGrant.seal(crypto, Bytes.fromB64(w.member.reg.identityPub), decoyId, decoyKey)), null),
+                    WireGrant(targetId, w.member.userId, "writer", "", 9, Bytes.toB64(SharedGrant.seal(crypto, Bytes.fromB64(w.member.reg.identityPub), targetId, targetVk)), null),
+                ),
+                items = emptyList(), removedGrants = emptyList(),
+            ),
+        )
+        val cache = InMemoryVaultCache()
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, cache)
+        engine.sync()
+        assertFalse(device.hasVault(decoyId), "the decoy row never reached the account")
+        assertTrue(engine.vaultInfos().none { it.vaultId == decoyId })
+        assertEquals(listOf(targetId), engine.legacyReviewVaults().map { it.vaultId }, "only the genuine legacy vault is offered for review")
+        val notice = engine.notices().single { it.kind == "bad-id" }
+        assertEquals("sync", notice.reason)
+        // The human accepts TARGET (the only card): the record holds exactly that vouch, as JSON, and nothing else.
+        engine.acceptLegacyVault(targetId)
+        assertEquals(listOf(TrustRecords.Vouch(targetId, tag(targetVk), "confirmed")), TrustRecords.decodeVouches(cache.clientState(SyncEngine.LEGACY_AUTHORIZED_KEY)).rows)
+        assertEquals(listOf(targetId), server.selfWraps.map { it.first })
     }
 }
 

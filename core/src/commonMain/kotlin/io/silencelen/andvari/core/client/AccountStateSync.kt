@@ -78,21 +78,21 @@ class AccountStateSync(
         local.setClientState(key, value)
     }
 
-    private fun keyTag(c: Contact): String? = runCatching {
-        c.userId + "|" + io.silencelen.andvari.core.crypto.Bytes.toHexLower(account.cryptoProvider().sha256(io.silencelen.andvari.core.crypto.Bytes.fromB64(c.identityPub)))
+    private fun keyTag(c: Contact): TrustRecords.ConfirmedPin? = runCatching {
+        TrustRecords.ConfirmedPin(c.userId, io.silencelen.andvari.core.crypto.Bytes.toHexLower(account.cryptoProvider().sha256(io.silencelen.andvari.core.crypto.Bytes.fromB64(c.identityPub))))
     }.getOrNull()
 
-    private fun confirmedHere(): Set<String> =
-        store(confirmedKey)?.split('\n')?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
+    // A10: a [TrustRecords.ConfirmedPin] JSON record (the pre-A10 `userId|tag` lines migrate on first read).
+    private fun confirmedHere(): List<TrustRecords.ConfirmedPin> =
+        TrustRecords.load(confirmedKey, ::store, ::storeSet, TrustRecords::decodeConfirmedPins, TrustRecords::encodeConfirmedPins)
 
     private fun recordConfirmed(c: Contact) {
         val tag = keyTag(c) ?: return
-        storeSet(confirmedKey, (confirmedHere().filterNot { it.startsWith(c.userId + "|") } + tag).sorted().joinToString("\n"))
+        storeSet(confirmedKey, TrustRecords.encodeConfirmedPins(confirmedHere().filterNot { it.userId == c.userId } + tag))
     }
 
     private fun forgetConfirmed(userId: String) {
-        val next = confirmedHere().filterNot { it.startsWith("$userId|") }
-        storeSet(confirmedKey, if (next.isEmpty()) null else next.sorted().joinToString("\n"))
+        storeSet(confirmedKey, TrustRecords.encodeConfirmedPins(confirmedHere().filterNot { it.userId == userId }))
     }
 
     /** True when a human confirmed THIS pin's key for this user on THIS device. */
