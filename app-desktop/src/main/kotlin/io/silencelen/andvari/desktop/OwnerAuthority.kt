@@ -11,6 +11,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -23,11 +24,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.silencelen.andvari.core.client.CoHolder
 import io.silencelen.andvari.core.client.LegacyGrantRow
+import io.silencelen.andvari.core.client.OwnershipClaim
+import io.silencelen.andvari.core.client.OwnershipTransferAckRequiredException
 import io.silencelen.andvari.core.client.ReauthFailedException
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.VaultInfo
@@ -39,37 +44,70 @@ import kotlinx.coroutines.launch
 // <member>?"). Kept identical between the Android and desktop apps except for the state holder's type.
 
 /**
- * "You own <vault>?": the server reports this account as the owner, but this device has no record that the account
- * created the vault or accepted it. Confirmed once, with a fresh master-password reauth; the record then syncs to
- * every device. Until then nothing is signed or sealed for this vault on the strength of the server's label.
+ * "You own <vault>?" (review MEDIUM-1): the server reports this account as the owner, but this device has no record
+ * that the account created the vault or that its owner transferred it here. Like A5b's personal-vault choice, the
+ * dialog first loads and shows what the SERVER reports (its owner, its last transfer, the co-holders), then asks for
+ * a fresh master password (checked on this device). A vault this device first received as a MEMBER also needs the
+ * explicit "This vault's owner transferred it to me".
  */
 @Composable
 internal fun OwnershipConfirmCard(vm: DesktopState, v: VaultInfo, onConfirmed: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var open by remember(v.vaultId) { mutableStateOf(false) }
+    var claim by remember(v.vaultId) { mutableStateOf<OwnershipClaim?>(null) }
     var password by remember(v.vaultId) { mutableStateOf("") }
+    var ack by remember(v.vaultId) { mutableStateOf(false) }
     var busy by remember(v.vaultId) { mutableStateOf(false) }
     var err by remember(v.vaultId) { mutableStateOf<String?>(null) }
+    val who = { c: CoHolder -> if (c.displayName.isNotEmpty()) "${c.displayName} (${c.email})" else "someone this device can't name" }
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.padding(12.dp)) {
             Text("You own “${v.name}”?", style = MaterialTheme.typography.titleSmall)
             Text(
-                "The server reports you as its owner, but this device has no record that you created this vault or took it " +
-                    "over. Confirm it once before you re-share it or hand it over. If you did not create this vault, don't " +
-                    "confirm: tell your admin.",
+                "The server reports you as its owner, but this device has no record that you created this vault or that its " +
+                    "owner transferred it to you. Only confirm if you created this vault, or its owner transferred it to you. " +
+                    "Otherwise, don't confirm: tell your admin.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            err?.takeIf { claim == null }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             Spacer(Modifier.height(6.dp))
-            OutlinedButton(onClick = { open = true }) { Text("Yes, I own “${v.name}”…") }
+            OutlinedButton(enabled = !busy, onClick = {
+                scope.launch {
+                    busy = true
+                    err = null
+                    claim = runCatching { vm.describeVaultOwnership(v.vaultId) }
+                        .onFailure { err = "Couldn't load who holds this vault, or its key did not come from your own account." }.getOrNull()
+                    busy = false
+                }
+            }) { Text("Confirm I own “${v.name}”…") }
         }
     }
-    if (open) {
+    claim?.let { c ->
+        val close = { vm.cancelOwnershipClaim(); claim = null; password = ""; ack = false; err = null }
         AlertDialog(
-            onDismissRequest = { open = false; password = ""; err = null },
-            title = { Text("You own “${v.name}”?") },
+            onDismissRequest = close,
+            title = { Text("You own “${c.vaultName ?: v.name}”?") },
             text = {
                 Column {
-                    Text("Enter your master password to confirm. It is checked on this device.")
+                    Text("Only confirm if you created this vault, or its owner transferred it to you.")
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        (c.lastTransferTo?.let { "Last ownership transfer: to ${who(it)}, transfer #${c.lastTransferSeq}" }
+                            ?: "Created by ${c.reportedOwner?.let(who) ?: "an unknown owner"}; no transfer on record") + " (as reported by the server)",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Also holding this vault: " + (if (c.coHolders.isEmpty()) "no one else" else c.coHolders.joinToString("; ") { "${who(it)}, ${it.role}" }) +
+                            " (as reported by the server)",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (c.receivedAsMember) {
+                        Spacer(Modifier.height(6.dp))
+                        Text("This device first received this vault as a member.", style = MaterialTheme.typography.bodySmall)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = ack, onCheckedChange = { ack = it })
+                            Text("This vault's owner transferred it to me", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         password, { password = it }, Modifier.fillMaxWidth(), label = { Text("Master password (required)") },
@@ -80,23 +118,27 @@ internal fun OwnershipConfirmCard(vm: DesktopState, v: VaultInfo, onConfirmed: (
                 }
             },
             confirmButton = {
-                TextButton(enabled = !busy && password.isNotEmpty(), onClick = {
+                TextButton(enabled = !busy && password.isNotEmpty() && (!c.receivedAsMember || ack), onClick = {
                     scope.launch {
                         busy = true
-                        val failure = runCatching { vm.confirmVaultOwnership(v.vaultId, password) }.exceptionOrNull()
+                        val failure = runCatching { vm.confirmVaultOwnership(c, password, ack) }.exceptionOrNull()
                         password = ""
                         busy = false
                         if (failure == null) {
-                            open = false
+                            claim = null
                             err = null
                             onConfirmed()
                         } else {
-                            err = if (failure is ReauthFailedException) "That master password isn't right." else "Couldn't confirm it. Try again."
+                            err = when (failure) {
+                                is ReauthFailedException -> "That master password isn't right."
+                                is OwnershipTransferAckRequiredException -> "Tick “This vault's owner transferred it to me” only if that is true."
+                                else -> "Couldn't confirm it. Try again."
+                            }
                         }
                     }
                 }) { Text("Confirm") }
             },
-            dismissButton = { TextButton(onClick = { open = false; password = ""; err = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = close) { Text("Cancel") } },
         )
     }
 }
