@@ -3,7 +3,7 @@ import { ApiClient, ApiError } from "../api/client";
 import type { ClientPolicy } from "../api/types";
 import { fromB64 } from "../crypto/bytes";
 import { fingerprint, shortFormMatches } from "../crypto/escrow";
-import { enrollCheckCodeMatches } from "../enroll/enrollcheck";
+import { enrolInPerson, enrollCheckCodeMatches, IN_PERSON_CODE_WARNING, type InPersonEvidence } from "../enroll/enrollcheck";
 import { pinFromEnrolLink } from "../vault/contacts";
 import { MyIdentityCard } from "./Household";
 import { groupedShort } from "../crypto/fingerprint";
@@ -656,6 +656,14 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
   );
 }
 
+/**
+ * Security review 2026-10, root cause A, A5c: when the in-person condition is not met, the enrolment registers
+ * WITHOUT pinning the admin and this is the state it reports — a pending verification (the normal "Verify a
+ * household member" ceremony closes it later), never an error. One sentence, rendered on the form and on the
+ * end screen (enrol-provenance.test.ts pins it verbatim).
+ */
+const ADMIN_PIN_PENDING = "Your admin isn't verified on this account yet. You can verify them any time under Settings → Verify a household member.";
+
 function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy, onReady, prefill, onBlockingChange, onTimedOut }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null; onBlockingChange: (blocking: boolean) => void; onTimedOut: (notice: string) => void }) {
   // A prefill applies ONLY if the link was minted FOR this exact origin — the page IS served
   // by payload.o, so a mismatch means a redirect or a hand-mangled link; fall through to manual
@@ -666,11 +674,18 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
   // emails invites), so the claim is honoured only after the human TYPES the in-person code the admin's
   // screen shows beside the QR (enrollCheckCode). The same code authenticates `ifp`/`iu`, the admin's
   // identity, which this enrolment then pins (the §7.2 mutual pin).
+  // A5c (API review #4): the code is an unkeyed hash of the link, so the server that composed a navigated
+  // link can email "the code" beside it. The code alone is therefore never in-person evidence: the human
+  // must also affirm, first person and under the stop warning, that they are reading the admin's screen
+  // right now (`inPersonAffirmed`; in required-affirm that is the posture's own tick). Both halves go to
+  // the state layer as raw evidence (`InPersonEvidence`), which re-checks them. Without them the enrolment
+  // registers with NO pin and the admin stays a pending verification.
   const linkPayload = linkValid ? prefill! : null;
   const linkRfp = linkPayload?.rfp;
   const inPersonLink = !!linkPayload && (!!linkPayload.rfp || !!linkPayload.ifp);
   const [inPersonEntry, setInPersonEntry] = useState("");
   const [inPersonOk, setInPersonOk] = useState(false);
+  const [inPersonAffirmed, setInPersonAffirmed] = useState(false); // waived: "I'm with my admin right now"
   useEffect(() => {
     let live = true;
     if (!linkPayload || !inPersonLink) {
@@ -790,6 +805,12 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       // pubkey is never trusted on its own.
       let recoveryPublicKey: Uint8Array | undefined;
       let recoveryFingerprint: string | undefined;
+      // A5c: the in-person evidence, built from the human's two acts at submit (the effect above may lag a
+      // keystroke) and handed to the state layer raw — the escrow gate and the admin pin both re-check it.
+      const inPersonEvidence: InPersonEvidence = {
+        typedCode: inPersonEntry,
+        inPersonAffirmed: posture === "required-affirm" ? affirmConfirmed : inPersonAffirmed,
+      };
       if (posture !== "waived") {
         // Audit F15: ApiClient owns this endpoint (the escrow re-seal path already calls it).
         // The hand-rolled fetch this replaces omitted the X-Andvari-Client header every other
@@ -798,8 +819,8 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         // enrollment path, only on the re-seal one. It works unauthenticated: raw() simply omits
         // the Authorization header when no tokens are held.
         const pub = fromB64((await net(client.recoveryPubkey())).trim());
-        // Re-check the in-person code at submit (the effect above may lag a keystroke).
-        const inPersonVerified = !!linkPayload && (await enrollCheckCodeMatches(linkPayload, inPersonEntry));
+        // Re-check the in-person evidence at submit: the typed code AND the first-person affirmation (A5c).
+        const inPersonVerified = !!linkPayload && (await enrolInPerson(linkPayload, inPersonEvidence));
         const gate = escrowGate({ posture, linkRfp, inPersonVerified, typedSheet: shortFp, serverFullFp: fp, pubFullFp: await fingerprint(pub) });
         if (!gate.seal || !gate.verifiedFp) {
           return setErr("The recovery key this server offers does not match the code your admin gave you. STOP and contact your admin.");
@@ -840,13 +861,15 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       });
       const store = new VaultStore(client, account);
       await store.sync().catch(() => {});
-      // Root cause A §7.2 (A5): the enrolment pin of the admin. Only for an in-person link whose code the
-      // human typed, and only when the key the server serves for `iu` hashes to the link's `ifp` in full;
-      // anything else pins nothing (the member can verify their admin later from Settings).
-      if (linkPayload?.ifp && linkPayload.iu && (await enrollCheckCodeMatches(linkPayload, inPersonEntry))) {
+      // Root cause A §7.2 (A5): the enrolment pin of the admin. Only on in-person evidence — the code the
+      // human typed from the admin's screen AND their first-person affirmation (A5c), both re-checked by
+      // pinFromEnrolLink from the raw inputs — and only when the key the server serves for `iu` hashes to
+      // the link's `ifp` in full; anything else pins nothing and the admin stays a pending verification
+      // (ADMIN_PIN_PENDING: the member verifies them later from Settings).
+      if (linkPayload?.ifp && linkPayload.iu && inPersonEvidence.inPersonAffirmed) {
         try {
           const served = await client.userIdentity(linkPayload.iu);
-          const c = await pinFromEnrolLink(linkPayload, true, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
+          const c = await pinFromEnrolLink(linkPayload, inPersonEvidence, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
           if (c) {
             await store.accountState.pin(c);
             setAdminPinned(true);
@@ -939,7 +962,9 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
     return (
       <div>
         <h2>Let your admin verify you</h2>
-        {showIdentity.adminPinned && <Msg kind="info">Your admin is now a verified household member on this account.</Msg>}
+        {showIdentity.adminPinned
+          ? <Msg kind="info">Your admin is now a verified household member on this account.</Msg>
+          : <Msg kind="info">{ADMIN_PIN_PENDING}</Msg>}
         <MyIdentityCard account={showIdentity.account} intro="Show this to your admin. They scan the QR, or type the code, under Settings → Verify a household member." />
         <button
           type="button"
@@ -990,21 +1015,39 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       </Field>
 
       {inPersonLink && (
-        <Field
-          label="In-person code — type the 32 characters your admin's screen shows beside the QR"
-          prompt
-          hint={
-            <span className="muted">
-              {inPersonOk
-                ? "matches"
-                : posture === "required-affirm"
-                  ? "required: it proves this invite came from your admin in person. Got this link any other way (email, chat)? Stop and ask your admin."
-                  : "optional: lets this app verify your admin's identity now."}
-            </span>
-          }
-        >
-          <input className="mono" value={inPersonEntry} onChange={(e) => setInPersonEntry(e.target.value)} placeholder="from your admin's screen, not this one" />
-        </Field>
+        <div className="check-block">
+          {/* A5c: in the waived posture the code field sits BEHIND the first-person in-person affirmation
+              (required-affirm has its own tick below, and the seal needs the code regardless). Unticked,
+              the enrolment goes ahead with no admin pin: a pending verification, not an error. */}
+          {posture !== "required-affirm" && (
+            <label className="check">
+              <input type="checkbox" checked={inPersonAffirmed} onChange={(e) => setInPersonAffirmed(e.target.checked)} />
+              <span>I'm with my admin <strong>right now</strong>, reading the in-person code from their screen.</span>
+            </label>
+          )}
+          {posture === "required-affirm" || inPersonAffirmed ? (
+            <>
+              <div className="msg err" style={{ display: "block" }}>{IN_PERSON_CODE_WARNING}</div>
+              <Field
+                label="In-person code — type the 32 characters your admin's screen shows beside the QR"
+                prompt
+                hint={
+                  <span className="muted">
+                    {inPersonOk
+                      ? "matches"
+                      : posture === "required-affirm"
+                        ? "required: it proves this invite came from your admin in person. Got this link any other way (email, chat)? Stop and ask your admin."
+                        : "once it matches, your admin becomes a verified household member on this account."}
+                  </span>
+                }
+              >
+                <input className="mono" value={inPersonEntry} onChange={(e) => setInPersonEntry(e.target.value)} placeholder="from your admin's screen, not this one" />
+              </Field>
+            </>
+          ) : (
+            <p className="muted">{ADMIN_PIN_PENDING}</p>
+          )}
+        </div>
       )}
 
       <FingerprintProvenance

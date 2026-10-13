@@ -813,7 +813,7 @@ function InviteForm({ client, signupMode, account, onInvited }: { client: ApiCli
               )}
               {inPersonCode && (
                 <div className="msg info" style={{ display: "block", marginTop: 8 }}>
-                  <div><strong>In-person code</strong> — read this to the invitee (or let them read it here). They type it after scanning; it is what proves the QR came from you, in person.</div>
+                  <div><strong>In-person code</strong> — read this to the invitee (or let them read it here). They type it after scanning; it is what proves the QR came from you, in person. <strong>Never send it by email or message</strong>: it only means something read from this screen, in person.</div>
                   <div className="mono" style={{ whiteSpace: "pre-line", fontSize: "1.1em", marginTop: 4 }} data-testid="in-person-code">{groupedShort(inPersonCode)}</div>
                 </div>
               )}
