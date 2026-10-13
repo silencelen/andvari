@@ -49,6 +49,10 @@ class AccountStateSync(
     // a restart on a host whose cache is memory-only. Both are a public counter or a UVK-sealed blob.
     private fun highWater(): Long = store(hwKey)?.toLongOrNull() ?: 0L
 
+    /** True once this device has merged (or written) account state: a served blob below its mark is a detectable
+     *  rollback. A device without one is FRESH to account state, and a served blob is as replayable as a wrap (A9). */
+    fun hasHighWater(): Boolean = highWater() > 0
+
     private fun loadLocal(): AccountStateDoc? = store(copyKey)?.let { sealed ->
         runCatching { account.openAccountState(sealed) }.getOrNull()
     }

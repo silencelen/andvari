@@ -39,10 +39,10 @@ class TotpEnrollClientTest : P4TestSupport() {
         // The bare call is what the server now refuses outside the window…
         val bare = assertFailsWith<ApiException> { api.totpSetup() }
         assertEquals("reauth_required", bare.code)
-        // …a wrong password is refused, not silently ignored…
-        // (A9, M-1: the proof is the account's fenced in-session derivation; the enrolled session's salt is current.)
-        val wrong = assertFailsWith<ApiException> { api.totpSetupWithPassword("not the password", account) }
-        assertEquals("reauth_failed", wrong.code)
+        // …a wrong password is refused, not silently ignored — since the A9 review (LOW-1) LOCALLY: the fenced derivation
+        // proves the password against the session UVK before anything is derived for the server, so nothing is sent…
+        assertFailsWith<io.silencelen.andvari.core.client.ReauthFailedException> { api.totpSetupWithPassword("not the password", account) }
+        assertEquals(TotpStatus(enrolled = false, pendingSetup = false), api.totpStatus(), "no setup was staged by the refused attempt")
         // …and the client's password-carrying enrolment goes through.
         val setup = api.totpSetupWithPassword(password, account)
         assertTrue(setup.secretBase32.isNotEmpty())

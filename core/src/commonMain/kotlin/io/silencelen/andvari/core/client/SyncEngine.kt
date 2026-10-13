@@ -130,6 +130,9 @@ data class OwnershipClaim(
 /** A6b: the master password given for a reauth does not open this account's key. */
 class ReauthFailedException : Exception("that master password isn't right")
 
+/** A9 review LOW-2: a save, import or copy with no explicit destination while no personal vault is in force. */
+class NoPersonalVaultException : Exception(HouseholdCopy.NO_PERSONAL_VAULT)
+
 /**
  * A6b carry-forward (A1b): the reauth could not be checked because this session unlocked with a salt the account no
  * longer has (a password change or a KDF upgrade since this unlock). The message is the copy; web twin
@@ -485,7 +488,7 @@ class SyncEngine(
      * dedupe fingerprints against one vault while the rows land in another.
      */
     fun importProjections(vaultId: String? = null): CsvImport.ImportProjections {
-        val target = vaultId ?: account.personalVaultId
+        val target = vaultId ?: personalVaultOrRefuse()
         return CsvImport.projections(items().filter { it.vaultId == target }.map { it.doc })
     }
 
@@ -676,6 +679,11 @@ class SyncEngine(
     /** The account's own personal-vault designation (account state, A9), or null when none was ever recorded. */
     fun designatedPersonalVaultId(): String? = accountState.doc.personal?.vaultId
 
+    /** A9 review LOW-2: the default destination, or [NoPersonalVaultException] while no personal vault is in force (§4.3:
+     *  no default destination), so the refusal says "Choose a vault for this item." instead of reaching the seal with an
+     *  empty vault id (which surfaced as "wrong master password"). */
+    private fun personalVaultOrRefuse(): String = account.personalVaultId.ifEmpty { throw NoPersonalVaultException() }
+
     /** The question's choices, from the cached rows and this client's own key provenance. The server's
      *  `type` label and `role` are not read. */
     fun personalCandidates(): List<PersonalVaultMigration.Candidate> {
@@ -710,7 +718,7 @@ class SyncEngine(
      * for another vault) is a PROPOSAL ([Account.PersonalStatus.PROPOSED]) until the human confirms it or re-designates.
      * The registering device designates the wrap it minted at its first decision.
      */
-    private fun decidePersonalLocally() {
+    private fun decidePersonalLocally(mergedStateBefore: Boolean = accountState.hasHighWater()) {
         val cached = cachedPersonalWrap()
         val designation = accountState.doc.personal?.vaultId
         when (account.personalStatus) {
@@ -724,27 +732,27 @@ class SyncEngine(
                         recordDesignationLocally(served.vaultId)
                         rememberPersonalWrap(served)
                     }
-                    // The account's own designation (UVK-sealed, newest wins) names the served vault: confirmed anywhere.
-                    designation == served.vaultId -> rememberPersonalWrap(served)
-                    // An established device with no designation on record: unchanged (A5b: the cache is its anchor).
-                    designation == null && cached != null && cached.vaultId == served.vaultId -> rememberPersonalWrap(served)
+                    // A9 review LOW-4: a device that never confirmed a personal vault (no cached wrap) asks ONCE, whatever
+                    // the designation says: on such a device the account state is as replayable as the wrap (no
+                    // high-water mark can tell an older authentic blob from the current one), so a matching designation
+                    // proves nothing. The human's confirmation is what makes the device established.
+                    cached == null -> account.holdPersonalProposal(designation)
+                    // The cached wrap and the served one agree, and the designation (if any) does too: unchanged.
+                    cached.vaultId == served.vaultId && (designation == null || designation == served.vaultId) -> rememberPersonalWrap(served)
+                    // A confirmed re-designation elsewhere (the account's own designation, UVK-sealed, newest wins) on a
+                    // device that merged account state BEFORE this sync, so a rolled-back blob would have been detected.
+                    designation == served.vaultId && mergedStateBefore -> rememberPersonalWrap(served)
                     // A5b: the cached wrap stays in force; the served one waits for the human (also a replayed older wrap).
-                    cached != null && cached.vaultId != served.vaultId && (designation == null || designation == cached.vaultId) ->
+                    cached.vaultId != served.vaultId && (designation == null || designation == cached.vaultId) ->
                         account.holdPersonalChange(cached)
-                    // A9 (M-2): nothing on this device vouches for the served wrap (no cache and no designation, or a
-                    // designation for another vault): a proposal, never a silent adoption. Nothing is in force.
+                    // A9 (M-2): nothing on this device vouches for the served wrap (a designation for a third vault, or
+                    // one this device has not merged state for): a proposal, never a silent adoption. Nothing is in force.
                     else -> account.holdPersonalProposal(designation)
                 }
             }
-            Account.PersonalStatus.PROPOSED -> {
-                personalVaultChoices = null
-                val served = account.pendingPersonalChange
-                // The designation arrived (or was written) since: it vouches for the served vault, nothing else does.
-                if (served != null && designation == served.vaultId) {
-                    account.acceptPersonalChange()
-                    rememberPersonalWrap(served)
-                }
-            }
+            // A9 review LOW-4: a proposal is resolved only by the human ([acceptPersonalChange] after the co-holders were
+            // shown, or a reauthed re-designation); a designation arriving later never confirms it on their behalf.
+            Account.PersonalStatus.PROPOSED -> personalVaultChoices = null
             Account.PersonalStatus.WITHHELD, Account.PersonalStatus.CHANGED, Account.PersonalStatus.UNREADABLE_CACHED ->
                 personalVaultChoices = null
             Account.PersonalStatus.UNREADABLE -> {
@@ -1373,8 +1381,9 @@ class SyncEngine(
         // §4.2: best effort, never fails the sync. Then root cause A §4.3 (A5 review H-1): local, never mints — and since
         // A9 (M-2) it reads the account's designation, so the refresh comes FIRST; a designation this device recorded
         // (register, an accepted change) is written back by one more refresh.
+        val mergedStateBefore = accountState.hasHighWater() // A9 review LOW-4: before THIS sync's refresh could set it
         runCatching { accountState.refresh() }
-        decidePersonalLocally()
+        decidePersonalLocally(mergedStateBefore)
         if (designationDirty) {
             designationDirty = false
             runCatching { accountState.refresh() }
@@ -2565,7 +2574,7 @@ class SyncEngine(
                 ItemHome.Edit.OK -> SealProvenance.Editor(vaultId!!)
             }
         } else {
-            SealProvenance.Chosen(vaultId ?: account.personalVaultId)
+            SealProvenance.Chosen(vaultId ?: personalVaultOrRefuse())
         }
         val effectiveVault = provenance.vaultId
         val id = itemId ?: newItemId ?: account.newItemId()
@@ -2711,7 +2720,7 @@ class SyncEngine(
     ) = syncMutex.withLock {
         // S2: the destination vault — must be the SAME vault the plan's projections came
         // from (importProjections), or the dedupe verdicts are meaningless. Null = personal.
-        @Suppress("NAME_SHADOWING") val vaultId = vaultId ?: account.personalVaultId
+        @Suppress("NAME_SHADOWING") val vaultId = vaultId ?: personalVaultOrRefuse()
         var done = 0
         for (chunk in items.chunked(SERVER_BATCH_MAX)) {
             push(chunk.map {
