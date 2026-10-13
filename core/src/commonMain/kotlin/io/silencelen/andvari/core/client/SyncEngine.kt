@@ -64,7 +64,10 @@ data class LifecycleNotice(
      *  queue rows the server definitively refused and the drain durably dropped.
      *  `vk-mismatch` / `key-unreadable` (security review 2026-10, root cause A §3.1): a grant row
      *  carried a seal whose key differs from our own UVK wrap (ours was kept), or our UVK wrap is
-     *  present and does not open (no seal fallback; the vault stays keyless). */
+     *  present and does not open (no seal fallback; the vault stays keyless).
+     *  `wrong-vault` (root cause A §5.1 INV-HOME, branch A1b): the server sent an item under another vault than the
+     *  one this device holds it in (or a conflict row that disagrees about its vault); the row was NOT applied. One
+     *  per pull; [vaultId] is the first offending row's vault and [parkedCount] how many rows were refused. */
     val kind: String,
     /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
     val purgeAt: Long? = null,
@@ -130,6 +133,13 @@ class ReissueNotAuthorizedException(val vaultId: String, val userId: String) :
 
 /** A6b: the master password given for a reauth does not open this account's key. */
 class ReauthFailedException : Exception("that master password isn't right")
+
+/**
+ * A6b carry-forward (A1b): the reauth could not be checked because this session unlocked with a salt the account no
+ * longer has (a password change or a KDF upgrade since this unlock). The message is the copy; web twin
+ * `ReauthStaleSessionError`, byte-identical.
+ */
+class ReauthStaleSessionException : Exception(HouseholdCopy.REAUTH_STALE_SESSION)
 
 /**
  * One row of the "Legacy grants" list (§8.2 step 4, A6b). Everything but [verifiedLabel] and [pinState] is what the
@@ -519,7 +529,8 @@ class SyncEngine(
      * refs are DROPPED — a deleted item's attachment blobs were hard-unlinked at tombstone (design doc).
      */
     suspend fun restoreDeleted(itemId: String, vaultId: String, doc: ItemDoc) {
-        api.restoreItem(itemId, account.encryptItem(vaultId, itemId, doc.copy(attachments = emptyList())))
+        // INV-SEAL (a): the doc was decrypted from this item's archived envelope under [vaultId]; INV-HOME: only at home.
+        api.restoreItem(itemId, sealFor(SealProvenance.Envelope(vaultId), itemId, doc.copy(attachments = emptyList())))
         sync()
     }
 
@@ -1028,12 +1039,25 @@ class SyncEngine(
     /** A6b review MEDIUM-1: this device first adopted [vaultId]'s key as a MEMBER (a seal, a v2 grant, a non-owner
      *  row), now or in an earlier session (the durable record; the in-memory bit is rebuilt from served rows). */
     fun receivedAsMember(vaultId: String): Boolean =
-        account.keyArrivedByMemberGrant(vaultId) || vaultId in persistedSet(MEMBER_GRANTED_KEY)
+        account.keyArrivedByMemberGrant(vaultId) || vaultId in persistedSet(MEMBER_GRANTED_KEY) ||
+            accountState.doc.receivedAsMember(vaultId)
 
     private fun persistMemberGranted() {
         val persisted = persistedSet(MEMBER_GRANTED_KEY)
         val added = cache.vaults().map { it.vaultId }.filter { it !in persisted && account.keyArrivedByMemberGrant(it) }
         if (added.isNotEmpty()) persistSet(MEMBER_GRANTED_KEY, persisted + added)
+    }
+
+    /**
+     * A6b carry-forward LOW-R (A1b): every vault THIS device recorded as received-as-member joins the account state too
+     * (UVK-sealed, union-merged, add-only), so a fresh device of the same account whose first served row is
+     * owner-shaped still asks for the transfer acknowledgement. Best effort: a failed write is retried next sync.
+     */
+    private suspend fun flushMemberReceived() {
+        val local = persistedSet(MEMBER_GRANTED_KEY).filter { !accountState.doc.receivedAsMember(it) }
+        if (local.isEmpty()) return
+        val at = nowMs()
+        runCatching { accountState.update { d -> AccountState.withMemberReceived(d, local, at) } }
     }
 
     /**
@@ -1081,6 +1105,9 @@ class SyncEngine(
         ) throw VaultKeyNotVerifiedException(vaultId)
         if (receivedAsMember(vaultId) && !transferredToMe) throw OwnershipTransferAckRequiredException(vaultId)
         val keys = api.accountKeys()
+        // A6b carry-forward (A1b): a salt this session did not unlock with (a password change or KDF upgrade since) can
+        // never verify; say how to recover instead of "that master password isn't right".
+        if (!account.sessionSaltCurrent(keys)) throw ReauthStaleSessionException()
         val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { account.verifyPassword(password, keys) }
         if (!ok) throw ReauthFailedException()
         pendingOwnershipClaim = null
@@ -1293,6 +1320,7 @@ class SyncEngine(
         surfaceGrantStates()
         postAuthorizedSelfWraps()
         flushOwnershipReleases()
+        flushMemberReceived()
     }
 
     /**
@@ -1313,6 +1341,12 @@ class SyncEngine(
         decidePersonalLocally()
         val decryptedVaults = HashSet<String>()
         for (w in cache.envelopes()) {
+            // INV-HOME (A1b): rebuild/confirm the home from the cached rows (an upgraded cache records its homes here);
+            // a cached row that contradicts a recorded home is quarantined, never decrypted into the working set.
+            if (!admitHome(w)) {
+                cache.deleteItem(w.itemId)
+                continue
+            }
             if (w.deleted || !account.hasVault(w.vaultId)) continue
             runCatching {
                 cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
@@ -1399,6 +1433,7 @@ class SyncEngine(
             // re-applies the delta since the cursor also rolled back).
             runCatching { cache.evictDecrypted(); hydrate() }
             pendingAddedNotices.clear() // H71: nothing this tx minted is true after the rollback
+            wrongVault = ItemHome.Tally() // the refused rows rolled back with the tx; the next pull refuses them again
             throw t
         }
 
@@ -1424,6 +1459,53 @@ class SyncEngine(
 
         materializeOutstandingConflicts()
         surfaceKeyAnomalies()
+        surfaceWrongVault()
+    }
+
+    /**
+     * INV-HOME (security review 2026-10, root cause A §5.1; branch A1b): admit one served or cached row against
+     * `home(itemId)`. The first row for an itemId records its home; a later row (live or tombstone) under another
+     * vault is NOT applied: it is quarantined and counted for this pull's single "wrong vault" anomaly.
+     */
+    private fun admitHome(item: WireItem): Boolean =
+        when (ItemHome.admit(cache.itemHome(item.itemId), item.vaultId)) {
+            ItemHome.Admit.NEW_HOME -> {
+                cache.setItemHome(item.itemId, item.vaultId)
+                true
+            }
+            ItemHome.Admit.HOME -> true
+            ItemHome.Admit.QUARANTINE -> {
+                cache.quarantine(item)
+                wrongVault.note(item.vaultId)
+                false
+            }
+        }
+
+    /** INV-HOME / INV-CONFLICT: this pull's refusals, as ONE "the server sent an item under the wrong vault" notice. */
+    private var wrongVault = ItemHome.Tally()
+
+    private fun surfaceWrongVault() {
+        val t = wrongVault
+        wrongVault = ItemHome.Tally()
+        if (t.anomalies() == 0) return
+        pushNotice(LifecycleNotice(account.newItemId(), t.firstVaultId ?: "", "", "wrong-vault", parkedCount = t.refused))
+    }
+
+    /** Rows refused by INV-HOME on this device (ciphertext, never applied), for diagnosis. */
+    fun quarantinedItems(): List<WireItem> = cache.quarantined()
+
+    /**
+     * INV-SEAL (root cause A §5.1; branch A1b): the ONE item seal for a push. [provenance] names where the plaintext
+     * came from, and so the only vault it may be sealed under; the item must live there (its home), or have no home yet
+     * (a fresh id: a copy, an import row, a new item), which this seal then records. [Account.sealItem] adds
+     * INV-WRITE-KEY. A refusal throws [ItemChangedVaultsException]; nothing is re-targeted.
+     */
+    private fun sealFor(provenance: SealProvenance, itemId: String, doc: ItemDoc): io.silencelen.andvari.core.model.ItemUpload {
+        val home = cache.itemHome(itemId)
+        if (ItemHome.seal(home, provenance.vaultId) == ItemHome.Seal.REFUSE) throw ItemChangedVaultsException()
+        val upload = account.sealItem(provenance, itemId, doc)
+        if (home == null) cache.setItemHome(itemId, provenance.vaultId)
+        return upload
     }
 
     /**
@@ -1536,6 +1618,9 @@ class SyncEngine(
                 pendingAddedNotices.add(LifecycleNotice(account.newItemId(), vaultId, name, "added", byLabel = by))
             }
             for (item in resp.items) {
+                // INV-HOME first: a row under another vault than this item's home is not applied at all (not even a
+                // tombstone), and never reaches the cache, the working set, export or autofill.
+                if (!admitHome(item)) continue
                 if (item.deleted) {
                     cache.deleteItem(item.itemId)
                     continue
@@ -1565,7 +1650,7 @@ class SyncEngine(
                 held.deleteId?.let { cache.addConsumedDeleteId(it) }
                 // Belt: rehydrate any held ciphertext item the backfill did not re-deliver.
                 for (wi in held.items) {
-                    if (cache.getItem(wi.itemId) != null) continue
+                    if (cache.getItem(wi.itemId) != null || !admitHome(wi)) continue
                     runCatching {
                         cache.upsertItem(wi, VaultItem(wi.itemId, vaultId, wi.rev, wi.updatedAt, account.decryptItem(wi)))
                     }
@@ -2131,6 +2216,8 @@ class SyncEngine(
     suspend fun runGesture(g: MoveGesture, onProgress: ((done: Int, total: Int) -> Unit)? = null, finalSync: Boolean = true) {
         val src = cache.getItem(g.sourceItemId)
             ?: throw CryptoException("The item to move is no longer here — it may have changed or been removed.")
+        // INV-HOME: the gesture was minted for the source in its vault; it never runs against another vault's copy.
+        if (src.vaultId != g.sourceVaultId) throw ItemChangedVaultsException()
 
         // --- COPY LEG ---
         var newDoc = src.doc
@@ -2157,7 +2244,8 @@ class SyncEngine(
             }
             newDoc = newDoc.copy(attachments = newRefs)
         }
-        val upload = account.encryptItem(g.targetVaultId, g.newItemId, newDoc)
+        // INV-SEAL (c): the destination the user chose; the fresh id takes it as its home.
+        val upload = sealFor(SealProvenance.Chosen(g.targetVaultId), g.newItemId, newDoc)
         val copyResp = api.push(
             PushRequest(listOf(Mutation(gestureMutationId(g.gestureId, "copy"), "put", g.newItemId, g.targetVaultId, 0, upload))),
         )
@@ -2250,23 +2338,43 @@ class SyncEngine(
         for (item in envelopes) {
             if (!item.conflict || item.deleted) continue
             // A reader must not materialize (its push would be denied, spec 03 §5) — the
-            // flag waits for a writer/owner on some other device.
-            if (account.roleFor(item.vaultId) == "reader") continue
-            val winner = cache.getItem(item.itemId) ?: continue // undecryptable → wait
+            // flag waits for a writer/owner on some other device. INV-WRITE-KEY: nor under a key we may not seal with.
+            if (account.roleFor(item.vaultId) == "reader" || !account.canSealUnder(item.vaultId)) continue
+            // INV-CONFLICT (root cause A §5.1, A1b): the twin and the home must agree with the flagged row's vault, or
+            // nothing is pushed and the pull raises its wrong-vault anomaly. (INV-HOME already keeps such a row out of
+            // the cache; this is the second lock, and it no longer depends on the cache being keyed by itemId.)
+            val twin = cache.getItem(item.itemId)
+            if (ItemHome.conflict(twin?.vaultId, item.vaultId, cache.itemHome(item.itemId)) == ItemHome.Conflict.ABORT) {
+                wrongVault.note(item.vaultId)
+                continue
+            }
+            // BOTH mutations come from decrypt(flagged), sealed under flagged.vaultId (provenance (a)).
+            val doc = runCatching { account.decryptItem(item) }.getOrNull() ?: continue // undecryptable → wait
+            val provenance = SealProvenance.Envelope(item.vaultId)
             val copyId = deterministicCopyId(item.itemId, item.rev)
             // PDD-1: the CORRECT copy is built from the DISPLACED (losing) value by the pushing
             // client (materializeConflictFromServerItem); this path is the FALLBACK + flag
             // clearer. If the copy is already present (push side, a peer, or a prior pass), skip
-            // re-creating it and just clear the flag with the live winner. If it is absent (the
-            // conflict was caused by a client that didn't materialize) preserve at least the
-            // winner so clearing the flag doesn't erase the only trace.
-            val mutations = mutableListOf<Mutation>()
-            if (copyId !in known && cache.getItem(copyId) == null) {
-                val copyDoc = winner.doc.copy(name = "${winner.doc.name} (conflict ${isoDate(item.updatedAt)})")
-                mutations += putMutation(copyId, item.vaultId, copyDoc, 0)
+            // re-creating it and just clear the flag. If it is absent (the conflict was caused by a
+            // client that didn't materialize) preserve at least this value so clearing the flag
+            // doesn't erase the only trace.
+            // A1b review LOW-1 (availability; web twin: the pull's per-row try/catch around materializeConflict): the
+            // copy id is deterministic, so a server can pre-claim home(copyId) under another vault and make this seal
+            // refuse. The refusal is right, but it is THIS ROW's verdict: count it for the wrong-vault notice and
+            // carry on, never let it escape and fail this sync and every later one while the flag stands.
+            try {
+                val mutations = mutableListOf<Mutation>()
+                if (copyId !in known && cache.getItem(copyId) == null) {
+                    val copyDoc = doc.copy(name = "${doc.name} (conflict ${isoDate(item.updatedAt)})")
+                    mutations += putMutation(provenance, copyId, copyDoc, 0)
+                }
+                mutations += putMutation(provenance, item.itemId, doc, item.rev) // clears the flag
+                push(mutations)
+            } catch (e: ItemChangedVaultsException) {
+                wrongVault.note(item.vaultId)
+            } catch (e: VaultKeyNotVerifiedException) {
+                wrongVault.note(item.vaultId)
             }
-            mutations += putMutation(item.itemId, item.vaultId, winner.doc, winner.rev) // clears the flag
-            push(mutations)
         }
     }
 
@@ -2278,41 +2386,55 @@ class SyncEngine(
      * the live winner. The copy id is deterministic over (itemId, winnerRev), the same
      * derivation the pull side uses, so an already-present copy is a no-op.
      */
-    private suspend fun materializeConflictFromServerItem(losing: WireItem, winnerRev: Long) {
-        if (account.roleFor(losing.vaultId) == "reader") return // a reader's push would be denied
+    private suspend fun materializeConflictFromServerItem(d: Displaced) {
+        val losing = d.losing
+        if (account.roleFor(losing.vaultId) == "reader" || !account.canSealUnder(losing.vaultId)) return // a reader's push would be denied
+        // INV-CONFLICT (A1b): the displaced value must be the item we wrote, in the vault we wrote it to and its home.
+        // Its AD vault is then the vault the copy is sealed under (provenance (a)).
+        if (ItemHome.serverItem(d.pushedVaultId, losing.vaultId, cache.itemHome(losing.itemId)) == ItemHome.ServerItem.ABORT) {
+            wrongVault.note(losing.vaultId)
+            return
+        }
         val losingDoc = runCatching { account.decryptItem(losing) }.getOrNull() ?: return // held key → skip
-        val copyId = deterministicCopyId(losing.itemId, winnerRev)
+        val copyId = deterministicCopyId(losing.itemId, d.winnerRev)
         if (cache.getItem(copyId) != null) return // already materialized
         val copyDoc = losingDoc.copy(name = "${losingDoc.name} (conflict ${isoDate(losing.updatedAt)})")
-        push(listOf(putMutation(copyId, losing.vaultId, copyDoc, 0)))
+        push(listOf(putMutation(SealProvenance.Envelope(losing.vaultId), copyId, copyDoc, 0)))
     }
+
+    /** PDD-1: a server-returned displaced value, the winner's rev, and the vault the losing put was pushed to. */
+    private class Displaced(val losing: WireItem, val winnerRev: Long, val pushedVaultId: String)
 
     /** UUIDv4-shaped id derived from sha256("conflict|itemId|rev") — stable across retries.
      *  Delegates to the vector-pinned shared derivation (spec/test-vectors/conflictcopy.json). */
     private fun deterministicCopyId(itemId: String, rev: Long): String =
         ConflictCopy.id(account.cryptoProvider(), itemId, rev)
 
-    fun putMutation(itemId: String, vaultId: String, doc: ItemDoc, baseItemRev: Long): Mutation =
+    /** A put sealed through [sealFor] (INV-SEAL / INV-HOME / INV-WRITE-KEY): the vault IS the provenance's. */
+    private fun putMutation(provenance: SealProvenance, itemId: String, doc: ItemDoc, baseItemRev: Long): Mutation =
         Mutation(
             mutationId = account.newItemId(),
             op = "put",
             itemId = itemId,
-            vaultId = vaultId,
+            vaultId = provenance.vaultId,
             baseItemRev = baseItemRev,
-            item = account.encryptItem(vaultId, itemId, doc),
+            item = sealFor(provenance, itemId, doc),
         )
 
     fun deleteMutation(itemId: String, vaultId: String, baseItemRev: Long): Mutation =
         Mutation(account.newItemId(), "delete", itemId, vaultId, baseItemRev, null)
 
-    /** Create or update an item, then reconcile. New items go to [vaultId] (default personal). */
+    /** Create or update an item, then reconcile. New items go to [vaultId] (default personal); an edit passes the vault
+     *  its editor opened on as [vaultId] (INV-EDIT, required). */
     suspend fun save(itemId: String?, doc: ItemDoc, vaultId: String? = null) = saveWithUploads(itemId, doc, emptyList(), vaultId)
 
     /**
      * Blob-first save (spec 02 §6): encrypt + upload every new attachment under the
      * (possibly fresh) itemId, THEN push the item that references them. An EXISTING item
      * never changes vaults (its blob AD binds to the vault; the server enforces
-     * vault_mismatch) — edits always target the item's own vault, wherever it lives.
+     * vault_mismatch): an edit names the vault its editor was bound to when it opened
+     * ([vaultId], INV-EDIT), and a home that differs now refuses the save with
+     * [ItemChangedVaultsException] instead of re-targeting it.
      *
      * F21: a save denied because its vault just went in-grace (an owner's accidental
      * delete) is PARKED for replay on restore — [surfaceStagedDenials] runs after the
@@ -2351,7 +2473,21 @@ class SyncEngine(
         if (itemId != null && existing == null && queuedOnly == null) {
             throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
         }
-        val effectiveVault = existing?.vaultId ?: queuedOnly?.vaultId ?: vaultId ?: account.personalVaultId
+        // INV-EDIT / INV-SEAL (root cause A §5.1, A1b). An EDIT is sealed under the vault its editor was bound to when it
+        // OPENED ([vaultId], provenance (b)); it is never looked up by itemId here. If the item's home is another vault
+        // now, the save is refused ("reopen it"), never re-targeted. A NEW item goes to the destination the user chose
+        // ([vaultId], default the personal vault, provenance (c)).
+        val provenance: SealProvenance = if (itemId != null) {
+            val home = cache.itemHome(itemId) ?: existing?.vaultId ?: queuedOnly?.vaultId
+            when (ItemHome.edit(home, vaultId)) {
+                ItemHome.Edit.UNBOUND -> throw IllegalArgumentException("an edit must name the vault its editor opened on")
+                ItemHome.Edit.CHANGED_VAULTS -> throw ItemChangedVaultsException()
+                ItemHome.Edit.OK -> SealProvenance.Editor(vaultId!!)
+            }
+        } else {
+            SealProvenance.Chosen(vaultId ?: account.personalVaultId)
+        }
+        val effectiveVault = provenance.vaultId
         val id = itemId ?: newItemId ?: account.newItemId()
         if (uploads.isNotEmpty()) {
             var done = 0
@@ -2375,7 +2511,7 @@ class SyncEngine(
         return syncMutex.withLock {
             // H37: the queued burst's ORIGINAL base rev wins over the cache's — see below.
             val coalescedBase = coalesceQueuedPuts(id)
-            val m = putMutation(id, effectiveVault, doc, coalescedBase ?: existing?.rev ?: 0)
+            val m = putMutation(provenance, id, doc, coalescedBase ?: existing?.rev ?: 0)
             sendOrQueue(m)?.let { return@withLock it }
             reconcileAfterWrite(m)
         }
@@ -2502,7 +2638,8 @@ class SyncEngine(
                 Mutation(
                     mutationId = it.itemId, // stable id → idempotent retry of the same plan
                     op = "put", itemId = it.itemId, vaultId = vaultId, baseItemRev = 0,
-                    item = account.encryptItem(vaultId, it.itemId, it.doc),
+                    // INV-SEAL (c): the import destination the user chose; each fresh id takes it as its home.
+                    item = sealFor(SealProvenance.Chosen(vaultId), it.itemId, it.doc),
                 )
             })
             done += chunk.size
@@ -2598,7 +2735,7 @@ class SyncEngine(
      */
     private suspend fun flushQueue(): Int {
         var deniedCount = 0
-        val displaced = mutableListOf<Pair<WireItem, Long>>() // PDD-1: (losing serverItem, winner newRev)
+        val displaced = mutableListOf<Displaced>() // PDD-1: (losing serverItem, winner newRev, pushed vault)
         while (true) {
             val chunk = nextBatch(cache.pending()) // H19: count- AND byte-bounded
             if (chunk.isEmpty()) break
@@ -2609,7 +2746,7 @@ class SyncEngine(
         mintRejectedNotices()
         // Materialize AFTER draining — a re-entrant push here recurses into flushQueue; each
         // copy is a fresh item (baseRev 0) that applies cleanly, so the recursion is bounded.
-        for ((losing, winnerRev) in displaced) materializeConflictFromServerItem(losing, winnerRev)
+        for (d in displaced) materializeConflictFromServerItem(d)
         return deniedCount
     }
 
@@ -2628,7 +2765,7 @@ class SyncEngine(
      * each of which is dropped durably via [rejectRow]. A per-row `rejected` status (the
      * H03 server amendment, spec 03 §5) takes the same drop path with no bisection at all.
      */
-    private suspend fun pushBatch(chunk: List<Mutation>, displaced: MutableList<Pair<WireItem, Long>>): BatchOutcome {
+    private suspend fun pushBatch(chunk: List<Mutation>, displaced: MutableList<Displaced>): BatchOutcome {
         val out = BatchOutcome()
         val resp = try {
             api.push(PushRequest(chunk))
@@ -2681,7 +2818,7 @@ class SyncEngine(
                 // winner, not a losing value — materializing it would spawn a spurious copy.
                 val si = r.serverItem
                 val nr = r.newItemRev
-                if (r.status == "conflict" && m.op == "put" && si != null && nr != null) displaced += si to nr
+                if (r.status == "conflict" && m.op == "put" && si != null && nr != null) displaced += Displaced(si, nr, m.vaultId)
                 // Any other definitive outcome removes it (idempotent replay returns
                 // the original result).
                 cache.dequeue(m.mutationId)

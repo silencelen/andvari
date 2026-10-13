@@ -1288,6 +1288,8 @@ private fun SignOutConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
 private fun Vault(state: DesktopState) {
     var query by remember { mutableStateOf("") }
     var editing by remember { mutableStateOf<Pair<String?, ItemDoc>?>(null) }
+    // INV-EDIT (root cause A §5.1, A1b): the vault the editor was bound to when it OPENED on an existing item.
+    var editingVaultId by remember { mutableStateOf<String?>(null) }
     var detailId by remember { mutableStateOf<String?>(null) }
     var importFlow by remember { mutableStateOf(false) } // the universal import screen
     // Owner dev-note 2026-08-18: sort + facet state (the Android/web listctl twin) — plain
@@ -1417,11 +1419,11 @@ private fun Vault(state: DesktopState) {
                 // F71: close ONLY via saveItem's success callback (the Android op{}+onSaved
                 // contract) — the old `saveItem(...); editing = null` closed optimistically
                 // and a failed save/upload discarded everything typed.
-                onSave = { doc, uploads, vaultId -> state.saveItem(editing!!.first, doc, uploads, vaultId) { state.endEditorSession(); editing = null } },
+                onSave = { doc, uploads, vaultId -> state.saveItem(editing!!.first, doc, uploads, if (editing!!.first != null) editingVaultId else vaultId) { state.endEditorSession(); editing = null } },
                 onCancel = { state.endEditorSession(); editing = null },
                 )
             }
-            current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
+            current != null -> Detail(state, current, vaultBadges[current.vaultId], { editing = current.itemId to current.doc; editingVaultId = current.vaultId }, { state.deleteItem(current.itemId); detailId = null }, { detailId = null })
             else -> Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(query, { query = it }, Modifier.weight(1f), label = { Text("Search vault") }, placeholder = { Text("Search vault…") }, singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) }) // a11ydesk-07: programmatic name
@@ -1917,6 +1919,8 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // Root cause A §3.1 (security review 2026-10): canon in core HouseholdCopy, web pinned to it.
         "vk-mismatch" -> Pair(HouseholdCopy.vkMismatchNotice(name), true)
         "key-unreadable" -> Pair(HouseholdCopy.KEY_UNREADABLE_NOTICE, true)
+        // Root cause A §5.1 INV-HOME (A1b): a served row named another vault than this device holds the item in.
+        "wrong-vault" -> Pair(HouseholdCopy.WRONG_VAULT_NOTICE, true)
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
                 "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +
@@ -2558,7 +2562,7 @@ private fun ItemHistorySection(state: DesktopState, item: VaultItem, readOnly: B
             onDismissRequest = { confirmRestore = null },
             title = { Text("Restore this version?") },
             text = { Text("The item's current version will be replaced by the one from ${java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10)}. The replaced version stays in history.") },
-            confirmButton = { TextButton(onClick = { confirmRestore = null; state.restoreVersion(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
+            confirmButton = { TextButton(onClick = { confirmRestore = null; state.restoreVersion(item.itemId, item.vaultId, v.doc) { onRestored() } }) { Text("Restore") } },
             dismissButton = { TextButton(onClick = { confirmRestore = null }) { Text("Cancel") } },
         )
     }

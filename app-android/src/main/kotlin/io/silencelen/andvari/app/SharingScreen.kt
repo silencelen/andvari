@@ -112,6 +112,8 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
         // Root cause A §3.1 (security review 2026-10): canon in core HouseholdCopy, web pinned to it.
         "vk-mismatch" -> Pair(HouseholdCopy.vkMismatchNotice(name), true)
         "key-unreadable" -> Pair(HouseholdCopy.KEY_UNREADABLE_NOTICE, true)
+        // Root cause A §5.1 INV-HOME (A1b): a served row named another vault than this device holds the item in.
+        "wrong-vault" -> Pair(HouseholdCopy.WRONG_VAULT_NOTICE, true)
         else -> Pair( // "anomaly"
             "The server says you lost access to “$name”, but this couldn’t be verified as a real owner action. " +
                 "A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). " +

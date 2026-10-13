@@ -188,8 +188,8 @@ class ClientEngineTest {
 
         // A advances the item; B then edits from its now-STALE base rev → server flags
         // the item, and B's post-push pull materializes the conflict (copy + flag-clear).
-        engineA.save(itemId, engineA.item(itemId)!!.doc.copy(name = "Future v2"))
-        engineB.save(itemId, engineB.item(itemId)!!.doc.copy(name = "Future stale"))
+        engineA.save(itemId, engineA.item(itemId)!!.doc.copy(name = "Future v2"), engineA.item(itemId)!!.vaultId)
+        engineB.save(itemId, engineB.item(itemId)!!.doc.copy(name = "Future stale"), engineB.item(itemId)!!.vaultId)
 
         // Decrypt both pushed mutations through a plain pull on engine A.
         engineA.sync()

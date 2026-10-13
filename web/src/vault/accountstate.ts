@@ -52,6 +52,9 @@ export interface AccountStateDoc {
   ownedVaults: Record<string, number>;
   /** A6b: vaultId → ms; written when the account transfers the vault away or leaves it. */
   ownedTombstones: Record<string, number>;
+  /** A1b (A6b review LOW-R): vaults some device of this account first adopted the key of AS A MEMBER, vaultId → ms.
+   *  Add-only (no tombstones), union-merged keeping the larger `at`, like `ownedVaults`. */
+  memberReceived: Record<string, number>;
 }
 
 export class AccountStateError extends Error {}
@@ -62,12 +65,12 @@ export const ACCOUNT_STATE_SEALED_MAX = 65536;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
-const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones"];
+const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones", "memberReceived"];
 const CONTACT_KEYS = ["userId", "identityPub", "label", "verifiedAt", "method"];
 const ISSUED_KEYS = ["vaultId", "userId", "keyHash", "at"];
 
 export function emptyAccountState(userId: string): AccountStateDoc {
-  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {} };
+  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {}, memberReceived: {} };
 }
 
 /** The tombstone key for an issued grant. */
@@ -92,7 +95,8 @@ export function ownsVault(doc: AccountStateDoc, vaultId: string): boolean {
 export function isBlankAccountState(doc: AccountStateDoc): boolean {
   return doc.contacts.length === 0 && Object.keys(doc.consumedNonces).length === 0 && doc.orgRecoveryFp === null &&
     doc.issuedGrants.length === 0 && Object.keys(doc.issuedTombstones).length === 0 &&
-    Object.keys(doc.ownedVaults).length === 0 && Object.keys(doc.ownedTombstones).length === 0;
+    Object.keys(doc.ownedVaults).length === 0 && Object.keys(doc.ownedTombstones).length === 0 &&
+    Object.keys(doc.memberReceived).length === 0;
 }
 
 /** Deterministic encoding: fixed key order, contacts by userId, sorted maps. */
@@ -113,6 +117,7 @@ export function encodeAccountState(doc: AccountStateDoc): string {
     issuedTombstones: sortedRecord(doc.issuedTombstones),
     ownedVaults: sortedRecord(doc.ownedVaults),
     ownedTombstones: sortedRecord(doc.ownedTombstones),
+    memberReceived: sortedRecord(doc.memberReceived),
   });
 }
 
@@ -207,9 +212,14 @@ export function decodeAccountState(userId: string, plaintext: string): AccountSt
     if (t < 0) throw new AccountStateError("owned vault at is negative");
   }
   const ownedTombstones = intRecord(o.ownedTombstones, "owned tombstones");
+  const memberReceived = intRecord(o.memberReceived, "member-received vaults");
+  for (const [k, t] of Object.entries(memberReceived)) {
+    if (!UUID_RE.test(k)) throw new AccountStateError("member-received vault id is not a uuid");
+    if (t < 0) throw new AccountStateError("member-received at is negative");
+  }
   return {
     v: 1, userId, seq: o.seq, contacts, contactTombstones: tombstones, orgRecoveryFp: fp as string | null, consumedNonces: nonces,
-    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones,
+    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived,
   };
 }
 
@@ -286,13 +296,21 @@ export function mergeAccountState(
   const ownedTombstones = unionMax((d) => d.ownedTombstones);
   const ownedAll = unionMax((d) => d.ownedVaults);
   const ownedVaults = Object.fromEntries(Object.entries(ownedAll).filter(([k, t]) => (ownedTombstones[k] ?? Number.MIN_SAFE_INTEGER) < t));
+  const memberReceived = unionMax((d) => d.memberReceived ?? {}); // A1b (LOW-R): add-only union, the larger `at`
   return {
     doc: {
       v: 1, userId, seq: Math.max(localSeq, servedSeq, highWater, 0), contacts, contactTombstones: sortedTomb, orgRecoveryFp: fp, consumedNonces,
-      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones,
+      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived,
     },
     rollback,
   };
+}
+
+/** Record that some device of this account received `vaultIds` as a member (A1b, LOW-R; core `withMemberReceived`). */
+export function withMemberReceived(doc: AccountStateDoc, vaultIds: readonly string[], at: number): AccountStateDoc {
+  const m = { ...doc.memberReceived };
+  for (const id of vaultIds) m[id] = Math.max(m[id] ?? at, at);
+  return { ...doc, memberReceived: m };
 }
 
 /** Record a grant this account just signed (A6b; core `AccountState.withIssued` twin). */

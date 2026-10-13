@@ -4,6 +4,7 @@ import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
+import kotlinx.serialization.builtins.ListSerializer
 
 /** A decrypted item held in the client (plaintext lives only in memory). */
 data class VaultItem(
@@ -206,9 +207,36 @@ interface VaultCache {
 
     fun setLiveSince(vaultId: String, at: Long?) = setClientState(LIVE_SINCE_PREFIX + vaultId, at?.toString())
 
+    // ---- item home (security review 2026-10, root cause A §5.1 INV-HOME; branch A1b) ----
+    // Both ride [clientState]: they share the pull's transaction ([atomically]), survive a restart, and survive a resync
+    // [clear] (a server-triggered 410 wipes the row stores, never the homes). A home is written from the FIRST envelope
+    // this device applied for an itemId, or by this device's own first seal of a new itemId; never overwritten after.
+
+    /** The vaultId of the first envelope this device applied for [itemId] (null: none yet). */
+    fun itemHome(itemId: String): String? = clientState(ITEM_HOME_PREFIX + itemId)
+
+    /** Record [itemId]'s home. Callers only ever write a home that is absent ([ItemHome.admit] / [ItemHome.seal]). */
+    fun setItemHome(itemId: String, vaultId: String) = setClientState(ITEM_HOME_PREFIX + itemId, vaultId)
+
+    /** Served rows refused by INV-HOME (newest last, at most [QUARANTINE_CAP]): ciphertext, never applied, never listed,
+     *  searched, exported or filled. Kept for diagnosis only. */
+    fun quarantined(): List<WireItem> = clientState(QUARANTINE_KEY)?.let {
+        runCatching { quarantineJson.decodeFromString(ListSerializer(WireItem.serializer()), it) }.getOrNull()
+    }.orEmpty()
+
+    /** Quarantine one refused row (the newest copy per (itemId, vaultId, rev) wins; the list is capped). */
+    fun quarantine(wire: WireItem) {
+        val rows = quarantined().filterNot { it.itemId == wire.itemId && it.vaultId == wire.vaultId && it.rev == wire.rev } + wire
+        setClientState(QUARANTINE_KEY, quarantineJson.encodeToString(ListSerializer(WireItem.serializer()), rows.takeLast(QUARANTINE_CAP)))
+    }
+
     companion object {
         const val CONSUMED_NONCES_KEY = "lifecycle.consumed"
         const val LIVE_SINCE_PREFIX = "lifecycle.liveSince."
+        const val ITEM_HOME_PREFIX = "item.home."
+        const val QUARANTINE_KEY = "item.quarantine"
+        const val QUARANTINE_CAP = 256
+        private val quarantineJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
     }
 }
 

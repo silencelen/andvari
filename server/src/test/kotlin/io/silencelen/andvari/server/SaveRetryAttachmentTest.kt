@@ -87,7 +87,7 @@ class SaveRetryAttachmentTest {
         commitFirstAttempt(api, account, ref, item.itemId, item.vaultId, data)
 
         // The retry: same once-minted ref, re-encrypted from plaintext (fresh header).
-        engine.saveWithUploads(item.itemId, item.doc.copy(attachments = listOf(ref)), listOf(PendingUpload(ref, data)))
+        engine.saveWithUploads(item.itemId, item.doc.copy(attachments = listOf(ref)), listOf(PendingUpload(ref, data)), item.vaultId)
 
         val saved = engine.items().single()
         assertEquals(listOf(ref.id), saved.doc.attachments.map { it.id }, "the retried edit landed with its attachment")

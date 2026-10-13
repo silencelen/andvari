@@ -8,6 +8,7 @@
  */
 import type { CardFieldKind } from "./detect";
 import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
 import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
@@ -151,6 +152,7 @@ function showView(unlocked: boolean): void {
     el("personal-change").hidden = true; // A5b: likewise
     el("personal-change-accept").hidden = true; // A6: re-offered only after a fresh co-holder lookup
     el("grants-waiting").hidden = true; // A6: likewise
+    el("wrong-vault").hidden = true; // A1b: likewise
     el("qu-offer").hidden = true; // quick-unlock offer/enroll are unlocked-only chrome (spec 01 §8.4)
     el("qu-enroll").hidden = true;
     el("qu-settings").hidden = true;
@@ -189,6 +191,10 @@ async function refresh(): Promise<void> {
   const waiting = s.unlocked ? s.waitingGrants ?? 0 : 0;
   el("grants-waiting").hidden = waiting <= 0;
   el("grants-waiting").textContent = waitingGrantsLine(waiting);
+  // A1b (§5.1 INV-HOME): the last snapshot sent rows under the wrong vault; they were not applied.
+  const wrong = s.unlocked ? s.wrongVault ?? 0 : 0;
+  el("wrong-vault").hidden = wrong <= 0;
+  el("wrong-vault").textContent = wrongVaultLine(wrong);
   if (s.unlocked) {
     await loadUnlocked();
     // a11y 2c: on a recovery-password session, move focus onto the critical notice so a screen

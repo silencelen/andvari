@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { UserLookupResponse, VaultMemberSummary } from "../api/types";
 import type { Account } from "../vault/account";
-import { type DeletedVaultInfo, type IncomingTransfer, type LegacyGrantRow, MemberNotVerifiedError, OwnershipNotConfirmedError, type OwnershipClaim, OwnershipTransferAckRequiredError, ReauthFailedError, type VaultInfo, type VaultStore } from "../vault/store";
+import { type DeletedVaultInfo, type IncomingTransfer, type LegacyGrantRow, MemberNotVerifiedError, OwnershipNotConfirmedError, type OwnershipClaim, OwnershipTransferAckRequiredError, ReauthFailedError, ReauthStaleSessionError, type VaultInfo, type VaultStore } from "../vault/store";
 import { VaultKeyNotVerifiedError } from "../vault/account";
 import { VerifyMemberPanel } from "./Household";
 import { LegacyReviewCard, PendingInvitationsCard } from "./SignedGrantCards";
@@ -626,7 +626,7 @@ function ConfirmOwnership({ vault, store, onConfirmed }: { vault: VaultInfo; sto
       onConfirmed();
     } catch (x) {
       setErr(
-        x instanceof ReauthFailedError ? "That master password isn't right."
+        x instanceof ReauthFailedError || x instanceof ReauthStaleSessionError ? x.message
           : x instanceof OwnershipTransferAckRequiredError ? x.message
           : friendlyError(x),
       );

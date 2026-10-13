@@ -220,6 +220,17 @@ object HouseholdCopy {
      *  into it. The review card ("Review your shared vaults") is where the member accepts it or leaves. */
     const val VAULT_NOT_VERIFIED = "This shared vault isn't verified on this device yet, so it is read-only. Review it under Shared vaults first."
 
+    /** INV-EDIT (root cause A §5.1, branch A1b): the item now lives in another vault than the one its editor opened on.
+     *  Nothing is saved and nothing is re-targeted. TWIN of web `ItemChangedVaultsError`, byte-equal (vault-copy.test.ts). */
+    const val ITEM_CHANGED_VAULTS = "This item changed vaults; reopen it."
+
+    /** A6b carry-forward (A1b): a reauth against a session whose salt is stale (a password change or KDF upgrade since
+     *  this unlock) can never verify. TWIN of web `ReauthStaleSessionError`, byte-equal (vault-copy.test.ts). */
+    const val REAUTH_STALE_SESSION = "Lock and unlock andvari, then try again."
+
+    /** The A6b "You own <vault>?" reauth: the password does not open this account's key. TWIN of web `ReauthFailedError`. */
+    const val REAUTH_FAILED = "That master password isn't right."
+
     /** NATIVE-PINNED: desktop manual-refresh offline notice — reassuring (cached data is
      *  still on screen), so sync flows prefer it over the bare [UNREACHABLE]. */
     const val SYNC_OFFLINE = "Can't reach the server right now — showing what's synced on this device."
@@ -286,6 +297,14 @@ object HouseholdCopy {
      */
     const val KEY_UNREADABLE_NOTICE: String =
         "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made."
+
+    /**
+     * Root cause A §5.1 INV-HOME (branch A1b): the server sent an item under another vault than the one this device holds
+     * it in; it was not applied (quarantined), once per pull. Danger tone. TWIN of web Vault.tsx noticeBody
+     * "wrong-vault", byte-equal, pinned by web/src/ui/vault-copy.test.ts.
+     */
+    const val WRONG_VAULT_NOTICE: String =
+        "The server sent an item under the wrong vault. andvari kept the item where it was and ignored the other copy. Tell your admin — the server may be misbehaving."
 
     /**
      * Root cause A §1.6 (branch A6): a vault grant this client adopted after verifying it against the PINNED
@@ -497,6 +516,7 @@ object HouseholdCopy {
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is VaultKeyNotVerifiedException -> VAULT_NOT_VERIFIED // A6: a legacy key is read-only, never "wrong password"
+        t is ItemChangedVaultsException -> ITEM_CHANGED_VAULTS // A1b INV-EDIT: reopen, never re-target
         t is CryptoException -> WRONG_MASTER_PASSWORD
         t is ApiException -> apiCopy(t)
         t is IOException -> SAVE_FAILED_OFFLINE

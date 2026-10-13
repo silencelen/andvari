@@ -69,7 +69,7 @@ describe("contact pins come only from a human", () => {
     expect(pinState(doc, { userId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", identityPub: served().identityPub })).toBe("unpinned");
   });
 
-  it("a sync that delivers a member grant pins nothing and writes no account state", async () => {
+  it("a sync that delivers a member grant pins nothing (its only account-state write is the A1b member provenance)", async () => {
     const rk = boxKeypairFromSeed(randomBytes(32));
     const fp = await fingerprint(rk.publicKey);
     const victim = (await Account.enroll({ inviteToken: "t", email: "v@example.com", displayName: "v", password: "pw pw pw pw", kdfParams: KDF, recoveryPublicKey: rk.publicKey, recoveryFingerprint: fp })).account;
@@ -98,6 +98,11 @@ describe("contact pins come only from a human", () => {
     await store.sync();
     expect(victim.hasVault(shared.vaultId)).toBe(true);
     expect(store.accountState.contacts()).toHaveLength(0);
-    expect(writes).toHaveLength(0);
+    // The only write a sync makes on its own is the A1b (LOW-R) member-provenance record: never a contact.
+    for (const w of writes) {
+      const doc = victim.openAccountState(w);
+      expect(doc.contacts).toHaveLength(0);
+      expect(Object.keys(doc.memberReceived)).toEqual([shared.vaultId]);
+    }
   });
 });

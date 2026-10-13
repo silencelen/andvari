@@ -104,7 +104,7 @@ class LifecycleReplayLossTest {
 
         // Owner deletes; the member edits anyway — the write is denied, then PARKED (F21).
         engineOwner.deleteSharedVault(nv.vaultId)
-        runCatching { engineMember.save(item.itemId, item.doc.copy(name = "wifi-edited-by-kid")) }
+        runCatching { engineMember.save(item.itemId, item.doc.copy(name = "wifi-edited-by-kid"), item.vaultId) }
         engineMember.sync()
         val held = assertNotNull(cacheMember.getHeld(nv.vaultId), "the deleted vault moves to holding")
         assertEquals(1, held.parked.size, "F21: the member's offline edit is parked, never dropped")
@@ -161,7 +161,7 @@ class LifecycleReplayLossTest {
 
         // Delete → the member's edit parks.
         engineOwner.deleteSharedVault(nv.vaultId)
-        runCatching { engineMember.save(item.itemId, item.doc.copy(name = "wifi-edited-by-kid")) }
+        runCatching { engineMember.save(item.itemId, item.doc.copy(name = "wifi-edited-by-kid"), item.vaultId) }
         engineMember.sync()
         val parkedId = assertNotNull(cacheMember.getHeld(nv.vaultId)).parked.single().mutationId
 

@@ -1976,8 +1976,8 @@ class DesktopState(
     fun clearItemVersions() { itemVersions = null }
     /** Item history restore (H03): an ordinary save of the archived doc with every attachment
      *  ref the live item no longer carries stripped — see [SyncEngine.versionDocForRestore]. */
-    fun restoreVersion(itemId: String, version: ItemDoc, onSaved: () -> Unit = {}) =
-        saveItem(itemId, engine?.versionDocForRestore(itemId, version) ?: version, onSaved = onSaved)
+    fun restoreVersion(itemId: String, vaultId: String, version: ItemDoc, onSaved: () -> Unit = {}) =
+        saveItem(itemId, engine?.versionDocForRestore(itemId, version) ?: version, vaultId = vaultId, onSaved = onSaved) // bound to the item's vault (INV-EDIT)
 
     fun deleteItem(itemId: String) = op {
         val outcome = engine!!.remove(itemId)

@@ -13,6 +13,7 @@ import { buildGrantFrame, decideLegacyGrant, type GrantOutcome, type GrantPin, t
 import type { Contact } from "./accountstate";
 import { CryptoError } from "../crypto/sodium";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
+import type { SealProvenance } from "./itemhome";
 import type {
   AccountKeys,
   CreateVaultRequest,
@@ -638,6 +639,8 @@ export class Account {
             this.grantAnomaliesByVault.delete(grant.vaultId);
           } else {
             this.grantAnomaliesByVault.set(grant.vaultId, "vk_mismatch");
+            // A1b (keyprecedence.json; core parity): the mismatch also raises the "vault key mismatch" notice.
+            this.vkMismatchVaults.add(grant.vaultId);
           }
           return;
         }
@@ -749,7 +752,8 @@ export class Account {
         // the v1 seal. A verified grant naming a DIFFERENT key than the vouched one is vk_mismatch: keep the vouched
         // key when the seal still opens to it, otherwise refuse the row with no key. Never adopt it.
         if (this.vouchGate(grant.vaultId, o.vk) === "mismatch") {
-          if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false, anomaly: "vk_mismatch" };
+          // A1b (keyprecedence.json; core parity): sealMismatch, so the "vault key mismatch" notice is raised too.
+          if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: true, anomaly: "vk_mismatch" };
           throw new GrantRefusedSignal("vk_mismatch");
         }
         return { vk: o.vk, source: "signed-grant", sealMismatch: false, from: o.from };
@@ -1046,6 +1050,12 @@ export class Account {
    * The server serves `keys`, but it cannot make a password it chose pass without a wrap of OUR UVK. MK and the wrap
    * key are wiped on the way out (audit H80).
    */
+  /** A6b carry-forward (A1b; core `sessionSaltCurrent`): `keys` carry the salt THIS session unlocked with. After an
+   *  in-session password change or KDF upgrade they do not, and {@link verifyPassword} fails closed. */
+  sessionSaltCurrent(keys: AccountKeys): boolean {
+    return this.sessionKdfSalt !== null && keys.kdfSalt === this.sessionKdfSalt;
+  }
+
   async verifyPassword(password: string, keys: AccountKeys): Promise<boolean> {
     // A6b review LOW-3 (core twin): the KDF floor/ceiling fence unlock applies (throws KdfPolicyError), and only the
     // salt THIS session unlocked with: a replayed older AccountKeys carries another salt and the OLD password's wrap.
@@ -1315,29 +1325,47 @@ export class Account {
     }
   }
 
+  /** INV-WRITE-KEY as a question: may an item be sealed under `vaultId`'s held key at all? (core `canSealUnder`) */
+  canSealUnder(vaultId: string): boolean {
+    return !this.isLegacyReadOnly(vaultId) && !this.heldKeyContradictsVouch(vaultId);
+  }
+
   /**
-   * Seal an item doc under its vault VK. The formatVersion — also bound into the AD —
-   * is max(docFloor, the fv this itemId was last decrypted/sealed at), so callers never
-   * thread fv explicitly: new docs seal at their floor, existing items re-seal
-   * monotonically (decryptItem/decryptItemVersion feed the per-item memory). The wire
-   * fv and the AD fv come from this ONE computation.
+   * THE item seal for anything pushed (security review 2026-10, root cause A §5.1 INV-SEAL; branch A1b; core
+   * `Account.sealItem` twin): item plaintext is sealed under `VK_v` only for its provenance vault `v`, and never under a
+   * key INV-WRITE-KEY refuses (legacy-read-only, or contradicting this device's vouch / held-key memory). The
+   * formatVersion — also bound into the AD — is max(docFloor, the fv this itemId was last decrypted/sealed at), so
+   * callers never thread fv explicitly. The wire fv and the AD fv come from this ONE computation.
+   */
+  sealItem(provenance: SealProvenance, itemId: string, doc: ItemDoc): ItemUpload {
+    if (!this.canSealUnder(provenance.vaultId)) throw new VaultKeyNotVerifiedError(provenance.vaultId); // INV-WRITE-KEY
+    return this.sealUnder(provenance.vaultId, itemId, doc);
+  }
+
+  /**
+   * Test and fixture shim for {@link sealItem}: the plaintext's provenance is whatever the CALLER asserts `vaultId` is,
+   * so product code never calls this (a source tripwire in itemhome.vectors.test.ts fails the suite if it does).
    */
   encryptItem(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
-    if (this.isLegacyReadOnly(vaultId)) throw new VaultKeyNotVerifiedError(vaultId); // INV-WRITE-KEY
-    return this.sealItem(vaultId, itemId, doc);
+    return this.sealItem({ kind: "chosen", vaultId }, itemId, doc);
   }
 
   /**
-   * The holding-area snapshot (spec 03 §11, store.moveToHolding): re-seal plaintext that was DECRYPTED from this
-   * vault, under the same key, for this device's own ciphertext-only storage. Never pushed, never a new
-   * provenance, so INV-WRITE-KEY (which guards what the household receives) does not apply: a removed
-   * legacy-read-only vault is parked exactly like any other.
+   * A LOCAL re-seal, never pushed: plaintext DECRYPTED from `vaultId` (provenance (a)) sealed again under the same key
+   * for this device's own ciphertext-only storage — the holding-area snapshot (store.moveToHolding), a queued write's
+   * pre-edit snapshot, and the revert of a refused write. Not a new provenance and not something the household
+   * receives, so INV-WRITE-KEY does not apply: a removed legacy-read-only vault is parked exactly like any other.
    */
-  resealForHolding(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
-    return this.sealItem(vaultId, itemId, doc);
+  resealLocal(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
+    return this.sealUnder(vaultId, itemId, doc);
   }
 
-  private sealItem(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
+  /** The holding-area snapshot: {@link resealLocal}. */
+  resealForHolding(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
+    return this.resealLocal(vaultId, itemId, doc);
+  }
+
+  private sealUnder(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
     const fv = Math.max(docFloor(doc), this.itemFv.get(itemId) ?? 1);
     this.itemFv.set(itemId, fv);
     const blob = seal(this.vk(vaultId), utf8(JSON.stringify(doc)), adItem(vaultId, itemId, fv));

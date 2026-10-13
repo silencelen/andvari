@@ -571,7 +571,9 @@ sweep → up-to-date cursor no-ops, stale cursor 410s then converges via `since=
   never re-encrypts; it applies the newest write, archives the loser, and sets
   `conflict=true`. The next syncing client that can decrypt materializes a visible
   "(conflict copy)" item — new itemId, fresh envelope — then clears the flag with a
-  normal push.
+  normal push. Both mutations are built from the flagged envelope's OWN plaintext and sealed
+  under that envelope's vault (INV-CONFLICT, §7.2); a flagged row whose vault disagrees with the
+  item's home or its in-memory twin pushes nothing.
 
 ### 7.1 Server durability — what `applied` promises (2026-09-13 amendment, audit H84)
 
@@ -603,6 +605,41 @@ conforming server to promise.
 
 `data/andvari.db` is still the only copy of the household's ciphertext; durability is not backup
 (`docs/self-hosting.md` § Backup).
+
+### 7.2 Item home and seal provenance (NORMATIVE client duties; security review 2026-10, root cause A §5, branch A1b)
+
+The server chooses every row a client sees, so a row's `vaultId` is a hint about where an item lives, not a
+fact. These invariants keep plaintext in the vault it came from. Every client implements them; the rules are
+pure functions graded by `spec/test-vectors/itemhome.json` (core `ItemHome`, web `vault/itemhome.ts`, extension
+`itemhome.ts`).
+
+- **INV-HOME.** For every itemId a client records `home(itemId)`: the vaultId of the FIRST envelope it applied
+  for that itemId (or of its own first seal of a fresh id). It is persisted with the offline cache (§8: native
+  client-state rows `item.home.<itemId>`, web kv rows `itemHome:<itemId>`, the extension's storage.local per
+  origin and user), survives a 410 resync and a restart, and is rebuilt from the cached rows on hydrate. Every
+  later row for that itemId, live or tombstone, whose vaultId differs from the home is NOT applied: it goes to a
+  quarantine (ciphertext, kept for diagnosis), is excluded from items, search, export, autofill and capture, and
+  the pull raises ONE "the server sent an item under the wrong vault" notice. No legitimate flow re-homes an
+  itemId: move and copy mint a fresh id (the copy leg) and then delete the source.
+- **INV-SEAL.** Item plaintext is sealed for a push under `VK_v` only when its provenance vault is `v`:
+  (a) the vault bound in the AD of the envelope it was decrypted from; (b) the vault an editor session was
+  bound to when it OPENED; (c) a destination the user explicitly chose and saw (move, copy, import, the new-item
+  vault picker). No wire field, lookup by itemId or label chooses the sealing key: every item seal goes through
+  one helper that takes the provenance (core `Account.sealItem`, web `Account.sealItem`, the extension's gated
+  `putItem`), and a seal of an itemId under any vault other than its home is refused.
+- **INV-CONFLICT.** A conflict copy and the flag-clearing put are both built from `decrypt(flagged)` under
+  `flagged.vaultId`. If the in-memory twin or the home names another vault, nothing is pushed and the pull's
+  wrong-vault notice is raised. The push-side copy from a server-returned displaced value requires that value to
+  be under the vault the losing put was pushed to (its AD vault, which is also the copy's seal vault) and the
+  item's home.
+- **INV-EDIT.** A save of an existing item names the vault its editor was bound to when it opened. If the item's
+  home differs at save time, the save is refused ("This item changed vaults; reopen it."), never re-targeted.
+- **INV-WRITE-KEY.** No item is sealed under a key that is legacy-read-only (spec 01 §6) or that contradicts this
+  device's vouch or held-key memory (the vouch gate), on any path: save, conflict, copy-into, import, the
+  extension's capture and update targets, TOTP add. (The holding area's local re-seal, a queued write's local
+  pre-edit snapshot and the revert of a refused write never leave the device and are not pushes.)
+
+The home is device-local: the server chooses the first home on a fresh device (spec 05 R17).
 
 ## 8. Client offline cache
 
