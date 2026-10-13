@@ -2695,6 +2695,27 @@ class DesktopState(
 
     fun personalChange(): io.silencelen.andvari.core.client.PersonalChange? = engine?.personalChange()
 
+    // ---- grant re-issue authority (security review 2026-10, root cause A, branch A6b) ----
+
+    /** The server reports this account as [vaultId]'s owner but this account has no evidence of it ("You own <vault>?"). */
+    fun ownershipNeedsConfirmation(vaultId: String): Boolean = engine?.ownershipNeedsConfirmation(vaultId) == true
+
+    /** "You own <vault>?" confirmed with a fresh master-password reauth (checked on this device). */
+    suspend fun confirmVaultOwnership(vaultId: String, password: String) {
+        requireNotNull(engine) { "locked" }.confirmOwnership(vaultId, password)
+    }
+
+    /** The "Legacy grants" list for an owned vault (server-listed; each row needs the owner's confirmation). */
+    suspend fun loadLegacyGrants(vaultId: String): List<io.silencelen.andvari.core.client.LegacyGrantRow> =
+        requireNotNull(engine) { "locked" }.loadLegacyGrants(vaultId)
+
+    fun legacyGrantRows(vaultId: String): List<io.silencelen.andvari.core.client.LegacyGrantRow> = engine?.legacyGrantRows(vaultId).orEmpty()
+
+    /** The owner confirmed "Re-share <vault> with <member>?" on [row]: only now is the grant signed. */
+    suspend fun confirmReissue(row: io.silencelen.andvari.core.client.LegacyGrantRow) {
+        requireNotNull(engine) { "locked" }.confirmReissue(row)
+    }
+
     fun acceptPersonalChange() {
         requireNotNull(engine) { "locked" }.acceptPersonalChange()
     }

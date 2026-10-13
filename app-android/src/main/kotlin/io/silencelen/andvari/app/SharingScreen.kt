@@ -399,12 +399,22 @@ private fun OwnerVaultPanel(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             RenameHeader(vm, ui, v)
+            // A6b: the server's role label only shows this panel; signing actions need this account's own evidence.
+            var ownTick by remember(v.vaultId) { mutableStateOf(0) }
+            val unconfirmed = remember(v.vaultId, ownTick, ui.busy) { vm.ownershipNeedsConfirmation(v.vaultId) }
             Text(
-                "You own this vault. Writers can add and edit items; readers can only view.",
+                (if (unconfirmed) "The server reports you as this vault's owner. " else "You own this vault. ") +
+                    "Writers can add and edit items; readers can only view.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(10.dp))
-            TransferControl(vm, ui, v)
+            if (unconfirmed) {
+                OwnershipConfirmCard(vm, v) { ownTick++ }
+            } else {
+                LegacyGrantsCard(vm, v)
+                Spacer(Modifier.height(10.dp))
+                TransferControl(vm, ui, v)
+            }
             Spacer(Modifier.height(10.dp))
             DeleteVaultControl(vm, ui, v)
         }
