@@ -103,6 +103,27 @@ class MemberNotVerifiedException(val userId: String) :
 class OwnershipNotConfirmedException(val vaultId: String) :
     Exception("confirm that you own this vault first (this device has no record that you created it or accepted it)")
 
+/** A6b review MEDIUM-1: the vault's key reached this device as a MEMBER; claiming it needs the human's explicit
+ *  "This vault's owner transferred it to me" on top of the password. */
+class OwnershipTransferAckRequiredException(val vaultId: String) :
+    Exception("this device received this vault as a member: confirm that its owner transferred it to you")
+
+/**
+ * What "You own <vault>?" shows (A6b review MEDIUM-1), like A5b's personal-vault choice. [reportedOwner],
+ * [lastTransferTo]/[lastTransferSeq], [coHolders] and [origin] are AS REPORTED BY THE SERVER; [receivedAsMember] is
+ * this device's own record that it first got the key as a member (then the dialog asks for the transfer acknowledgement).
+ */
+data class OwnershipClaim(
+    val vaultId: String,
+    val vaultName: String?,
+    val reportedOwner: CoHolder?,
+    val lastTransferTo: CoHolder?,
+    val lastTransferSeq: Long?,
+    val coHolders: List<CoHolder>,
+    val origin: PersonalChoiceInfo.Origin,
+    val receivedAsMember: Boolean,
+)
+
 /** A6b: a re-issue with no human confirmation and no matching issued-grants record. */
 class ReissueNotAuthorizedException(val vaultId: String, val userId: String) :
     Exception("re-sharing this vault with this member needs your confirmation")
@@ -276,6 +297,9 @@ class SyncEngine(
         const val REMOVED_LEGACY = "legacy"
         /** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches. */
         internal const val HELD_KEYS_KEY = "grant.held.keys"
+
+        /** A6b review MEDIUM-1: vaults this device first adopted a key for as a MEMBER (durable provenance). */
+        internal const val MEMBER_GRANTED_KEY = "grant.member.granted"
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -565,6 +589,7 @@ class SyncEngine(
         val known = persisted.mapTo(HashSet()) { it.substringBefore('|') }
         val added = account.heldKeyTagsSnapshot().filterKeys { it !in known }.map { (v, t) -> "$v|$t" }
         if (added.isNotEmpty()) persistSet(HELD_KEYS_KEY, persisted + added)
+        persistMemberGranted()
     }
 
     // ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7) ----
@@ -998,18 +1023,67 @@ class SyncEngine(
         if (!ownsVault(vaultId)) throw OwnershipNotConfirmedException(vaultId)
     }
 
+    private var pendingOwnershipClaim: OwnershipClaim? = null
+
+    /** A6b review MEDIUM-1: this device first adopted [vaultId]'s key as a MEMBER (a seal, a v2 grant, a non-owner
+     *  row), now or in an earlier session (the durable record; the in-memory bit is rebuilt from served rows). */
+    fun receivedAsMember(vaultId: String): Boolean =
+        account.keyArrivedByMemberGrant(vaultId) || vaultId in persistedSet(MEMBER_GRANTED_KEY)
+
+    private fun persistMemberGranted() {
+        val persisted = persistedSet(MEMBER_GRANTED_KEY)
+        val added = cache.vaults().map { it.vaultId }.filter { it !in persisted && account.keyArrivedByMemberGrant(it) }
+        if (added.isNotEmpty()) persistSet(MEMBER_GRANTED_KEY, persisted + added)
+    }
+
     /**
-     * "You own <vault>?" confirmed (A6b): a fresh master-password reauth, checked on this device against the UVK
-     * this session holds ([Account.verifyPassword]), records [vaultId] as owned. Refuses a vault whose key this
-     * account does not hold from its own UVK wrap (a seal-only or contradicted key is never a basis to own).
+     * Step 1 of "You own <vault>?" (A6b review MEDIUM-1): what the confirmation must show, loaded BEFORE it is offered.
+     * Everything but [OwnershipClaim.receivedAsMember] is what the SERVER reports (who it lists as owner, its last
+     * completed transfer, the co-holders); it informs, it decides nothing. Mints nothing. Refuses a vault whose key
+     * does not come from this account's own UVK wrap, and THROWS when the members cannot be loaded (the dialog must
+     * name them). Supersedes any earlier claim.
      */
-    suspend fun confirmOwnership(vaultId: String, password: String) {
+    suspend fun describeOwnership(vaultId: String): OwnershipClaim {
+        pendingOwnershipClaim = null
         if (!account.hasVault(vaultId) || !account.keyFromOwnUvkWrap(vaultId) || account.isLegacyReadOnly(vaultId) ||
             account.heldKeyContradictsVouch(vaultId)
         ) throw VaultKeyNotVerifiedException(vaultId)
+        val members = api.vaultMembers(vaultId).map { CoHolder(it.userId, it.displayName, it.email, it.role) }
+        val row = cache.vaults().firstOrNull { it.vaultId == vaultId }
+        val lt = row?.lastTransfer
+        return OwnershipClaim(
+            vaultId = vaultId,
+            vaultName = row?.let { account.decryptVaultName(vaultId, it.metaBlob) }?.takeIf { it != VAULT_NAME_FALLBACK },
+            reportedOwner = members.firstOrNull { it.role == "owner" },
+            lastTransferTo = lt?.let { t -> members.firstOrNull { it.userId == t.newOwnerUserId } ?: CoHolder(t.newOwnerUserId, "", "", "") },
+            lastTransferSeq = lt?.seq,
+            coHolders = members.filter { it.userId != account.userId },
+            origin = originOf(vaultId),
+            receivedAsMember = receivedAsMember(vaultId),
+        ).also { pendingOwnershipClaim = it }
+    }
+
+    /** Drop a claim the human cancelled. */
+    fun cancelOwnershipClaim() { pendingOwnershipClaim = null }
+
+    /**
+     * Step 2, "You own <vault>?" confirmed (A6b): only the claim this engine described ([describeOwnership]) and still
+     * holds; a fresh master-password reauth checked on this device against the UVK this session holds
+     * ([Account.verifyPassword]); and, for a vault this device received as a MEMBER, the human's explicit second
+     * acknowledgement [transferredToMe] ("This vault's owner transferred it to me": a genuine owner whose vault was
+     * transferred to them before A6b is in exactly this state, so it is not refused outright). Records [vaultId] as owned.
+     */
+    suspend fun confirmOwnership(claim: OwnershipClaim, password: String, transferredToMe: Boolean = false) {
+        check(claim === pendingOwnershipClaim) { "that ownership confirmation was not described here (or is stale)" }
+        val vaultId = claim.vaultId
+        if (!account.hasVault(vaultId) || !account.keyFromOwnUvkWrap(vaultId) || account.isLegacyReadOnly(vaultId) ||
+            account.heldKeyContradictsVouch(vaultId)
+        ) throw VaultKeyNotVerifiedException(vaultId)
+        if (receivedAsMember(vaultId) && !transferredToMe) throw OwnershipTransferAckRequiredException(vaultId)
         val keys = api.accountKeys()
         val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { account.verifyPassword(password, keys) }
         if (!ok) throw ReauthFailedException()
+        pendingOwnershipClaim = null
         accountState.update { AccountState.withOwned(it, vaultId, nowMs()) }
     }
 

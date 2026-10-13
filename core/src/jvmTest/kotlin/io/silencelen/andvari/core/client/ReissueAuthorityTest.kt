@@ -182,9 +182,9 @@ class ReissueAuthorityTest {
     /** An owner, a member, a shared vault "Household" the owner created ON ANOTHER DEVICE before this branch. */
     private class World(val owner: Enrolled, val member: Enrolled, val vaultId: String, val metaBlob: String, val ownerWrap: String)
 
-    private fun world(ownerParams: KdfParams = kdf): World {
+    private fun world(ownerParams: KdfParams = kdf, memberParams: KdfParams = kdf): World {
         val owner = enroll("a6b-owner", ownerParams)
-        val member = enroll("a6b-member")
+        val member = enroll("a6b-member", memberParams)
         val shared = owner.account.buildCreateSharedVault("Household")
         return World(owner, member, shared.vaultId, shared.request.metaBlob, shared.request.wrappedVk)
     }
@@ -245,7 +245,7 @@ class ReissueAuthorityTest {
         assertFalse(row.ownershipConfirmed)
         assertFailsWith<OwnershipNotConfirmedException>("confirmed re-issue refused") { engine.confirmReissue(row) }
         // Nor can the member claim it: its key came from a grant, not from its own UVK wrap.
-        assertFailsWith<VaultKeyNotVerifiedException> { engine.confirmOwnership(w.vaultId, password) }
+        assertFailsWith<VaultKeyNotVerifiedException> { engine.describeOwnership(w.vaultId) }
         assertTrue(server.adds.isEmpty() && server.offers.isEmpty() && server.reissues.isEmpty(), "nothing was signed or sealed")
     }
 
@@ -400,11 +400,17 @@ class ReissueAuthorityTest {
         assertTrue(engine.ownershipNeedsConfirmation(w.vaultId), "a vault created before A6b has no ownership record")
         assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer") }
 
-        assertFailsWith<ReauthFailedException> { engine.confirmOwnership(w.vaultId, "not the password") }
+        val claim = engine.describeOwnership(w.vaultId)
+        assertFalse(claim.receivedAsMember, "a vault this account created needs only the single confirm")
+        assertEquals(PersonalChoiceInfo.Origin.CREATED, claim.origin)
+        assertEquals("Household", claim.vaultName)
+        assertFailsWith<ReauthFailedException> { engine.confirmOwnership(claim, "not the password") }
         assertFalse(engine.ownsVault(w.vaultId), "a wrong password records nothing")
         assertTrue(server.adds.isEmpty())
+        // Only the claim this engine described is accepted.
+        assertFailsWith<IllegalStateException> { engine.confirmOwnership(claim.copy(), password) }
 
-        engine.confirmOwnership(w.vaultId, password)
+        engine.confirmOwnership(claim, password)
         assertTrue(engine.ownsVault(w.vaultId))
         assertFalse(engine.ownershipNeedsConfirmation(w.vaultId), "asked once")
         engine.addVaultMember(w.vaultId, w.member.userId, "writer")
@@ -436,5 +442,97 @@ class ReissueAuthorityTest {
     private fun engineLifecycleKey(engine: SyncEngine, vaultId: String): ByteArray {
         val f = SyncEngine::class.java.getDeclaredField("account").apply { isAccessible = true }
         return (f.get(engine) as Account).lifecycleKeyFor(vaultId)
+    }
+
+    // ---- A6b review MEDIUM-1: a vault this device received as a member is not claimed by one confirm ----
+
+    private val floor = KdfParams(ops = KdfUpgrade.MIN_OPS, memBytes = KdfUpgrade.MIN_MEM_BYTES)
+
+    /** The member's device holding the vault through a verified grant from its pinned owner AND its own self-wrap,
+     *  with the server relabelling the member's row `owner`. */
+    private suspend fun memberHoldingRelabelled(w: World): Pair<SyncEngine, FakeServer> {
+        val vk = Envelope.openB64(crypto, uvkOf(w.owner), w.ownerWrap, Ad.vk(w.vaultId, w.owner.userId))
+        val selfWrap = Envelope.sealB64(crypto, uvkOf(w.member), vk, Ad.vk(w.vaultId, w.member.userId))
+        val signed = w.owner.account.buildSignedGrant(w.vaultId, pinOf(w.member, "Member"))
+        val server = FakeServer(
+            SyncResponse(
+                9, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 9, w.metaBlob, 0)),
+                listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "owner", selfWrap, 9, null, signed)), emptyList(), emptyList(),
+            ),
+            keys = w.member.keys,
+        )
+        server.members[w.vaultId] = listOf(summary(w.member, "Member", "owner"), summary(w.owner, "Owner", "writer"))
+        val engine = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        engine.sync()
+        return engine to server
+    }
+
+    @Test
+    fun aMemberGrantedVaultIsNotClaimedByASingleConfirm() = runBlocking<Unit> {
+        val w = world(memberParams = floor)
+        val (engine, _) = memberHoldingRelabelled(w)
+        assertTrue(engine.ownershipNeedsConfirmation(w.vaultId))
+        val claim = engine.describeOwnership(w.vaultId)
+        // The dialog data, as the server reports it, and this device's own record of how it got the key.
+        assertTrue(claim.receivedAsMember)
+        assertEquals(w.member.userId, claim.reportedOwner?.userId, "the server's owner label, shown as reported")
+        assertEquals(listOf(w.owner.userId), claim.coHolders.map { it.userId }, "the co-holders are named")
+        assertEquals(PersonalChoiceInfo.Origin.CREATED, claim.origin, "no transfer reported")
+        assertNull(claim.lastTransferTo)
+        assertFailsWith<OwnershipTransferAckRequiredException>("one confirm does not claim a vault received as a member") {
+            engine.confirmOwnership(claim, password)
+        }
+        assertFalse(engine.ownsVault(w.vaultId))
+        // The explicit second acknowledgement ("This vault's owner transferred it to me") is what a genuine
+        // pre-A6b transfer recipient gives; it is not refused outright.
+        engine.confirmOwnership(claim, password, transferredToMe = true)
+        assertTrue(engine.ownsVault(w.vaultId))
+    }
+
+    // ---- A6b review LOW-3: the reauth runs only on keys this session can vouch for ----
+
+    @Test
+    fun theReauthRefusesAReplayedOlderSaltAndAWeakenedKdf() {
+        val owner = enroll("a6b-owner", floor)
+        val device = unlock(owner)
+        val uvk = uvkOf(owner)
+        // An OLDER AccountKeys (before a password change): another salt, the same UVK under the OLD password.
+        val oldSalt = crypto.randomBytes(16)
+        val oldWrap = Envelope.sealB64(crypto, Keys.wrapKey(crypto, Keys.masterKey(crypto, "the old password", oldSalt, floor)), uvk, Ad.uvk(owner.userId))
+        val replayed = owner.keys.copy(kdfSalt = Bytes.toB64(oldSalt), wrappedUvk = oldWrap)
+        assertFalse(runCatching { device.verifyPassword("the old password", replayed) }.getOrDefault(false), "a replayed older salt never passes")
+        // The current salt, but weakened KDF parameters the server chose.
+        val weak = KdfParams(ops = 1, memBytes = 8192)
+        val weakWrap = Envelope.sealB64(crypto, Keys.wrapKey(crypto, Keys.masterKey(crypto, password, Bytes.fromB64(owner.keys.kdfSalt), weak)), uvk, Ad.uvk(owner.userId))
+        val weakened = owner.keys.copy(kdfParams = weak, wrappedUvk = weakWrap)
+        assertFalse(runCatching { device.verifyPassword(password, weakened) }.getOrDefault(false), "a weakened KDF never passes")
+        assertTrue(device.verifyPassword(password, owner.keys), "the real keys still pass")
+    }
+
+    @Test
+    fun theMemberProvenanceSurvivesARestartWhoseServedRowLooksLikeAnOwnerRow() = runBlocking<Unit> {
+        // The server later strips the grant from the relabelled row: a restarted engine sees a plain owner-shaped row,
+        // but the device's durable record still says the key first arrived as a member.
+        val w = world(memberParams = floor)
+        val vk = Envelope.openB64(crypto, uvkOf(w.owner), w.ownerWrap, Ad.vk(w.vaultId, w.owner.userId))
+        val selfWrap = Envelope.sealB64(crypto, uvkOf(w.member), vk, Ad.vk(w.vaultId, w.member.userId))
+        val signed = w.owner.account.buildSignedGrant(w.vaultId, pinOf(w.member, "Member"))
+        val server = FakeServer(
+            SyncResponse(9, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 9, w.metaBlob, 0)),
+                listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "writer", selfWrap, 9, null, signed)), emptyList(), emptyList()),
+            keys = w.member.keys,
+        )
+        server.members[w.vaultId] = listOf(summary(w.member, "Member", "owner"))
+        val cache = InMemoryVaultCache()
+        val ds = MemoryDeviceState()
+        SyncEngine(api(server), unlock(w.member), cache, deviceState = ds).sync()
+        server.feed = SyncResponse(12, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 12, w.metaBlob, 0)),
+            listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "owner", selfWrap, 12, null)), emptyList(), emptyList())
+        val restarted = SyncEngine(api(server), unlock(w.member), cache, deviceState = ds)
+        restarted.hydrate()
+        restarted.sync()
+        val claim = restarted.describeOwnership(w.vaultId)
+        assertTrue(claim.receivedAsMember, "the durable provenance outlives the served row")
+        assertFailsWith<OwnershipTransferAckRequiredException> { restarted.confirmOwnership(claim, password) }
     }
 }
