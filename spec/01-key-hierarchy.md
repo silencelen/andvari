@@ -439,7 +439,8 @@ key signs only through the flows that need it (today: escrow v2).
     device has adopted a key for from a TRUSTED source (its own UVK wrap, a verified v2 grant, a legacy
     key this device vouched for — recorded at the freeze or the human's Accept — and every vault it
     created; never an unvouched read-only v1 seal), a device-local tag = SHA-256 of the FIRST such key,
-    stored durably beside the vouches. The tag AND the vouch survive every server-driven drop (every
+    stored durably beside the vouches (both as JSON records with a strict decode — every id a UUID, every
+    tag 64 hex — never delimiter-joined lines; security review 2026-10 plugin scan F1/F2, spec 05 R18). The tag AND the vouch survive every server-driven drop (every
     removal verdict, the resync drop, holding expiry); only a drop the user initiated on this device —
     their own leave or delete — clears them, which keeps "leave and ask the owner to add you again" the
     recovery for `vk_mismatch`. No step of root cause A re-keys a vault, so a vault's key never legitimately changes; a later
