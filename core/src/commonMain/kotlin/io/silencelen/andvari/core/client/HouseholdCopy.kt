@@ -231,6 +231,10 @@ object HouseholdCopy {
     /** The A6b "You own <vault>?" reauth: the password does not open this account's key. TWIN of web `ReauthFailedError`. */
     const val REAUTH_FAILED = "That master password isn't right."
 
+    /** A9 review LOW-2: a default save, import or copy while no personal vault is in force (the designation is still a
+     *  proposal, or none exists) — the item needs an explicit destination. TWIN of web `NoPersonalVaultError`, byte-equal. */
+    const val NO_PERSONAL_VAULT = "Choose a vault for this item."
+
     /** NATIVE-PINNED: desktop manual-refresh offline notice — reassuring (cached data is
      *  still on screen), so sync flows prefer it over the bare [UNREACHABLE]. */
     const val SYNC_OFFLINE = "Can't reach the server right now — showing what's synced on this device."
@@ -517,6 +521,7 @@ object HouseholdCopy {
         t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
         t is VaultKeyNotVerifiedException -> VAULT_NOT_VERIFIED // A6: a legacy key is read-only, never "wrong password"
         t is ItemChangedVaultsException -> ITEM_CHANGED_VAULTS // A1b INV-EDIT: reopen, never re-target
+        t is NoPersonalVaultException -> NO_PERSONAL_VAULT // A9: no default destination, never "wrong master password"
         t is CryptoException -> WRONG_MASTER_PASSWORD
         t is ApiException -> apiCopy(t)
         t is IOException -> SAVE_FAILED_OFFLINE

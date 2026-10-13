@@ -25,7 +25,10 @@ import io.silencelen.andvari.core.model.AccountStatePut
 import io.silencelen.andvari.core.model.AccountStateResponse
 import io.silencelen.andvari.core.model.CreateVaultRequest
 import io.silencelen.andvari.core.model.GrantReissueRequest
+import io.silencelen.andvari.core.model.MutationResult
 import io.silencelen.andvari.core.model.PersonalWrap
+import io.silencelen.andvari.core.model.PushRequest
+import io.silencelen.andvari.core.model.PushResponse
 import io.silencelen.andvari.core.model.PersonalWrapPut
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
@@ -112,6 +115,7 @@ class ApiReview2Test {
         val reissues = mutableListOf<Triple<String, String, String>>()
         val removals = mutableListOf<Pair<String, String>>()
         val personalWrapPuts = mutableListOf<PersonalWrapPut>()
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
         val members = HashMap<String, List<VaultMemberSummary>>()
         var accountState: String? = null
         var accountSeq: Long = 0
@@ -143,6 +147,12 @@ class ApiReview2Test {
                         else -> SyncResponse(server.feed.rev, false, emptyList(), emptyList(), emptyList(), emptyList())
                     }
                     respond(json.encodeToString(SyncResponse.serializer(), resp), HttpStatusCode.OK, ct)
+                }
+                path == "/api/v1/sync/push" -> {
+                    val body = json.decodeFromString(PushRequest.serializer(), body(req))
+                    server.pushed += body.mutations
+                    val rev = server.feed.rev + server.pushed.size
+                    respond(json.encodeToString(PushResponse.serializer(), PushResponse(rev, body.mutations.map { MutationResult(it.mutationId, "applied", newItemRev = rev) })), HttpStatusCode.OK, ct)
                 }
                 path == "/api/v1/account/keys" && server.keys != null ->
                     respond(json.encodeToString(AccountKeys.serializer(), server.keys!!), HttpStatusCode.OK, ct)
@@ -325,13 +335,25 @@ class ApiReview2Test {
         assertEquals(w.owner.personalId, engine.designatedPersonalVaultId())
         assertTrue(device.get("personal.wrap")!!.contains(w.owner.personalId), "and cached on this device")
 
-        // A fresh device whose served wrap AGREES with the designation is confirmed without a question.
+        // A9 review LOW-4: a fresh device (no cached wrap, no high-water mark of its own) confirms the served wrap ONCE,
+        // even when the designation names it: on a fresh device the designation is as replayable as the wrap.
         val freshAccount = unlock(w.owner)
-        val fresh = SyncEngine(api(server), freshAccount, InMemoryVaultCache(), deviceState = MemoryDeviceState())
+        val dsFresh = MemoryDeviceState()
+        val fresh = SyncEngine(api(server), freshAccount, InMemoryVaultCache(), deviceState = dsFresh)
         fresh.sync()
-        assertEquals(Account.PersonalStatus.CONFIRMED, freshAccount.personalStatus, "the designation vouches for the served wrap")
+        assertEquals(Account.PersonalStatus.PROPOSED, freshAccount.personalStatus, "a fresh device asks once, designation or not")
+        assertEquals(PersonalChange(w.owner.personalId, w.owner.personalId), fresh.personalChange(), "the designation and the served wrap agree")
+        fresh.sync()
+        assertEquals(Account.PersonalStatus.PROPOSED, freshAccount.personalStatus, "a second sync does not confirm it for the human")
+        fresh.describePersonalChange()
+        fresh.acceptPersonalChange()
+        assertEquals(Account.PersonalStatus.CONFIRMED, freshAccount.personalStatus)
         assertEquals(w.owner.personalId, freshAccount.personalVaultId)
         assertNull(fresh.personalChange())
+        // From then on the device is established: a restart with the cached wrap is confirmed silently.
+        val restarted = unlock(w.owner)
+        SyncEngine(api(server), restarted, InMemoryVaultCache(), deviceState = dsFresh).sync()
+        assertEquals(Account.PersonalStatus.CONFIRMED, restarted.personalStatus, "exactly once")
         assertEquals("personal", fresh.vaultInfos().single { it.vaultId == w.owner.personalId }.type)
     }
 
@@ -615,6 +637,74 @@ class ApiReview2Test {
         device.addGrant(WireGrant(w.sharedId, w.owner.userId, "owner", w.ownerWrap, 3, null))
         assertTrue(device.hasVault(w.sharedId) && device.heldKeyContradictsVouch(w.sharedId), "the own wrap is used but flagged")
         assertFailsWith<VaultKeyNotVerifiedException>("INV-WRITE-KEY holds for the vault name too") { device.buildRenameMeta(w.sharedId, w.metaBlob, "Renamed") }
+    }
+
+    // ---- A9 review round (MERGE AFTER FIXES) ----
+
+    /** LOW-4: a fresh device served an OLDER authentic account-state blob together with the matching older wrap. */
+    @Test
+    fun review_low4_aFreshDeviceServedAReplayedOlderStateAndWrapPairStaysProposed() = runBlocking<Unit> {
+        val w = world(floor)
+        val server = serverOf(w)
+        val a = SyncEngine(api(server), w.owner.account, InMemoryVaultCache(), deviceState = MemoryDeviceState())
+        a.sync()
+        val olderState = server.accountState to server.accountSeq // designation = the personal vault, wrap = the personal wrap
+        a.redesignatePersonalVault(a.proposePersonalVault(w.sharedId), password)
+        assertEquals(w.sharedId, designationOn(server, w.owner))
+        // The server replays the older pair to a fresh device: the blob is authentic and its designation names the wrap.
+        server.accountState = olderState.first
+        server.accountSeq = olderState.second + 5
+        val b = unlock(w.owner, w.owner.reg.personalWrap)
+        val engineB = SyncEngine(api(server), b, InMemoryVaultCache(), deviceState = MemoryDeviceState())
+        engineB.sync()
+        assertEquals(Account.PersonalStatus.PROPOSED, b.personalStatus, "a matching designation does not auto-confirm on a device with no high-water mark of its own")
+        assertEquals("", b.personalVaultId)
+        assertTrue(server.personalWrapPuts.size == 1 && engineB.vaultInfos().none { it.type == "personal" })
+    }
+
+    /** LOW-1: the reauth derivation PROVES the password against the session UVK, so a quick-unlock session whose served salt
+     *  the server chose derives nothing for it. */
+    @Test
+    fun review_low1_theReauthProvesThePasswordAgainstTheSessionUvk() {
+        val owner = enroll("a9-qu", floor)
+        val uvk = uvkOf(owner)
+        // A biometric/PIN unlock: the UVK comes from the platform, and the server serves the AccountKeys at that moment —
+        // here a salt and a wrap of its own choosing (it cannot wrap OUR UVK under a salt we never derived for).
+        val serverSalt = Bytes.toB64(crypto.randomBytes(16))
+        val junkWrap = Envelope.sealB64(crypto, crypto.randomBytes(32), uvk, Ad.uvk(owner.userId))
+        val chosen = owner.keys.copy(kdfSalt = serverSalt, wrappedUvk = junkWrap)
+        val quick = Account.unlockWithUvk(owner.userId, uvk.copyOf(), chosen, crypto)
+        assertFailsWith<ReauthFailedException>("the served salt is the session's, but the password proves nothing under it") { quick.reauthAuthKey(password, chosen) }
+        // The same quick-unlock session with the REAL keys served passes (biometric users can still reauth)...
+        val quickReal = Account.unlockWithUvk(owner.userId, uvk.copyOf(), owner.keys, crypto)
+        assertEquals(expectedAuthKey(owner), quickReal.reauthAuthKey(password, owner.keys))
+        // ...and a wrong password derives nothing for the server either (proved locally, never sent to find out).
+        assertFailsWith<ReauthFailedException> { quickReal.reauthAuthKey("not the password", owner.keys) }
+        // A password-unlock session with the real keys passes, as before.
+        assertEquals(expectedAuthKey(owner), unlock(owner).reauthAuthKey(password, owner.keys))
+    }
+
+    /** LOW-2: a default save while no personal vault is in force is refused with "Choose a vault for this item.", never
+     *  reaching the seal with an empty vault id (which surfaced as "wrong master password"). */
+    @Test
+    fun review_low2_aDefaultSaveWhileProposedIsRefusedWithChooseAVault() = runBlocking<Unit> {
+        val w = world()
+        val server = serverOf(w)
+        server.withholdState = true
+        val b = unlock(w.owner)
+        val engine = SyncEngine(api(server), b, InMemoryVaultCache(), deviceState = MemoryDeviceState())
+        engine.sync()
+        assertEquals(Account.PersonalStatus.PROPOSED, b.personalStatus)
+        val doc = ItemDoc(type = "login", name = "Bank", login = LoginData(username = "me", password = "pw"))
+        val e = assertFailsWith<NoPersonalVaultException> { engine.save(null, doc) }
+        assertEquals(HouseholdCopy.NO_PERSONAL_VAULT, e.message)
+        assertEquals(HouseholdCopy.NO_PERSONAL_VAULT, HouseholdCopy.forSaveError(e))
+        assertFailsWith<NoPersonalVaultException> { engine.importAll(emptyList()) }
+        assertFailsWith<NoPersonalVaultException> { engine.importProjections() }
+        assertTrue(engine.items().isEmpty() && server.pushed.isEmpty(), "nothing was sealed anywhere")
+        // An explicit destination still works.
+        engine.save(null, doc, vaultId = w.sharedId)
+        assertEquals(w.sharedId, server.pushed.single().vaultId)
     }
 
     /** Captures every private key a keypair derivation hands out (the probe Account's identity and signing secrets). */

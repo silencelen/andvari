@@ -1563,7 +1563,45 @@ class Account private constructor(
     fun reauthAuthKey(password: String, keys: AccountKeys): String {
         KdfUpgrade.requireServerKdfParams(keys.kdfParams)
         if (!sessionSaltCurrent(keys)) throw ReauthStaleSessionException()
-        return deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
+        // A9 review LOW-1: the salt check above is only a pre-check. A quick-unlock session (the UVK came from the
+        // platform) recorded whatever salt the server served at that moment, so the derivation is PROVED instead: the
+        // same argon2 pass yields the wrap key, which must open the served wrappedUvk to the UVK this session holds.
+        // A server-chosen salt or wrap, or a wrong password, derives nothing that leaves the device.
+        return proveMasterPassword(password, keys) ?: throw ReauthFailedException()
+    }
+
+    /**
+     * ONE argon2id pass over [password] under [keys]' salt and params, split into the wrap key and the auth key; the
+     * wrap key must open [keys]`.wrappedUvk` to the UVK this session already holds (the server cannot forge that
+     * without the password), and only then is the base64 auth key returned. Null = wrong password, or keys that are not
+     * this account's. MK, both derived keys and the opened copy are wiped on the way out (audit H80).
+     */
+    private fun proveMasterPassword(password: String, keys: AccountKeys): String? {
+        val mk = Keys.masterKey(crypto, password, Bytes.fromB64(keys.kdfSalt), keys.kdfParams)
+        val authKey: ByteArray
+        val wrapKey: ByteArray
+        try {
+            authKey = Keys.authKey(crypto, mk)
+            wrapKey = Keys.wrapKey(crypto, mk)
+        } finally {
+            mk.fill(0)
+        }
+        try {
+            val opened = try {
+                Envelope.openB64(crypto, wrapKey, keys.wrappedUvk, Ad.uvk(userId))
+            } catch (e: Exception) {
+                return null
+            }
+            try {
+                if (!Bytes.ctEquals(opened, uvk)) return null
+            } finally {
+                opened.fill(0)
+            }
+            return Bytes.toB64(authKey)
+        } finally {
+            authKey.fill(0)
+            wrapKey.fill(0)
+        }
     }
 
     /**
@@ -1582,26 +1620,7 @@ class Account private constructor(
         KdfUpgrade.requireServerKdfParams(keys.kdfParams)
         val salt = sessionKdfSalt ?: return false
         if (keys.kdfSalt != salt) return false
-        val mk = Keys.masterKey(crypto, password, Bytes.fromB64(keys.kdfSalt), keys.kdfParams)
-        val wrapKey = try {
-            Keys.wrapKey(crypto, mk)
-        } finally {
-            mk.fill(0)
-        }
-        try {
-            val opened = try {
-                Envelope.openB64(crypto, wrapKey, keys.wrappedUvk, Ad.uvk(userId))
-            } catch (e: Exception) {
-                return false
-            }
-            try {
-                return Bytes.ctEquals(opened, uvk)
-            } finally {
-                opened.fill(0)
-            }
-        } finally {
-            wrapKey.fill(0)
-        }
+        return proveMasterPassword(password, keys) != null // A9 review: the one proof, shared with reauthAuthKey
     }
 
     /**
