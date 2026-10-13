@@ -1,5 +1,6 @@
 import { pickPersonal, type PersonalWrapWire } from "./personalpick";
 import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
+import { admitRows, sealGate, serverItemDecision } from "./itemhome";
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import type { BioReq, BioResult } from "./bioprotocol";
 import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
@@ -275,6 +276,11 @@ interface Session {
   /** Root cause A §1.7 (A6): grant rows with no UVK wrap (a seal or signed grant only) — waiting for a full
    *  client to verify and self-wrap. Shown in the popup; recomputed by resync() without the UVK. */
   waitingGrants?: number;
+  /** Root cause A §5.1 INV-HOME (A1b): itemId → the vault of the FIRST row this browser applied for it. Durable in
+   *  storage.local (per origin and user) and in the snapshot; a later row under another vault is never applied. */
+  homes: Map<string, string>;
+  /** A1b: rows the last snapshot sent under the wrong vault (refused); the popup says so while it is > 0. */
+  wrongVault?: number;
   /** How this session was opened. `enroll` COPIES the surviving full-password stamp regardless, but the
    *  provenance makes the "never mint `now` from a QUICK session" invariant (breaker A4) explicit. */
   provenance: "PASSWORD" | "QUICK";
@@ -307,6 +313,9 @@ interface SessionSnapshot {
   vaultRoles?: Record<string, string>;
   /** A6: the waiting-grant count (a count, no key material); absent in an older snapshot = 0. */
   waitingGrants?: number;
+  /** A1b: the item homes (ids only, no key material); absent in an older snapshot = reloaded from storage.local. */
+  homes?: Record<string, string>;
+  wrongVault?: number;
   items: DecryptedItem[];
 }
 
@@ -1202,6 +1211,8 @@ function ensureLoaded(): Promise<void> {
         // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         waitingGrants: typeof snap.waitingGrants === "number" ? snap.waitingGrants : 0,
+        homes: new Map(Object.entries(snap.homes ?? {})),
+        wrongVault: typeof snap.wrongVault === "number" ? snap.wrongVault : 0,
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         // spec 02 §3.2: a snapshot persisted by a pre-check build may hold a malformed doc — the
@@ -1256,6 +1267,8 @@ function persistSession(): Promise<void> {
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
     vaultRoles: Object.fromEntries(session.vaultRoles),
     waitingGrants: session.waitingGrants ?? 0,
+    homes: Object.fromEntries(session.homes),
+    wrongVault: session.wrongVault ?? 0,
     items: session.items,
   };
   // The known-logins digest tracks the items it is derived from: every persist of the session
@@ -1500,7 +1513,11 @@ async function resync(): Promise<void> {
   try {
     const sync = await api.sync(0);
     if (writesInFlight > 0 || !session) return; // a write started mid-sync — its result would be clobbered
-    session.items = decryptItems(sync, session.vaultKeys);
+    // A1b INV-HOME: the snapshot's rows are admitted against this browser's homes BEFORE anything is decrypted.
+    const homed = await homeAndDecrypt(sync, session.vaultKeys, session.userId, session.homes);
+    if (writesInFlight > 0 || !session) return;
+    session.items = homed.items;
+    session.wrongVault = homed.wrongVault;
     // H70 (2026-09-13 audit): refresh the G21 reader gate's input as well as the item projection.
     // A grant's `role` needs no key to read and the server re-delivers the grant row on every role
     // change (spec 03 §4), but this pull only ever rebuilt the items — so an owner demoting a
@@ -1746,6 +1763,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         personalChange: session ? (await readPersonalChange(session.userId)) !== null : false,
         personalChangeText: session ? await personalChangeText(session) : null,
         waitingGrants: session?.waitingGrants ?? 0,
+        wrongVault: session?.wrongVault ?? 0,
       } satisfies Res<"status">;
     }
     case "lock": {
@@ -2380,7 +2398,12 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
     const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, uvk, s.userId);
     warnKeyState(keyUnreadable, waiting);
     const personalVaultId = await pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys, sync.vaults);
-    const items = decryptItems(sync, vaultKeys);
+    const homed = await homeAndDecrypt(sync, vaultKeys, s.userId);
+    if (gen !== redeemGen || session) {
+      api.setTokens(null, null); // a switch/lock landed meanwhile — install nothing (the sync-time rule above)
+      return { ok: false, code: "aborted" };
+    }
+    const items = homed.items;
     // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
     // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
     session = {
@@ -2393,6 +2416,8 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       mustChangePassword: s.mustChangePassword ?? false,
       uvk,
       waitingGrants: waiting.size,
+      homes: homed.homes,
+      wrongVault: homed.wrongVault,
       provenance: "PASSWORD",
       lastFullUnlockAt: Date.now(),
     };
@@ -2628,7 +2653,9 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, begin.uvk, begin.userId);
           warnKeyState(keyUnreadable, waiting);
           const personalVaultId = await pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys, sync.vaults);
-          const items = decryptItems(sync, vaultKeys);
+          const homed = await homeAndDecrypt(sync, vaultKeys, begin.userId);
+          if (gen !== redeemGen) return { ok: false, code: "aborted" };
+          const items = homed.items;
           // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
           // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
           session = {
@@ -2641,6 +2668,8 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
             mustChangePassword: false,
             uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
             waitingGrants: waiting.size,
+            homes: homed.homes,
+            wrongVault: homed.wrongVault,
             provenance: "QUICK",
             lastFullUnlockAt: begin.blob.lastFullUnlockAt,
           };
@@ -2795,6 +2824,41 @@ async function closeOffscreenIfPresent(): Promise<void> {
   } catch {
     /* none open, or a close race — nothing to do */
   }
+}
+
+/** storage.local key of this user's item homes (ids only, non-secret: the server sees every (itemId, vaultId)). */
+const homesKey = (userId: string): string => nsk(`itemHomes:${userId}`);
+
+async function loadHomes(userId: string): Promise<Map<string, string>> {
+  try {
+    const k = homesKey(userId);
+    const raw = (await chrome.storage.local.get(k))[k] as Record<string, string> | undefined;
+    return new Map(Object.entries(raw && typeof raw === "object" ? raw : {}).filter(([, v]) => typeof v === "string"));
+  } catch {
+    return new Map(); // storage unavailable: a fresh browser's posture (the residual), never a failed unlock
+  }
+}
+
+function saveHomes(userId: string, homes: Map<string, string>): Promise<void> {
+  return chrome.storage.local.set({ [homesKey(userId)]: Object.fromEntries(homes) }).catch(() => {});
+}
+
+/**
+ * Root cause A §5.1 INV-HOME (branch A1b; core applyPull / web store twin): admit a snapshot's rows against this
+ * browser's homes, THEN decrypt only the admitted ones. A row under another vault than its item's home (live or
+ * tombstone) never reaches session.items, so it is never matched, filled, updated by a capture or given a TOTP. The
+ * refusals are counted for the popup's "wrong vault" line. New homes are persisted.
+ */
+async function homeAndDecrypt(
+  sync: SyncResponse,
+  vaultKeys: Map<string, Uint8Array>,
+  userId: string,
+  homes?: Map<string, string>,
+): Promise<{ items: DecryptedItem[]; homes: Map<string, string>; wrongVault: number }> {
+  const h = homes ?? (await loadHomes(userId));
+  const { admitted, tally, changed } = admitRows(sync.items, h);
+  if (changed) await saveHomes(userId, h);
+  return { items: decryptItems({ ...sync, items: admitted }, vaultKeys), homes: h, wrongVault: tally.refused };
 }
 
 function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): DecryptedItem[] {
@@ -3982,7 +4046,11 @@ async function putItem(
   formatVersion: number,
 ): Promise<MutationResult | undefined> {
   const vk = session?.vaultKeys.get(vaultId);
-  if (!vk) return undefined;
+  // A1b: INV-WRITE-KEY (only a key this session holds, i.e. one that opened under the UVK — never a grant seal) and the
+  // INV-SEAL home cross-check (the item lives in this vault, or is a fresh id that takes it as its home).
+  const gate = sealGate(vk !== undefined, session?.homes.get(itemId), vaultId);
+  if (!vk || !session || gate === "no_key" || gate === "refuse") return undefined;
+  const owner = session;
   const blob = toB64(seal(vk, new TextEncoder().encode(JSON.stringify(doc)), adItem(vaultId, itemId, formatVersion)));
   writesInFlight++; // hold off resync's wholesale session.items replace until this rev lands
   try {
@@ -3997,7 +4065,12 @@ async function putItem(
         item: { formatVersion, attachmentIds: doc.attachments?.map((a) => a.id) ?? [], blob },
       },
     ]);
-    return resp.results[0];
+    const r = resp.results[0];
+    if (gate === "new_home" && (r?.status === "applied" || r?.status === "conflict") && !owner.homes.has(itemId)) {
+      owner.homes.set(itemId, vaultId);
+      void saveHomes(owner.userId, owner.homes);
+    }
+    return r;
   } finally {
     writesInFlight--;
   }
@@ -4041,7 +4114,9 @@ function putLanded(r: MutationResult | undefined): r is MutationResult & { statu
 async function materializeConflictCopy(r: MutationResult, vaultId: string): Promise<void> {
   if (r.status !== "conflict" || r.newItemRev === undefined || !session) return;
   const losing = r.serverItem;
-  if (!losing || losing.deleted || !losing.blob || losing.vaultId !== vaultId) return;
+  if (!losing || losing.deleted || !losing.blob) return;
+  // A1b INV-CONFLICT: the displaced value must be the item we wrote, in the vault we wrote it to and its home.
+  if (serverItemDecision(vaultId, losing.vaultId, session.homes.get(losing.itemId)) === "abort") return;
   if (session.vaultRoles.get(vaultId) === "reader") return;
   // Through decryptItems — the ONE wire-open site (the fv read ceiling, the per-vault key, the AD
   // binding and the undecryptable-skip all live there; a second open here would dodge those pins).

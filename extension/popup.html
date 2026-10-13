@@ -84,6 +84,8 @@
     <!-- Root cause A §1.7 (A6, owner decision Q8): the extension never opens a grant seal; shared vaults whose
          grant has no wrap yet wait for a full client to verify them. Unlocked-only chrome, re-derived by refresh(). -->
     <div id="grants-waiting" class="must-change-strip grants-waiting" role="status" hidden></div>
+    <!-- Root cause A §5.1 INV-HOME (A1b): the server sent an item under the wrong vault; it was not applied. -->
+    <div id="wrong-vault" class="must-change-strip grants-waiting" role="status" hidden></div>
 
     <section id="locked" class="locked" hidden>
       <div class="hero">
