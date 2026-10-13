@@ -19,12 +19,15 @@ test("itemdoc-validate.json — every item case reaches the vector's verdict", (
   }
 });
 
-test("decryptItems quarantines a failing doc instead of admitting it", () => {
+test("decryptItem quarantines a failing doc instead of admitting it", () => {
+  // A9: the per-row open lives in decryptItem (homeAndDecrypt and decryptItems both route through it).
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf-8");
-  const a = bg.indexOf("function decryptItems(");
-  assert.ok(a > -1, "decryptItems missing");
+  const a = bg.indexOf("function decryptItem(");
+  assert.ok(a > -1, "decryptItem missing");
   const body = bg.slice(a, bg.indexOf("\n}\n", a));
-  assert.match(body, /if \(itemDocProblem\(doc\) !== null\) continue;/);
-  // …and the check runs BEFORE the push, so nothing unchecked ever reaches session.items.
-  assert.ok(body.indexOf("itemDocProblem(doc)") < body.indexOf("items.push("), "check must precede the push");
+  assert.match(body, /if \(itemDocProblem\(doc\) !== null\) return null;/);
+  // …and the check runs BEFORE the row is returned, so nothing unchecked ever reaches session.items.
+  assert.ok(body.indexOf("itemDocProblem(doc)") < body.indexOf("return { itemId"), "check must precede the return");
+  const all = bg.slice(bg.indexOf("function decryptItems("), bg.indexOf("\n}\n", bg.indexOf("function decryptItems(")));
+  assert.match(all, /decryptItem\(it, vaultKeys\)/, "decryptItems routes through decryptItem");
 });
