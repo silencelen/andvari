@@ -702,6 +702,8 @@ class SyncEngineLifecycleTest {
             ),
         )
         engine.sync()
+        // A6b: the accept was made on another device of this account, which recorded the ownership in account state.
+        engine.accountState.update { AccountState.withOwned(it, vaultId, 1) }
 
         engine.offerTransfer(vaultId, "next-owner")
         val sent = server.transferOffers.single()

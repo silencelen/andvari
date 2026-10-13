@@ -67,6 +67,14 @@ internal object ConsumedNonceSerializer : KSerializer<ConsumedNonce> {
 }
 
 /**
+ * One vault grant THIS account signed (security review 2026-10, root cause A, branch A6b): the (vault, member) pair
+ * and SHA-256 (hex) of the identity key it was sealed to. A re-issue to a pair recorded here, for the SAME key, needs
+ * no prompt; anything else needs a human on the device to confirm the pair. Pre-A6b grants are never recorded.
+ */
+@Serializable
+data class IssuedGrant(val vaultId: String, val userId: String, val keyHash: String, val at: Long)
+
+/**
  * The account-state plaintext (root cause A §4.2): `Envelope(UVK, JSON, Ad.accountState(userId))`.
  * Only this user's UVK can seal or open it, so the server can withhold or roll it back but never add
  * to it. [seq] is the authenticated high-water counter; the server's own `seq` is only a CAS token.
@@ -80,8 +88,29 @@ data class AccountStateDoc(
     val contactTombstones: Map<String, Long> = emptyMap(),
     val orgRecoveryFp: String? = null,
     val consumedNonces: Map<String, List<ConsumedNonce>> = emptyMap(),
+    /** A6b: every grant this account signed from A6b on (see [IssuedGrant]). */
+    val issuedGrants: List<IssuedGrant> = emptyList(),
+    /** A6b: `"<vaultId>|<userId>"` → ms; written when the owner removes the member. */
+    val issuedTombstones: Map<String, Long> = emptyMap(),
+    /** A6b: vaults this account OWNS by its own evidence (created, accepted by transfer, or confirmed with a password
+     *  reauth), vaultId → ms. The server's `role=owner` label is never an input. */
+    val ownedVaults: Map<String, Long> = emptyMap(),
+    /** A6b: vaultId → ms; written when the account transfers the vault away or leaves it. */
+    val ownedTombstones: Map<String, Long> = emptyMap(),
 ) {
     fun contact(userId: String): Contact? = contacts.firstOrNull { it.userId == userId }
+
+    /** The issued-grant record for ([vaultId], [userId]), when one is in force. */
+    fun issued(vaultId: String, userId: String): IssuedGrant? =
+        issuedGrants.firstOrNull { it.vaultId == vaultId && it.userId == userId }
+            ?.takeIf { it.at > (issuedTombstones[AccountState.pairKey(vaultId, userId)] ?: -1L) }
+
+    /** True when this account's own evidence says it owns [vaultId]. */
+    fun owns(vaultId: String): Boolean = ownedVaults[vaultId]?.let { it > (ownedTombstones[vaultId] ?: -1L) } == true
+
+    /** True when there is nothing in the document worth writing. */
+    fun isBlank(): Boolean = contacts.isEmpty() && consumedNonces.isEmpty() && orgRecoveryFp == null &&
+        issuedGrants.isEmpty() && issuedTombstones.isEmpty() && ownedVaults.isEmpty() && ownedTombstones.isEmpty()
 }
 
 class AccountStateException(message: String) : Exception(message)
@@ -132,6 +161,16 @@ object AccountState {
         }
         if (doc.contacts.map { it.userId }.toSet().size != doc.contacts.size) throw AccountStateException("duplicate contact")
         doc.orgRecoveryFp?.let { if (!HEX64_RE.matches(it)) throw AccountStateException("orgRecoveryFp is not 64 hex") }
+        for (g in doc.issuedGrants) {
+            if (!UUID_RE.matches(g.vaultId) || !UUID_RE.matches(g.userId)) throw AccountStateException("issued grant id is not a uuid")
+            if (!HEX64_RE.matches(g.keyHash)) throw AccountStateException("issued grant keyHash is not 64 hex")
+            if (g.at < 0) throw AccountStateException("issued grant at is negative")
+        }
+        if (doc.issuedGrants.map { pairKey(it.vaultId, it.userId) }.toSet().size != doc.issuedGrants.size) throw AccountStateException("duplicate issued grant")
+        for ((k, at) in doc.ownedVaults) {
+            if (!UUID_RE.matches(k)) throw AccountStateException("owned vault id is not a uuid")
+            if (at < 0) throw AccountStateException("owned vault at is negative")
+        }
         return doc
     }
 
@@ -191,10 +230,79 @@ object AccountState {
         val preferServed = served != null && !rollback && servedSeq > localSeq
         val fp = if (preferServed) served!!.orgRecoveryFp ?: local?.orgRecoveryFp else local?.orgRecoveryFp ?: served?.orgRecoveryFp
 
+        // A6b: issued grants union by (vaultId, userId), the newest `at` wins (tie: the smaller keyHash); a tombstone
+        // not older than the entry removes it. Owned vaults union (max `at`), a tombstone not older removes it. Like
+        // contacts, a rollback cannot shrink either: both copies are UVK-authenticated and the local one is kept.
+        val issuedTomb = HashMap<String, Long>()
+        for ((k, t) in docs.flatMap { it.issuedTombstones.entries }) issuedTomb[k] = maxOf(issuedTomb[k] ?: t, t)
+        val byPair = HashMap<String, IssuedGrant>()
+        for (g in docs.flatMap { it.issuedGrants }) {
+            val k = pairKey(g.vaultId, g.userId)
+            val cur = byPair[k]
+            byPair[k] = when {
+                cur == null -> g
+                g.at > cur.at -> g
+                g.at < cur.at -> cur
+                else -> if (g.keyHash < cur.keyHash) g else cur
+            }
+        }
+        val issued = byPair.entries.filter { (k, g) -> (issuedTomb[k] ?: Long.MIN_VALUE) < g.at }.map { it.value }
+            .sortedWith(compareBy<IssuedGrant> { it.vaultId }.thenBy { it.userId })
+        val ownedTomb = HashMap<String, Long>()
+        for ((k, t) in docs.flatMap { it.ownedTombstones.entries }) ownedTomb[k] = maxOf(ownedTomb[k] ?: t, t)
+        val owned = HashMap<String, Long>()
+        for ((k, t) in docs.flatMap { it.ownedVaults.entries }) owned[k] = maxOf(owned[k] ?: t, t)
+        val ownedLive = owned.filter { (k, t) -> (ownedTomb[k] ?: Long.MIN_VALUE) < t }
+
         val seq = maxOf(localSeq, servedSeq, highWater, 0)
         return Merged(
-            AccountStateDoc(VERSION, userId, seq, contacts, tombstones.toSortedMap(), fp, cappedNonces),
+            AccountStateDoc(
+                VERSION, userId, seq, contacts, tombstones.toSortedMap(), fp, cappedNonces,
+                issued, issuedTomb.toSortedMap(), ownedLive.toSortedMap(), ownedTomb.toSortedMap(),
+            ),
             rollback,
+        )
+    }
+
+    /** The tombstone key for an issued grant. */
+    fun pairKey(vaultId: String, userId: String): String = "$vaultId|$userId"
+
+    /**
+     * Record a grant this account just signed (A6b). The entry replaces any earlier one for the pair, and its `at`
+     * is pushed past an older tombstone so a re-add after a removal survives the merge.
+     */
+    fun withIssued(doc: AccountStateDoc, vaultId: String, userId: String, keyHash: String, at: Long): AccountStateDoc {
+        val k = pairKey(vaultId, userId)
+        val t = maxOf(at, (doc.issuedTombstones[k] ?: -1L) + 1, (doc.issuedGrants.firstOrNull { it.vaultId == vaultId && it.userId == userId }?.at ?: -1L))
+        return doc.copy(
+            issuedGrants = (doc.issuedGrants.filterNot { it.vaultId == vaultId && it.userId == userId } + IssuedGrant(vaultId, userId, keyHash, t))
+                .sortedWith(compareBy<IssuedGrant> { it.vaultId }.thenBy { it.userId }),
+        )
+    }
+
+    /** Tombstone the issued grant for ([vaultId], [userId]): the owner removed the member (A6b). */
+    fun withoutIssued(doc: AccountStateDoc, vaultId: String, userId: String, at: Long): AccountStateDoc {
+        val k = pairKey(vaultId, userId)
+        val existing = doc.issuedGrants.firstOrNull { it.vaultId == vaultId && it.userId == userId }?.at ?: -1L
+        val t = maxOf(at, existing, doc.issuedTombstones[k] ?: -1L)
+        return doc.copy(
+            issuedGrants = doc.issuedGrants.filterNot { it.vaultId == vaultId && it.userId == userId },
+            issuedTombstones = (doc.issuedTombstones + (k to t)).toSortedMap(),
+        )
+    }
+
+    /** Record that this account owns [vaultId] (created it, accepted it, or confirmed it with a reauth; A6b). */
+    fun withOwned(doc: AccountStateDoc, vaultId: String, at: Long): AccountStateDoc {
+        val t = maxOf(at, (doc.ownedTombstones[vaultId] ?: -1L) + 1, doc.ownedVaults[vaultId] ?: -1L)
+        return doc.copy(ownedVaults = (doc.ownedVaults + (vaultId to t)).toSortedMap())
+    }
+
+    /** Tombstone ownership of [vaultId]: the account transferred it away or left it (A6b). */
+    fun withoutOwned(doc: AccountStateDoc, vaultId: String, at: Long): AccountStateDoc {
+        val t = maxOf(at, doc.ownedVaults[vaultId] ?: -1L, doc.ownedTombstones[vaultId] ?: -1L)
+        return doc.copy(
+            ownedVaults = (doc.ownedVaults - vaultId).toSortedMap(),
+            ownedTombstones = (doc.ownedTombstones + (vaultId to t)).toSortedMap(),
         )
     }
 

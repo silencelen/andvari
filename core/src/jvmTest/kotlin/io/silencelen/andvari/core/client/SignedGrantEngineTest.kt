@@ -1012,6 +1012,10 @@ class SignedGrantEngineTest {
         val ownerDevice = unlock(w.owner)
         val engine = SyncEngine(api(server), ownerDevice, InMemoryVaultCache())
         engine.sync()
+        // A6b: the owner's own evidence of ownership (here seeded directly; in the app it is the creation record,
+        // a transfer accept, or the password-reauthed "You own <vault>?").
+        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer") }
+        engine.accountState.update { AccountState.withOwned(it, w.vaultId, 1) }
         assertFailsWith<MemberNotVerifiedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer") }
         assertTrue(server.adds.isEmpty())
 
@@ -1037,7 +1041,7 @@ class SignedGrantEngineTest {
     }
 
     @Test
-    fun theOwnerReissuesLegacyGrantsToPinnedMembersAndListsTheRest() = runBlocking<Unit> {
+    fun theOwnerReissuesLegacyGrantsOnlyOnConfirmationAndListsTheRest() = runBlocking<Unit> {
         val w = world()
         val unpinned = enroll("a6-unpinned")
         val server = FakeServer(
@@ -1051,8 +1055,15 @@ class SignedGrantEngineTest {
         )
         val engine = SyncEngine(api(server), unlock(w.owner), InMemoryVaultCache())
         engine.sync()
+        engine.accountState.update { AccountState.withOwned(it, w.vaultId, 1) } // A6b: ownership evidence (see above)
         engine.accountState.pin(pinOf(w.member, "Member"))
         engine.sync()
+        assertTrue(server.reissues.isEmpty(), "A6b: sync() never re-issues")
+        val rows = engine.loadLegacyGrants(w.vaultId)
+        assertEquals(listOf(w.member.userId, unpinned.userId).sorted(), rows.map { it.userId }.sorted())
+        assertTrue(server.reissues.isEmpty(), "listing signs nothing for an unrecorded pair")
+        assertFailsWith<MemberNotVerifiedException> { engine.confirmReissue(rows.single { it.userId == unpinned.userId }) }
+        engine.confirmReissue(rows.single { it.userId == w.member.userId })
         val (vaultId, userId, signed) = server.reissues.single()
         assertEquals(w.vaultId to w.member.userId, vaultId to userId)
         val me = crypto.boxKeypairFromSeed(seedOf(w.member))
@@ -1062,10 +1073,11 @@ class SignedGrantEngineTest {
             heldVk = w.vk,
         )
         assertTrue(opened is GrantOutcome.Adopted, "the SAME VK, re-issued")
-        val legacy = engine.legacyGrantMembers(w.vaultId)
+        val legacy = engine.legacyGrantRows(w.vaultId)
         assertEquals(listOf(unpinned.userId), legacy.map { it.userId }, "only the unpinned member still needs securing")
+        assertEquals(SyncEngine.MemberPinState.NEEDS_VERIFICATION, legacy.single().pinState)
         engine.sync()
-        assertEquals(1, server.reissues.size, "once per session")
+        assertEquals(1, server.reissues.size, "sync() adds nothing")
     }
 
     private fun ownerRowWrap(w: World): String = Envelope.sealB64(crypto, ownerUvk(w.owner), w.vk, Ad.vk(w.vaultId, w.owner.userId))
