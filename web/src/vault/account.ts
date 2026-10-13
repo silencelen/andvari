@@ -4,7 +4,7 @@ import { usageKey } from "../crypto/usagekey";
 import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "../crypto/bytes";
 import { open, seal, structuralRefusal } from "../crypto/envelope";
 import { fingerprint as recoveryFingerprint, sealUvkV2 } from "../crypto/escrow";
-import { authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
+import { assertServerKdfParams, authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
 import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
 import { boxKeypairFromSeed, randomBytes, sha256Sync, signKeypairFromSeed } from "../crypto/provider";
@@ -209,6 +209,10 @@ export class Account {
    */
   private readonly memberGrantedVaults = new Set<string>();
 
+  /** A6b review LOW-3: the `kdfSalt` of the AccountKeys this session unlocked (or enrolled) with; null = unknown, and
+   *  then no reauth passes on this session (fail closed; a re-lock after a password change resets it). */
+  private sessionKdfSalt: string | null = null;
+
   /** Root cause A §3.1: vaults whose row carried a seal that opened to a DIFFERENT key than the one
    *  we hold from our own UVK wrap ("vault key mismatch"; ours was kept). Core: `vkMismatchVaults`. */
   private readonly vkMismatchVaults = new Set<string>();
@@ -398,6 +402,7 @@ export class Account {
       account.vaultRoles.set(personalVaultId, "owner");
       account.personalStatusValue = "confirmed";
       account.personalWrapValue = request.personalWrap!;
+      account.sessionKdfSalt = request.kdfSalt; // A6b review LOW-3
       account.uvkWrappedVaults.add(personalVaultId);
       signingForCleanup = null; // owned by the returned Account now
       return { request, account, recoverySecret: recovery.recoverySecret };
@@ -599,6 +604,7 @@ export class Account {
     const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, "", new Map());
     // Root cause A §4.3: the personal vault comes from the UVK-authenticated wrap and nothing else.
     account.applyPersonalWrap(keys.personalWrap ?? null);
+    account.sessionKdfSalt = keys.kdfSalt || null; // A6b review LOW-3: the salt this session unlocked with
     return account;
   }
 
@@ -1041,6 +1047,10 @@ export class Account {
    * key are wiped on the way out (audit H80).
    */
   async verifyPassword(password: string, keys: AccountKeys): Promise<boolean> {
+    // A6b review LOW-3 (core twin): the KDF floor/ceiling fence unlock applies (throws KdfPolicyError), and only the
+    // salt THIS session unlocked with: a replayed older AccountKeys carries another salt and the OLD password's wrap.
+    assertServerKdfParams(keys.kdfParams);
+    if (this.sessionKdfSalt === null || keys.kdfSalt !== this.sessionKdfSalt) return false;
     const mk = masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams);
     let wrapKey: Uint8Array;
     try {

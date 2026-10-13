@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { UserLookupResponse, VaultMemberSummary } from "../api/types";
 import type { Account } from "../vault/account";
-import { type DeletedVaultInfo, type IncomingTransfer, type LegacyGrantRow, MemberNotVerifiedError, OwnershipNotConfirmedError, ReauthFailedError, type VaultInfo, type VaultStore } from "../vault/store";
+import { type DeletedVaultInfo, type IncomingTransfer, type LegacyGrantRow, MemberNotVerifiedError, OwnershipNotConfirmedError, type OwnershipClaim, OwnershipTransferAckRequiredError, ReauthFailedError, type VaultInfo, type VaultStore } from "../vault/store";
+import { VaultKeyNotVerifiedError } from "../vault/account";
 import { VerifyMemberPanel } from "./Household";
 import { LegacyReviewCard, PendingInvitationsCard } from "./SignedGrantCards";
 import { UNREACHABLE } from "./errors";
@@ -583,48 +584,93 @@ function MemberPinTag({ store, account, m, onVerify }: { store: VaultStore; acco
 }
 
 /**
- * "You own <vault>?" (security review 2026-10, root cause A, branch A6b): the server reports this account as the owner,
- * but this browser has no record that the account created the vault or accepted it. The owner confirms once, with a
- * fresh master-password reauth checked against this session's key; the record then syncs to every device. Until
- * then, nothing is signed or sealed for this vault on the strength of the server's label.
+ * "You own <vault>?" (security review 2026-10, root cause A, branch A6b; review MEDIUM-1): the server reports this
+ * account as the owner, but this browser has no record that the account created the vault or that its owner
+ * transferred it here. Like A5b's personal-vault choice, the confirmation first loads and shows what the server
+ * reports (its owner, its last transfer, who else holds the vault), then asks for a fresh master password, checked
+ * against this session's key. A vault this browser first received as a MEMBER also needs the explicit "This vault's
+ * owner transferred it to me". Until then nothing is signed or sealed for it on the strength of the server's label.
  */
 function ConfirmOwnership({ vault, store, onConfirmed }: { vault: VaultInfo; store: VaultStore; onConfirmed: () => void }) {
-  const [open, setOpen] = useState(false);
+  const [claim, setClaim] = useState<OwnershipClaim | null>(null);
   const [password, setPassword] = useState("");
+  const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const confirm = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const open = async () => {
     setBusy(true);
     setErr("");
     try {
-      await store.confirmOwnership(vault.vaultId, password);
-      setPassword("");
-      onConfirmed();
+      setClaim(await store.describeOwnership(vault.vaultId));
     } catch (x) {
-      setErr(x instanceof ReauthFailedError ? "That master password isn't right." : friendlyError(x));
+      setErr(x instanceof VaultKeyNotVerifiedError ? "This vault's key did not come from your own account, so it can't be claimed here." : friendlyError(x));
     } finally {
       setBusy(false);
     }
   };
+  const cancel = () => {
+    store.cancelOwnershipClaim();
+    setClaim(null);
+    setPassword("");
+    setAck(false);
+    setErr("");
+  };
+  const confirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!claim) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await store.confirmOwnership(claim, password, ack);
+      setPassword("");
+      onConfirmed();
+    } catch (x) {
+      setErr(
+        x instanceof ReauthFailedError ? "That master password isn't right."
+          : x instanceof OwnershipTransferAckRequiredError ? x.message
+          : friendlyError(x),
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const who = (c: { displayName: string; email: string; userId: string }) => (c.displayName ? `${c.displayName} (${c.email})` : "someone this browser can't name");
   return (
     <div className="msg info" style={{ display: "block", marginTop: 14 }}>
       <strong>You own “{vault.name}”?</strong> The server reports you as its owner, but this device has no record that you
-      created this vault or took it over. Confirm it once before you add members, re-share it, or hand it over. If you
-      did not create this vault, don't confirm: tell your admin.
-      {!open ? (
+      created this vault or that its owner transferred it to you. Only confirm if you created this vault, or its owner
+      transferred it to you. Otherwise, don't confirm: tell your admin.
+      {err && <Msg kind="err">{err}</Msg>}
+      {!claim ? (
         <div className="actions" style={{ marginTop: 8 }}>
-          <button type="button" className="ghost" onClick={() => setOpen(true)}>Yes, I own “{vault.name}”…</button>
+          <button type="button" className="ghost" disabled={busy} onClick={() => void open()}>{busy ? <Busy>Loading…</Busy> : `Confirm I own “${vault.name}”…`}</button>
         </div>
       ) : (
         <form onSubmit={confirm} style={{ marginTop: 8 }}>
-          {err && <Msg kind="err">{err}</Msg>}
+          <ul className="plain-list">
+            <li>
+              {claim.lastTransferTo
+                ? <>Last ownership transfer: to {who(claim.lastTransferTo)}, transfer #{claim.lastTransferSeq} <span className="muted">(as reported by the server)</span></>
+                : <>Created by {claim.reportedOwner ? who(claim.reportedOwner) : "an unknown owner"}; no transfer on record <span className="muted">(as reported by the server)</span></>}
+            </li>
+            <li>
+              Also holding this vault: {claim.coHolders.length === 0 ? "no one else" : claim.coHolders.map((c) => `${who(c)}, ${c.role}`).join("; ")}{" "}
+              <span className="muted">(as reported by the server)</span>
+            </li>
+            {claim.receivedAsMember && <li><strong>This device first received this vault as a member.</strong></li>}
+          </ul>
+          {claim.receivedAsMember && (
+            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} disabled={busy} />
+              This vault's owner transferred it to me
+            </label>
+          )}
           <div className="field">
             <label>Your master password</label>
             <div className="secret-row">
               <input type="password" autoComplete="current-password" aria-label="Your master password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} />
-              <button className="primary" disabled={busy || !password}>{busy ? <Busy>Checking…</Busy> : "Confirm"}</button>
-              <button type="button" className="ghost" disabled={busy} onClick={() => { setOpen(false); setPassword(""); setErr(""); }}>Cancel</button>
+              <button className="primary" disabled={busy || !password || (claim.receivedAsMember && !ack)}>{busy ? <Busy>Checking…</Busy> : "Confirm"}</button>
+              <button type="button" className="ghost" disabled={busy} onClick={cancel}>Cancel</button>
             </div>
           </div>
         </form>

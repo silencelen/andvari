@@ -10,12 +10,12 @@ import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
 import { memoryClientState } from "./accountstatesync";
 import type { Contact } from "./accountstate";
-import { OwnershipNotConfirmedError, ReauthFailedError, ReissueNotAuthorizedError, VaultStore } from "./store";
+import { OwnershipNotConfirmedError, OwnershipTransferAckRequiredError, ReauthFailedError, ReissueNotAuthorizedError, VaultStore } from "./store";
 import { VaultKeyNotVerifiedError } from "./account";
 import { issuedFor, ownsVault } from "./accountstate";
-import { adIdkey, adUvk } from "../crypto/ad";
+import { adIdkey, adUvk, adVk } from "../crypto/ad";
 import { fromB64, toB64, toHexLower, utf8 } from "../crypto/bytes";
-import { open } from "../crypto/envelope";
+import { open, seal } from "../crypto/envelope";
 import { type KdfParams, masterKey, wrapKey } from "../crypto/keys";
 import { acceptProofFromHash } from "../crypto/lifecycleproof";
 import { sha256Sync } from "../crypto/provider";
@@ -43,11 +43,13 @@ interface Enrolled {
   personalMeta: string;
 }
 
-async function enroll(tag: string): Promise<Enrolled> {
+const FLOOR: KdfParams = { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 };
+
+async function enroll(tag: string, kdfParams: KdfParams = KDF): Promise<Enrolled> {
   const email = `${tag}-${Math.random().toString(16).slice(2)}@example.com`;
   const recovery = boxKeypairFromSeed(randomBytes(32));
   const password = `pw ${email}`;
-  const { request, account } = await Account.enroll({ inviteToken: "t", email, displayName: email, password, kdfParams: KDF, recoveryPublicKey: recovery.publicKey, recoveryFingerprint: await fingerprint(recovery.publicKey) });
+  const { request, account } = await Account.enroll({ inviteToken: "t", email, displayName: email, password, kdfParams, recoveryPublicKey: recovery.publicKey, recoveryFingerprint: await fingerprint(recovery.publicKey) });
   return {
     account,
     keys: {
@@ -148,9 +150,9 @@ interface World {
 }
 
 /** An owner, a member, and a shared vault "Household" the owner created ON ANOTHER DEVICE before this branch. */
-async function world(): Promise<World> {
-  const owner = await enroll("a6b-owner");
-  const member = await enroll("a6b-member");
+async function world(ownerKdf: KdfParams = KDF, memberKdf: KdfParams = KDF): Promise<World> {
+  const owner = await enroll("a6b-owner", ownerKdf);
+  const member = await enroll("a6b-member", memberKdf);
   const shared = owner.account.buildCreateSharedVault("Household");
   return { owner, member, vaultId: shared.vaultId, metaBlob: shared.request.metaBlob, ownerWrap: shared.request.wrappedVk };
 }
@@ -223,7 +225,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(rows[0]!.ownershipConfirmed).toBe(false);
     await expect(store.confirmReissue(rows[0]!)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     // Nor can the member claim it: its key came from a grant, not from its own UVK wrap.
-    await expect(store.confirmOwnership(w.vaultId, w.member.password)).rejects.toBeInstanceOf(VaultKeyNotVerifiedError);
+    await expect(store.describeOwnership(w.vaultId)).rejects.toBeInstanceOf(VaultKeyNotVerifiedError);
     expect(server.adds).toEqual([]);
     expect(server.offers).toEqual([]);
     expect(server.reissues).toEqual([]);
@@ -349,7 +351,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
   });
 
   it("the 'You own <vault>?' confirmation requires a reauth", async () => {
-    const w = await world();
+    const w = await world(FLOOR); // the reauth applies the unlock KDF fence
     const server = new FakeServer(ownerFeed(w));
     server.keys = w.owner.keys;
     const store = new VaultStore(server.asClient(), await unlock(w.owner), undefined, memoryClientState());
@@ -358,11 +360,16 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(store.ownershipNeedsConfirmation(w.vaultId), "a vault created before A6b has no ownership record").toBe(true);
     await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer")).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
 
-    await expect(store.confirmOwnership(w.vaultId, "not the password")).rejects.toBeInstanceOf(ReauthFailedError);
+    const claim = await store.describeOwnership(w.vaultId);
+    expect(claim.receivedAsMember, "a vault this account created needs only the single confirm").toBe(false);
+    expect(claim.origin).toBe("created");
+    expect(claim.vaultName).toBe("Household");
+    await expect(store.confirmOwnership(claim, "not the password")).rejects.toBeInstanceOf(ReauthFailedError);
     expect(store.ownsVault(w.vaultId), "a wrong password records nothing").toBe(false);
     expect(server.adds).toEqual([]);
+    await expect(store.confirmOwnership({ ...claim }, w.owner.password)).rejects.toThrow(/not described/);
 
-    await store.confirmOwnership(w.vaultId, w.owner.password);
+    await store.confirmOwnership(claim, w.owner.password);
     expect(store.ownsVault(w.vaultId)).toBe(true);
     expect(store.ownershipNeedsConfirmation(w.vaultId), "asked once").toBe(false);
     await store.addVaultMember(w.vaultId, w.member.userId, "writer");
@@ -386,5 +393,84 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     await store.sync();
     expect(store.ownsVault(vaultId), "a verified transfer to someone else ends this account's ownership evidence").toBe(false);
     await expect(store.offerTransfer(vaultId, member.userId)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+  });
+
+  // ---- A6b review MEDIUM-1 / LOW-3 ----
+
+  async function uvkOfE(e: Enrolled): Promise<Uint8Array> {
+    return open(await wrapKey(masterKey(e.password, fromB64(e.keys.kdfSalt), e.keys.kdfParams)), fromB64(e.keys.wrappedUvk), adUvk(e.userId));
+  }
+
+  /** The member's browser holding the vault through a verified grant AND its own self-wrap, the row relabelled owner. */
+  async function memberHoldingRelabelled(w: World) {
+    const vk = open(await uvkOfE(w.owner), fromB64(w.ownerWrap), adVk(w.vaultId, w.owner.userId));
+    const selfWrap = toB64(seal(await uvkOfE(w.member), vk, adVk(w.vaultId, w.member.userId)));
+    const signed = w.owner.account.buildSignedGrant(w.vaultId, pinOf(w.member, "Member"));
+    const server = new FakeServer({
+      rev: 9, full: true, vaults: [personalRow(w.member), sharedRow(w, 9)],
+      grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "owner", wrappedVk: selfWrap, rev: 9, sealedVk: null, signedGrant: signed }],
+      items: [], removedGrants: [],
+    });
+    server.keys = w.member.keys;
+    server.members[w.vaultId] = [summary(w.member, "Member", "owner"), summary(w.owner, "Owner", "writer")];
+    const store = new VaultStore(server.asClient(), await unlock(w.member), undefined, memoryClientState());
+    await store.sync();
+    return { store, server };
+  }
+
+  it("MEDIUM-1: a member-granted vault is not claimed by a single confirm", async () => {
+    const w = await world(KDF, FLOOR);
+    const { store } = await memberHoldingRelabelled(w);
+    expect(store.ownershipNeedsConfirmation(w.vaultId)).toBe(true);
+    const claim = await store.describeOwnership(w.vaultId);
+    expect(claim.receivedAsMember).toBe(true);
+    expect(claim.reportedOwner?.userId, "the server's owner label, shown as reported").toBe(w.member.userId);
+    expect(claim.coHolders.map((c) => c.userId), "the co-holders are named").toEqual([w.owner.userId]);
+    expect(claim.origin).toBe("created");
+    expect(claim.lastTransferTo).toBeNull();
+    await expect(store.confirmOwnership(claim, w.member.password), "one confirm does not claim a vault received as a member").rejects.toBeInstanceOf(OwnershipTransferAckRequiredError);
+    expect(store.ownsVault(w.vaultId)).toBe(false);
+    await store.confirmOwnership(claim, w.member.password, true);
+    expect(store.ownsVault(w.vaultId), "the explicit transfer acknowledgement is accepted").toBe(true);
+  });
+
+  it("LOW-3: the reauth refuses a replayed older salt and a weakened KDF", async () => {
+    const owner = await enroll("a6b-owner", FLOOR);
+    const device = await unlock(owner);
+    const uvk = await uvkOfE(owner);
+    const oldSalt = randomBytes(16);
+    const oldWrap = toB64(seal(await wrapKey(masterKey("the old password", oldSalt, FLOOR)), uvk, adUvk(owner.userId)));
+    const replayed = { ...owner.keys, kdfSalt: toB64(oldSalt), wrappedUvk: oldWrap };
+    expect(await device.verifyPassword("the old password", replayed).catch(() => false), "a replayed older salt never passes").toBe(false);
+    const weakWrap = toB64(seal(await wrapKey(masterKey(owner.password, fromB64(owner.keys.kdfSalt), KDF)), uvk, adUvk(owner.userId)));
+    const weakened = { ...owner.keys, kdfParams: KDF, wrappedUvk: weakWrap };
+    expect(await device.verifyPassword(owner.password, weakened).catch(() => false), "a weakened KDF never passes").toBe(false);
+    expect(await device.verifyPassword(owner.password, owner.keys), "the real keys still pass").toBe(true);
+  });
+
+  it("MEDIUM-1: the member provenance survives a reload whose served row looks like an owner row", async () => {
+    const w = await world(KDF, FLOOR);
+    const vk = open(await uvkOfE(w.owner), fromB64(w.ownerWrap), adVk(w.vaultId, w.owner.userId));
+    const selfWrap = toB64(seal(await uvkOfE(w.member), vk, adVk(w.vaultId, w.member.userId)));
+    const signed = w.owner.account.buildSignedGrant(w.vaultId, pinOf(w.member, "Member"));
+    const server = new FakeServer({
+      rev: 9, full: true, vaults: [personalRow(w.member), sharedRow(w, 9)],
+      grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "writer", wrappedVk: selfWrap, rev: 9, sealedVk: null, signedGrant: signed }],
+      items: [], removedGrants: [],
+    });
+    server.keys = w.member.keys;
+    server.members[w.vaultId] = [summary(w.member, "Member", "owner")];
+    const local = memoryClientState();
+    await new VaultStore(server.asClient(), await unlock(w.member), undefined, local).sync();
+    server.feed = {
+      rev: 12, full: true, vaults: [personalRow(w.member), sharedRow(w, 12)],
+      grants: [personalGrant(w.member), { vaultId: w.vaultId, userId: w.member.userId, role: "owner", wrappedVk: selfWrap, rev: 12, sealedVk: null }],
+      items: [], removedGrants: [],
+    };
+    const reloaded = new VaultStore(server.asClient(), await unlock(w.member), undefined, local);
+    await reloaded.sync();
+    const claim = await reloaded.describeOwnership(w.vaultId);
+    expect(claim.receivedAsMember, "the durable provenance outlives the served row").toBe(true);
+    await expect(reloaded.confirmOwnership(claim, w.member.password)).rejects.toBeInstanceOf(OwnershipTransferAckRequiredError);
   });
 });
