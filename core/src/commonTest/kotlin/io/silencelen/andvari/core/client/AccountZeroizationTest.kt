@@ -133,7 +133,9 @@ class AccountZeroizationTest {
 
     @Test
     fun deriveAuthKey_wipesTheMk() {
-        val r = Account.enroll("inv", "a@x.com", "a", password, kdf, null, null, "dev", real)
+        // A9: Account.deriveAuthKey applies the KDF floor/ceiling fence, so this one enrols at the real floor.
+        val floor = KdfParams(ops = KdfUpgrade.MIN_OPS, memBytes = KdfUpgrade.MIN_MEM_BYTES)
+        val r = Account.enroll("inv", "a@x.com", "a", password, floor, null, null, "dev", real)
         val rec = Recording(real)
         val b64 = Account.deriveAuthKey(password, r.request.kdfSalt, r.request.kdfParams, rec)
         assertEquals(r.request.authKey, b64) // the encoded credential is intact…

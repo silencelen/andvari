@@ -151,6 +151,10 @@ class PersonalVaultIdentityTest {
         assertEquals(Account.PersonalStatus.CONFIRMED, account.personalStatus)
         val engine = SyncEngine(api(FakeServer(feed)), account, InMemoryVaultCache())
         engine.sync()
+        // A9 (M-2): a fresh device with no designation on record confirms the served wrap once; the labels still decide nothing.
+        assertEquals(Account.PersonalStatus.PROPOSED, account.personalStatus)
+        engine.describePersonalChange()
+        engine.acceptPersonalChange()
         assertEquals(victim.reg.personalVault.vaultId, account.personalVaultId)
         val types = engine.vaultInfos().associate { it.vaultId to it.type }
         assertEquals("personal", types[victim.reg.personalVault.vaultId], "type is derived from the wrap, not the label")
@@ -309,7 +313,7 @@ class PersonalVaultIdentityTest {
         val cache = InMemoryVaultCache()
         // Earlier session: the wrap was served, so this device has seen it.
         val first = Account.unlock(h.victim.reg.userId, password, h.victim.keys.copy(personalWrap = h.victim.reg.personalWrap), crypto)
-        SyncEngine(api(FakeServer(h.feed)), first, cache).sync()
+        SyncEngine(api(FakeServer(h.feed)), first, cache).also { it.sync(); it.describePersonalChange(); it.acceptPersonalChange() } // A9: confirmed once
         assertEquals(h.victim.reg.personalVault.vaultId, first.personalVaultId)
 
         // Now the server withholds it and serves the hostile labels (as a delta: the cursor has moved).

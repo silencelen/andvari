@@ -32,7 +32,8 @@ class ItemHomeVectorTest {
     @Test
     fun admit() {
         for (c in v["admit"]!!.jsonArray.map { it.jsonObject }) {
-            assertEquals(c["expect"].str(), ItemHome.admit(c["home"].str(), c["vaultId"].str()!!).code, c["name"].str())
+            val applies = c["applies"]?.jsonPrimitive?.booleanOrNull ?: true
+            assertEquals(c["expect"].str(), ItemHome.admit(c["home"].str(), c["vaultId"].str()!!, applies).code, c["name"].str())
         }
     }
 
@@ -50,11 +51,16 @@ class ItemHomeVectorTest {
             for (r in c["rows"]!!.jsonArray.map { it.jsonObject }) {
                 val itemId = r["itemId"].str()!!
                 val vaultId = r["vaultId"].str()!!
-                val verdict = ItemHome.admit(homes[itemId], vaultId)
+                // A9: a row applies only when it is live and under a vault this device holds the key for (the engine also
+                // needs the envelope to decrypt; the vectors cannot express that, ApiReview2Test does).
+                val deleted = r["deleted"]?.jsonPrimitive?.booleanOrNull == true
+                val applies = !deleted && r["unheld"]?.jsonPrimitive?.booleanOrNull != true
+                val verdict = ItemHome.admit(homes[itemId], vaultId, applies)
                 verdicts += verdict.code
                 when (verdict) {
                     ItemHome.Admit.NEW_HOME -> homes[itemId] = vaultId
                     ItemHome.Admit.HOME -> {}
+                    ItemHome.Admit.SKIP -> continue
                     ItemHome.Admit.QUARANTINE -> { tally.note(vaultId); continue }
                 }
                 if (r["deleted"]?.jsonPrimitive?.booleanOrNull == true) twins.remove(itemId) else twins[itemId] = vaultId

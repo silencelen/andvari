@@ -53,8 +53,10 @@ class KdfReKeyCoreTest {
 
     private val real = createCryptoProvider()
     private val password = "correct horse battery staple"
-    private val cheap = KdfParams(ops = 1, memBytes = 8192) // account's OLD params — test-speed
-    private val policyParams = KdfParams.DEFAULT           // 64 MiB / t=3 — the fence floor, inclusive
+    // A9 (M-1): the current-password proof goes through the KDF fence, so the account's OLD params sit AT the floor
+    // (an account below it could not sign in at all) and the policy raises one axis past it.
+    private val cheap = KdfParams(ops = KdfUpgrade.MIN_OPS, memBytes = KdfUpgrade.MIN_MEM_BYTES) // account's OLD params
+    private val policyParams = KdfParams(ops = KdfUpgrade.MIN_OPS + 1, memBytes = KdfUpgrade.MIN_MEM_BYTES)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private val enrolled = Account.enroll("inv", "a@x.com", "a", password, cheap, null, null, "dev", real)
@@ -218,8 +220,9 @@ class KdfReKeyCoreTest {
         rekey(server, crypto = rec) { }
         assertEquals(1, server.puts, "guard: the zeroization claim is only meaningful if the re-key ran")
 
-        // Two derivations: the NEW master key, and the one deriveAuthKey makes to prove possession.
-        assertEquals(2, rec.argon.size)
+        // One derivation through the injected provider: the NEW master key. (A9: the possession proof is the account's
+        // own fenced reauthAuthKey, on the account's provider; AccountZeroizationTest.deriveAuthKey_wipesTheMk covers it.)
+        assertEquals(1, rec.argon.size)
         rec.argon.forEachIndexed { i, s -> assertWiped(s, "master key #$i") }
         // The wrapKey is the AEAD key of the UVK seal; the UVK egress copy is its plaintext.
         val seal = rec.seals.single { it.ad.contentEquals(Ad.uvk(userId)) }

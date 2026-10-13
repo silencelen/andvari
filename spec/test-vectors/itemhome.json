@@ -1,11 +1,40 @@
 {
-  "comment": "Security review 2026-10, root cause A §5 (branch A1b). HAND-AUTHORED decision rows for the item-home invariants, written from the design text, graded against the functions production calls: core ItemHome (SyncEngine), web vault/itemhome.ts (store.ts) and extension/src/itemhome.ts (background.ts). Ids are opaque symbols: P = the vault this device holds the item in, S = another vault (one the server or a colluding co-member keys), X/Y/Z = itemIds. home(itemId) is the vaultId of the FIRST envelope this device applied for that itemId (device-local; a fresh device's first home is the server's choice, a stated residual). Sections: admit (one row against a home), pulls (a pull's rows in order: per-row verdicts, the homes after, the single wrong-vault anomaly, and which flagged rows reach materialization), conflict (INV-CONFLICT), serverItem (the push-side copy from a displaced value), edit (INV-EDIT) and seal (the INV-SEAL home cross-check every item seal for a push runs).",
+  "comment": "Security review 2026-10, root cause A §5 (branch A1b). HAND-AUTHORED decision rows for the item-home invariants, written from the design text, graded against the functions production calls: core ItemHome (SyncEngine), web vault/itemhome.ts (store.ts) and extension/src/itemhome.ts (background.ts). Ids are opaque symbols: P = the vault this device holds the item in, S = another vault (one the server or a colluding co-member keys), X/Y/Z = itemIds. home(itemId) is the vaultId of the FIRST envelope this device applied for that itemId (device-local; a fresh device's first home is the server's choice, a stated residual). Sections: admit (one row against a home), pulls (a pull's rows in order: per-row verdicts, the homes after, the single wrong-vault anomaly, and which flagged rows reach materialization), conflict (INV-CONFLICT), serverItem (the push-side copy from a displaced value), edit (INV-EDIT) and seal (the INV-SEAL home cross-check every item seal for a push runs). A9 (security review 2026-10): home(itemId) is recorded ONLY from a row this device actually APPLIED — admit rows carry `applies` (default true; false = a tombstone, a vault whose key this device does not hold, or an envelope that does not open) and an unhomed row that cannot be applied is `skip`: no home, no anomaly, and the row's own handling (a tombstone deletes nothing it never had; ciphertext may be kept for a later key) proceeds. Pull rows express it as `deleted` / `unheld`.",
   "admit": [
     { "name": "no home yet: the row's vault becomes the home", "home": null, "vaultId": "P", "expect": "new_home" },
     { "name": "a row under the home applies", "home": "P", "vaultId": "P", "expect": "home" },
     { "name": "a row under another vault is quarantined", "home": "P", "vaultId": "S", "expect": "quarantine" },
     { "name": "a tombstone under another vault is quarantined too (it is a row like any other)", "home": "P", "vaultId": "S", "deleted": true, "expect": "quarantine" },
     { "name": "a tombstone under the home applies", "home": "P", "vaultId": "P", "deleted": true, "expect": "home" }
+,
+    {
+      "name": "A9: no home yet, but the row cannot be applied here (a tombstone): no home is recorded",
+      "home": null,
+      "vaultId": "S",
+      "applies": false,
+      "expect": "skip"
+    },
+    {
+      "name": "A9: no home yet, but the row cannot be applied here (a vault this device holds no key for): no home is recorded",
+      "home": null,
+      "vaultId": "S",
+      "applies": false,
+      "expect": "skip"
+    },
+    {
+      "name": "A9: a row under the home applies even when it cannot be opened here (a tombstone under the home)",
+      "home": "P",
+      "vaultId": "P",
+      "applies": false,
+      "expect": "home"
+    },
+    {
+      "name": "A9: a row under another vault is quarantined whether or not it could be applied",
+      "home": "P",
+      "vaultId": "S",
+      "applies": false,
+      "expect": "quarantine"
+    }
   ],
   "pulls": [
     {
@@ -68,6 +97,114 @@
         { "itemId": "Y", "vaultId": "S" }
       ],
       "expect": { "verdicts": ["home", "new_home"], "homes": { "X": "P", "Y": "S" }, "anomalies": 0, "materialize": [{ "itemId": "X", "vaultId": "P" }] }
+    }
+,
+    {
+      "name": "A9: on a FRESH device a tombstone served FIRST never homes X; the genuine live row then takes the home",
+      "homes": {},
+      "rows": [
+        {
+          "itemId": "X",
+          "vaultId": "S",
+          "deleted": true
+        },
+        {
+          "itemId": "X",
+          "vaultId": "P"
+        }
+      ],
+      "expect": {
+        "verdicts": [
+          "skip",
+          "new_home"
+        ],
+        "homes": {
+          "X": "P"
+        },
+        "anomalies": 0,
+        "materialize": []
+      }
+    },
+    {
+      "name": "A9: on a FRESH device a row under a vault this device holds NO key for, served FIRST, never homes X",
+      "homes": {},
+      "rows": [
+        {
+          "itemId": "X",
+          "vaultId": "S",
+          "unheld": true
+        },
+        {
+          "itemId": "X",
+          "vaultId": "P"
+        }
+      ],
+      "expect": {
+        "verdicts": [
+          "skip",
+          "new_home"
+        ],
+        "homes": {
+          "X": "P"
+        },
+        "anomalies": 0,
+        "materialize": []
+      }
+    },
+    {
+      "name": "A9: an unheld or tombstone row that comes AFTER the home is still quarantined (it names another vault)",
+      "homes": {},
+      "rows": [
+        {
+          "itemId": "X",
+          "vaultId": "P"
+        },
+        {
+          "itemId": "X",
+          "vaultId": "S",
+          "unheld": true
+        },
+        {
+          "itemId": "X",
+          "vaultId": "S",
+          "deleted": true
+        }
+      ],
+      "expect": {
+        "verdicts": [
+          "new_home",
+          "quarantine",
+          "quarantine"
+        ],
+        "homes": {
+          "X": "P"
+        },
+        "anomalies": 1,
+        "materialize": []
+      }
+    },
+    {
+      "name": "A9: a tombstone under the home applies (X is deleted, the home stays)",
+      "homes": {
+        "X": "P"
+      },
+      "rows": [
+        {
+          "itemId": "X",
+          "vaultId": "P",
+          "deleted": true
+        }
+      ],
+      "expect": {
+        "verdicts": [
+          "home"
+        ],
+        "homes": {
+          "X": "P"
+        },
+        "anomalies": 0,
+        "materialize": []
+      }
     }
   ],
   "conflict": [
