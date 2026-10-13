@@ -219,3 +219,35 @@ describe("Vault.tsx A7 review notices — the core HouseholdCopy twins", () => {
     });
   }
 });
+
+/**
+ * Root cause A §5.1 (branch A1b): the item-home sentences live in core HouseholdCopy and the natives render them
+ * directly; web's twins are pinned byte-equal here. The two reauth sentences (A6b carry-forward) are the error messages
+ * of store.ts's ReauthFailedError / ReauthStaleSessionError, and the INV-EDIT refusal is itemhome.ts's constant.
+ */
+describe("A1b item home + reauth copy — the core HouseholdCopy twins", () => {
+  const storeTs = readFileSync(here("../vault/store.ts"), "utf8");
+  const itemHomeTs = readFileSync(here("../vault/itemhome.ts"), "utf8");
+  const kt = (name: string): string => {
+    const m = householdKt.match(new RegExp(`const val ${name}(?:: String)? =\\s*"([^"]+)"`));
+    expect(m, `HouseholdCopy.${name} moved — update the pin`).not.toBeNull();
+    return m![1]!;
+  };
+
+  it("wrong-vault carries HouseholdCopy.WRONG_VAULT_NOTICE byte-equal", () => {
+    expect(vaultTsx).toContain(JSON.stringify(kt("WRONG_VAULT_NOTICE")));
+  });
+
+  it("the INV-EDIT refusal is HouseholdCopy.ITEM_CHANGED_VAULTS byte-equal", () => {
+    expect(itemHomeTs).toContain(`export const ITEM_CHANGED_VAULTS = ${JSON.stringify(kt("ITEM_CHANGED_VAULTS"))};`);
+  });
+
+  it("the stale-salt reauth says how to recover, byte-equal with HouseholdCopy.REAUTH_STALE_SESSION", () => {
+    expect(kt("REAUTH_STALE_SESSION")).toBe("Lock and unlock andvari, then try again.");
+    expect(storeTs).toContain(`super(${JSON.stringify(kt("REAUTH_STALE_SESSION"))});`);
+  });
+
+  it("the wrong-password reauth is HouseholdCopy.REAUTH_FAILED byte-equal", () => {
+    expect(storeTs).toContain(`super(${JSON.stringify(kt("REAUTH_FAILED"))});`);
+  });
+});

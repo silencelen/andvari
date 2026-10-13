@@ -14,6 +14,7 @@ import {
   CopyDeniedError,
   ALREADY_RECORDED,
   ItemChangedError,
+  ItemChangedVaultsError,
   LEFT_UNPROVEN,
   type LifecycleNotice,
   type MoveGesture,
@@ -207,6 +208,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   // run's post-"Wrong password" offer). Consumed by the Editor at mount and cleared with it.
   const [editorGenerate, setEditorGenerate] = useState(false);
   const [editing, setEditing] = useState<ItemDoc | null>(null);
+  /** INV-EDIT (root cause A §5.1, A1b): the vault the open editor was bound to when it OPENED on an existing item.
+   *  The save names it; a home that changed since refuses the save ("reopen it") instead of re-targeting it. */
+  const [editingVaultId, setEditingVaultId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode | null>(null);
   // DN-1 (A1): the Sharing view's per-vault settings layer. The id lives HERE — not in
@@ -443,6 +447,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   const closeLayers = useCallback(() => {
     setEditing(null);
     setEditorGenerate(false);
+    setEditingVaultId(null);
     setImportOpen(false);
     setExportMode(null);
     setSelected(null);
@@ -466,7 +471,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   };
 
   const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => {
-    await store.save(selected, doc, newFiles, onProgress, vaultId);
+    // An edit names the vault its editor opened on (INV-EDIT); a new item names the picker's destination.
+    await store.save(selected, doc, newFiles, onProgress, selected !== null ? (editingVaultId ?? undefined) : vaultId);
     refresh();
     setEditorGenerate(false);
     setEditing(null);
@@ -498,6 +504,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       if (it && it.doc.type === "login") {
         setEditorGenerate(true);
         setEditing(it.doc);
+        setEditingVaultId(it.vaultId);
       }
     }
   };
@@ -738,7 +745,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             vaultName={current.vaultId !== account.personalVaultId ? vaultNameById.get(current.vaultId) : undefined}
             moveTargets={newItemVaultChoices.filter((v) => v.vaultId !== current.vaultId)}
             onUsed={() => usage.record(current.itemId)}
-            onEdit={() => setEditing(current.doc)}
+            onEdit={() => { setEditing(current.doc); setEditingVaultId(current.vaultId); }}
             onDelete={() => remove(current.itemId)}
             onMoved={() => { refresh(); setSelected(null); }}
             onBack={() => setSelected(null)}
@@ -1030,6 +1037,13 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return {
         warn: true,
         body: `The server sent a key for “${name}” that doesn't match the one saved for your account. andvari kept your own key and ignored the other. Tell your admin — the server may be misbehaving.`,
+      };
+    case "wrong-vault":
+      // Root cause A §5.1 INV-HOME (A1b): a served row named another vault than the one this browser holds the item in;
+      // it was not applied. TWIN of core HouseholdCopy.WRONG_VAULT_NOTICE, byte-equal, pinned by vault-copy.test.ts.
+      return {
+        warn: true,
+        body: "The server sent an item under the wrong vault. andvari kept the item where it was and ignored the other copy. Tell your admin — the server may be misbehaving.",
       };
     case "key-unreadable":
       // Root cause A §3.1: our UVK wrap is present and does not open; no seal fallback. TWIN of
@@ -1662,7 +1676,7 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
       // this put a `rejected` row (core SyncEngine.versionDocForRestore twin).
       const liveIds = new Set((item.doc.attachments ?? []).map((a) => a.id));
       const doc: ItemDoc = { ...v.doc, attachments: v.doc.attachments?.filter((a) => liveIds.has(a.id)) };
-      await store.save(item.itemId, doc); // an ordinary put over the live item
+      await store.save(item.itemId, doc, [], undefined, item.vaultId); // an ordinary put over the live item, bound to its vault
       onRestored(); // back to the vault; the live item now holds the restored version
     } catch {
       setErr("Restore failed — nothing changed. Try again.");
@@ -2114,6 +2128,8 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
       setSaveErr(
         rejectedAttachment
           ? "The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again."
+          : err instanceof ItemChangedVaultsError
+            ? err.message // A1b INV-EDIT: "This item changed vaults; reopen it." (core HouseholdCopy.ITEM_CHANGED_VAULTS)
           : err instanceof ApiError && err.status === 413
             ? "The server refused that upload — it may be too large, or storage may be full."
             : "Save failed — nothing was changed.",

@@ -327,7 +327,7 @@ describe("Skipti holding area: park, reinstate, replay (F21)", () => {
     });
 
     // Must NOT throw — the edit is parked, not lost.
-    await expect(s.store.save(s.itemId, { ...DOC, name: "edited in-flight" })).resolves.toBeUndefined();
+    await expect(s.store.save(s.itemId, { ...DOC, name: "edited in-flight" }, [], undefined, s.vaultId)).resolves.toBeUndefined();
     const n = s.store.notices().find((x) => x.vaultId === s.vaultId);
     expect(n?.kind).toBe("deleted");
     expect(n?.parkedCount).toBe(1);
@@ -353,7 +353,7 @@ describe("Skipti holding area: park, reinstate, replay (F21)", () => {
     const s = await seededMember("reader");
     s.api.denyVaults.add(s.vaultId);
     // No delete arrives — the reconcile pull is empty, so the vault stays live.
-    await expect(s.store.save(s.itemId, { ...DOC, name: "reader edit" })).rejects.toBeInstanceOf(ApiError);
+    await expect(s.store.save(s.itemId, { ...DOC, name: "reader edit" }, [], undefined, s.vaultId)).rejects.toBeInstanceOf(ApiError);
     expect(s.store.heldVaults()).toHaveLength(0);
   });
 });
