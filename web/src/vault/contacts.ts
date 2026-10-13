@@ -1,6 +1,7 @@
 import { ctEquals, fromB64 } from "../crypto/bytes";
 import { matchesFull, matchesShort } from "../crypto/fingerprint";
 import { identityFingerprint } from "../crypto/sharedgrant";
+import { enrolInPerson, type InPersonEvidence } from "../enroll/enrollcheck";
 import type { EnrollPayload } from "../enroll/enrolllink";
 import type { AccountStateDoc, Contact } from "./accountstate";
 
@@ -60,17 +61,21 @@ export async function pinFromQr(qrPayload: string, served: ServedIdentity, label
 }
 
 /**
- * The enrolment mutual pin (root cause A §7.2): the link's `ifp`/`iu`, honoured ONLY when the human typed
- * the link's in-person code and it matched (`inPersonVerified`), and compared at full length.
+ * The enrolment mutual pin (root cause A §7.2): the link's `ifp`/`iu`, honoured ONLY on in-person evidence
+ * re-checked HERE from the raw inputs (A5c): the human typed the link's in-person code from the admin's screen
+ * AND affirmed, first person, that they are reading that screen right now (`enrolInPerson`). A navigated link
+ * plus a correct code is not evidence on its own: the server that composed the link can supply both. Compared
+ * at full length; null leaves the admin a pending verification, never an error.
  */
 export async function pinFromEnrolLink(
   payload: EnrollPayload,
-  inPersonVerified: boolean,
+  evidence: InPersonEvidence,
   served: ServedIdentity,
   label: string,
   now: number,
 ): Promise<Contact | null> {
-  if (!inPersonVerified || !payload.ifp || !payload.iu) return null;
+  if (!payload.ifp || !payload.iu) return null;
+  if (!(await enrolInPerson(payload, evidence))) return null;
   if (!HEX64_RE.test(payload.ifp) || payload.iu !== served.userId) return null;
   const fp = await servedFingerprint(served);
   if (fp === null || !matchesFull(payload.ifp, fp)) return null;
