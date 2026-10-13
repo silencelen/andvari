@@ -1745,7 +1745,9 @@ class AndvariViewModel(
         // thread), paid only on the rare unconfirmed path.
         val gk = gateKeys
         if (gk != null) {
-            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, gk.kdfSalt, gk.kdfParams) }
+            // A9 (M-1): the gate's proof goes through the one fenced in-session derivation (the unlock KDF fence, and
+            // only the salt this session just unlocked with — these ARE that session's keys).
+            val authKey = withContext(Dispatchers.Default) { requireNotNull(account) { "locked" }.reauthAuthKey(password, gk) }
             startRecoveryCapture(authKey)
         } else toVault()
     }
@@ -4148,7 +4150,7 @@ class AndvariViewModel(
     fun totpBegin(password: String) = totpOp {
         // Security review 2026-10: a first enrollment proves the master password (the server refuses
         // a bare setup outside its fresh-login window). One argon2id pass — off the Main thread.
-        val setup = withContext(Dispatchers.Default) { api!!.totpSetupWithPassword(password) }
+        val setup = withContext(Dispatchers.Default) { api!!.totpSetupWithPassword(password, requireNotNull(account) { "locked" }) }
         _ui.value = _ui.value.copy(totpSetup = setup, busy = false)
     }
 
