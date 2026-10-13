@@ -63,11 +63,21 @@ describe("trust records (A10)", () => {
     expect(encodeVouches([])).toBeNull();
   });
 
-  it("an encoder never writes a row with a malformed id", () => {
-    const json = encodeVouches([
-      { vaultId: `${v1}\n${v2}|${tagB}|confirmed`, tag: tagA, kind: "confirmed" },
-      { vaultId: v2, tag: tagA, kind: "confirmed" },
-    ])!;
+  // A10 review LOW-1: an encoder handed a malformed row by product code THROWS (a silently dropped row is a record
+  // that lies — the consumed-nonce case let a verified v1 nonce replay). Only the decoders drop.
+  it("an encoder throws on a malformed row instead of dropping it silently", () => {
+    const forged = `${v1}\n${v2}|${tagB}|confirmed`;
+    expect(() => encodeVouches([{ vaultId: forged, tag: tagA, kind: "confirmed" }])).toThrow(/malformed/);
+    expect(() => encodeVouches([{ vaultId: v1, tag: "short", kind: "confirmed" }])).toThrow(/malformed/);
+    expect(() => encodeVouches([{ vaultId: v1, tag: tagA, kind: "maybe" as "confirmed" }])).toThrow(/malformed/);
+    expect(() => encodeHeldKeys([{ vaultId: forged, tag: tagA }])).toThrow(/malformed/);
+    expect(() => encodeIdSet([v1, `${v2}|x`])).toThrow(/malformed/);
+    expect(() => encodeTokenSet(["bad token"])).toThrow(/malformed/);
+    expect(() => encodeTombstones([{ vaultId: v1, userId: "not-a-uuid", at: 1 }])).toThrow(/malformed/);
+    expect(() => encodeTombstones([{ vaultId: v1, userId: u1, at: 1.5 }])).toThrow(/malformed/);
+    expect(() => encodeConfirmedPins([{ userId: v1, keyTag: "short" }])).toThrow(/malformed/);
+    expect(() => encodeConsumedNonces([{ vaultId: v1, nonce: "a b", issuedAt: 7 }])).toThrow(/malformed/);
+    const json = encodeVouches([{ vaultId: v2, tag: tagA, kind: "confirmed" }])!;
     expect(decodeVouches(json).rows).toEqual([{ vaultId: v2, tag: tagA, kind: "confirmed" }]);
     expect(json).not.toContain("\n");
   });
