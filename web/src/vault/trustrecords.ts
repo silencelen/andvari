@@ -9,7 +9,9 @@ import { isUuid } from "../api/wireids";
  * human never reviewed. Each record is now a JSON array of objects (or of strings, for the plain id sets) with a
  * STRICT decode: exactly the expected keys, the expected types, and every id in the UUID grammar (wireids.ts) or
  * the token grammar (the SAFE_ID shape, for base64url grant ids and nonces); anything else is refused. The encoders
- * refuse the same rows, so a malformed id can neither be written nor read back.
+ * THROW on the same rows (A10 review LOW-1: a silently dropped row is a record that lies — product code that reaches
+ * an encoder with a malformed row has a bug upstream, and the throw names it), so a malformed id can neither be
+ * written nor read back.
  *
  * Migration: a value that is not a JSON array is a pre-A10 line record. It is parsed ONCE with the old grammar,
  * line by line, keeping only the lines that have exactly the old field count and well-formed ids, and the caller
@@ -105,6 +107,11 @@ function decode<T>(raw: string | null | undefined, keys: readonly string[], from
 
 const encode = <T>(rows: T[]): string | null => (rows.length === 0 ? null : JSON.stringify(rows));
 
+/** An encoder was handed a row the strict grammar refuses: a bug upstream, never a row to drop quietly. */
+function malformed(what: string, row: unknown): never {
+  throw new Error(`malformed ${what} record: ${JSON.stringify(row).slice(0, 200)}`);
+}
+
 function decodeStrings(raw: string | null | undefined, accept: (s: string) => boolean): Decoded<string> {
   if (!raw) return { rows: [], rewrite: false };
   const arr = parseArray(raw);
@@ -121,8 +128,8 @@ function decodeStrings(raw: string | null | undefined, accept: (s: string) => bo
   return { rows: [...new Set(raw.split("\n").filter((l) => l.length > 0 && accept(l)))], rewrite: true };
 }
 
-const encodeStrings = (rows: Iterable<string>, accept: (s: string) => boolean): string | null => {
-  const out = [...new Set([...rows].filter(accept))].sort();
+const encodeStrings = (rows: Iterable<string>, accept: (s: string) => boolean, what: string): string | null => {
+  const out = [...new Set([...rows].map((s) => (accept(s) ? s : malformed(what, s))))].sort();
   return out.length === 0 ? null : JSON.stringify(out);
 };
 
@@ -135,7 +142,7 @@ export const decodeVouches = (raw: string | null | undefined): Decoded<Vouch> =>
   decode(raw, ["vaultId", "tag", "kind"], (o) => vouch(str(o, "vaultId"), str(o, "tag"), str(o, "kind")), (p) => (p.length === 3 ? vouch(p[0]!, p[1]!, p[2]!) : null));
 
 export const encodeVouches = (rows: Iterable<Vouch>): string | null =>
-  encode([...rows].flatMap((v) => { const r = vouch(v.vaultId, v.tag, v.kind); return r ? [{ vaultId: r.vaultId, tag: r.tag, kind: r.kind }] : []; }));
+  encode([...rows].map((v) => { const r = vouch(v.vaultId, v.tag, v.kind) ?? malformed("vouch", v); return { vaultId: r.vaultId, tag: r.tag, kind: r.kind }; }));
 
 // ---- held keys ----
 
@@ -145,17 +152,17 @@ export const decodeHeldKeys = (raw: string | null | undefined): Decoded<HeldKey>
   decode(raw, ["vaultId", "tag"], (o) => held(str(o, "vaultId"), str(o, "tag")), (p) => (p.length === 2 ? held(p[0]!, p[1]!) : null));
 
 export const encodeHeldKeys = (rows: Iterable<HeldKey>): string | null =>
-  encode([...rows].flatMap((h) => { const r = held(h.vaultId, h.tag); return r ? [{ vaultId: r.vaultId, tag: r.tag }] : []; }));
+  encode([...rows].map((h) => { const r = held(h.vaultId, h.tag) ?? malformed("held key", h); return { vaultId: r.vaultId, tag: r.tag }; }));
 
 // ---- plain sets ----
 
 /** A set of vault ids (member-granted). */
 export const decodeIdSet = (raw: string | null | undefined): Decoded<string> => decodeStrings(raw, isUuid);
-export const encodeIdSet = (rows: Iterable<string>): string | null => encodeStrings(rows, isUuid);
+export const encodeIdSet = (rows: Iterable<string>): string | null => encodeStrings(rows, isUuid, "vault id");
 
 /** A set of opaque tokens (declined grant ids, base64url). */
 export const decodeTokenSet = (raw: string | null | undefined): Decoded<string> => decodeStrings(raw, (s) => TOKEN.test(s));
-export const encodeTokenSet = (rows: Iterable<string>): string | null => encodeStrings(rows, (s) => TOKEN.test(s));
+export const encodeTokenSet = (rows: Iterable<string>): string | null => encodeStrings(rows, (s) => TOKEN.test(s), "token");
 
 // ---- issued tombstones ----
 
@@ -166,7 +173,7 @@ export const decodeTombstones = (raw: string | null | undefined): Decoded<Tombst
   decode(raw, ["vaultId", "userId", "at"], (o) => tomb(str(o, "vaultId"), str(o, "userId"), num(o, "at")), (p) => (p.length === 3 ? tomb(p[0]!, p[1]!, int(p[2]!)) : null));
 
 export const encodeTombstones = (rows: Iterable<Tombstone>): string | null =>
-  encode([...rows].flatMap((t) => { const r = tomb(t.vaultId, t.userId, Number.isSafeInteger(t.at) ? t.at : null); return r ? [{ vaultId: r.vaultId, userId: r.userId, at: r.at }] : []; }));
+  encode([...rows].map((t) => { const r = tomb(t.vaultId, t.userId, Number.isSafeInteger(t.at) ? t.at : null) ?? malformed("tombstone", t); return { vaultId: r.vaultId, userId: r.userId, at: r.at }; }));
 
 // ---- confirmed pins ----
 
@@ -176,7 +183,7 @@ export const decodeConfirmedPins = (raw: string | null | undefined): Decoded<Con
   decode(raw, ["userId", "keyTag"], (o) => pin(str(o, "userId"), str(o, "keyTag")), (p) => (p.length === 2 ? pin(p[0]!, p[1]!) : null));
 
 export const encodeConfirmedPins = (rows: Iterable<ConfirmedPin>): string | null =>
-  encode([...rows].flatMap((c) => { const r = pin(c.userId, c.keyTag); return r ? [{ userId: r.userId, keyTag: r.keyTag }] : []; }));
+  encode([...rows].map((c) => { const r = pin(c.userId, c.keyTag) ?? malformed("confirmed pin", c); return { userId: r.userId, keyTag: r.keyTag }; }));
 
 // ---- consumed nonces ----
 
@@ -187,7 +194,7 @@ export const decodeConsumedNonces = (raw: string | null | undefined): Decoded<Co
   decode(raw, ["vaultId", "nonce", "issuedAt"], (o) => nonceRow(str(o, "vaultId"), str(o, "nonce"), num(o, "issuedAt")), (p) => (p.length === 3 ? nonceRow(p[0]!, p[1]!, int(p[2]!)) : null));
 
 export const encodeConsumedNonces = (rows: Iterable<ConsumedNonceRow>): string | null =>
-  encode([...rows].flatMap((n) => { const r = nonceRow(n.vaultId, n.nonce, Number.isSafeInteger(n.issuedAt) ? n.issuedAt : null); return r ? [{ vaultId: r.vaultId, nonce: r.nonce, issuedAt: r.issuedAt }] : []; }));
+  encode([...rows].map((n) => { const r = nonceRow(n.vaultId, n.nonce, Number.isSafeInteger(n.issuedAt) ? n.issuedAt : null) ?? malformed("consumed nonce", n); return { vaultId: r.vaultId, nonce: r.nonce, issuedAt: r.issuedAt }; }));
 
 /**
  * Read one record through `decoder`, migrating the stored form when it asks for a rewrite. `get` / `set` are the

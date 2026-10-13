@@ -2,6 +2,7 @@ package io.silencelen.andvari.core.client
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -63,10 +64,22 @@ class TrustRecordsTest {
         assertNull(TrustRecords.encodeVouches(emptyList()))
     }
 
+    /** A10 review LOW-1: an encoder handed a malformed row by product code THROWS (a silently dropped row is a
+     *  record that lies — the consumed-nonce case let a verified v1 nonce replay). Only the decoders drop. */
     @Test
-    fun anEncoderNeverWritesARowWithAMalformedId() {
-        val rows = listOf(TrustRecords.Vouch("$v1\n$v2|$tagB|confirmed", tagA, "confirmed"), TrustRecords.Vouch(v2, tagA, "confirmed"))
-        val json = TrustRecords.encodeVouches(rows)!!
+    fun anEncoderThrowsOnAMalformedRow_insteadOfDroppingItSilently() {
+        val forged = "$v1\n$v2|$tagB|confirmed"
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeVouches(listOf(TrustRecords.Vouch(forged, tagA, "confirmed"))) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeVouches(listOf(TrustRecords.Vouch(v1, "short", "confirmed"))) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeVouches(listOf(TrustRecords.Vouch(v1, tagA, "maybe"))) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeHeldKeys(listOf(TrustRecords.HeldKey(forged, tagA))) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeIdSet(listOf(v1, "$v2|x")) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeTokenSet(listOf("bad token")) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeTombstones(listOf(TrustRecords.Tombstone(v1, "not-a-uuid", 1L))) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeConfirmedPins(listOf(TrustRecords.ConfirmedPin(v1, "short"))) }
+        assertFailsWith<IllegalArgumentException> { TrustRecords.encodeConsumedNonces(listOf(TrustRecords.ConsumedNonce(v1, "a b", 7L))) }
+        // A well-formed row still encodes, and the strict decode reads it back.
+        val json = TrustRecords.encodeVouches(listOf(TrustRecords.Vouch(v2, tagA, "confirmed")))!!
         assertEquals(listOf(TrustRecords.Vouch(v2, tagA, "confirmed")), TrustRecords.decodeVouches(json).rows)
         assertFalse(json.contains("\n"))
     }

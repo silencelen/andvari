@@ -20,7 +20,9 @@ import kotlinx.serialization.json.put
  * human never reviewed. Each record is now a JSON array of objects (or of strings, for the plain id sets) with a
  * STRICT decode: exactly the expected keys, the expected types, and every id in the UUID grammar ([WireIds]) or
  * the token grammar (the SAFE_ID shape, for base64url grant ids and nonces); anything else is refused. The encoders
- * refuse the same rows, so a malformed id can neither be written nor read back.
+ * THROW on the same rows (A10 review LOW-1: a silently dropped row is a record that lies — product code that reaches
+ * an encoder with a malformed row has a bug upstream, and the throw names it), so a malformed id can neither be
+ * written nor read back.
  *
  * Migration: a value that is not a JSON array is a pre-A10 line record. It is parsed ONCE with the old grammar,
  * line by line, keeping only the lines that have exactly the old field count and well-formed ids, and the caller
@@ -57,7 +59,7 @@ object TrustRecords {
         fromLine = { p -> if (p.size == 3) vouch(p[0], p[1], p[2]) else null },
     )
 
-    fun encodeVouches(rows: Collection<Vouch>): String? = encode(rows.mapNotNull { vouch(it.vaultId, it.tag, it.kind) }) { v ->
+    fun encodeVouches(rows: Collection<Vouch>): String? = encode(rows.map { vouch(it.vaultId, it.tag, it.kind) ?: malformed("vouch", it) }) { v ->
         buildJsonObject { put("vaultId", v.vaultId); put("tag", v.tag); put("kind", v.kind) }
     }
 
@@ -73,7 +75,7 @@ object TrustRecords {
         fromLine = { p -> if (p.size == 2) held(p[0], p[1]) else null },
     )
 
-    fun encodeHeldKeys(rows: Collection<HeldKey>): String? = encode(rows.mapNotNull { held(it.vaultId, it.tag) }) { h ->
+    fun encodeHeldKeys(rows: Collection<HeldKey>): String? = encode(rows.map { held(it.vaultId, it.tag) ?: malformed("held key", it) }) { h ->
         buildJsonObject { put("vaultId", h.vaultId); put("tag", h.tag) }
     }
 
@@ -85,12 +87,12 @@ object TrustRecords {
     /** A set of vault ids (member-granted). */
     fun decodeIdSet(raw: String?): Decoded<String> = decodeStrings(raw) { if (WireIds.isUuid(it)) it else null }
 
-    fun encodeIdSet(rows: Collection<String>): String? = encodeStrings(rows.filter { WireIds.isUuid(it) })
+    fun encodeIdSet(rows: Collection<String>): String? = encodeStrings(rows.map { if (WireIds.isUuid(it)) it else malformed("vault id", it) })
 
     /** A set of opaque tokens (declined grant ids, base64url). */
     fun decodeTokenSet(raw: String?): Decoded<String> = decodeStrings(raw) { if (TOKEN.matches(it)) it else null }
 
-    fun encodeTokenSet(rows: Collection<String>): String? = encodeStrings(rows.filter { TOKEN.matches(it) })
+    fun encodeTokenSet(rows: Collection<String>): String? = encodeStrings(rows.map { if (TOKEN.matches(it)) it else malformed("token", it) })
 
     // ---- issued tombstones ----
 
@@ -101,7 +103,7 @@ object TrustRecords {
         fromLine = { p -> if (p.size == 3) tomb(p[0], p[1], p[2].toLongOrNull()) else null },
     )
 
-    fun encodeTombstones(rows: Collection<Tombstone>): String? = encode(rows.mapNotNull { tomb(it.vaultId, it.userId, it.at) }) { t ->
+    fun encodeTombstones(rows: Collection<Tombstone>): String? = encode(rows.map { tomb(it.vaultId, it.userId, it.at) ?: malformed("tombstone", it) }) { t ->
         buildJsonObject { put("vaultId", t.vaultId); put("userId", t.userId); put("at", t.at) }
     }
 
@@ -117,7 +119,7 @@ object TrustRecords {
         fromLine = { p -> if (p.size == 2) pin(p[0], p[1]) else null },
     )
 
-    fun encodeConfirmedPins(rows: Collection<ConfirmedPin>): String? = encode(rows.mapNotNull { pin(it.userId, it.keyTag) }) { c ->
+    fun encodeConfirmedPins(rows: Collection<ConfirmedPin>): String? = encode(rows.map { pin(it.userId, it.keyTag) ?: malformed("confirmed pin", it) }) { c ->
         buildJsonObject { put("userId", c.userId); put("keyTag", c.keyTag) }
     }
 
@@ -133,7 +135,7 @@ object TrustRecords {
         fromLine = { p -> if (p.size == 3) nonce(p[0], p[1], p[2].toLongOrNull()) else null },
     )
 
-    fun encodeConsumedNonces(rows: Collection<ConsumedNonce>): String? = encode(rows.mapNotNull { nonce(it.vaultId, it.nonce, it.issuedAt) }) { n ->
+    fun encodeConsumedNonces(rows: Collection<ConsumedNonce>): String? = encode(rows.map { nonce(it.vaultId, it.nonce, it.issuedAt) ?: malformed("consumed nonce", it) }) { n ->
         buildJsonObject { put("vaultId", n.vaultId); put("nonce", n.nonce); put("issuedAt", n.issuedAt) }
     }
 
@@ -141,6 +143,10 @@ object TrustRecords {
         if (WireIds.isUuid(vaultId) && nonce != null && TOKEN.matches(nonce) && issuedAt != null) ConsumedNonce(vaultId!!, nonce, issuedAt) else null
 
     // ---- the shared machinery ----
+
+    /** An encoder was handed a row the strict grammar refuses: a bug upstream, never a row to drop quietly. */
+    private fun malformed(what: String, row: Any): Nothing =
+        throw IllegalArgumentException("malformed $what record: ${row.toString().replace("\n", "\\n").take(200)}")
 
     private fun str(o: JsonObject, key: String): String? = (o[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
     private fun num(o: JsonObject, key: String): Long? = (o[key] as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
