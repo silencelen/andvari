@@ -927,7 +927,12 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                 effToken.trim(), email.trim(), name.trim(), password, waived = postureNow == EnrollPosture.Waived,
                 typedShortFp = if (affirming) "" else shortFp,
                 affirmedRfp = if (affirming) linkRfp else null,
-                inPersonVerified = affirming && inPersonOk,
+                // A5c: the in-person evidence goes over RAW — the state layer derives the verdict itself
+                // (inPersonVerdict); the form's inPersonOk only drives the gate and the hint.
+                linkPayload = linkPayload,
+                inPersonEntry = inPersonEntry,
+                inPersonAffirmed = affirmed,
+                inviteProvenance = inviteProvenance,
             )
         }
     }
@@ -979,7 +984,12 @@ private fun EnrollForm(vm: AndvariViewModel, ui: UiState) {
                     if (fp.isNotEmpty() && !affirmMatches) {
                         Text("doesn't match this server's recovery key — if you scanned it correctly, STOP and contact your admin", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
                     }
-                    // A5: the in-person code (32 characters beside the QR on the admin's screen).
+                    // A5: the in-person code (32 characters beside the QR on the admin's screen). A5c: under the
+                    // stop warning — the code is a hash of the link, so a code that arrived WITH the link proves nothing.
+                    Text(
+                        "Only type a code you are reading from your admin's screen right now. Never use a code from an email or message.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                    )
                     Field("In-person code from your admin's screen", inPersonEntry, { inPersonEntry = it }, mono = true, imeAction = ImeAction.Next)
                     Row(
                         Modifier.padding(top = 8.dp)

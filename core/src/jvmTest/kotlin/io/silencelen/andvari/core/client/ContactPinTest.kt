@@ -60,14 +60,22 @@ class ContactPinTest {
     @Test
     fun enrolPinNeedsTheInPersonCodeAndTheFullFingerprint() {
         val p = EnrollPayload(1, "https://vault.example", "t", "e", rfp = null, ifp = beaFp, iu = beaId)
-        assertNull(ContactPin.fromEnrolLink(crypto, p, inPersonVerified = false, served, "Admin", 1), "a navigated or pasted link is not in-person evidence")
-        assertEquals(Contact.METHOD_ENROL, ContactPin.fromEnrolLink(crypto, p, inPersonVerified = true, served, "Admin", 1)?.method)
-        assertNull(ContactPin.fromEnrolLink(crypto, p, inPersonVerified = true, substituted, "Admin", 1), "never pin a key the server chose")
         val code = EnrollLink.checkCode(crypto, p)!!
         assertTrue(EnrollLink.checkCodeMatches(crypto, p, code))
+        // A5c (security review 2026-10, API review #4): the code is an unkeyed hash of the link itself, so whoever
+        // composed the link (the server emails invites) can hand the invitee "the code" through the same channel.
+        // A navigated link plus a correct code is therefore NOT in-person evidence on its own: the human's
+        // first-person in-person affirmation is required too, and this layer re-checks the code from the raw
+        // typed entry rather than trusting a caller's boolean.
+        assertNull(ContactPin.fromEnrolLink(crypto, p, typedCode = code, inPersonAffirmed = false, served, "Admin", 1), "a navigated link plus a correct code, without the in-person affirmation, pins nothing")
+        assertNull(ContactPin.fromEnrolLink(crypto, p, typedCode = "", inPersonAffirmed = true, served, "Admin", 1), "an affirmation without the code pins nothing")
+        assertNull(ContactPin.fromEnrolLink(crypto, p, typedCode = code.take(16), inPersonAffirmed = true, served, "Admin", 1), "a prefix of the code is not the code")
+        assertEquals(Contact.METHOD_ENROL, ContactPin.fromEnrolLink(crypto, p, typedCode = code, inPersonAffirmed = true, served, "Admin", 1)?.method, "the genuine in-person path still pins")
+        assertNull(ContactPin.fromEnrolLink(crypto, p, typedCode = code, inPersonAffirmed = true, substituted, "Admin", 1), "never pin a key the server chose")
         // A server that composes its own link (its key's ifp) yields a different in-person code.
         val forged = p.copy(ifp = SharedGrant.fingerprint(crypto, mallory.publicKey))
         assertTrue(!EnrollLink.checkCodeMatches(crypto, forged, code), "the admin's on-screen code does not match a server-composed link")
+        assertNull(ContactPin.fromEnrolLink(crypto, forged, typedCode = code, inPersonAffirmed = true, served, "Admin", 1), "the admin's code never pins a server-composed link")
     }
 
     @Test
