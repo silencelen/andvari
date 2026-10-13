@@ -304,10 +304,16 @@ key signs only through the flows that need it (today: escrow v2).
   or not; a served wrap it does not name, or one served to a device with no cached wrap and no
   designation, is a PROPOSAL: nothing is in force (no default destination) until the human confirms it
   after seeing its co-holders, or re-designates. The server keeps every wrap the account ever minted,
-  so without this a fresh device adopted whichever one it was served. "Never switch silently" holds
-  inside the account type too: a wrap applied while another is in force is a notice (or, unopenable,
-  an anomaly), never a switch; only the human's confirmed designation replaces the wrap in force.
-  "No personal vault" means no default save/import destination and no usage ledger.
+  so without this a fresh device adopted whichever one it was served. **A device that never confirmed
+  a personal vault (no cached wrap) treats EVERY served wrap as a proposal, designation or not (A9
+  review, LOW-4):** on such a device the account state is as replayable as the wrap, so a matching
+  designation proves nothing; the human confirms once, and the device is established from then on.
+  The extension, which never reads account state, applies the same rule to its cache. "Never switch
+  silently" holds inside the account type too: a wrap applied while another is in force is a notice
+  (or, unopenable, an anomaly), never a switch; only the human's confirmed designation replaces the
+  wrap in force. "No personal vault" means no default save/import destination and no usage ledger;
+  a default save, import or copy then fails with "Choose a vault for this item." (never with a
+  wrong-password error, and never redirected), and the editors require an explicit vault pick.
   Vectors: `spec/test-vectors/personalwrap.json`.
 - **Shared vault** (`type=shared`): the creator generates `vaultId`, `VK`, `metaBlob`.
   - The **creator's own grant** uses `wrappedVk = Envelope(key = UVK, plaintext = VK,
@@ -591,9 +597,16 @@ key signs only through the flows that need it (today: escrow v2).
   unlock andvari, then try again"). A server that answers `GET /account/keys` with its own salt or
   minimal-cost params therefore never obtains a second, cheaper hash of the master password. The only
   derivation outside it is the sign-in after prelogin, where no session salt exists yet; it is fenced
-  on the params and pinned to its two call sites by a tripwire test. The raw KDF is called only inside
+  on the params and pinned to its call sites by a tripwire test. The raw KDF is called only inside
   the account types, the backup KDF (spec 07 §2.3, its own window) and the re-key (fenced by the
-  upgrade rule above); a product call anywhere else fails the build.
+  upgrade rule above); a product call anywhere else fails the build. **The derivation is PROVED
+  (A9 review, LOW-1):** the salt check is only a pre-check, because a quick-unlock session (the UVK
+  came from the platform, spec 01 §8) records whatever salt the server served at that moment. So the
+  same argon2id pass also yields the wrap key, which MUST open the served `wrappedUvk` to the UVK the
+  session holds (the server cannot produce that without the password); only then is the auth key
+  returned. A server-chosen salt or wrap, and a wrong password, derive nothing that leaves the device,
+  and the wrong password is found out locally ("That master password isn't right") instead of by the
+  server.
 
 ## 8. Quick unlock (platform-local, never server-visible)
 

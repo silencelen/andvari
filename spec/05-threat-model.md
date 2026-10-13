@@ -240,12 +240,17 @@ served wrap it does not name, or one served to a device with no cache and no des
 account state withheld), is a PROPOSAL: nothing is in force (no default destination), the human sees the vault's
 server-reported co-holders and origin and confirms it, or re-designates with the password. An established device
 whose cached wrap the server keeps serving is unchanged. The "never switch silently" rule also holds inside the
-account type itself: a second apply while a wrap is in force is a notice, never a switch. What remains: a
-fresh device the server serves an OLDER authentic account-state blob together with the matching older wrap
-adopts that pair (the designation is replayable where no high-water mark exists yet, the (b) class of residual);
-an established device detects the rollback. And the extension, which never reads account state, still takes
-the served wrap as its default save target on a browser with no cached wrap until a full client's
-confirmation re-serves it (its captures seal only under keys the user's UVK wraps).
+account type itself: a second apply while a wrap is in force is a notice, never a switch. **A9 review (LOW-4,
+MEDIUM-1): the fresh-device replay is CLOSED by a one-time confirmation.** On a device that never confirmed a
+personal vault (no cached wrap) a served wrap is a proposal even when the account's designation names it: on such a
+device the account state is as replayable as the wrap (no high-water mark can tell an older authentic blob from the
+current one), so a matching designation proves nothing, and the human confirms once (co-holders shown). A device that
+merged account state before and holds a cached wrap follows the designation (a rollback there is detectable). The
+extension holds the same line without reading account state: a served wrap on a browser with no cached wrap is a
+proposal, it has no capture destination until the popup's describe/accept confirms it (captures and TOTP adds answer
+"Open andvari to confirm your personal vault."), and the cached-wrap path is unchanged. Cost: every fresh device of
+an account asks exactly once; the registering device never does. What remains: a default save while a proposal is
+pending is refused ("Choose a vault for this item."), never redirected.
 
 **R15 (signed grants and the compatibility window — security review 2026-10, root cause A §1.4–§1.7, §8.2;
 branch A6).** Residuals accepted: (a) **legacy keys** (spec 01 §6): while the window is open a client still
@@ -339,7 +344,13 @@ attached beside the account's own UVK wrap (ignored, as A1 requires) or from a r
 otherwise become add-only durable evidence that makes the genuine creator answer a false "its owner
 transferred it to me" forever. What remains: a member whose devices never verified the owner (an unpinned
 sender beside a self-wrap) records no provenance on that device and relies on the account state's
-`memberReceived`, written by the device that adopted the key through the grant.
+`memberReceived`, written by the device that adopted the key through the grant. (vii) **A pinned co-member who holds
+the VK can mark the creator's own vault "received as a member" (A9 review LOW-4, documented only):** any pinned
+household member holding a vault's key can sign a v2 grant for it (R15(f)), and a VERIFIED grant from a pinned sender
+beside the account's own self-wrap is authenticated member provenance (vi), so a colluding co-member can have the
+genuine creator asked for the "This vault's owner transferred it to me" acknowledgement once on the next "You own
+<vault>?". A nuisance, not an authority: the acknowledgement is the creator's own statement, nothing is signed or
+sealed by it, and it is asked once per device. Closing it is the R15(f) owner-binding follow-up.
 
 **R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
 (a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
