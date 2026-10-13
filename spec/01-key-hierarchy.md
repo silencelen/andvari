@@ -373,7 +373,14 @@ key signs only through the flows that need it (today: escrow v2).
     re-issue and the transfer offer require the vault to be in the account state's `ownedVaults`
     (written when this account creates the vault, when it accepts a transfer, or by a one-time
     "You own <vault>?" confirmation behind a fresh master-password reauth checked on the device against
-    the UVK the session holds; tombstoned in `ownedTombstones` when the account transfers the vault away,
+    the UVK the session holds — the served AccountKeys must pass the unlock KDF floor/ceiling fence and
+    carry the salt this session unlocked with, so a replayed pre-password-change AccountKeys never lets an
+    old password pass; the confirmation first loads and shows, "as reported by the server", the vault's
+    owner, its last completed transfer and its co-holders, is worded "Only confirm if you created this
+    vault, or its owner transferred it to you", and is refused for a vault whose key is not from the
+    account's own UVK wrap; for a vault this device first adopted as a MEMBER (a durable device-local
+    record, not rebuilt from served rows) it also needs the explicit acknowledgement "This vault's owner
+    transferred it to me", which a genuine pre-A6b transfer recipient gives; tombstoned in `ownedTombstones` when the account transfers the vault away,
     on a transfer verified under the vault key, or leaves it). The owner wrap is minted only by a transfer
     accept, after the offer verified under the vault key. The server's role label is display only ("as
     reported by the server"); without the record the owner panel shows only "You own <vault>?". The

@@ -270,7 +270,23 @@ accepted: a vault created before A6b needs one "You own <vault>?" confirmation (
 owner action, and a human who confirms ownership of, or a re-share to, something they never shared is not
 stopped (the copy says the list comes from the server); a pre-A6b member must be confirmed once per vault;
 and a forged transfer completion (a co-member holding the key can mint the MAC, R16(a)) can only REMOVE the
-ownership record, which costs a re-confirmation, never a grant.
+ownership record, which costs a re-confirmation, never a grant. Review residuals (A6b review): (i) **a member
+claiming a vault** it holds through its self-wrap is no longer one confirm away: a vault this device first
+adopted as a member needs the explicit "This vault's owner transferred it to me" on top of the password, and
+the dialog shows the server-reported owner, transfer and co-holders; a member on a FRESH device whose served
+row the server has stripped to an owner shape has no such provenance and gets only the single confirm (still
+a password reauth, an assertion worded "Only confirm if you created this vault, or its owner transferred it to
+you", and the server-reported co-holders on screen). (ii) **a fresh device adopting an older authentic
+account-state blob** (no local copy, no high-water mark yet) can bring back an issued-grant or ownership entry
+that a later tombstone removed, until it merges with a newer copy; the entry is genuine (this account wrote
+it) and a resurrected issued-grant entry only renews a grant this owner once signed to that same key. The
+optional "prompt-only on a device that never wrote account state" hardening was not built: a device that has
+written once may still hold the resurrected entry from its first merge, so it would not close the window.
+(iii) **transfer accept records ownership** for an offer a colluding vault-key holder could have minted (the
+offer is a MAC, R16(a)); it still needs the target's explicit "Become the owner", and the vault key it then
+owns is one the target already held, so it adds a sharing authority, not a key. (iv) the reauth is refused
+on a session whose unlock salt is unknown or stale (after an in-session password change) until the next
+unlock: fail closed.
 
 **R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
 (a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
