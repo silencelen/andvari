@@ -185,7 +185,15 @@ cache OFF.
   (`ownedVaults`, `ownedTombstones`), both unioned on merge with a not-older tombstone removing an
   entry, so a rollback cannot shrink them, and (branch A1b) `memberReceived` (vaultId → ms: vaults some
   device of the account first adopted the key of as a member), add-only and unioned keeping the larger
-  value; a document without these keys reads them as empty. Native
+  value, and (branch A9) `personal = {vaultId, at} | absent`: the account's own PERSONAL-VAULT
+  DESIGNATION, written on register, on the migration choice, on a re-designation and on an accepted
+  change, tombstone-free (the entry with the newest `at` wins the merge, tie: the smaller vaultId; a
+  new designation is pushed past the one it replaces whatever the writing device's clock says) and
+  omitted from the encoding while absent. A served `personalWrap` naming the designated vault is in
+  force on any device that confirmed a personal vault before (a cached wrap) and merged account state
+  before; on a device with no cached wrap every served wrap is a PROPOSAL the human confirms once
+  (A9 review LOW-4), as is one naming a vault the designation does not (spec 01 §6; spec 05 R14). A
+  document without these keys reads them as empty. Native
   clients keep the high-water seq and their sealed copy in the durable device state when the host has
   one, so both survive a restart on a memory-only cache. `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
   lives inside the blob. Clients merge on every read and on a 409 (contacts union by userId, newest

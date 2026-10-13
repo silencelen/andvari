@@ -127,12 +127,11 @@ data class OwnershipClaim(
     val receivedAsMember: Boolean,
 )
 
-/** A6b: a re-issue with no human confirmation and no matching issued-grants record. */
-class ReissueNotAuthorizedException(val vaultId: String, val userId: String) :
-    Exception("re-sharing this vault with this member needs your confirmation")
-
 /** A6b: the master password given for a reauth does not open this account's key. */
 class ReauthFailedException : Exception("that master password isn't right")
+
+/** A9 review LOW-2: a save, import or copy with no explicit destination while no personal vault is in force. */
+class NoPersonalVaultException : Exception(HouseholdCopy.NO_PERSONAL_VAULT)
 
 /**
  * A6b carry-forward (A1b): the reauth could not be checked because this session unlocked with a salt the account no
@@ -162,6 +161,13 @@ data class LegacyGrantRow(
     val pinState: SyncEngine.MemberPinState,
     /** False when this account has no evidence of owning the vault yet ("You own <vault>?" first). */
     val ownershipConfirmed: Boolean,
+    /**
+     * A9 (M-3): when this account's issued-grants record says it once signed this vault to this member, the time it did
+     * (ms), for the hint "you shared this vault with them on …". DISPLAY ONLY: it pre-ticks nothing and never re-issues;
+     * every signing is the owner's tap on the row. Null when there is no record, or when THIS device removed the member
+     * (its own durable tombstone outranks a record a rolled-back account state brought back).
+     */
+    val previouslySharedAt: Long? = null,
 )
 
 /** A5b review LOW-1/LOW-2 (closed in A6): what "Use the new personal vault" would mean, loaded BEFORE it is
@@ -310,6 +316,9 @@ class SyncEngine(
 
         /** A6b review MEDIUM-1: vaults this device first adopted a key for as a MEMBER (durable provenance). */
         internal const val MEMBER_GRANTED_KEY = "grant.member.granted"
+
+        /** A9 (M-3): `"<vaultId>|<userId>|<ms>"` lines, one per member THIS device removed (durable device state). */
+        internal const val ISSUED_TOMBSTONES_KEY = "grant.issued.tombstones"
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -479,7 +488,7 @@ class SyncEngine(
      * dedupe fingerprints against one vault while the rows land in another.
      */
     fun importProjections(vaultId: String? = null): CsvImport.ImportProjections {
-        val target = vaultId ?: account.personalVaultId
+        val target = vaultId ?: personalVaultOrRefuse()
         return CsvImport.projections(items().filter { it.vaultId == target }.map { it.doc })
     }
 
@@ -660,6 +669,21 @@ class SyncEngine(
         personalSet(lastPersonalKey, wrap.vaultId)
     }
 
+    /** A9 (M-2): record the designation in this device's account-state copy now; [sync] writes it to the server. */
+    private var designationDirty = false
+
+    private fun recordDesignationLocally(vaultId: String) {
+        runCatching { accountState.updateLocal { AccountState.withPersonal(it, vaultId, nowMs()) } }.onSuccess { designationDirty = true }
+    }
+
+    /** The account's own personal-vault designation (account state, A9), or null when none was ever recorded. */
+    fun designatedPersonalVaultId(): String? = accountState.doc.personal?.vaultId
+
+    /** A9 review LOW-2: the default destination, or [NoPersonalVaultException] while no personal vault is in force (§4.3:
+     *  no default destination), so the refusal says "Choose a vault for this item." instead of reaching the seal with an
+     *  empty vault id (which surfaced as "wrong master password"). */
+    private fun personalVaultOrRefuse(): String = account.personalVaultId.ifEmpty { throw NoPersonalVaultException() }
+
     /** The question's choices, from the cached rows and this client's own key provenance. The server's
      *  `type` label and `role` are not read. */
     fun personalCandidates(): List<PersonalVaultMigration.Candidate> {
@@ -689,15 +713,46 @@ class SyncEngine(
      *  - UNREADABLE with a cached wrap that opens: the junk does not discard it
      *    ([Account.PersonalStatus.UNREADABLE_CACHED], L-1);
      *  - UNREADABLE with nothing usable cached: no personal vault; only a re-designation replaces it.
+     * A9 (M-2) adds the account's own designation (account state `personal`, UVK-sealed, newest wins): a served wrap it
+     * names is CONFIRMED on any device; a served wrap nothing vouches for (no cache and no designation, or a designation
+     * for another vault) is a PROPOSAL ([Account.PersonalStatus.PROPOSED]) until the human confirms it or re-designates.
+     * The registering device designates the wrap it minted at its first decision.
      */
-    private fun decidePersonalLocally() {
+    private fun decidePersonalLocally(mergedStateBefore: Boolean = accountState.hasHighWater()) {
         val cached = cachedPersonalWrap()
+        val designation = accountState.doc.personal?.vaultId
         when (account.personalStatus) {
             Account.PersonalStatus.CONFIRMED -> {
                 personalVaultChoices = null
-                if (cached != null && account.holdPersonalChange(cached)) return
-                account.personalWrap?.let { rememberPersonalWrap(it) }
+                val served = account.personalWrap ?: return
+                when {
+                    // A9 (M-2): the registering device minted this wrap itself: it is the designation from day one.
+                    account.personalWrapMintedHere -> {
+                        account.personalWrapMintedHere = false
+                        recordDesignationLocally(served.vaultId)
+                        rememberPersonalWrap(served)
+                    }
+                    // A9 review LOW-4: a device that never confirmed a personal vault (no cached wrap) asks ONCE, whatever
+                    // the designation says: on such a device the account state is as replayable as the wrap (no
+                    // high-water mark can tell an older authentic blob from the current one), so a matching designation
+                    // proves nothing. The human's confirmation is what makes the device established.
+                    cached == null -> account.holdPersonalProposal(designation)
+                    // The cached wrap and the served one agree, and the designation (if any) does too: unchanged.
+                    cached.vaultId == served.vaultId && (designation == null || designation == served.vaultId) -> rememberPersonalWrap(served)
+                    // A confirmed re-designation elsewhere (the account's own designation, UVK-sealed, newest wins) on a
+                    // device that merged account state BEFORE this sync, so a rolled-back blob would have been detected.
+                    designation == served.vaultId && mergedStateBefore -> rememberPersonalWrap(served)
+                    // A5b: the cached wrap stays in force; the served one waits for the human (also a replayed older wrap).
+                    cached.vaultId != served.vaultId && (designation == null || designation == cached.vaultId) ->
+                        account.holdPersonalChange(cached)
+                    // A9 (M-2): nothing on this device vouches for the served wrap (a designation for a third vault, or
+                    // one this device has not merged state for): a proposal, never a silent adoption. Nothing is in force.
+                    else -> account.holdPersonalProposal(designation)
+                }
             }
+            // A9 review LOW-4: a proposal is resolved only by the human ([acceptPersonalChange] after the co-holders were
+            // shown, or a reauthed re-designation); a designation arriving later never confirms it on their behalf.
+            Account.PersonalStatus.PROPOSED -> personalVaultChoices = null
             Account.PersonalStatus.WITHHELD, Account.PersonalStatus.CHANGED, Account.PersonalStatus.UNREADABLE_CACHED ->
                 personalVaultChoices = null
             Account.PersonalStatus.UNREADABLE -> {
@@ -784,7 +839,9 @@ class SyncEngine(
         val wrap = account.buildPersonalWrap(proposal.vaultId)
         api.putPersonalWrap(io.silencelen.andvari.core.model.PersonalWrapPut(wrap.vaultId, wrap.wrappedVk, currentAuthKey))
         rememberPersonalWrap(wrap) // before applying, so the new wrap is never mistaken for a change
-        account.applyPersonalWrap(wrap)
+        account.installDesignatedPersonalWrap(wrap) // the human named it: in force now, whatever was before
+        // A9 (M-2): the human's choice is the account's designation, for every device (local first; the refresh writes it).
+        runCatching { accountState.update { AccountState.withPersonal(it, wrap.vaultId, nowMs()) } }
         decidePersonalLocally() // clears the question
         onPersonalWrapStored?.invoke(wrap)
     }
@@ -800,17 +857,24 @@ class SyncEngine(
     suspend fun redesignatePersonalVault(proposal: PersonalVaultProposal, password: String) {
         check(proposal === pendingProposal) { "that personal-vault choice was not confirmed here (or is stale)" }
         val keys = api.accountKeys()
-        val authKey = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-            Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, account.cryptoProvider())
-        }
+        // A9 (M-1): the ONE fenced in-session derivation: the unlock KDF floor/ceiling (KdfPolicyViolationException) and
+        // only the salt this session unlocked with (ReauthStaleSessionException); nothing else is ever derived or sent.
+        val authKey = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { account.reauthAuthKey(password, keys) }
         confirmPersonalVault(proposal, authKey)
     }
 
-    /** Non-null while a served wrap names another vault than this device's and the human has not decided. */
+    /**
+     * Non-null while a served wrap waits for the human: CHANGED (it names another vault than this device's, which stays
+     * in force: [PersonalChange.currentVaultId]) or PROPOSED (A9: nothing is in force; `currentVaultId` is the account's
+     * designation the served wrap contradicts, or empty when the account has none).
+     */
     fun personalChange(): PersonalChange? {
-        if (account.personalStatus != Account.PersonalStatus.CHANGED) return null
         val served = account.pendingPersonalChange ?: return null
-        return PersonalChange(account.personalVaultId, served.vaultId)
+        return when (account.personalStatus) {
+            Account.PersonalStatus.CHANGED -> PersonalChange(account.personalVaultId, served.vaultId)
+            Account.PersonalStatus.PROPOSED -> PersonalChange(account.proposedAgainstDesignation ?: "", served.vaultId)
+            else -> null
+        }
     }
 
     /**
@@ -825,7 +889,10 @@ class SyncEngine(
         }
         personalChangeDescribed = null
         account.acceptPersonalChange()
-        account.personalWrap?.let { rememberPersonalWrap(it) } // before deciding, or it would read as a change again
+        account.personalWrap?.let {
+            rememberPersonalWrap(it) // before deciding, or it would read as a change again
+            recordDesignationLocally(it.vaultId) // A9 (M-2): the human's confirmation is the account's designation
+        }
         decidePersonalLocally()
     }
 
@@ -1154,19 +1221,6 @@ class SyncEngine(
         recordIssued(vaultId, pin)
     }
 
-    /**
-     * §8.2 step 4 WITHOUT a prompt (rule b only): re-issue [userId]'s grant for [vaultId] as v2 with the SAME key, when
-     * this account owns the vault by its own evidence and the pair is in its issued-grants record for the key now
-     * pinned. Anything else throws ([ReissueNotAuthorizedException]): it needs [confirmReissue].
-     */
-    suspend fun reissueGrant(vaultId: String, userId: String) {
-        requireOwned(vaultId)
-        val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
-        val rec = accountState.issued(vaultId, userId)
-        if (rec == null || rec.keyHash != keyHash(pin.identityPub)) throw ReissueNotAuthorizedException(vaultId, userId)
-        postReissue(vaultId, pin)
-    }
-
     private val legacyRowsByVault = HashMap<String, List<LegacyGrantRow>>()
 
     /** Vaults a verified transfer moved away from this account during a pull; tombstoned at the end of [sync]. */
@@ -1175,16 +1229,21 @@ class SyncEngine(
     private suspend fun flushOwnershipReleases() {
         if (ownershipReleases.isEmpty()) return
         val ids = ownershipReleases.toList()
-        ownershipReleases.clear()
+        // A9 (LOW): the set is cleared only once the record took (locally at least); a release the write could not even
+        // adopt (a newer client owns the format) stays queued for the next sync instead of silently never retrying.
         runCatching { accountState.update { d -> ids.fold(d) { acc, id -> AccountState.withoutOwned(acc, id, nowMs()) } } }
+            .onSuccess { ownershipReleases.removeAll(ids.toSet()) }
     }
 
     /**
      * The "Legacy grants" list for [vaultId] (§8.2 step 4, A6b): the members the SERVER lists as still holding only a
      * v1 grant (a hint), each with the vault name and, when pinned and current here, the member's VERIFIED label.
-     * Loading it re-issues, without a prompt, only the pairs in this account's issued-grants record for the same key
-     * (rule b); every other row waits for the owner's per-row confirmation ([confirmReissue]). Never called by
-     * [sync]. Throws when the member list cannot be loaded.
+     * Loading it signs NOTHING (security review 2026-10, A9, M-3): every re-issue is the owner's per-row confirmation
+     * ([confirmReissue]). The former rule (b), a prompt-free renewal of pairs in the issued-grants record, is gone: the
+     * record is UVK-authentic but relayed by the server, which can withhold the removal tombstone from a device that
+     * never saw it and then list the removed member, so "in the record" was not "the owner still wants this". The record
+     * now only annotates the row ([LegacyGrantRow.previouslySharedAt]). Never called by [sync]. Throws when the member
+     * list cannot be loaded.
      */
     suspend fun loadLegacyGrants(vaultId: String): List<LegacyGrantRow> {
         legacyRowsByVault.remove(vaultId)
@@ -1198,13 +1257,26 @@ class SyncEngine(
             if (m.legacyGrant != true || m.role == "owner" || m.userId == account.userId) continue
             val state = memberPinState(m.userId, m.identityPub)
             val pin = accountState.currentPin(m.userId)
-            if (owned && state == MemberPinState.PINNED && pin != null && accountState.issued(vaultId, m.userId)?.keyHash == keyHash(pin.identityPub)) {
-                if (runCatching { postReissue(vaultId, pin) }.isSuccess) continue
-            }
-            rows.add(LegacyGrantRow(vaultId, name, m.userId, m.displayName, m.email, m.identityPub, pin?.label?.takeIf { state == MemberPinState.PINNED }, state, owned))
+            val sharedAt = accountState.issued(vaultId, m.userId)?.at?.takeIf { it > (issuedTombstoneHere(vaultId, m.userId) ?: -1L) }
+            rows.add(LegacyGrantRow(vaultId, name, m.userId, m.displayName, m.email, m.identityPub, pin?.label?.takeIf { state == MemberPinState.PINNED }, state, owned, sharedAt))
         }
         legacyRowsByVault[vaultId] = rows
         return rows
+    }
+
+    // ---- A9 (M-3): the removing device's own durable tombstones ----
+
+    /** The ms at which THIS device removed [userId] from [vaultId] (durable device state), or null. */
+    private fun issuedTombstoneHere(vaultId: String, userId: String): Long? =
+        personalGet(ISSUED_TOMBSTONES_KEY)?.split('\n')?.mapNotNull { line ->
+            val parts = line.split('|')
+            if (parts.size == 3 && parts[0] == vaultId && parts[1] == userId) parts[2].toLongOrNull() else null
+        }?.maxOrNull()
+
+    private fun recordIssuedTombstoneHere(vaultId: String, userId: String, at: Long) {
+        val lines = personalGet(ISSUED_TOMBSTONES_KEY)?.split('\n')?.filter { it.isNotEmpty() }.orEmpty()
+            .filterNot { it.startsWith("$vaultId|$userId|") }
+        personalSet(ISSUED_TOMBSTONES_KEY, (lines + "$vaultId|$userId|$at").sorted().joinToString("\n"))
     }
 
     /** The rows the last [loadLegacyGrants] for [vaultId] returned (empty until one ran). */
@@ -1306,9 +1378,16 @@ class SyncEngine(
         flushQueue()
         pull()
         surfaceStagedDenials()
-        // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
-        decidePersonalLocally()
+        // §4.2: best effort, never fails the sync. Then root cause A §4.3 (A5 review H-1): local, never mints — and since
+        // A9 (M-2) it reads the account's designation, so the refresh comes FIRST; a designation this device recorded
+        // (register, an accepted change) is written back by one more refresh.
+        val mergedStateBefore = accountState.hasHighWater() // A9 review LOW-4: before THIS sync's refresh could set it
         runCatching { accountState.refresh() }
+        decidePersonalLocally(mergedStateBefore)
+        if (designationDirty) {
+            designationDirty = false
+            runCatching { accountState.refresh() }
+        }
         // Root cause A (branch A6). Pins may have changed: re-run §1.4 for rows not yet adopted (pending
         // invitations, legacy keys an owner re-issued). Then the member self-wrap (§3.2), minted ONLY for a key
         // from a verified v2 grant or a v1 key this device froze or the human confirmed (never for a key only an
@@ -1351,6 +1430,7 @@ class SyncEngine(
             runCatching {
                 cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
                 decryptedVaults.add(w.vaultId)
+                homeApplied(w)
             }
         }
         freezeOnce(decryptedVaults)
@@ -1468,18 +1548,21 @@ class SyncEngine(
      * vault is NOT applied: it is quarantined and counted for this pull's single "wrong vault" anomaly.
      */
     private fun admitHome(item: WireItem): Boolean =
-        when (ItemHome.admit(cache.itemHome(item.itemId), item.vaultId)) {
-            ItemHome.Admit.NEW_HOME -> {
-                cache.setItemHome(item.itemId, item.vaultId)
-                true
-            }
-            ItemHome.Admit.HOME -> true
+        when (ItemHome.admit(cache.itemHome(item.itemId), item.vaultId, applies = !item.deleted && item.blob != null && account.hasVault(item.vaultId))) {
+            // A9 (L-1): the home is recorded by [homeApplied] once the row IS applied (it decrypted), never at admission:
+            // a row that cannot be applied here (SKIP) records nothing and a later genuine row takes the home.
+            ItemHome.Admit.NEW_HOME, ItemHome.Admit.SKIP, ItemHome.Admit.HOME -> true
             ItemHome.Admit.QUARANTINE -> {
                 cache.quarantine(item)
                 wrongVault.note(item.vaultId)
                 false
             }
         }
+
+    /** INV-HOME (A9 L-1): [item] was just APPLIED (decrypted into the working set): the first such row is the home. */
+    private fun homeApplied(item: WireItem) {
+        if (cache.itemHome(item.itemId) == null) cache.setItemHome(item.itemId, item.vaultId)
+    }
 
     /** INV-HOME / INV-CONFLICT: this pull's refusals, as ONE "the server sent an item under the wrong vault" notice. */
     private var wrongVault = ItemHome.Tally()
@@ -1619,7 +1702,8 @@ class SyncEngine(
             }
             for (item in resp.items) {
                 // INV-HOME first: a row under another vault than this item's home is not applied at all (not even a
-                // tombstone), and never reaches the cache, the working set, export or autofill.
+                // tombstone), and never reaches the cache, the working set, export or autofill. A9 (L-1): an unhomed row
+                // homes the item only once it is applied below (a tombstone or an unheld row records no home).
                 if (!admitHome(item)) continue
                 if (item.deleted) {
                     cache.deleteItem(item.itemId)
@@ -1633,6 +1717,7 @@ class SyncEngine(
                     }.getOrNull()
                 } else null
                 cache.upsertItem(item, decrypted)
+                if (decrypted != null) homeApplied(item)
             }
             // Reinstate (spec 03 §11): runs AFTER items apply so the backfill row wins and
             // the held-ciphertext rehydration below only fills gaps.
@@ -1653,6 +1738,7 @@ class SyncEngine(
                     if (cache.getItem(wi.itemId) != null || !admitHome(wi)) continue
                     runCatching {
                         cache.upsertItem(wi, VaultItem(wi.itemId, vaultId, wi.rev, wi.updatedAt, account.decryptItem(wi)))
+                        homeApplied(wi)
                     }
                 }
                 val name = prePullNames[vaultId]
@@ -2099,8 +2185,11 @@ class SyncEngine(
         val nonce = LifecycleProof.newNonce(account.cryptoProvider())
         val issuedAt = nowMs()
         val proof = LifecycleProof.removeV2(account.cryptoProvider(), account.lifecycleKeyFor(vaultId), vaultId, userId, nonce, issuedAt)
+        // A9 (M-3): this device's own durable record of the removal, written BEFORE the request so no later rollback of
+        // account state can make this device offer the pair as "previously shared" again.
+        recordIssuedTombstoneHere(vaultId, userId, issuedAt)
         api.removeVaultMember(vaultId, userId, io.silencelen.andvari.core.model.VaultMemberRemoveRequest(proof = proof, nonce = nonce, proofV = 2, issuedAt = issuedAt))
-        // A6b: a removed member's pair leaves the issued-grants record (tombstoned): a later re-issue needs a human.
+        // A6b: a removed member's pair leaves the issued-grants record (tombstoned) on every device of the owner.
         runCatching { accountState.update { AccountState.withoutIssued(it, vaultId, userId, nowMs()) } }
         reconcileSync()
     }
@@ -2485,7 +2574,7 @@ class SyncEngine(
                 ItemHome.Edit.OK -> SealProvenance.Editor(vaultId!!)
             }
         } else {
-            SealProvenance.Chosen(vaultId ?: account.personalVaultId)
+            SealProvenance.Chosen(vaultId ?: personalVaultOrRefuse())
         }
         val effectiveVault = provenance.vaultId
         val id = itemId ?: newItemId ?: account.newItemId()
@@ -2631,7 +2720,7 @@ class SyncEngine(
     ) = syncMutex.withLock {
         // S2: the destination vault — must be the SAME vault the plan's projections came
         // from (importProjections), or the dedupe verdicts are meaningless. Null = personal.
-        @Suppress("NAME_SHADOWING") val vaultId = vaultId ?: account.personalVaultId
+        @Suppress("NAME_SHADOWING") val vaultId = vaultId ?: personalVaultOrRefuse()
         var done = 0
         for (chunk in items.chunked(SERVER_BATCH_MAX)) {
             push(chunk.map {

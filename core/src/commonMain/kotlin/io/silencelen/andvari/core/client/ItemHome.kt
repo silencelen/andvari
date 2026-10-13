@@ -24,16 +24,26 @@ class ItemChangedVaultsException : Exception(HouseholdCopy.ITEM_CHANGED_VAULTS)
  * home cross-check; branch A1b). Pure, so `spec/test-vectors/itemhome.json` grades exactly what [SyncEngine] calls; the
  * web twin is `web/src/vault/itemhome.ts` and the extension's is `extension/src/itemhome.ts`.
  *
- * `home(itemId)` is the vaultId of the FIRST envelope this device applied for that itemId. It is device-local and never
- * a server value after that first row: the server can choose the first home on a fresh device (a stated residual), but
- * it can never move an item this device already holds into another vault. No legitimate flow re-homes an itemId: move
- * and copy mint fresh ids and then delete the source.
+ * `home(itemId)` is the vaultId of the FIRST envelope this device APPLIED for that itemId (A9 L-1: applied, not merely
+ * served: a tombstone or a row under a vault this device holds no key for never homes an item). It is device-local and
+ * never a server value after that first row: the server can choose the first home on a fresh device among the rows it
+ * can apply (a stated residual), but it can never move an item this device already holds into another vault. No
+ * legitimate flow re-homes an itemId: move and copy mint fresh ids and then delete the source.
  */
 object ItemHome {
     /** What to do with one served row (live or tombstone). */
     enum class Admit(val code: String) {
-        /** No home yet: this row's vault becomes the home, and the row applies. */
+        /** No home yet and the row can be applied here: this row's vault becomes the home, and the row applies. */
         NEW_HOME("new_home"),
+
+        /**
+         * No home yet, but the row CANNOT be applied on this device (security review 2026-10, A9 L-1): a tombstone, a
+         * vault whose key this device does not hold, or an envelope that does not open. No home is recorded (the home
+         * is the vault of the first envelope this device APPLIED, design §5.1, never of a row it merely saw), no
+         * anomaly is raised, and the row's own handling proceeds (a tombstone deletes nothing this device never had;
+         * ciphertext may be kept for a key that arrives later, which then homes it when it is applied).
+         */
+        SKIP("skip"),
 
         /** The row is under the item's home: it applies. */
         HOME("home"),
@@ -42,8 +52,9 @@ object ItemHome {
         QUARANTINE("quarantine"),
     }
 
-    fun admit(home: String?, rowVaultId: String): Admit = when {
-        home == null -> Admit.NEW_HOME
+    /** [applies]: whether this device can apply the row now (live, key held, and it opens). Only an unhomed row reads it. */
+    fun admit(home: String?, rowVaultId: String, applies: Boolean = true): Admit = when {
+        home == null -> if (applies) Admit.NEW_HOME else Admit.SKIP
         home == rowVaultId -> Admit.HOME
         else -> Admit.QUARANTINE
     }

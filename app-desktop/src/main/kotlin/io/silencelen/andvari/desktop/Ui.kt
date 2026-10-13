@@ -1413,8 +1413,10 @@ private fun Vault(state: DesktopState) {
                 // vaults) and ONLY when a writable SHARED vault exists — a personal-only user
                 // never sees it (mirrors web's `selected === null && hasWritableShared`). Read
                 // once per editor open (each choice decrypts vault metadata).
+                // A9 review LOW-2: with no personal vault in force the picker is offered for any choice at all, and the
+                // Editor then requires an explicit pick (no default destination, §4.3).
                 vaultChoices = if (editing!!.first == null)
-                    newItemVaultChoices.takeIf { c -> c.any { it.type != "personal" } }
+                    newItemVaultChoices.takeIf { c -> c.any { it.type != "personal" } || state.personalVaultId().isEmpty() }
                 else null,
                 // F71: close ONLY via saveItem's success callback (the Android op{}+onSaved
                 // contract) — the old `saveItem(...); editing = null` closed optimistically
@@ -2874,7 +2876,11 @@ private fun Editor(
     // F18: which vault a NEW item is created in. Non-null only for new items with a writable
     // shared vault (see the call site); default = the first choice, which is personal
     // (vaultInfos is personal-first). Threaded into onSave → saveItem's vaultId.
-    var vaultId by remember { mutableStateOf(vaultChoices?.firstOrNull()?.vaultId) }
+    // A9 review LOW-2: the default is the PERSONAL vault; with none in force (no "personal" choice) there is no default and
+    // the human must pick, or the save is refused with "Choose a vault for this item."
+    val personalChoice = vaultChoices?.firstOrNull { it.type == "personal" }?.vaultId
+    var vaultId by remember { mutableStateOf(personalChoice ?: vaultChoices?.firstOrNull()?.vaultId?.takeIf { vaultChoices.any { c -> c.type == "personal" } }) }
+    var vaultError by remember { mutableStateOf<String?>(null) }
     val isLogin = initial.type == "login"
     val isCard = initial.type == "card"
     var name by remember { mutableStateOf(initial.name) }
@@ -2917,9 +2923,10 @@ private fun Editor(
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         // F18: shown only when there's a choice to make (>1 writable vault). A single-vault
         // user's new item lands in Personal exactly as before — no picker.
-        if (vaultChoices != null && vaultChoices.size > 1) {
-            VaultPicker("Vault", vaultChoices, vaultId) { vaultId = it }
+        if (vaultChoices != null && (vaultChoices.size > 1 || vaultId == null)) {
+            VaultPicker("Vault", vaultChoices, vaultId) { vaultId = it; vaultError = null }
         }
+        vaultError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Field("Name", name, { name = it })
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true)
@@ -3084,6 +3091,8 @@ private fun Editor(
                 // L7: BLOCK, never silently drop a typed half (the pre-Tier-2 behavior stored
                 // an unreadable half as ABSENT, overwriting whatever the card had).
                 cardExpiryError = "expiry can’t be read — fix or clear it to save"
+            } else if (vaultChoices != null && vaultId == null) {
+                vaultError = io.silencelen.andvari.core.client.HouseholdCopy.NO_PERSONAL_VAULT // A9 review LOW-2: never a guessed destination
             } else {
                 onSave(builtDoc(normalizedTotp), pending, vaultId)
             }

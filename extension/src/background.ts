@@ -1,5 +1,5 @@
 import { pickPersonal, type PersonalWrapWire } from "./personalpick";
-import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
+import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, personalProposalNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
 import { admitRows, sealGate, serverItemDecision } from "./itemhome";
 import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import type { BioReq, BioResult } from "./bioprotocol";
@@ -1211,7 +1211,9 @@ function ensureLoaded(): Promise<void> {
         // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         waitingGrants: typeof snap.waitingGrants === "number" ? snap.waitingGrants : 0,
-        homes: new Map(Object.entries(snap.homes ?? {})),
+        // A1b item homes: a snapshot persisted before they existed carries none; the durable record in storage.local
+        // is reloaded then (A9: an empty map here would have been taken as authoritative and overwritten it).
+        homes: snap.homes ? new Map(Object.entries(snap.homes)) : await loadHomes(snap.userId),
         wrongVault: typeof snap.wrongVault === "number" ? snap.wrongVault : 0,
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
@@ -1762,6 +1764,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         totpPending: tp ? { email: tp.email, expiresAt: tp.expiresAt } : null,
         personalChange: session ? (await readPersonalChange(session.userId)) !== null : false,
         personalChangeText: session ? await personalChangeText(session) : null,
+        personalProposal: session ? !session.personalVaultId && (await readPersonalChange(session.userId)) !== null : false,
         waitingGrants: session?.waitingGrants ?? 0,
         wrongVault: session?.wrongVault ?? 0,
       } satisfies Res<"status">;
@@ -2099,7 +2102,9 @@ export async function pickPersonalVaultId(
     }
     // A5b M-2 / L-2: a served wrap naming another vault waits for the human (popup notice); the cache keeps
     // the vault this device had. Anything else clears a stale pending change.
-    if (pick.source === "changed") {
+    // A9 review MEDIUM-1: a served wrap on a browser with no cached wrap is a PROPOSAL staged the same way, with no
+    // current vault: the popup asks the human to confirm it (describe/accept) before anything is captured into it.
+    if (pick.source === "changed" || pick.source === "proposed") {
       const metaOf = (id: string) => vaults.find((v) => v.vaultId === id)?.metaBlob ?? "";
       const record: PersonalChangeRecord = {
         ...pick.served,
@@ -2117,6 +2122,7 @@ export async function pickPersonalVaultId(
   if (pick.source === "unreadable") console.warn("andvari: the personal-vault record does not open; no personal vault this session");
   if (pick.source === "unreadable-cached") console.warn("andvari: the personal-vault record does not open; using the one this device already authenticated");
   if (pick.source === "changed") console.warn("andvari: the personal-vault record names another vault than this device's; keeping this device's until you confirm");
+  if (pick.source === "proposed") console.info("andvari: this browser has not confirmed a personal vault yet; captures wait for the confirmation in the popup");
   return pick.vaultId;
 }
 
@@ -2145,6 +2151,8 @@ async function personalChangeText(s: Session): Promise<string | null> {
   const c = await readPersonalChange(s.userId);
   if (!c) return null;
   const currentId = c.currentVaultId ?? s.personalVaultId;
+  // A9 review MEDIUM-1: no current vault = a proposal on a browser that never confirmed one.
+  if (!currentId) return personalProposalNotice(vaultNameFromMeta(s.vaultKeys.get(c.vaultId), c.vaultId, c.servedMetaBlob));
   return personalChangeNotice(
     vaultNameFromMeta(s.vaultKeys.get(currentId), currentId, c.currentMetaBlob),
     vaultNameFromMeta(s.vaultKeys.get(c.vaultId), c.vaultId, c.servedMetaBlob),
@@ -2848,6 +2856,11 @@ function saveHomes(userId: string, homes: Map<string, string>): Promise<void> {
  * browser's homes, THEN decrypt only the admitted ones. A row under another vault than its item's home (live or
  * tombstone) never reaches session.items, so it is never matched, filled, updated by a capture or given a TOTP. The
  * refusals are counted for the popup's "wrong vault" line. New homes are persisted.
+ *
+ * A9 (L-1): an UNHOMED row homes its item only if this browser actually APPLIES it — live, blob present, key held, and
+ * the envelope opens to a well-formed doc (the open happens once, here; the admitted rows reuse it). A blob-less
+ * tombstone or a row under a vault this session holds no key for is skipped: no home, no anomaly. Before A9 such a row
+ * served first homed the item to the server's vault and quarantined the genuine row on this browser for good.
  */
 async function homeAndDecrypt(
   sync: SyncResponse,
@@ -2856,33 +2869,51 @@ async function homeAndDecrypt(
   homes?: Map<string, string>,
 ): Promise<{ items: DecryptedItem[]; homes: Map<string, string>; wrongVault: number }> {
   const h = homes ?? (await loadHomes(userId));
-  const { admitted, tally, changed } = admitRows(sync.items, h);
+  const opened = new Map<SyncResponse["items"][number], DecryptedItem>();
+  const applies = (it: SyncResponse["items"][number]): boolean => {
+    if (it.deleted || !it.blob || !vaultKeys.has(it.vaultId)) return false;
+    const d = decryptItem(it, vaultKeys);
+    if (d) opened.set(it, d);
+    return d !== null;
+  };
+  const { admitted, tally, changed } = admitRows(sync.items, h, applies);
   if (changed) await saveHomes(userId, h);
-  return { items: decryptItems({ ...sync, items: admitted }, vaultKeys), homes: h, wrongVault: tally.refused };
+  const items: DecryptedItem[] = [];
+  for (const it of admitted) {
+    const d = opened.get(it) ?? decryptItem(it, vaultKeys);
+    if (d) items.push(d);
+  }
+  return { items, homes: h, wrongVault: tally.refused };
+}
+
+/** One row, decrypted under a held key to a well-formed doc, or null (tombstone, no key, undecryptable, malformed). */
+function decryptItem(it: SyncResponse["items"][number], vaultKeys: Map<string, Uint8Array>): DecryptedItem | null {
+  if (it.deleted || !it.blob) return null;
+  // Fail closed above the read ceiling (web account.ts parity): an fv this client doesn't
+  // understand may carry doc semantics an edit would corrupt. Items we CAN read carry their
+  // fv onto the session item, and every re-seal AD-binds + rewires that SAME fv (the server
+  // refuses per-item fv downgrades) — so nothing we touch can ever downgrade or upgrade.
+  if (it.formatVersion > MAX_ITEM_FORMAT_VERSION) return null;
+  const vk = vaultKeys.get(it.vaultId);
+  if (!vk) return null;
+  try {
+    const doc: unknown = JSON.parse(
+      new TextDecoder().decode(open(vk, fromB64(it.blob), adItem(it.vaultId, it.itemId, it.formatVersion))),
+    );
+    // spec 02 §3.2 (security review 2026-10): any writer of a shared vault can seal any JSON
+    // under its VK — a malformed doc is skipped like an undecryptable one, never admitted.
+    if (itemDocProblem(doc) !== null) return null;
+    return { itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc: doc as ItemDoc };
+  } catch {
+    return null; // undecryptable — skip
+  }
 }
 
 function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): DecryptedItem[] {
   const items: DecryptedItem[] = [];
   for (const it of sync.items) {
-    if (it.deleted || !it.blob) continue;
-    // Fail closed above the read ceiling (web account.ts parity): an fv this client doesn't
-    // understand may carry doc semantics an edit would corrupt. Items we CAN read carry their
-    // fv onto the session item, and every re-seal AD-binds + rewires that SAME fv (the server
-    // refuses per-item fv downgrades) — so nothing we touch can ever downgrade or upgrade.
-    if (it.formatVersion > MAX_ITEM_FORMAT_VERSION) continue;
-    const vk = vaultKeys.get(it.vaultId);
-    if (!vk) continue;
-    try {
-      const doc: unknown = JSON.parse(
-        new TextDecoder().decode(open(vk, fromB64(it.blob), adItem(it.vaultId, it.itemId, it.formatVersion))),
-      );
-      // spec 02 §3.2 (security review 2026-10): any writer of a shared vault can seal any JSON
-      // under its VK — a malformed doc is skipped like an undecryptable one, never admitted.
-      if (itemDocProblem(doc) !== null) continue;
-      items.push({ itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc: doc as ItemDoc });
-    } catch {
-      /* undecryptable — skip */
-    }
+    const d = decryptItem(it, vaultKeys);
+    if (d) items.push(d);
   }
   return items;
 }
@@ -3853,12 +3884,15 @@ async function resolvePendingSave(
   // Unlock-prompt (2026-08-12): the click itself is REMEMBERED as approval — the banner goes on
   // to summon the unlock screen (openPopupForSave), and the next unlock auto-commits this pending
   // (reofferPendingSaves) instead of re-asking for a second Save click.
-  if (!session || !session.personalVaultId) {
+  if (!session) {
     pending.approvedAt = Date.now();
     tabs.set(tabId, st);
     persistTabs();
     return { ok: false, code: "locked", error: "locked" };
   }
+  // A9 review MEDIUM-1: unlocked but no confirmed personal vault — nothing is sealed under a guessed vault; the click
+  // is not kept as approval either (the confirmation, not an unlock, is what is missing).
+  if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" };
 
   // A Save click landing while the approved auto-commit's put is still in flight (post-unlock
   // race) must not start a SECOND put of the same credential — answer retryable; the commit's own
@@ -3879,7 +3913,8 @@ async function commitPendingSave(
   st: TabState,
   pending: PendingSave & { password: string; frameId: number; uri?: string; approvedAt?: number },
 ): Promise<{ res: Res<"resolvePendingSave">; wrote: boolean }> {
-  if (!session || !session.personalVaultId) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
+  if (!session) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
+  if (!session.personalVaultId) return { res: { ok: false, code: "no_personal_vault", error: "no personal vault" }, wrote: false }; // A9 review MEDIUM-1
   // Re-decide save-vs-update NOW (the capture-time decision is stale if the vault was LOCKED then —
   // matchesFor was empty ⇒ updatesItemId null). resolveSaveAction only auto-updates on UNAMBIGUOUS
   // same-account signals: it NEVER runs the ambiguous "lone host login" (2b) fallback here (a
@@ -3995,7 +4030,8 @@ async function resolvePendingCardSave(
     pendingCardSave.delete(tabId);
     return { ok: true };
   }
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
+  if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" }; // A9 review MEDIUM-1
   if (!luhnValid(rec.number)) {
     pendingCardSave.delete(tabId);
     return { ok: false, code: "failed", error: "invalid card number" };
@@ -4159,7 +4195,8 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
 
 /** `uri` is the stored site uri (H124: `capturedSiteUri` — http stays http); `host` names the item. */
 async function putNewLogin(host: string, username: string, password: string, uri: string): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked or no personal vault" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
+  if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" }; // A9 review MEDIUM-1
   const itemId = crypto.randomUUID();
   const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [uri] } };
   // NEW logins seal at the login doc floor (format.ts). G2 added card creation via a SEPARATE
@@ -4183,7 +4220,8 @@ async function putNewCard(rec: {
   cardholderName: string;
   postalCode?: string;
 }): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked or no personal vault" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
+  if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" }; // A9 review MEDIUM-1
   const itemId = crypto.randomUUID();
   const card: CardData = { number: rec.number };
   if (rec.expMonth) card.expMonth = rec.expMonth;
@@ -4229,7 +4267,8 @@ async function setTotp(
   sender: chrome.runtime.MessageSender,
 ): Promise<Res<"setTotp">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "popup only" };
-  if (!session || !session.personalVaultId) return { ok: false, code: "locked", error: "locked" };
+  if (!session) return { ok: false, code: "locked", error: "locked" };
+  if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" }; // A9 review MEDIUM-1
   const target = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "login");
   if (!target) return { ok: false, code: "failed", error: "unknown item" };
   // G21: the honest SW backstop for the suppressed popup offer (MatchItem.readOnly). A reader's

@@ -41,13 +41,14 @@ class PersonalWrapDurabilityTest {
     @Test
     fun aWithheldWrapStaysWithheldAfterARestartAndARevocationPurge() {
         val recovery = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
-        val (reg, _) = Account.enroll("inv", "a5b@example.com", "a5b", password, KdfParams(ops = 1, memBytes = 8192), recovery.publicKey, Escrow.fingerprint(crypto, recovery.publicKey), "dev", crypto)
+        val (reg, registering) = Account.enroll("inv", "a5b@example.com", "a5b", password, KdfParams(ops = 1, memBytes = 8192), recovery.publicKey, Escrow.fingerprint(crypto, recovery.publicKey), "dev", crypto)
         val keys = AccountKeys(reg.kdfSalt, reg.kdfParams, reg.wrappedUvk, reg.encryptedIdentitySeed, reg.identityPub, escrowFingerprint = reg.escrow!!.fingerprint)
         val key = originKey("https://vault.example.net")
 
-        // Session 1: the wrap is served; the offline cache is in memory (the desktop default).
+        // Session 1: the REGISTERING device (A9: it designates the wrap it minted at its first decision, offline too);
+        // the offline cache is in memory (the desktop default).
         val store1 = DesktopSessionStore(root)
-        val first = Account.unlock(reg.userId, password, keys.copy(personalWrap = reg.personalWrap), crypto)
+        val first = registering
         SyncEngine(idleApi(), first, InMemoryVaultCache(), deviceState = store1.personalDeviceState(key, reg.userId)).hydrate()
         assertEquals(Account.PersonalStatus.CONFIRMED, first.personalStatus)
 

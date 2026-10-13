@@ -30,8 +30,8 @@ import {
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256, sha256Sync } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
-import { ITEM_FORMAT_VERSION, type Account, type ItemUpload, type LegacyVouchKind, VaultKeyNotVerifiedError } from "./account";
-import { type ConsumedNonce, type Contact, withIssued, withMemberReceived, withoutIssued, withOwned, withoutOwned } from "./accountstate";
+import { ITEM_FORMAT_VERSION, type Account, type ItemUpload, type LegacyVouchKind, ReauthFailedError, ReauthStaleSessionError, VaultKeyNotVerifiedError } from "./account";
+import { type ConsumedNonce, type Contact, withIssued, withMemberReceived, withoutIssued, withOwned, withoutOwned, withPersonal } from "./accountstate";
 import {
   admitRow,
   chosenProvenance,
@@ -232,30 +232,17 @@ export interface OwnershipClaim {
   receivedAsMember: boolean;
 }
 
-/** A6b: a re-issue with no human confirmation and no matching issued-grants record. */
-export class ReissueNotAuthorizedError extends Error {
-  constructor(readonly vaultId: string, readonly userId: string) {
-    super("Re-sharing this vault with this member needs your confirmation.");
-    this.name = "ReissueNotAuthorizedError";
-  }
-}
+// The reauth errors live in account.ts since A9 (M-1 / the review's LOW-1), beside the one fenced derivation that raises
+// them; re-exported here for the UI's existing imports.
+export { ReauthFailedError, ReauthStaleSessionError };
 
-/** A6b: the master password given for a reauth does not open this account's key. Core twin
- *  `HouseholdCopy.REAUTH_FAILED`, byte-equal (vault-copy.test.ts). */
-export class ReauthFailedError extends Error {
+/** A9 review LOW-2: a save, import or copy with no explicit destination while no personal vault is in force (the
+ *  designation is still a proposal, or none exists). Core twin `NoPersonalVaultException` / `HouseholdCopy.NO_PERSONAL_VAULT`,
+ *  byte-equal (vault-copy.test.ts). */
+export class NoPersonalVaultError extends Error {
   constructor() {
-    super("That master password isn't right.");
-    this.name = "ReauthFailedError";
-  }
-}
-
-/** A6b carry-forward (A1b): the reauth could not be checked because this session unlocked with a salt the account no
- *  longer has (a password change or a KDF upgrade since). Core twin `ReauthStaleSessionException` /
- *  `HouseholdCopy.REAUTH_STALE_SESSION`, byte-equal (vault-copy.test.ts). */
-export class ReauthStaleSessionError extends Error {
-  constructor() {
-    super("Lock and unlock andvari, then try again.");
-    this.name = "ReauthStaleSessionError";
+    super("Choose a vault for this item.");
+    this.name = "NoPersonalVaultError";
   }
 }
 
@@ -281,6 +268,11 @@ export interface LegacyGrantRow {
   pinState: MemberPinState;
   /** False when this account has no evidence of owning the vault yet ("You own <vault>?" first). */
   ownershipConfirmed: boolean;
+  /** A9 (M-3): when this account's issued-grants record says it once signed this vault to this member, the ms it did
+   *  (the hint "you shared this vault with them on …"). DISPLAY ONLY: it pre-ticks nothing and never re-issues; every
+   *  signing is the owner's tap. Null when there is no record, or when THIS browser removed the member (its own durable
+   *  tombstone outranks a record a rolled-back account state brought back). */
+  previouslySharedAt: number | null;
 }
 
 export class MemberNotVerifiedError extends Error {
@@ -310,6 +302,8 @@ const DECLINED_KEY = "grant.declined";
 export const HELD_KEYS_KEY = "grant.held.keys";
 /** A6b review MEDIUM-1: vaults this browser first adopted a key for as a MEMBER (durable provenance). */
 export const MEMBER_GRANTED_KEY = "grant.member.granted";
+/** A9 (M-3): `"<vaultId>|<userId>|<ms>"` lines, one per member THIS browser removed (durable client state). */
+export const ISSUED_TOMBSTONES_KEY = "grant.issued.tombstones";
 /** LifecycleNotice.reason on a `left` notice whose leave carried no proof (in-window, §8.6). Core `LEFT_UNPROVEN`. */
 export const LEFT_UNPROVEN = "unproven";
 /** LifecycleNotice.reason on a `replay-denied` raised by a consumed removal nonce (§6.3 step 5). Core `REMOVAL_REPLAY`. */
@@ -688,6 +682,31 @@ export class VaultStore {
     this.clientState.set("personal.last", w.vaultId);
   }
 
+  /** A9 (M-2): record the designation in this browser's account-state copy now; sync() writes it to the server. */
+  private designationDirty = false;
+
+  private recordDesignationLocally(vaultId: string): void {
+    try {
+      this.accountState.updateLocal((d) => withPersonal(d, vaultId, Date.now()));
+      this.designationDirty = true;
+    } catch {
+      /* a newer client owns the format: nothing to record */
+    }
+  }
+
+  /** The account's own personal-vault designation (account state, A9), or null when none was ever recorded. */
+  designatedPersonalVaultId(): string | null {
+    return this.accountState.doc.personal?.vaultId ?? null;
+  }
+
+  /** A9 review LOW-2: the default destination, or {@link NoPersonalVaultError} while no personal vault is in force (§4.3:
+   *  no default destination), so the refusal says "Choose a vault for this item." instead of reaching the seal with an
+   *  empty vault id (which surfaced as "wrong master password"). */
+  private personalVaultOrRefuse(): string {
+    if (!this.account.personalVaultId) throw new NoPersonalVaultError();
+    return this.account.personalVaultId;
+  }
+
   /**
    * Root cause A §4.3 as amended by the A5 review (H-1) and re-review (A5b), local only, never minting (core
    * twin). confirmed + a cached wrap for ANOTHER vault → "changed": the device keeps its own until the human
@@ -695,16 +714,46 @@ export class VaultStore {
    * "withheld"; absent + nothing cached → ask; unreadable + a cached wrap that opens → "unreadable-cached"
    * (L-1); unreadable otherwise → only a re-designation.
    */
-  private decidePersonalLocally(): void {
+  private decidePersonalLocally(mergedStateBefore: boolean = this.accountState.hasHighWater()): void {
     const cached = this.cachedPersonalWrap();
+    const designation = this.accountState.doc.personal?.vaultId ?? null;
     switch (this.account.personalStatus) {
       case "confirmed": {
         this.personalVaultChoices = null;
-        if (cached && this.account.holdPersonalChange(cached)) return;
-        const w = this.account.personalWrap;
-        if (w) this.rememberPersonalWrap(w);
+        const served = this.account.personalWrap;
+        if (!served) return;
+        if (this.account.personalWrapMintedHere) {
+          // A9 (M-2): the registering device minted this wrap itself: it is the designation from day one.
+          this.account.personalWrapMintedHere = false;
+          this.recordDesignationLocally(served.vaultId);
+          this.rememberPersonalWrap(served);
+        } else if (!cached) {
+          // A9 review LOW-4: a browser that never confirmed a personal vault (no cached wrap) asks ONCE, whatever the
+          // designation says: on such a browser the account state is as replayable as the wrap (no high-water mark can
+          // tell an older authentic blob from the current one), so a matching designation proves nothing.
+          this.account.holdPersonalProposal(designation);
+        } else if (cached.vaultId === served.vaultId && (designation === null || designation === served.vaultId)) {
+          // The cached wrap and the served one agree, and the designation (if any) does too: unchanged.
+          this.rememberPersonalWrap(served);
+        } else if (designation === served.vaultId && mergedStateBefore) {
+          // A confirmed re-designation elsewhere (the account's own designation, UVK-sealed, newest wins) on a browser
+          // that merged account state BEFORE this sync, so a rolled-back blob would have been detected.
+          this.rememberPersonalWrap(served);
+        } else if (cached.vaultId !== served.vaultId && (designation === null || designation === cached.vaultId)) {
+          // A5b: the cached wrap stays in force; the served one waits for the human (also a replayed older wrap).
+          this.account.holdPersonalChange(cached);
+        } else {
+          // A9 (M-2): nothing on this browser vouches for the served wrap (a designation for a third vault, or one this
+          // browser has not merged state for): a proposal, never a silent adoption. Nothing is in force.
+          this.account.holdPersonalProposal(designation);
+        }
         return;
       }
+      case "proposed":
+        // A9 review LOW-4: a proposal is resolved only by the human (acceptPersonalChange after the co-holders were shown,
+        // or a reauthed re-designation); a designation arriving later never confirms it on their behalf.
+        this.personalVaultChoices = null;
+        return;
       case "withheld":
       case "changed":
       case "unreadable-cached":
@@ -801,15 +850,34 @@ export class VaultStore {
     const wrap = this.account.buildPersonalWrap(proposal.vaultId);
     await this.api.putPersonalWrap(wrap, currentAuthKey);
     this.rememberPersonalWrap(wrap); // before applying, so the new wrap is never read as a change
-    this.account.applyPersonalWrap(wrap);
+    this.account.installDesignatedPersonalWrap(wrap); // the human named it: in force now, whatever was before
+    // A9 (M-2): the human's choice is the account's designation, for every device (local first; the refresh writes it).
+    await this.accountState.update((d) => withPersonal(d, wrap.vaultId, Date.now())).catch(() => {});
     this.decidePersonalLocally(); // clears the question
   }
 
-  /** Non-null while a served wrap names another vault than this browser's and the human has not decided. */
+  /**
+   * Settings → "This is my personal vault" (owner decision Q9), confirmed: re-designation with a FRESH master-password
+   * reauth (core `redesignatePersonalVault` twin). A9 (M-1): the proof is {@link Account.reauthAuthKey}, the ONE fenced
+   * in-session derivation (the unlock KDF floor/ceiling: `KdfPolicyError`; only the salt this session unlocked with:
+   * {@link ReauthStaleSessionError}); nothing else is ever derived or sent.
+   */
+  async redesignatePersonalVault(proposal: PersonalVaultProposal, password: string): Promise<void> {
+    if (proposal !== this.pendingProposal) throw new Error("that personal-vault choice was not confirmed here (or is stale)");
+    const keys = await this.api.accountKeys();
+    const authKey = await this.account.reauthAuthKey(password, keys);
+    await this.confirmPersonalVault(proposal, authKey);
+  }
+
+  /** Non-null while a served wrap waits for the human: "changed" (it names another vault than this browser's, which
+   *  stays in force: `currentVaultId`) or "proposed" (A9: nothing is in force; `currentVaultId` is the account's
+   *  designation the served wrap contradicts, or empty when the account has none). */
   personalChange(): PersonalChange | null {
     const served = this.account.pendingPersonalChange;
-    if (this.account.personalStatus !== "changed" || !served) return null;
-    return { currentVaultId: this.account.personalVaultId, servedVaultId: served.vaultId };
+    if (!served) return null;
+    if (this.account.personalStatus === "changed") return { currentVaultId: this.account.personalVaultId, servedVaultId: served.vaultId };
+    if (this.account.personalStatus === "proposed") return { currentVaultId: this.account.proposedAgainstDesignation ?? "", servedVaultId: served.vaultId };
+    return null;
   }
 
   /** The human confirmed the change: the served wrap (authenticated under our UVK) is in force and cached.
@@ -822,7 +890,10 @@ export class VaultStore {
     this.personalChangeDescribed = null;
     this.account.acceptPersonalChange();
     const w = this.account.personalWrap;
-    if (w) this.rememberPersonalWrap(w);
+    if (w) {
+      this.rememberPersonalWrap(w);
+      this.recordDesignationLocally(w.vaultId); // A9 (M-2): the human's confirmation is the account's designation
+    }
     this.decidePersonalLocally();
   }
 
@@ -1285,25 +1356,16 @@ export class VaultStore {
     await this.recordIssued(vaultId, pin);
   }
 
-  /** §8.2 step 4 WITHOUT a prompt (rule b only): the vault is owned by this account's evidence and the pair is in its
-   *  issued-grants record for the key now pinned. Anything else throws ({@link ReissueNotAuthorizedError}). */
-  async reissueGrant(vaultId: string, userId: string): Promise<void> {
-    this.requireOwned(vaultId);
-    const pin = this.accountState.currentPin(userId);
-    if (!pin) throw new MemberNotVerifiedError(userId);
-    const rec = this.accountState.issued(vaultId, userId);
-    if (!rec || rec.keyHash !== VaultStore.keyHash(pin.identityPub)) throw new ReissueNotAuthorizedError(vaultId, userId);
-    await this.postReissue(vaultId, pin);
-  }
-
   private readonly legacyRowsByVault = new Map<string, LegacyGrantRow[]>();
 
   /**
    * The "Legacy grants" list for `vaultId` (§8.2 step 4, A6b): members the SERVER lists as still on a v1 grant (a hint),
-   * each with the vault name and, when pinned and current here, the member's VERIFIED label. Loading it re-issues,
-   * without a prompt, only the pairs in the issued-grants record for the same key (rule b); every other row waits for
-   * the owner's per-row confirmation ({@link confirmReissue}). Never called by sync(). Throws when the member list
-   * cannot be loaded.
+   * each with the vault name and, when pinned and current here, the member's VERIFIED label. Loading it signs NOTHING
+   * (security review 2026-10, A9, M-3): every re-issue is the owner's per-row confirmation ({@link confirmReissue}). The
+   * former rule (b), a prompt-free renewal of pairs in the issued-grants record, is gone: the record is UVK-authentic
+   * but relayed by the server, which can withhold the removal tombstone from a device that never saw it and then list
+   * the removed member. The record now only annotates the row (`previouslySharedAt`). Never called by sync(). Throws
+   * when the member list cannot be loaded.
    */
   async loadLegacyGrants(vaultId: string): Promise<LegacyGrantRow[]> {
     this.legacyRowsByVault.delete(vaultId);
@@ -1321,17 +1383,12 @@ export class VaultStore {
       if (m.legacyGrant !== true || m.role === "owner" || m.userId === this.account.userId) continue;
       const state = this.memberPinState(m.userId, m.identityPub);
       const pin = this.accountState.currentPin(m.userId);
-      if (owned && state === "pinned" && pin && this.accountState.issued(vaultId, m.userId)?.keyHash === VaultStore.keyHash(pin.identityPub)) {
-        try {
-          await this.postReissue(vaultId, pin);
-          continue;
-        } catch {
-          /* listed below */
-        }
-      }
+      const recAt = this.accountState.issued(vaultId, m.userId)?.at ?? null;
+      const tombAt = this.issuedTombstoneHere(vaultId, m.userId);
       rows.push({
         vaultId, vaultName, userId: m.userId, displayName: m.displayName, email: m.email, identityPub: m.identityPub,
         verifiedLabel: state === "pinned" && pin ? pin.label : null, pinState: state, ownershipConfirmed: owned,
+        previouslySharedAt: recAt !== null && recAt > (tombAt ?? -1) ? recAt : null,
       });
     }
     this.legacyRowsByVault.set(vaultId, rows);
@@ -1341,6 +1398,22 @@ export class VaultStore {
   /** The rows the last {@link loadLegacyGrants} for `vaultId` returned (empty until one ran). */
   legacyGrantRows(vaultId: string): LegacyGrantRow[] {
     return this.legacyRowsByVault.get(vaultId) ?? [];
+  }
+
+  // ---- A9 (M-3): the removing browser's own durable tombstones ----
+
+  /** The ms at which THIS browser removed `userId` from `vaultId` (durable client state), or null. */
+  private issuedTombstoneHere(vaultId: string, userId: string): number | null {
+    const ats = (this.clientState.get(ISSUED_TOMBSTONES_KEY) ?? "").split("\n").flatMap((line) => {
+      const parts = line.split("|");
+      return parts.length === 3 && parts[0] === vaultId && parts[1] === userId && Number.isSafeInteger(Number(parts[2])) ? [Number(parts[2])] : [];
+    });
+    return ats.length ? Math.max(...ats) : null;
+  }
+
+  private recordIssuedTombstoneHere(vaultId: string, userId: string, at: number): void {
+    const lines = (this.clientState.get(ISSUED_TOMBSTONES_KEY) ?? "").split("\n").filter((l) => l && !l.startsWith(`${vaultId}|${userId}|`));
+    this.clientState.set(ISSUED_TOMBSTONES_KEY, [...lines, `${vaultId}|${userId}|${at}`].sort().join("\n"));
   }
 
   /** The owner tapped "Re-share <vault> with <member>" on `row` (rule a). Only a row this store offered in the current
@@ -1362,9 +1435,15 @@ export class VaultStore {
   private async flushOwnershipReleases(): Promise<void> {
     if (this.ownershipReleases.size === 0) return;
     const ids = [...this.ownershipReleases];
-    this.ownershipReleases.clear();
     const now = Date.now();
-    await this.accountState.update((d) => ids.reduce((acc, id) => withoutOwned(acc, id, now), d)).catch(() => {});
+    // A9 (LOW): the set is cleared only once the record took (locally at least); a release the write could not even
+    // adopt (a newer client owns the format) stays queued for the next sync instead of silently never retrying.
+    try {
+      await this.accountState.update((d) => ids.reduce((acc, id) => withoutOwned(acc, id, now), d));
+      for (const id of ids) this.ownershipReleases.delete(id);
+    } catch {
+      /* retried next sync */
+    }
   }
 
   /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
@@ -1515,9 +1594,16 @@ export class VaultStore {
     // one has settled). Bounded: one extra pull per sync; a bell landing during THIS pull is
     // caught by its own syncNow's comparison after it joins.
     if (this.bellRev > this.cursor) await this.pull();
-    // Root cause A §4.3 (A5 review H-1): local, never mints. §4.2: best effort, never fails the sync.
-    this.decidePersonalLocally();
+    // §4.2: best effort, never fails the sync. Then root cause A §4.3 (A5 review H-1): local, never mints — and since A9
+    // (M-2) it reads the account's designation, so the refresh comes FIRST; a designation this browser recorded
+    // (register, an accepted change) is written back by one more refresh.
+    const mergedStateBefore = this.accountState.hasHighWater(); // A9 review LOW-4: before THIS sync's refresh could set it
     await this.accountState.refresh().catch(() => {});
+    this.decidePersonalLocally(mergedStateBefore);
+    if (this.designationDirty) {
+      this.designationDirty = false;
+      await this.accountState.refresh().catch(() => {});
+    }
     // Root cause A (A6, core SyncEngine.sync twin): pins may have changed, so re-run §1.4 for rows not yet adopted;
     // then the member self-wrap (§3.2), minted ONLY for a key from a verified v2 grant or a v1 key this device
     // froze or the human confirmed (never an unconfirmed v1 seal: the A1 laundering bug). The owner's §8.2 step 4
@@ -2207,6 +2293,7 @@ export class VaultStore {
         doc,
       });
       this.undecryptableById.delete(item.itemId); // became decryptable (e.g. rewritten at v1)
+      this.homeApplied(item); // A9 (L-1): applied, so the first such row is the home
       if (item.conflict) conflicts?.push(item);
     } catch {
       // Undecryptable under a HELD key (formatVersion > supported — decryptItem
@@ -2633,16 +2720,19 @@ export class VaultStore {
    * NOT applied: it is quarantined and counted for this pull's single "wrong vault" anomaly.
    */
   private admitHome(item: WireItem): boolean {
-    const verdict = admitRow(this.homes.get(item.itemId), item.vaultId);
-    if (verdict === "new_home") {
-      this.recordHome(item.itemId, item.vaultId);
-      return true;
-    }
-    if (verdict === "home") return true;
+    const verdict = admitRow(this.homes.get(item.itemId), item.vaultId, !item.deleted && item.blob !== null && this.account.hasVault(item.vaultId));
+    // A9 (L-1): the home is recorded by homeApplied once the row IS applied (it decrypted), never at admission: a row
+    // that cannot be applied here ("skip") records nothing and a later genuine row takes the home.
+    if (verdict === "new_home" || verdict === "skip" || verdict === "home") return true;
     this.quarantinedRows.set(item.itemId, item);
     this.recordPullOp((b) => b.addQuarantined(item));
     this.wrongVault.note(item.vaultId);
     return false;
+  }
+
+  /** INV-HOME (A9 L-1): `item` was just APPLIED (decrypted into the working set): the first such row is the home. */
+  private homeApplied(item: WireItem): void {
+    if (!this.homes.has(item.itemId)) this.recordHome(item.itemId, item.vaultId);
   }
 
   private recordHome(itemId: string, vaultId: string): void {
@@ -3390,7 +3480,7 @@ export class VaultStore {
       if (verdict === "changed_vaults") throw new ItemChangedVaultsError();
       provenance = editorProvenance(vaultId!);
     } else {
-      provenance = chosenProvenance(vaultId ?? this.account.personalVaultId);
+      provenance = chosenProvenance(vaultId ?? this.personalVaultOrRefuse());
     }
     const targetVaultId = provenance.vaultId;
     const id = itemId ?? this.account.newItemId();
@@ -3602,7 +3692,7 @@ export class VaultStore {
     }
     // S2: the destination vault's projections — the SAME vaultId must feed importDocs, or
     // the F75 dedupe fingerprints one vault while the rows land in another. Default personal.
-    const target = vaultId ?? this.account.personalVaultId;
+    const target = vaultId ?? this.personalVaultOrRefuse();
     const logins: ImportProjections["logins"] = [];
     const notes: ImportProjections["notes"] = [];
     const names: string[] = [];
@@ -3636,7 +3726,7 @@ export class VaultStore {
     onProgress?: (done: number, total: number) => void,
     destinationVaultId?: string,
   ): Promise<void> {
-    const vaultId = destinationVaultId ?? this.account.personalVaultId;
+    const vaultId = destinationVaultId ?? this.personalVaultOrRefuse();
     const total = items.length;
     let done = 0;
     for (let start = 0; start < items.length; start += VaultStore.SERVER_BATCH_MAX) {
@@ -3854,8 +3944,11 @@ export class VaultStore {
     const issuedAt = Date.now();
     const key = await this.account.lifecycleKeyFor(vaultId);
     const proof = await removeV2Proof(key, vaultId, userId, nonce, issuedAt);
+    // A9 (M-3): this browser's own durable record of the removal, written BEFORE the request so no later rollback of
+    // account state can make this browser offer the pair as "previously shared" again.
+    this.recordIssuedTombstoneHere(vaultId, userId, issuedAt);
     await this.api.removeVaultMember(vaultId, userId, { proofV: 2, proof, nonce, issuedAt });
-    // A6b: a removed member's pair leaves the issued-grants record (tombstoned): a later re-issue needs a human.
+    // A6b: a removed member's pair leaves the issued-grants record (tombstoned) on every device of the owner.
     await this.accountState.update((d) => withoutIssued(d, vaultId, userId, Date.now())).catch(() => {});
   }
 

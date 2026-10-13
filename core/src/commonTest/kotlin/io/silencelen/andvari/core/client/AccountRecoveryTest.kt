@@ -117,7 +117,9 @@ class AccountRecoveryTest {
     fun setupMemberRecoveryProducesUsablePieceOverLiveUvk() {
         // Simulate a migration: an unlocked account (e.g. legacy jacob) mints a fresh piece.
         val r = Account.enroll("inv", "f@x.com", "f", password, kdf, null, null, "dev", crypto)
-        val currentAuthKey = Account.deriveAuthKey(password, r.request.kdfSalt, kdf, crypto)
+        // A9: Account.deriveAuthKey is fenced on the params (the test-speed KDF sits below the floor), so build the proof
+        // the way the fence would for real keys: the HKDF auth split of the MK.
+        val currentAuthKey = Bytes.toB64(Keys.authKey(crypto, Keys.masterKey(crypto, password, Bytes.fromB64(r.request.kdfSalt), kdf)))
 
         val setup = r.account.setupMemberRecovery(currentAuthKey)
         assertEquals(currentAuthKey, setup.request.currentAuthKey, "currentAuthKey carried for server reauth")

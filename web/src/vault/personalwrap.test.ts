@@ -147,6 +147,10 @@ describe("the personal vault is never a server label (VaultStore)", () => {
       memoryClientState(),
     );
     await store.sync();
+    // A9 (M-2): a fresh device with no designation on record confirms the served wrap once; the labels decide nothing.
+    expect(device.personalStatus).toBe("proposed");
+    await store.describePersonalChange();
+    store.acceptPersonalChange();
     expect(device.personalVaultId).toBe(victim.personalVaultId);
     const types = Object.fromEntries(store.vaults().map((x) => [x.vaultId, x.type]));
     expect(types[victim.personalVaultId]).toBe("personal");
@@ -257,7 +261,10 @@ describe("H-1 — a withheld personal wrap never lets the label decide", () => {
     const h = await h1Feed();
     const local = memoryClientState();
     const first = await Account.unlock(h.victim.userId, h.victim.password, { ...h.victim.keys, personalWrap: h.victim.personalWrap });
-    await new VaultStore(new FakeApi(h.rows).asClient(), first, undefined, local).sync();
+    const s1 = new VaultStore(new FakeApi(h.rows).asClient(), first, undefined, local);
+    await s1.sync();
+    await s1.describePersonalChange();
+    s1.acceptPersonalChange(); // A9 (M-2): confirmed once on a device with no designation on record
     expect(first.personalVaultId).toBe(h.victim.personalVaultId);
 
     const again = await Account.unlock(h.victim.userId, h.victim.password, h.victim.keys); // now withheld

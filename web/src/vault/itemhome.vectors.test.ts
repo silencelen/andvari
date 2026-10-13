@@ -10,9 +10,9 @@ import { admitRow, conflictDecision, editDecision, sealDecision, serverItemDecis
  * INV-SEAL routing tripwire: product code never calls the provenance-free `Account.encryptItem` shim.
  */
 
-type Row = { itemId: string; vaultId: string; deleted?: boolean; conflict?: boolean };
+type Row = { itemId: string; vaultId: string; deleted?: boolean; conflict?: boolean; unheld?: boolean };
 const v = JSON.parse(readFileSync(fileURLToPath(new URL("../../../spec/test-vectors/itemhome.json", import.meta.url)), "utf8")) as {
-  admit: { name: string; home: string | null; vaultId: string; expect: string }[];
+  admit: { name: string; home: string | null; vaultId: string; applies?: boolean; expect: string }[];
   pulls: { name: string; homes: Record<string, string>; rows: Row[]; expect: { verdicts: string[]; homes: Record<string, string>; anomalies: number; materialize: { itemId: string; vaultId: string }[] } }[];
   conflict: { name: string; twin: string | null; flagged: string; home: string | null; expect: string }[];
   serverItem: { name: string; pushed: string; losing: string; home: string | null; expect: string }[];
@@ -21,7 +21,7 @@ const v = JSON.parse(readFileSync(fileURLToPath(new URL("../../../spec/test-vect
 };
 
 describe("itemhome.json — the item-home rules on the web engine", () => {
-  for (const c of v.admit) it(`admit: ${c.name}`, () => expect(admitRow(c.home, c.vaultId)).toBe(c.expect));
+  for (const c of v.admit) it(`admit: ${c.name}`, () => expect(admitRow(c.home, c.vaultId, c.applies ?? true)).toBe(c.expect));
 
   it("carries the §5.3 fixture in both row orders", () => {
     expect(v.pulls.some((p) => p.name.startsWith("§5.3 fixture, flagged"))).toBe(true);
@@ -38,13 +38,16 @@ describe("itemhome.json — the item-home rules on the web engine", () => {
       const flagged: { itemId: string; vaultId: string }[] = [];
       const verdicts: string[] = [];
       for (const r of c.rows) {
-        const verdict = admitRow(homes.get(r.itemId), r.vaultId);
+        // A9: a row applies only when it is live and under a vault this device holds the key for (store.ts also
+        // needs the envelope to decrypt; the vectors cannot express that, api-review-2.test.ts does).
+        const verdict = admitRow(homes.get(r.itemId), r.vaultId, !r.deleted && !r.unheld);
         verdicts.push(verdict);
         if (verdict === "quarantine") {
           tally.note(r.vaultId);
           continue;
         }
         if (verdict === "new_home") homes.set(r.itemId, r.vaultId);
+        if (verdict === "skip") continue;
         if (r.deleted) twins.delete(r.itemId);
         else twins.set(r.itemId, r.vaultId);
         if (r.conflict) flagged.push({ itemId: r.itemId, vaultId: r.vaultId });

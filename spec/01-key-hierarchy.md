@@ -297,7 +297,23 @@ key signs only through the flows that need it (today: escrow v2).
   DIFFERENT vault than the one this device cached (a re-designation elsewhere, or an older wrap
   replayed) → the device does NOT switch: its cached wrap stays in force until the human confirms the
   change or re-designates. The cached wrap lives in device state that outlives the offline cache (no
-  cache policy, revocation purge or sign-out removes it). "No personal vault" means no default save/import destination and no usage ledger.
+  cache policy, revocation purge or sign-out removes it). **The designation (branch A9, M-2):** the
+  account also records which vault it last made personal in its account state (`personal`, spec 03
+  §3: UVK-sealed, newest wins; written on register, on the migration choice, on a re-designation and
+  on an accepted change). A served wrap naming the designated vault is in force on any device, cached
+  or not; a served wrap it does not name, or one served to a device with no cached wrap and no
+  designation, is a PROPOSAL: nothing is in force (no default destination) until the human confirms it
+  after seeing its co-holders, or re-designates. The server keeps every wrap the account ever minted,
+  so without this a fresh device adopted whichever one it was served. **A device that never confirmed
+  a personal vault (no cached wrap) treats EVERY served wrap as a proposal, designation or not (A9
+  review, LOW-4):** on such a device the account state is as replayable as the wrap, so a matching
+  designation proves nothing; the human confirms once, and the device is established from then on.
+  The extension, which never reads account state, applies the same rule to its cache. "Never switch
+  silently" holds inside the account type too: a wrap applied while another is in force is a notice
+  (or, unopenable, an anomaly), never a switch; only the human's confirmed designation replaces the
+  wrap in force. "No personal vault" means no default save/import destination and no usage ledger;
+  a default save, import or copy then fails with "Choose a vault for this item." (never with a
+  wrong-password error, and never redirected), and the editors require an explicit vault pick.
   Vectors: `spec/test-vectors/personalwrap.json`.
 - **Shared vault** (`type=shared`): the creator generates `vaultId`, `VK`, `metaBlob`.
   - The **creator's own grant** uses `wrappedVk = Envelope(key = UVK, plaintext = VK,
@@ -356,26 +372,31 @@ key signs only through the flows that need it (today: escrow v2).
     by serving older authentic blobs in ascending order.) A grant from a pinned, current contact is adopted with the notice
     "You were added to <vault> by <contact>" (owner decision Q5). Vectors:
     `spec/test-vectors/sharedgrant-v2.json`.
-  - **Grant authority, sender side (NORMATIVE; security review 2026-10, root cause A, branch A6b).**
-    A client never signs or seals a VK to a user unless (a) a HUMAN on that device confirmed that
-    (vault, user) pair now: the add-member action, or a per-row "Re-share <vault> with <member>?" on
-    the owner's "Legacy grants" list (each row names the vault and the member's VERIFIED label; the
-    copy says the list itself comes from the server; a batch is allowed only if every row shows both
-    and the owner confirms the list as a whole), or (b) the pair is in this account's **issued-grants
-    record** for the SAME identity key. The record lives in the account state (spec 03 §3,
+  - **Grant authority, sender side (NORMATIVE; security review 2026-10, root cause A, branch A6b;
+    narrowed by branch A9).** A client never signs or seals a VK to a user unless a HUMAN on that
+    device confirmed that (vault, user) pair now: the add-member action, or a per-row "Re-share
+    <vault> with <member>?" on the owner's "Legacy grants" list (each row names the vault and the
+    member's VERIFIED label; the copy says the list itself comes from the server; a batch is allowed
+    only if every row shows both and the owner confirms the list as a whole). **There is no
+    prompt-free path (A9, M-3).** The account's **issued-grants record** (account state, spec 03 §3,
     `issuedGrants` = `[{vaultId, userId, keyHash = hex SHA-256 of the identity key sealed to, at}]`,
-    `issuedTombstones` keyed `"<vaultId>|<userId>"`): every grant the account signs is recorded, a
-    removal tombstones the pair, and, being UVK-sealed and union-merged, it is shared by every device of
-    the owner and cannot be shrunk by a withheld or rolled-back blob. Grants signed before A6b are
-    never in it, so their re-issue always needs (a). Nothing re-issues automatically: the re-issue is
-    NOT part of sync; only loading the "Legacy grants" list renews, without a prompt, the pairs (b)
-    covers. **Ownership is the account's own evidence, never the `role=owner` label**: add member,
+    `issuedTombstones` keyed `"<vaultId>|<userId>"`: every grant the account signs is recorded, a
+    removal tombstones the pair, UVK-sealed and union-merged) is DISPLAY ONLY: it adds "you shared
+    this vault with them on <date>" to a row and pre-ticks nothing. It used to renew a recorded pair
+    without a prompt (A6b's rule (b)); that trusted the record's PRESENCE on the signing device, and
+    the record is relayed by the server, which can withhold the removal tombstone from a device that
+    never saw it (its high-water mark is below it, so no rollback is detectable) and then list the
+    removed member as legacy. The removing device also keeps its own durable tombstone (device state,
+    `grant.issued.tombstones`), written before the removal request, so it never shows the removed
+    pair as previously shared whatever account state it is later served. Nothing re-issues
+    automatically: the re-issue is NOT part of sync, and loading the list signs nothing. **Ownership
+    is the account's own evidence, never the `role=owner` label**: add member,
     re-issue and the transfer offer require the vault to be in the account state's `ownedVaults`
     (written when this account creates the vault, when it accepts a transfer, or by a one-time
     "You own <vault>?" confirmation behind a fresh master-password reauth checked on the device against
     the UVK the session holds — the served AccountKeys must pass the unlock KDF floor/ceiling fence and
     carry the salt this session unlocked with, so a replayed pre-password-change AccountKeys never lets an
-    old password pass; the confirmation first loads and shows, "as reported by the server", the vault's
+    old password pass (the one fenced in-session derivation, §7 "In-session password proofs"); the confirmation first loads and shows, "as reported by the server", the vault's
     owner, its last completed transfer and its co-holders, is worded "Only confirm if you created this
     vault, or its owner transferred it to you", and is refused for a vault whose key is not from the
     account's own UVK wrap; for a vault this account first adopted as a MEMBER (a durable device-local
@@ -565,6 +586,27 @@ key signs only through the flows that need it (today: escrow v2).
     itself never changes (§4).
   - Side effect: converging on policy params also heals that account's
     prelogin-divergence oracle (spec 05 R4).
+- **In-session password proofs (NORMATIVE; security review 2026-10, branch A9, M-1).** Every
+  credential a client derives from the master password AFTER unlock and sends to the server — the
+  `currentAuthKey` of a password change or KDF re-key, a TOTP enrolment, the recovery-capture gate,
+  the "You own <vault>?" reauth, the personal-vault re-designation (spec 03 §3) — MUST go through
+  ONE derivation (core `Account.reauthAuthKey`, web `Account#reauthAuthKey`) that, before any KDF
+  runs, (1) applies the §7 client-side sanity bounds to the served `kdfParams` (below the floor or
+  above the ceiling: refused, surfaced as the weakened-settings block, never as a wrong password)
+  and (2) refuses any `kdfSalt` other than the one THIS session unlocked or enrolled with ("Lock and
+  unlock andvari, then try again"). A server that answers `GET /account/keys` with its own salt or
+  minimal-cost params therefore never obtains a second, cheaper hash of the master password. The only
+  derivation outside it is the sign-in after prelogin, where no session salt exists yet; it is fenced
+  on the params and pinned to its call sites by a tripwire test. The raw KDF is called only inside
+  the account types, the backup KDF (spec 07 §2.3, its own window) and the re-key (fenced by the
+  upgrade rule above); a product call anywhere else fails the build. **The derivation is PROVED
+  (A9 review, LOW-1):** the salt check is only a pre-check, because a quick-unlock session (the UVK
+  came from the platform, spec 01 §8) records whatever salt the server served at that moment. So the
+  same argon2id pass also yields the wrap key, which MUST open the served `wrappedUvk` to the UVK the
+  session holds (the server cannot produce that without the password); only then is the auth key
+  returned. A server-chosen salt or wrap, and a wrong password, derive nothing that leaves the device,
+  and the wrong password is found out locally ("That master password isn't right") instead of by the
+  server.
 
 ## 8. Quick unlock (platform-local, never server-visible)
 

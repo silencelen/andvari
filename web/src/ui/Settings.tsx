@@ -4,7 +4,7 @@ import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
 import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
-import { Account } from "../vault/account";
+import { Account, ReauthStaleSessionError } from "../vault/account";
 import type { VaultStore } from "../vault/store";
 import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
@@ -66,7 +66,7 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
       <PersonalVaultCard client={client} account={account} store={store} />
       <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
       <OfflineCopyCard store={store} userId={account.userId} />
-      <TotpCard client={client} policy={policy} />
+      <TotpCard client={client} policy={policy} account={account} />
       <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
       <AppearanceCard />
       <div className="sheet">
@@ -519,7 +519,7 @@ function CopyButton({ value, label = "Copy", clearSeconds = 0 }: { value: string
 
 // ---- server TOTP (spec 03 §2 — optional second factor, verified at every sign-in) ----
 
-function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
+function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" | "account">) {
   const [status, setStatus] = useState<TotpStatus | null>(null);
   const [setup, setSetup] = useState<TotpSetupResponse | null>(null);
   const [code, setCode] = useState("");
@@ -568,7 +568,7 @@ function TotpCard({ client, policy }: Pick<Props, "client" | "policy">) {
   const begin = () =>
     run(async () => {
       try {
-        setSetup(await beginTotpEnrolment(client, password));
+        setSetup(await beginTotpEnrolment(client, password, account));
       } finally {
         setPassword("");
       }
@@ -713,7 +713,9 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props
     setMsg("");
     try {
       const keys = await client.accountKeys();
-      const currentAuthKey = await Account.deriveAuthKey(current, keys.kdfSalt, keys.kdfParams);
+      // A9 (M-1): the current-password proof is the one fenced in-session derivation (the KDF fence, and only the
+      // salt this session unlocked with); a stale session says how to recover instead of deriving anything.
+      const currentAuthKey = await account.reauthAuthKey(current, keys);
       const change = await account.buildPasswordChange(next, policy?.kdfParams ?? keys.kdfParams);
       await client.changePassword({ currentAuthKey, ...change });
       // §D.2c/§E.4 (S3-2): the durable offline cache still holds the OLD kdfSalt/kdfParams/wrappedUvk,
@@ -728,7 +730,7 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props
       setMsg("Master password changed — sessions on other devices were signed out.");
       onPasswordChanged();
     } catch (e) {
-      setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof ApiError && e.status === 401 ? "Current master password is wrong." : "Password change failed."); // H1 (spec 05 T1)
+      setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof ReauthStaleSessionError ? e.message : e instanceof ApiError && e.status === 401 ? "Current master password is wrong." : "Password change failed."); // H1 (spec 05 T1); A9
     } finally {
       setBusy(false);
     }

@@ -371,6 +371,17 @@ class Account private constructor(
          * ([acceptPersonalChange]) or re-designates the current one. [pendingPersonalChange] holds the served wrap.
          */
         CHANGED,
+
+        /**
+         * A served wrap OPENS, but NOTHING on this device vouches for it (security review 2026-10, branch A9, M-2):
+         * no cached wrap, and the account state carries no designation, or one for another vault
+         * ([proposedAgainstDesignation]). The server keeps every wrap this account ever minted and chooses which to
+         * serve, so on a fresh device a superseded wrap for a co-held vault would otherwise be adopted silently and
+         * every default save would land where co-holders read it. Nothing is in force ([personalVaultId] is empty:
+         * no default destination), [pendingPersonalChange] holds the served wrap, and only the human's confirmation
+         * ([acceptPersonalChange], after its co-holders were shown) or a reauthed re-designation resolves it.
+         */
+        PROPOSED,
     }
 
     var personalStatus: PersonalStatus = PersonalStatus.ABSENT
@@ -576,8 +587,16 @@ class Account private constructor(
          * credential AND the UVK wrap key re-derive — off the heap for a heap dump or swap page
          * instead of leaving it until GC. Every MK-derivation site in this class does the same:
          * [enroll], [unlock], [recover], and the identity seed in [unlockFromUvk].
+         *
+         * PRE-SESSION ONLY (security review 2026-10, branch A9, M-1): this is the sign-in derivation over the
+         * prelogin values, where no session salt exists yet. It still applies the KDF floor/ceiling fence
+         * ([KdfUpgrade.requireServerKdfParams], spec 05 T1) so no caller can derive under weakened params.
+         * Every IN-SESSION password proof (a reauth, TOTP enrolment, the KDF re-key, a re-designation)
+         * goes through [reauthAuthKey], which also refuses any salt but the session's; a tripwire test
+         * (ApiReview2Test) fails the build when product code calls this one anywhere else.
          */
         fun deriveAuthKey(password: String, kdfSaltB64: String, params: KdfParams, crypto: CryptoProvider = createCryptoProvider()): String {
+            KdfUpgrade.requireServerKdfParams(params)
             val mk = Keys.masterKey(crypto, password, Bytes.fromB64(kdfSaltB64), params)
             try {
                 val authKey = Keys.authKey(crypto, mk)
@@ -697,6 +716,7 @@ class Account private constructor(
                 )
                 account.personalStatus = PersonalStatus.CONFIRMED
                 account.personalWrap = req.personalWrap
+                account.personalWrapMintedHere = true // A9 (M-2): the registering device designates it at its first sync
                 account.uvkWrappedVaults.add(personalVaultId)
                 account.sessionKdfSalt = req.kdfSalt // A6b review LOW-3
                 signingForCleanup = null // owned by the returned Account now
@@ -745,7 +765,7 @@ class Account private constructor(
                     escrowFingerprint = "",
                 ),
                 crypto,
-            )
+            ).discardProbeSecrets() // A9: the probe is never a session; its identity and signing secrets die here
 
             // 3. Derive fresh password material and re-wrap the SAME UVK (invariant).
             //    ZEROIZATION (audit H80; see [deriveAuthKey]): the new MK dies after its purpose
@@ -1033,14 +1053,19 @@ class Account private constructor(
         opened.anomaly?.let { grantAnomalies[grant.vaultId] = it }
         if (opened.source == KeySource.UVK_WRAP && grant.userId == userId) uvkWrappedVaults.add(grant.vaultId)
         // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and NOT
-        // re-stamped by a later re-delivery (the early return above). Since root cause A §3.2 a
-        // member's own row can carry a UVK self-wrap, so "opened from a seal" alone no longer
-        // separates "shared" from "mine alone". A row is member-granted when the key came from a
-        // seal, OR the row carries any seal at all (a member row, or a post-transfer owner row
-        // that retains one), OR its role is not owner (a member self-wrap whose seal the server
-        // dropped). Since root cause A §4 this bit no longer decides "personal" (the personal wrap
-        // does); it feeds only the display and the §8.5 migration's candidate filter.
-        if (opened.viaSeal || !grant.sealedVk.isNullOrEmpty() || !grant.signedGrant.isNullOrEmpty() || grant.role != "owner") {
+        // re-stamped by a later re-delivery (the early return above). This bit is LOAD-BEARING
+        // (A6b review MEDIUM-1): the host persists it, it joins the account state's add-only
+        // `memberReceived`, and a vault it marks needs the explicit "its owner transferred it to me"
+        // acknowledgement before this account may claim ownership. So it is set only from
+        // AUTHENTICATED provenance (security review 2026-10, branch A9, L-2): the key was actually
+        // ADOPTED through a v1 seal or a verified v2 grant, the row carries a VERIFIED v2 grant from a
+        // pinned sender beside our own self-wrap (the owner provably granted us this vault), or the row
+        // is not an owner row AND no UVK wrap of ours opened. Never from the row's SHAPE: a seal the
+        // server attaches beside our own UVK wrap (junk, ignored above), an unverifiable grant field,
+        // or a relabelled role would otherwise become durable evidence that makes the genuine creator
+        // answer a false acknowledgement forever.
+        val ownUvkWrapOpened = opened.source == KeySource.PERSONAL_WRAP || (opened.source == KeySource.UVK_WRAP && grant.userId == userId)
+        if (opened.viaSeal || opened.from != null || (grant.role != "owner" && !ownUvkWrapOpened)) {
             memberGrantedVaults.add(grant.vaultId)
         }
     }
@@ -1109,12 +1134,15 @@ class Account private constructor(
             // classification (still terminal, still no seal fallback).
             if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
             val sealVk = if (sealed.isNullOrEmpty()) null else openSealOrNull(grant.vaultId, sealed)
-            // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it.
-            val signedDiffers = !grant.signedGrant.isNullOrEmpty() && openSigned(grant, heldVk = vk).verdict == GrantVerdict.VK_MISMATCH
+            // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it. A9 (L-2): a VERIFIED
+            // one that agrees names the pinned sender who granted us the vault: authenticated member provenance.
+            val signedOutcome = if (grant.signedGrant.isNullOrEmpty()) null else openSigned(grant, heldVk = vk)
+            val signedDiffers = signedOutcome?.verdict == GrantVerdict.VK_MISMATCH
+            val verifiedFrom = (signedOutcome as? GrantOutcome.Adopted)?.from
             // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
             val gateAnomaly = if (vouchGate(grant.vaultId, vk) == VouchGate.MISMATCH) GrantVerdict.VK_MISMATCH else null
             // A6 final review LOW-H: the gate's mismatch also lands in vkMismatchVaults (the "vault key mismatch" notice).
-            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers || gateAnomaly != null, anomaly = gateAnomaly)
+            return OpenedVk(vk, KeySource.UVK_WRAP, sealMismatch = (sealVk != null && !Bytes.ctEquals(sealVk, vk)) || signedDiffers || gateAnomaly != null, from = verifiedFrom, anomaly = gateAnomaly)
         }
         // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
         if (!grant.signedGrant.isNullOrEmpty()) {
@@ -1304,7 +1332,30 @@ class Account private constructor(
             }
             return
         }
+        // A9 (M-2 review): "never switch silently" holds HERE, not only in the engine's call order. While a wrap is in
+        // force on this device (served, cached or confirmed), a wrap for ANOTHER vault applied later (a keys refresh,
+        // a second pass) is a notice (CHANGED), and one that does not open keeps the wrap in force (UNREADABLE_CACHED).
+        val inForce = personalWrap
+        if (inForce != null && personalVaultId.isNotEmpty()) {
+            if (wrap.vaultId == inForce.vaultId) {
+                if (openAndInstallPersonalWrap(wrap)) {
+                    pendingPersonalChange = null
+                    personalStatus = PersonalStatus.CONFIRMED
+                } else personalStatus = PersonalStatus.UNREADABLE_CACHED
+                return
+            }
+            val vk = openPersonalWrap(wrap)
+            if (vk == null) {
+                personalStatus = PersonalStatus.UNREADABLE_CACHED
+                return
+            }
+            holdKeyFromPersonalWrap(wrap.vaultId, vk)
+            pendingPersonalChange = wrap
+            personalStatus = PersonalStatus.CHANGED
+            return
+        }
         pendingPersonalChange = null
+        proposedAgainstDesignation = null
         if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.CONFIRMED
         else {
             personalStatus = PersonalStatus.UNREADABLE
@@ -1312,6 +1363,43 @@ class Account private constructor(
             personalWrap = null
         }
     }
+
+    /**
+     * The human's CONFIRMED designation (the migration choice, or a reauthed re-designation; A9): the wrap this client
+     * just minted and the server accepted is in force now, whatever was before. The only path that replaces a wrap in
+     * force without the CHANGED notice, because the human is the one who named the vault.
+     */
+    fun installDesignatedPersonalWrap(wrap: PersonalWrap) {
+        check(openAndInstallPersonalWrap(wrap)) { "the designated personal wrap does not open" }
+        pendingPersonalChange = null
+        proposedAgainstDesignation = null
+        personalStatus = PersonalStatus.CONFIRMED
+    }
+
+    /**
+     * A9 (M-2): the served wrap opened ([PersonalStatus.CONFIRMED]) but nothing on this device vouches for it: no
+     * cached wrap, and the account state has no designation, or one for another vault ([designation]). It becomes a
+     * PROPOSAL: nothing is in force ([personalVaultId] empty), [pendingPersonalChange] holds the served wrap, and
+     * [acceptPersonalChange] (after the co-holders were shown) or a reauthed re-designation resolves it. False (nothing
+     * changed) when the status is not CONFIRMED.
+     */
+    fun holdPersonalProposal(designation: String?): Boolean {
+        val served = personalWrap ?: return false
+        if (personalStatus != PersonalStatus.CONFIRMED) return false
+        pendingPersonalChange = served
+        proposedAgainstDesignation = designation
+        personalWrap = null
+        personalVaultId = ""
+        personalStatus = PersonalStatus.PROPOSED
+        return true
+    }
+
+    /** While [PersonalStatus.PROPOSED]: the account-state designation the served wrap contradicts (null = none). */
+    var proposedAgainstDesignation: String? = null
+        private set
+
+    /** A9 (M-2): set by [enroll] on the registering device, which designates its minted wrap at its first sync. */
+    internal var personalWrapMintedHere: Boolean = false
 
     /**
      * The wrap THIS DEVICE cached the last time it authenticated one (UVK-sealed), applied after the served
@@ -1352,13 +1440,14 @@ class Account private constructor(
         return true
     }
 
-    /** The human confirmed a [PersonalStatus.CHANGED] notice: the served wrap (already authenticated under
-     *  our UVK) is now in force. Mints nothing. */
+    /** The human confirmed a [PersonalStatus.CHANGED] notice or a [PersonalStatus.PROPOSED] wrap (A9): the served
+     *  wrap (already authenticated under our UVK) is now in force. Mints nothing. */
     fun acceptPersonalChange() {
         val served = pendingPersonalChange ?: throw IllegalStateException("no personal-vault change is pending")
-        check(personalStatus == PersonalStatus.CHANGED) { "no personal-vault change is pending" }
+        check(personalStatus == PersonalStatus.CHANGED || personalStatus == PersonalStatus.PROPOSED) { "no personal-vault change is pending" }
         check(openAndInstallPersonalWrap(served)) { "the served personal wrap no longer opens" }
         pendingPersonalChange = null
+        proposedAgainstDesignation = null
         personalStatus = PersonalStatus.CONFIRMED
     }
 
@@ -1370,15 +1459,23 @@ class Account private constructor(
     var personalWrap: PersonalWrap? = null
         private set
 
+    /** The VK a personal wrap opens to under our UVK with the `vk-personal` AD, or null. */
+    private fun openPersonalWrap(wrap: PersonalWrap): ByteArray? =
+        runCatching { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }.getOrNull()?.takeIf { it.size == 32 }
+
+    /** Hold a key a personal wrap (ours, UVK-authentic) opened to, WITHOUT making its vault the personal one. */
+    private fun holdKeyFromPersonalWrap(vaultId: String, vk: ByteArray) {
+        val held = vaultKeys[vaultId]
+        if (held != null && !Bytes.ctEquals(held, vk)) vkMismatchVaults.add(vaultId)
+        vaultKeys[vaultId] = vk
+        keySources[vaultId] = KeySource.PERSONAL_WRAP
+        unreadableKeyVaults.remove(vaultId)
+        uvkWrappedVaults.add(vaultId)
+    }
+
     private fun openAndInstallPersonalWrap(wrap: PersonalWrap): Boolean {
-        val vk = runCatching { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }.getOrNull()
-        if (vk == null || vk.size != 32) return false
-        val held = vaultKeys[wrap.vaultId]
-        if (held != null && !Bytes.ctEquals(held, vk)) vkMismatchVaults.add(wrap.vaultId)
-        vaultKeys[wrap.vaultId] = vk
-        keySources[wrap.vaultId] = KeySource.PERSONAL_WRAP
-        unreadableKeyVaults.remove(wrap.vaultId)
-        uvkWrappedVaults.add(wrap.vaultId)
+        val vk = openPersonalWrap(wrap) ?: return false
+        holdKeyFromPersonalWrap(wrap.vaultId, vk)
         personalVaultId = wrap.vaultId
         personalWrap = wrap
         return true
@@ -1454,16 +1551,38 @@ class Account private constructor(
      */
     fun sessionSaltCurrent(keys: AccountKeys): Boolean = sessionKdfSalt != null && keys.kdfSalt == sessionKdfSalt
 
-    fun verifyPassword(password: String, keys: AccountKeys): Boolean {
-        // A6b review LOW-3: the same KDF floor/ceiling fence unlock applies (throws KdfPolicyViolationException), and
-        // only the salt THIS session unlocked with: a replayed older AccountKeys (before a password change) carries
-        // another salt and a wrap of the same UVK under the OLD password, which must never pass for it.
+    /**
+     * THE in-session password proof (security review 2026-10, branch A9, M-1): the login authKey of [password] under
+     * [keys], derived ONLY after (1) the unlock KDF floor/ceiling fence ([KdfPolicyViolationException]: weakened or
+     * absurd params the server chose derive nothing) and (2) the check that [keys] carry the salt THIS session unlocked
+     * with ([ReauthStaleSessionException]: a replayed older AccountKeys, or a password change / KDF upgrade since, never
+     * gets a second hash of the master password under a salt the server picked). Every password-derived upload (a
+     * reauth, TOTP enrolment, the KDF re-key's current proof, the personal-vault re-designation) goes through here; the
+     * pre-session [deriveAuthKey] is for sign-in only. MK and the raw key are wiped on the way out (audit H80).
+     */
+    fun reauthAuthKey(password: String, keys: AccountKeys): String {
         KdfUpgrade.requireServerKdfParams(keys.kdfParams)
-        val salt = sessionKdfSalt ?: return false
-        if (keys.kdfSalt != salt) return false
+        if (!sessionSaltCurrent(keys)) throw ReauthStaleSessionException()
+        // A9 review LOW-1: the salt check above is only a pre-check. A quick-unlock session (the UVK came from the
+        // platform) recorded whatever salt the server served at that moment, so the derivation is PROVED instead: the
+        // same argon2 pass yields the wrap key, which must open the served wrappedUvk to the UVK this session holds.
+        // A server-chosen salt or wrap, or a wrong password, derives nothing that leaves the device.
+        return proveMasterPassword(password, keys) ?: throw ReauthFailedException()
+    }
+
+    /**
+     * ONE argon2id pass over [password] under [keys]' salt and params, split into the wrap key and the auth key; the
+     * wrap key must open [keys]`.wrappedUvk` to the UVK this session already holds (the server cannot forge that
+     * without the password), and only then is the base64 auth key returned. Null = wrong password, or keys that are not
+     * this account's. MK, both derived keys and the opened copy are wiped on the way out (audit H80).
+     */
+    private fun proveMasterPassword(password: String, keys: AccountKeys): String? {
         val mk = Keys.masterKey(crypto, password, Bytes.fromB64(keys.kdfSalt), keys.kdfParams)
-        val wrapKey = try {
-            Keys.wrapKey(crypto, mk)
+        val authKey: ByteArray
+        val wrapKey: ByteArray
+        try {
+            authKey = Keys.authKey(crypto, mk)
+            wrapKey = Keys.wrapKey(crypto, mk)
         } finally {
             mk.fill(0)
         }
@@ -1471,16 +1590,37 @@ class Account private constructor(
             val opened = try {
                 Envelope.openB64(crypto, wrapKey, keys.wrappedUvk, Ad.uvk(userId))
             } catch (e: Exception) {
-                return false
+                return null
             }
             try {
-                return Bytes.ctEquals(opened, uvk)
+                if (!Bytes.ctEquals(opened, uvk)) return null
             } finally {
                 opened.fill(0)
             }
+            return Bytes.toB64(authKey)
         } finally {
+            authKey.fill(0)
             wrapKey.fill(0)
         }
+    }
+
+    /**
+     * A9 (LOW): an [Account] built only as a PROBE (the recovery identity hard-fail, [recover]) is never a session.
+     * Wipe the identity and signing secrets it derived; the UVK it shares with the caller is the caller's to wipe.
+     */
+    internal fun discardProbeSecrets() {
+        identityPriv.fill(0)
+        signSecret.fill(0)
+    }
+
+    fun verifyPassword(password: String, keys: AccountKeys): Boolean {
+        // A6b review LOW-3: the same KDF floor/ceiling fence unlock applies (throws KdfPolicyViolationException), and
+        // only the salt THIS session unlocked with: a replayed older AccountKeys (before a password change) carries
+        // another salt and a wrap of the same UVK under the OLD password, which must never pass for it.
+        KdfUpgrade.requireServerKdfParams(keys.kdfParams)
+        val salt = sessionKdfSalt ?: return false
+        if (keys.kdfSalt != salt) return false
+        return proveMasterPassword(password, keys) != null // A9 review: the one proof, shared with reauthAuthKey
     }
 
     /**
@@ -1607,7 +1747,9 @@ class Account private constructor(
      * (base64url). The name stays E2E ciphertext; the server only ever sees an opaque blob.
      */
     fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String {
-        if (isLegacyReadOnly(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
+        // INV-WRITE-KEY "whatever the path" (A9 LOW): a name is sealed under the VK like an item, so a legacy-read-only
+        // key or one that contradicts this device's vouch is refused here too, through the same [canSealUnder].
+        if (!canSealUnder(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
         val meta = decryptVaultMeta(vaultId, metaBlob)
         // spec 02 §4: metaV via the SINGLE [parseMetaV] rule SyncEngine.metaV also applies, so
         // write and apply agree on every client (a string primitive is not a counter → 0).
