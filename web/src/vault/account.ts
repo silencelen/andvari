@@ -54,6 +54,16 @@ export class ReauthStaleSessionError extends Error {
   }
 }
 
+/** A6b: the master password given for a reauth does not open this account's key. Core twin `ReauthFailedException` /
+ *  `HouseholdCopy.REAUTH_FAILED`, byte-equal (vault-copy.test.ts). Lives here since the A9 review (LOW-1): the one
+ *  fenced reauth derivation PROVES the password and raises it. */
+export class ReauthFailedError extends Error {
+  constructor() {
+    super("That master password isn't right.");
+    this.name = "ReauthFailedError";
+  }
+}
+
 /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed; core parity). */
 export const ITEM_FORMAT_VERSION = 2;
 
@@ -1094,10 +1104,47 @@ export class Account {
    * password-derived upload (a reauth, TOTP enrolment, the KDF re-key's current proof, the personal-vault
    * re-designation, the recovery-capture gate) goes through here; {@link deriveAuthKey} is for sign-in only.
    */
-  async reauthAuthKey(password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams">): Promise<string> {
+  async reauthAuthKey(password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams" | "wrappedUvk">): Promise<string> {
     assertServerKdfParams(keys.kdfParams);
     if (!this.sessionSaltCurrent(keys)) throw new ReauthStaleSessionError();
-    return Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams);
+    // A9 review LOW-1 (core twin): the salt check is only a pre-check; the derivation is PROVED in the same argon2 pass
+    // (the wrap key must open the served wrappedUvk to this session's UVK). A substituted wrap or a wrong password derives
+    // nothing that leaves the browser.
+    const authKey = await this.proveMasterPassword(password, keys);
+    if (authKey === null) throw new ReauthFailedError();
+    return authKey;
+  }
+
+  /** ONE argon2id pass split into the wrap key and the auth key; the wrap key must open `keys.wrappedUvk` to the UVK
+   *  this session holds, and only then is the base64 auth key returned. Null = wrong password, or keys that are not this
+   *  account's. MK, both derived keys and the opened copy are wiped on the way out (audit H80). */
+  private async proveMasterPassword(password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams" | "wrappedUvk">): Promise<string | null> {
+    const mk = masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams);
+    let authKey: Uint8Array;
+    let wrapKey: Uint8Array;
+    try {
+      authKey = await deriveAuthKey(mk);
+      wrapKey = await deriveWrapKey(mk);
+    } finally {
+      mk.fill(0);
+    }
+    try {
+      let opened: Uint8Array;
+      try {
+        opened = open(wrapKey, fromB64(keys.wrappedUvk), adUvk(this.userId));
+      } catch {
+        return null;
+      }
+      try {
+        if (!ctEquals(opened, this.uvk)) return null;
+      } finally {
+        opened.fill(0);
+      }
+      return toB64(authKey);
+    } finally {
+      authKey.fill(0);
+      wrapKey.fill(0);
+    }
   }
 
   /** A9 (LOW): an Account built only as a PROBE (the recovery identity hard-fail, {@link recover}) is never a session.
@@ -1112,28 +1159,7 @@ export class Account {
     // salt THIS session unlocked with: a replayed older AccountKeys carries another salt and the OLD password's wrap.
     assertServerKdfParams(keys.kdfParams);
     if (this.sessionKdfSalt === null || keys.kdfSalt !== this.sessionKdfSalt) return false;
-    const mk = masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams);
-    let wrapKey: Uint8Array;
-    try {
-      wrapKey = await deriveWrapKey(mk);
-    } finally {
-      mk.fill(0);
-    }
-    try {
-      let opened: Uint8Array;
-      try {
-        opened = open(wrapKey, fromB64(keys.wrappedUvk), adUvk(this.userId));
-      } catch {
-        return false;
-      }
-      try {
-        return ctEquals(opened, this.uvk);
-      } finally {
-        opened.fill(0);
-      }
-    } finally {
-      wrapKey.fill(0);
-    }
+    return (await this.proveMasterPassword(password, keys)) !== null; // A9 review: the one proof, shared with reauthAuthKey
   }
 
   /** A7 review MEDIUM-1 (core twin): forget this device's key memory for `vaultId` (the §8.2 vouch and the held-key

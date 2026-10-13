@@ -30,7 +30,7 @@ import {
 } from "../crypto/lifecycleproof";
 import { randomBytes, sha256, sha256Sync } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
-import { ITEM_FORMAT_VERSION, type Account, type ItemUpload, type LegacyVouchKind, ReauthStaleSessionError, VaultKeyNotVerifiedError } from "./account";
+import { ITEM_FORMAT_VERSION, type Account, type ItemUpload, type LegacyVouchKind, ReauthFailedError, ReauthStaleSessionError, VaultKeyNotVerifiedError } from "./account";
 import { type ConsumedNonce, type Contact, withIssued, withMemberReceived, withoutIssued, withOwned, withoutOwned, withPersonal } from "./accountstate";
 import {
   admitRow,
@@ -232,17 +232,19 @@ export interface OwnershipClaim {
   receivedAsMember: boolean;
 }
 
-/** A6b: the master password given for a reauth does not open this account's key. Core twin
- *  `HouseholdCopy.REAUTH_FAILED`, byte-equal (vault-copy.test.ts). */
-export class ReauthFailedError extends Error {
+// The reauth errors live in account.ts since A9 (M-1 / the review's LOW-1), beside the one fenced derivation that raises
+// them; re-exported here for the UI's existing imports.
+export { ReauthFailedError, ReauthStaleSessionError };
+
+/** A9 review LOW-2: a save, import or copy with no explicit destination while no personal vault is in force (the
+ *  designation is still a proposal, or none exists). Core twin `NoPersonalVaultException` / `HouseholdCopy.NO_PERSONAL_VAULT`,
+ *  byte-equal (vault-copy.test.ts). */
+export class NoPersonalVaultError extends Error {
   constructor() {
-    super("That master password isn't right.");
-    this.name = "ReauthFailedError";
+    super("Choose a vault for this item.");
+    this.name = "NoPersonalVaultError";
   }
 }
-
-// The stale-session reauth error lives in account.ts since A9 (M-1), beside the one fenced derivation that raises it.
-export { ReauthStaleSessionError };
 
 export { ItemChangedVaultsError } from "./itemhome";
 
@@ -697,6 +699,14 @@ export class VaultStore {
     return this.accountState.doc.personal?.vaultId ?? null;
   }
 
+  /** A9 review LOW-2: the default destination, or {@link NoPersonalVaultError} while no personal vault is in force (§4.3:
+   *  no default destination), so the refusal says "Choose a vault for this item." instead of reaching the seal with an
+   *  empty vault id (which surfaced as "wrong master password"). */
+  private personalVaultOrRefuse(): string {
+    if (!this.account.personalVaultId) throw new NoPersonalVaultError();
+    return this.account.personalVaultId;
+  }
+
   /**
    * Root cause A §4.3 as amended by the A5 review (H-1) and re-review (A5b), local only, never minting (core
    * twin). confirmed + a cached wrap for ANOTHER vault → "changed": the device keeps its own until the human
@@ -704,7 +714,7 @@ export class VaultStore {
    * "withheld"; absent + nothing cached → ask; unreadable + a cached wrap that opens → "unreadable-cached"
    * (L-1); unreadable otherwise → only a re-designation.
    */
-  private decidePersonalLocally(): void {
+  private decidePersonalLocally(mergedStateBefore: boolean = this.accountState.hasHighWater()): void {
     const cached = this.cachedPersonalWrap();
     const designation = this.accountState.doc.personal?.vaultId ?? null;
     switch (this.account.personalStatus) {
@@ -717,32 +727,33 @@ export class VaultStore {
           this.account.personalWrapMintedHere = false;
           this.recordDesignationLocally(served.vaultId);
           this.rememberPersonalWrap(served);
-        } else if (designation === served.vaultId) {
-          // The account's own designation (UVK-sealed, newest wins) names the served vault: confirmed anywhere.
+        } else if (!cached) {
+          // A9 review LOW-4: a browser that never confirmed a personal vault (no cached wrap) asks ONCE, whatever the
+          // designation says: on such a browser the account state is as replayable as the wrap (no high-water mark can
+          // tell an older authentic blob from the current one), so a matching designation proves nothing.
+          this.account.holdPersonalProposal(designation);
+        } else if (cached.vaultId === served.vaultId && (designation === null || designation === served.vaultId)) {
+          // The cached wrap and the served one agree, and the designation (if any) does too: unchanged.
           this.rememberPersonalWrap(served);
-        } else if (designation === null && cached && cached.vaultId === served.vaultId) {
-          // An established device with no designation on record: unchanged (A5b: the cache is its anchor).
+        } else if (designation === served.vaultId && mergedStateBefore) {
+          // A confirmed re-designation elsewhere (the account's own designation, UVK-sealed, newest wins) on a browser
+          // that merged account state BEFORE this sync, so a rolled-back blob would have been detected.
           this.rememberPersonalWrap(served);
-        } else if (cached && cached.vaultId !== served.vaultId && (designation === null || designation === cached.vaultId)) {
+        } else if (cached.vaultId !== served.vaultId && (designation === null || designation === cached.vaultId)) {
           // A5b: the cached wrap stays in force; the served one waits for the human (also a replayed older wrap).
           this.account.holdPersonalChange(cached);
         } else {
-          // A9 (M-2): nothing on this device vouches for the served wrap (no cache and no designation, or a designation
-          // for another vault): a proposal, never a silent adoption. Nothing is in force.
+          // A9 (M-2): nothing on this browser vouches for the served wrap (a designation for a third vault, or one this
+          // browser has not merged state for): a proposal, never a silent adoption. Nothing is in force.
           this.account.holdPersonalProposal(designation);
         }
         return;
       }
-      case "proposed": {
+      case "proposed":
+        // A9 review LOW-4: a proposal is resolved only by the human (acceptPersonalChange after the co-holders were shown,
+        // or a reauthed re-designation); a designation arriving later never confirms it on their behalf.
         this.personalVaultChoices = null;
-        const served = this.account.pendingPersonalChange;
-        // The designation arrived (or was written) since: it vouches for the served vault, nothing else does.
-        if (served && designation === served.vaultId) {
-          this.account.acceptPersonalChange();
-          this.rememberPersonalWrap(served);
-        }
         return;
-      }
       case "withheld":
       case "changed":
       case "unreadable-cached":
@@ -1586,8 +1597,9 @@ export class VaultStore {
     // §4.2: best effort, never fails the sync. Then root cause A §4.3 (A5 review H-1): local, never mints — and since A9
     // (M-2) it reads the account's designation, so the refresh comes FIRST; a designation this browser recorded
     // (register, an accepted change) is written back by one more refresh.
+    const mergedStateBefore = this.accountState.hasHighWater(); // A9 review LOW-4: before THIS sync's refresh could set it
     await this.accountState.refresh().catch(() => {});
-    this.decidePersonalLocally();
+    this.decidePersonalLocally(mergedStateBefore);
     if (this.designationDirty) {
       this.designationDirty = false;
       await this.accountState.refresh().catch(() => {});
@@ -3468,7 +3480,7 @@ export class VaultStore {
       if (verdict === "changed_vaults") throw new ItemChangedVaultsError();
       provenance = editorProvenance(vaultId!);
     } else {
-      provenance = chosenProvenance(vaultId ?? this.account.personalVaultId);
+      provenance = chosenProvenance(vaultId ?? this.personalVaultOrRefuse());
     }
     const targetVaultId = provenance.vaultId;
     const id = itemId ?? this.account.newItemId();
@@ -3680,7 +3692,7 @@ export class VaultStore {
     }
     // S2: the destination vault's projections — the SAME vaultId must feed importDocs, or
     // the F75 dedupe fingerprints one vault while the rows land in another. Default personal.
-    const target = vaultId ?? this.account.personalVaultId;
+    const target = vaultId ?? this.personalVaultOrRefuse();
     const logins: ImportProjections["logins"] = [];
     const notes: ImportProjections["notes"] = [];
     const names: string[] = [];
@@ -3714,7 +3726,7 @@ export class VaultStore {
     onProgress?: (done: number, total: number) => void,
     destinationVaultId?: string,
   ): Promise<void> {
-    const vaultId = destinationVaultId ?? this.account.personalVaultId;
+    const vaultId = destinationVaultId ?? this.personalVaultOrRefuse();
     const total = items.length;
     let done = 0;
     for (let start = 0; start < items.length; start += VaultStore.SERVER_BATCH_MAX) {

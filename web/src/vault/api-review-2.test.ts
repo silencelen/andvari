@@ -5,20 +5,20 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
 import type { AccountKeys, ItemDoc, PersonalWrap, PushResponse, RecoveryVerifyResponse, SyncResponse, VaultMemberAdd, VaultMemberSummary, WireGrant, WireItem, WireVault } from "../api/types";
-import { adItem, adVaultMeta } from "../crypto/ad";
+import { adItem, adUvk, adVaultMeta } from "../crypto/ad";
 import { fromB64, toB64, toHexLower, utf8 } from "../crypto/bytes";
-import { seal } from "../crypto/envelope";
+import { open, seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
-import { authKey, KdfPolicyError, type KdfParams, masterKey } from "../crypto/keys";
+import { authKey, KdfPolicyError, type KdfParams, masterKey, wrapKey } from "../crypto/keys";
 import { acceptProofFromHash } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes, sha256Sync } from "../crypto/provider";
 import { sealSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
-import { Account, VaultKeyNotVerifiedError } from "./account";
+import { Account, ReauthFailedError, VaultKeyNotVerifiedError } from "./account";
 import { AccountStateSync, memoryClientState } from "./accountstatesync";
 import { decodeAccountState, emptyAccountState, isBlankAccountState, ownsVault, withPersonal } from "./accountstate";
 import type { Contact } from "./accountstate";
-import { ReauthStaleSessionError, VaultStore } from "./store";
+import { NoPersonalVaultError, ReauthStaleSessionError, VaultStore } from "./store";
 
 /**
  * Security review 2026-10, branch A9 (web twin of core `ApiReview2Test`): the second API-review round over
@@ -94,6 +94,10 @@ async function enroll(tag: string, kdfParams: KdfParams = KDF): Promise<Enrolled
 
 /** A fresh device of `e`; the wrap the server serves it is `wrap` (default: the one enrolment minted). */
 const unlock = (e: Enrolled, wrap: PersonalWrap | null = e.personalWrap) => Account.unlock(e.userId, e.password, { ...e.keys, personalWrap: wrap });
+
+async function uvkOfE(e: Enrolled): Promise<Uint8Array> {
+  return open(await wrapKey(masterKey(e.password, fromB64(e.keys.kdfSalt), e.keys.kdfParams)), fromB64(e.keys.wrappedUvk), adUvk(e.userId));
+}
 
 async function expectedAuthKey(e: Enrolled): Promise<string> {
   return toB64(await authKey(masterKey(e.password, fromB64(e.keys.kdfSalt), e.keys.kdfParams)));
@@ -273,11 +277,11 @@ describe("A9 — second API-review round (VaultStore / Account)", () => {
     const logins = files.flatMap((f) =>
       readFileSync(f, "utf8").split("\n").flatMap((line, i) => (/Account\.deriveAuthKey\(/.test(line.split("//")[0]!) ? [{ path: rel(f), line: i + 1, code: line.trim() }] : [])),
     );
-    // The two legitimate sites: the sign-in over the prelogin values, and the fenced instance helper itself.
-    const offenders = logins.filter((l) =>
-      !((l.path === "ui/Welcome.tsx" && l.code.includes("pre.kdfSalt") && l.code.includes("pre.kdfParams")) || l.path === "vault/account.ts"));
+    // The one legitimate site: the sign-in over the prelogin values (the in-session proof derives through the raw KDF
+    // inside Account, proving the password against the session UVK; A9 review LOW-1).
+    const offenders = logins.filter((l) => !(l.path === "ui/Welcome.tsx" && l.code.includes("pre.kdfSalt") && l.code.includes("pre.kdfParams")));
     expect(offenders).toEqual([]);
-    expect(logins).toHaveLength(2);
+    expect(logins).toHaveLength(1);
   });
 
   // ---- M-2 ----
@@ -293,12 +297,73 @@ describe("A9 — second API-review round (VaultStore / Account)", () => {
     expect(s.designatedPersonalVaultId()).toBe(w.owner.personalVaultId);
     expect(local.get("personal.wrap")).toContain(w.owner.personalVaultId);
 
+    // A9 review LOW-4: a fresh device (no cached wrap, no high-water mark of its own) confirms the served wrap ONCE,
+    // even when the designation names it: on a fresh device the designation is as replayable as the wrap.
     const fresh = await unlock(w.owner);
-    const s2 = store(server, fresh);
+    const localFresh = memoryClientState();
+    const s2 = store(server, fresh, localFresh);
     await s2.sync();
+    expect(fresh.personalStatus).toBe("proposed");
+    expect(s2.personalChange()).toEqual({ currentVaultId: w.owner.personalVaultId, servedVaultId: w.owner.personalVaultId });
+    await s2.sync();
+    expect(fresh.personalStatus).toBe("proposed");
+    await s2.describePersonalChange();
+    s2.acceptPersonalChange();
     expect(fresh.personalStatus).toBe("confirmed");
     expect(fresh.personalVaultId).toBe(w.owner.personalVaultId);
     expect(s2.personalChange()).toBeNull();
+    const restarted = await unlock(w.owner);
+    await store(server, restarted, localFresh).sync();
+    expect(restarted.personalStatus, "exactly once").toBe("confirmed");
+  });
+
+  it("review LOW-4: a fresh device served a replayed older state/wrap pair stays proposed", async () => {
+    const w = await world(FLOOR);
+    const server = serverOf(w);
+    const a = store(server, w.owner.account);
+    await a.sync();
+    const older = { blob: server.accountStateBlob, seq: server.accountSeq };
+    await a.redesignatePersonalVault(await a.proposePersonalVault(w.sharedId), w.owner.password);
+    expect(await designationOn(server, w.owner)).toBe(w.sharedId);
+    server.accountStateBlob = older.blob;
+    server.accountSeq = older.seq + 5;
+    const b = await unlock(w.owner, w.owner.personalWrap);
+    const sb = store(server, b);
+    await sb.sync();
+    expect(b.personalStatus).toBe("proposed");
+    expect(b.personalVaultId).toBe("");
+    expect(sb.vaults().every((v) => v.type !== "personal")).toBe(true);
+  }, 60_000);
+
+  it("review LOW-1: the reauth proves the password against the session UVK (web has no quick unlock; the proof still refuses a substituted wrap)", async () => {
+    const owner = await enroll("a9-qu", FLOOR);
+    const uvk = await uvkOfE(owner);
+    const device = await unlock(owner);
+    // The server answers GET /account/keys with the session's salt but a wrap that is NOT of our UVK: the salt pre-check
+    // passes, the proof does not, and no key derived under its parameters is ever sent.
+    const junkWrap = toB64(seal(randomBytes(32), uvk, adUvk(owner.userId)));
+    await expect(device.reauthAuthKey(owner.password, { ...owner.keys, wrappedUvk: junkWrap })).rejects.toBeInstanceOf(ReauthFailedError);
+    // A wrong password is proved wrong locally (never sent to the server to find out).
+    await expect(device.reauthAuthKey("not the password", owner.keys)).rejects.toBeInstanceOf(ReauthFailedError);
+    // The real keys pass.
+    expect(await device.reauthAuthKey(owner.password, owner.keys)).toBe(await expectedAuthKey(owner));
+  }, 60_000);
+
+  it("review LOW-2: a default save while proposed is refused with 'Choose a vault for this item.'", async () => {
+    const w = await world();
+    const server = serverOf(w);
+    server.withholdState = true;
+    const b = await unlock(w.owner);
+    const s = store(server, b);
+    await s.sync();
+    expect(b.personalStatus).toBe("proposed");
+    const doc: ItemDoc = { type: "login", name: "Bank", login: { username: "me", password: "pw" } };
+    await expect(s.save(null, doc)).rejects.toBeInstanceOf(NoPersonalVaultError);
+    await expect(s.save(null, doc)).rejects.toThrow("Choose a vault for this item.");
+    await expect(s.importDocs([])).rejects.toBeInstanceOf(NoPersonalVaultError);
+    expect(s.list()).toEqual([]);
+    await s.save(null, doc, [], undefined, w.sharedId);
+    expect(s.list().map((i) => i.vaultId)).toEqual([w.sharedId]);
   });
 
   it("M-2: a fresh device served a superseded wrap against the designation asks instead of adopting", async () => {

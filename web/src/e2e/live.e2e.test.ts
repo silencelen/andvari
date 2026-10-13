@@ -12,6 +12,15 @@ import { Account, deviceName } from "../vault/account";
 import { shortIdentityFingerprint } from "../crypto/sharedgrant";
 import { NullCache, openVaultCache, vaultDbName } from "../vault/idbcache";
 import { VaultStore } from "../vault/store";
+import { memoryClientState } from "../vault/accountstatesync";
+
+/** A9 review LOW-4: a device that never confirmed a personal vault (each phase here is a fresh process) is asked once;
+ *  confirm the served wrap the way the UI does (co-holders shown, then accepted). No-op on an established device. */
+async function confirmPersonalOnce(store: VaultStore, account: Account): Promise<void> {
+  if (account.personalStatus !== "proposed") return;
+  await store.describePersonalChange();
+  store.acceptPersonalChange();
+}
 
 /** A put for a NEW personal item, built in the test (the store's put builder is private since A1b's INV-SEAL routing). */
 function newPut(account: Account, itemId: string, doc: ItemDoc): Mutation {
@@ -377,6 +386,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     const account = await Account.unlock(state.userId, state.password, keys);
     const store = new VaultStore(client, account);
     await store.sync();
+    await confirmPersonalOnce(store, account); // the post-crash process is a fresh device: it confirms its personal vault once
 
     // Re-encrypt the same item under the same itemId + mutationId and re-push.
     // Idempotency contract (spec 03 §5): the server replays the ORIGINAL result
@@ -413,13 +423,15 @@ describe.skipIf(!BASE)("live server e2e", () => {
     const live = new ApiClient(BASE!, state.tokens);
     const serverKeys = await live.accountKeys();
     const account = await Account.unlock(userId, state.password, serverKeys);
+    const device = memoryClientState(); // ONE device across every store below (A9: the personal-wrap cache lives here)
 
     // ---- seed a sentinel item on the SERVER (idempotent within a run) ----
     {
       const seedCache = await openVaultCache(userId);
-      const seedStore = new VaultStore(live, account, seedCache);
+      const seedStore = new VaultStore(live, account, seedCache, device);
       await seedStore.hydrate();
       await seedStore.sync();
+      await confirmPersonalOnce(seedStore, account); // a fresh device confirms its personal vault once (A9 review LOW-4)
       if (!seedStore.list().some((i) => i.doc.name.includes(A2_SENTINEL))) {
         await seedStore.save(null, {
           type: "login",
@@ -437,7 +449,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     // stored value: the sentinel MUST be absent at rest yet present decrypted.
     // ======================================================================
     const scanCache = await openVaultCache(userId);
-    const scanStore = new VaultStore(live, account, scanCache);
+    const scanStore = new VaultStore(live, account, scanCache, device);
     await scanStore.hydrate();
     await scanStore.sync(); // pure pull → ciphertext envelopes/grants/vaults into scanCache
     await scanCache.setAccountKeys(serverKeys); // model the S3 cache-refresh (drill 2 reads it back)
@@ -470,7 +482,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(cachedKeys, "offline unlock: accountKeys served from the cache with NO server call").not.toBeNull();
     assertServerKdfParams(cachedKeys!.kdfParams); // C3 floor at cache-read (the unlock seam's gate)
     const offlineAccount = await Account.unlock(userId, state.password, cachedKeys!); // pure crypto — offline unlock
-    const offlineStore = new VaultStore(deadClient, offlineAccount, offlineCache);
+    const offlineStore = new VaultStore(deadClient, offlineAccount, offlineCache, device);
     await offlineStore.hydrate(); // rebuilds the working set from the cache; makes NO server call
     const offlineItem = offlineStore.list().find((i) => i.itemId === sentinelItemId);
     expect(offlineItem, "offline: the item is listable from the cache with the server unreachable").toBeDefined();
@@ -491,7 +503,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     // cache and resyncs from 0 to a byte-identical item set (no partial-trust residue).
     // ======================================================================
     const goldCache = await openVaultCache(userId);
-    const goldStore = new VaultStore(live, account, goldCache);
+    const goldStore = new VaultStore(live, account, goldCache, device);
     await goldStore.hydrate();
     await goldStore.sync();
     const snapshot = (s: VaultStore): string =>
@@ -520,7 +532,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     await tearCache(vaultDbName(userId), poison);
 
     const healedCache = await openVaultCache(userId); // §B.4 (i): foreign kv:userId ⇒ discard EVERY store
-    const healedStore = new VaultStore(live, account, healedCache);
+    const healedStore = new VaultStore(live, account, healedCache, device);
     await healedStore.hydrate(); // cold — the torn cache was discarded whole
     await healedStore.sync(); // resync from 0 against the live server
     expect(snapshot(healedStore), "torn-cache heal: the resynced item set is byte-identical to pre-tear").toBe(golden);
@@ -549,7 +561,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     if (persistStubbed) {
       const q4Client = new ApiClient(BASE!, state.tokens);
       const q4Cache = await openVaultCache(userId);
-      const q4Store = new VaultStore(q4Client, account, q4Cache);
+      const q4Store = new VaultStore(q4Client, account, q4Cache, device);
       await q4Store.hydrate();
       await q4Store.sync();
 
@@ -575,7 +587,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
       // SAME mutationId is idempotent: re-pushing converges — the original result replays, no dup.
       const replay = await live.push([queuedMutation]);
       expect(["applied", "duplicate"].includes(replay.results[0]?.status ?? ""), "reconnect flush: replayed mutationId is idempotent").toBe(true);
-      const verifyStore = new VaultStore(live, account, new NullCache());
+      const verifyStore = new VaultStore(live, account, new NullCache(), device);
       await verifyStore.sync();
       expect(verifyStore.list().filter((i) => i.doc.name === noteName).length, "reconnect flush: server converged on exactly ONE item").toBe(1);
       q4Cache.close();
@@ -595,7 +607,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     if (persistStubbed) {
       const q5Client = new ApiClient(BASE!, state.tokens);
       const q5Cache = await openVaultCache(userId);
-      const q5Store = new VaultStore(q5Client, account, q5Cache);
+      const q5Store = new VaultStore(q5Client, account, q5Cache, device);
       await q5Store.hydrate();
       await q5Store.sync();
 
@@ -608,7 +620,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
       await q5Store.save(null, { type: "note", name: bhName, notes: "written after a mid-session cache close" });
       expect(q5Store.cacheDurable, "force-close: the store demoted the dead cache to NullCache").toBe(false);
 
-      const verify5 = new VaultStore(live, account, new NullCache());
+      const verify5 = new VaultStore(live, account, new NullCache(), device);
       await verify5.sync();
       expect(
         verify5.list().filter((i) => i.doc.name === bhName).length,
