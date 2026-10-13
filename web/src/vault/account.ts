@@ -1028,9 +1028,41 @@ export class Account {
     return this.vaultRoles.get(vaultId) ?? null;
   }
 
-  /** The role exactly as the server declared it. */
+  /** The role exactly as the server declared it. DISPLAY ONLY (security review 2026-10, root cause A, branch A6b): it
+   *  never unlocks an owner-only signing action; the store's owned-vaults record does. */
   serverRoleFor(vaultId: string): string | null {
     return this.vaultRoles.get(vaultId) ?? null;
+  }
+
+  /**
+   * A fresh master-password reauth checked IN THIS BROWSER (A6b, "You own <vault>?"; core `verifyPassword` twin):
+   * true only when `password` derives a wrap key that opens `keys.wrappedUvk` to the UVK this session already holds.
+   * The server serves `keys`, but it cannot make a password it chose pass without a wrap of OUR UVK. MK and the wrap
+   * key are wiped on the way out (audit H80).
+   */
+  async verifyPassword(password: string, keys: AccountKeys): Promise<boolean> {
+    const mk = masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams);
+    let wrapKey: Uint8Array;
+    try {
+      wrapKey = await deriveWrapKey(mk);
+    } finally {
+      mk.fill(0);
+    }
+    try {
+      let opened: Uint8Array;
+      try {
+        opened = open(wrapKey, fromB64(keys.wrappedUvk), adUvk(this.userId));
+      } catch {
+        return false;
+      }
+      try {
+        return ctEquals(opened, this.uvk);
+      } finally {
+        opened.fill(0);
+      }
+    } finally {
+      wrapKey.fill(0);
+    }
   }
 
   /** A7 review MEDIUM-1 (core twin): forget this device's key memory for `vaultId` (the §8.2 vouch and the held-key

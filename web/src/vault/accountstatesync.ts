@@ -9,7 +9,11 @@ import {
   type ConsumedNonce,
   type Contact,
   emptyAccountState,
+  isBlankAccountState,
+  type IssuedGrant,
+  issuedFor,
   mergeAccountState,
+  ownsVault,
   sameAccountStateContent,
   withConsumedNonces,
   withContact,
@@ -177,7 +181,7 @@ export class AccountStateSync {
       }
       // Root cause A §6.2 (branch A7): this device's consumed removal nonces merge into account state at the next
       // flush. The merge is a union that never drops a local entry, so served state can never shrink the set.
-      const baseDoc = this.loadLocal() ?? (this.doc.seq > 0 || this.doc.contacts.length > 0 || Object.keys(this.doc.consumedNonces).length > 0 ? this.doc : null);
+      const baseDoc = this.loadLocal() ?? (this.doc.seq > 0 || !isBlankAccountState(this.doc) ? this.doc : null);
       const deviceNonces = this.deviceConsumed();
       const localDoc = Object.keys(deviceNonces).length === 0 ? baseDoc : withConsumedNonces(baseDoc ?? emptyAccountState(this.account.userId), deviceNonces);
       const merged = mergeAccountState(this.account.userId, localDoc, served, this.highWater());
@@ -187,7 +191,7 @@ export class AccountStateSync {
         this.adopt(merged.doc, resp.sealedState);
         return this.doc;
       }
-      if (served === null && localDoc === null && merged.doc.contacts.length === 0 && Object.keys(merged.doc.consumedNonces).length === 0 && merged.doc.orgRecoveryFp === null) {
+      if (served === null && localDoc === null && isBlankAccountState(merged.doc)) {
         this.doc = merged.doc; // nothing to say yet: no empty blob just to have one
         return this.doc;
       }
@@ -223,6 +227,29 @@ export class AccountStateSync {
       }
     }
     if (copy) this.local.set("acctstate.copy", copy);
+  }
+
+  /**
+   * Apply `change` to this account's own state (A6b: the issued-grants and owned-vaults records; core `update` twin).
+   * LOCAL FIRST: adopted and sealed into this browser's copy at once, so it is in force here even if the write fails;
+   * the next refresh merges it with the served copy and writes it back. Throws only when a newer client owns the format.
+   */
+  async update(change: (doc: AccountStateDoc) => AccountStateDoc): Promise<void> {
+    if (this.readOnly) throw new Error("account state was written by a newer client");
+    const local = this.loadLocal();
+    const base = local ? mergeAccountState(this.account.userId, local, this.doc, this.highWater()).doc : this.doc;
+    this.adopt({ ...change(base), seq: Math.max(base.seq, this.doc.seq) }, null);
+    await this.refresh().catch(() => {});
+  }
+
+  /** The issued-grant record for (vaultId, userId) (A6b). */
+  issued(vaultId: string, userId: string): IssuedGrant | null {
+    return issuedFor(this.doc, vaultId, userId);
+  }
+
+  /** True when this account's own, UVK-authenticated evidence says it owns `vaultId` (A6b). */
+  owns(vaultId: string): boolean {
+    return ownsVault(this.doc, vaultId);
   }
 
   /** Pin a contact built by contacts.ts from a HUMAN comparison. Never this account itself. */
