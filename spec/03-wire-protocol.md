@@ -359,7 +359,12 @@ cache OFF.
   is not a canonical lowercase UUID: an itemId is handed to every other member of the vault
   by `/items/deleted` and `/sync` and becomes a path segment of THEIR authenticated
   `/items/{id}/…` requests, so a planted `../admin/…` must never be stored. Clients also
-  refuse any non-id path segment before sending, spec 02 §3.2). Nothing written; the rest of the batch proceeds; NOT
+  refuse any non-id path segment before sending, spec 02 §3.2; and since security review
+  2026-10 plugin scan F1 (A10) every client checks every SERVED id — vaultId, userId, itemId,
+  deviceId, a transfer's user ids — against the same canonical lowercase UUID grammar at
+  decode, dropping any row that fails with a `bad-id` anomaly and refusing a session or
+  identity row that fails, so a hostile server cannot smuggle a record delimiter or a second
+  id inside one; spec 05 R18). Nothing written; the rest of the batch proceeds; NOT
   audited (a writer's stale reference is not an intrusion event); NEVER dedup-cached (a
   replay of the same `mutationId` is re-evaluated against the live attachment rows, so a
   client that re-uploads the file and re-sends the identical put lands). `serverItem`
