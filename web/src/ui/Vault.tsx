@@ -1045,6 +1045,13 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
         warn: true,
         body: "The server sent an item under the wrong vault. andvari kept the item where it was and ignored the other copy. Tell your admin — the server may be misbehaving.",
       };
+    case "bad-id":
+      // Security review 2026-10 plugin scan F1 (A10): served rows with malformed ids were refused at the wire. TWIN of
+      // core HouseholdCopy.BAD_ID_NOTICE, byte-equal, pinned by vault-copy.test.ts.
+      return {
+        warn: true,
+        body: "The server sent records with malformed ids. andvari ignored them and kept your vaults as they were. Tell your admin — the server may be misbehaving.",
+      };
     case "key-unreadable":
       // Root cause A §3.1: our UVK wrap is present and does not open; no seal fallback. TWIN of
       // core HouseholdCopy.KEY_UNREADABLE_NOTICE, byte-equal, pinned by vault-copy.test.ts.

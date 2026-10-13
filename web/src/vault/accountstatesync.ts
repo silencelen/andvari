@@ -2,6 +2,7 @@ import { ApiError, type ApiClient } from "../api/client";
 import { fromB64, toHexLower } from "../crypto/bytes";
 import { sha256Sync } from "../crypto/provider";
 import type { Account } from "./account";
+import { decodeConfirmedPins, encodeConfirmedPins, loadRecord, type ConfirmedPin } from "./trustrecords";
 import {
   ACCOUNT_STATE_SEALED_MAX,
   type AccountStateDoc,
@@ -129,31 +130,32 @@ export class AccountStateSync {
   // ---- pin currency (security review 2026-10, root cause A; A5 review L-3, A6 review MED-1; core twin) ----
   // A pin may skip the add-member check or auto-adopt a grant only when a HUMAN confirmed it ON THIS DEVICE: made
   // here through pin() (every verification ceremony goes through it), or re-verified here. The record is device-
-  // local and durable ("pins.confirmed": `${userId}|${hex sha256(identityPub)}`, in this account's client-state
-  // namespace, like the A5b personal-wrap cache). A blob the server serves, however authentic or new, never
+  // local and durable ("pins.confirmed": a trustrecords.ts ConfirmedPin JSON record {userId, keyTag = hex
+  // sha256(identityPub)}, in this account's client-state namespace, like the A5b personal-wrap cache; A10: the
+  // pre-A10 `userId|tag` lines migrate on first read). A blob the server serves, however authentic or new, never
   // makes a pin current here: an older blob with a later-tombstoned pin cannot either (the replay case), and a
   // tombstoned pin is absent from the doc, so the tombstone wins. A confirmation is bound to the KEY.
 
-  private static confirmKey(userId: string, identityPub: string): string | null {
+  private static confirmKey(userId: string, identityPub: string): ConfirmedPin | null {
     try {
-      return `${userId}|${toHexLower(sha256Sync(fromB64(identityPub)))}`;
+      return { userId, keyTag: toHexLower(sha256Sync(fromB64(identityPub))) };
     } catch {
       return null;
     }
   }
 
-  private confirmedHere(): Set<string> {
-    return new Set((this.local.get("pins.confirmed") ?? "").split("\n").filter((x) => x.length > 0));
+  private confirmedHere(): ConfirmedPin[] {
+    return loadRecord("pins.confirmed", (k) => this.local.get(k), (k, v) => this.local.set(k, v), decodeConfirmedPins, encodeConfirmedPins);
   }
 
-  private saveConfirmed(set: Set<string>): void {
-    this.local.set("pins.confirmed", set.size === 0 ? null : [...set].sort().join("\n"));
+  private saveConfirmed(rows: ConfirmedPin[]): void {
+    this.local.set("pins.confirmed", encodeConfirmedPins(rows));
   }
 
   /** True when `c` (this userId with THIS key) was confirmed by a human on this device. */
   isCurrent(c: Contact): boolean {
     const k = AccountStateSync.confirmKey(c.userId, c.identityPub);
-    return k !== null && this.confirmedHere().has(k);
+    return k !== null && this.confirmedHere().some((p) => p.userId === k.userId && p.keyTag === k.keyTag);
   }
 
   /** The pin for `userId` when it is current on this device; null when there is none or it is not current. */
@@ -279,9 +281,7 @@ export class AccountStateSync {
         const k = AccountStateSync.confirmKey(contact.userId, contact.identityPub);
         if (k) {
           // Replace this user's earlier confirmation (core recordConfirmed parity, A6 re-review LOW-A).
-          const set = new Set([...this.confirmedHere()].filter((e) => !e.startsWith(`${contact.userId}|`)));
-          set.add(k);
-          this.saveConfirmed(set);
+          this.saveConfirmed([...this.confirmedHere().filter((e) => e.userId !== contact.userId), k]);
         }
         return;
       }
@@ -292,7 +292,7 @@ export class AccountStateSync {
 
   async unpin(userId: string): Promise<void> {
     if (this.readOnly) throw new Error("account state was written by a newer client");
-    this.saveConfirmed(new Set([...this.confirmedHere()].filter((k) => !k.startsWith(`${userId}|`))));
+    this.saveConfirmed(this.confirmedHere().filter((k) => k.userId !== userId));
     await this.refresh().catch(() => {});
     for (let i = 0; i < 3; i++) {
       if (await this.write(withoutContact(this.doc, userId, this.clock()))) return;

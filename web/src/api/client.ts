@@ -47,6 +47,7 @@ import type {
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
 import { SAFE_ID } from "../vault/itemdoc-shape";
+import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
 
 export const CLIENT_VERSION = "0.27.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
@@ -153,6 +154,33 @@ export class ApiClient {
    * not a replacement error path.
    */
   onUpgradeRequired?: () => void;
+
+  /**
+   * Security review 2026-10 (plugin scan F1/F2, branch A10): every server-supplied id is checked against the UUID
+   * grammar here, at the wire boundary (wireids.ts); a row with a malformed id is dropped before any caller sees it
+   * and reported here as `(endpoint, refusals)`. The store surfaces it as a `bad-id` anomaly notice. A session or
+   * identity row with a malformed id is refused outright (`bad_wire_id`).
+   */
+  onRefusedIds?: (endpoint: string, refused: Refusal[]) => void;
+
+  private reported<T>(endpoint: string, s: Sanitized<T>): T {
+    if (s.refused.length > 0) this.onRefusedIds?.(endpoint, s.refused);
+    return s.value;
+  }
+
+  private refuseWire(endpoint: string, r: Refusal): never {
+    this.onRefusedIds?.(endpoint, [r]);
+    throw new ApiError(0, "bad_wire_id", `the server sent a malformed ${r.field} on ${endpoint}`);
+  }
+
+  /** The two fences a served session passes BEFORE it is installed: the KDF floor (H1) and the id grammar (A10). */
+  private session(endpoint: string, s: SessionResponse): SessionResponse {
+    assertServerKdfParams(s.accountKeys.kdfParams); // H1: fence BEFORE installing the session
+    const r = refusedSession(s);
+    if (r) this.refuseWire(endpoint, r);
+    const accountKeys = this.reported(endpoint, sanitizeAccountKeys(s.accountKeys));
+    return accountKeys === s.accountKeys ? s : { ...s, accountKeys };
+  }
 
   private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
@@ -313,9 +341,7 @@ export class ApiClient {
   }
 
   async register(req: RegisterRequest) {
-    const s = await this.json<SessionResponse>("POST", "/api/v1/auth/register", req, false);
-    assertServerKdfParams(s.accountKeys.kdfParams); // H1: refuse a weakened enroll before proceeding
-    return s;
+    return this.session("register", await this.json<SessionResponse>("POST", "/api/v1/auth/register", req, false));
   }
 
   /**
@@ -343,9 +369,9 @@ export class ApiClient {
       },
       false,
     );
-    assertServerKdfParams(s.accountKeys.kdfParams); // H1: fence BEFORE installing the session
+    const session = this.session("login", s);
     this.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
-    return s;
+    return session;
   }
 
   /**
@@ -394,7 +420,7 @@ export class ApiClient {
     // masterKey; a mocked {} body (client.refresh.test.ts) legitimately carries no kdfParams.
     const k = await this.json<AccountKeys>("GET", "/api/v1/account/keys");
     if (k?.kdfParams) assertServerKdfParams(k.kdfParams);
-    return k;
+    return k ? this.reported("accountKeys", sanitizeAccountKeys(k)) : k;
   }
 
   async clientPolicy() {
@@ -405,8 +431,8 @@ export class ApiClient {
     return p;
   }
 
-  sync(since: number) {
-    return this.json<SyncResponse>("GET", `/api/v1/sync?since=${since}`);
+  async sync(since: number) {
+    return this.reported("sync", sanitizeSync(await this.json<SyncResponse>("GET", `/api/v1/sync?since=${since}`)));
   }
 
   push(mutations: Mutation[]) {
@@ -420,8 +446,9 @@ export class ApiClient {
   }
 
   /** Item undelete: the caller's tombstoned items (grant-scoped server-side). */
-  deletedItems() {
-    return this.json<DeletedItemsResponse>("GET", "/api/v1/items/deleted");
+  async deletedItems() {
+    const r = await this.json<DeletedItemsResponse>("GET", "/api/v1/items/deleted");
+    return { ...r, items: this.reported("deletedItems", sanitizeDeletedItems(r.items)) };
   }
 
   /** Item undelete: restore a tombstoned item from a re-encrypted version; returns the new rev. */
@@ -458,16 +485,22 @@ export class ApiClient {
   }
 
   /** The identity key the server holds for `userId`: UNTRUSTED until a human verifies it. */
-  userIdentity(userId: string) {
-    return this.json<UserLookupResponse>("GET", `/api/v1/users/${pathSeg(userId)}/identity`);
+  async userIdentity(userId: string) {
+    const u = await this.json<UserLookupResponse>("GET", `/api/v1/users/${pathSeg(userId)}/identity`);
+    const r = refusedUser(u);
+    if (r) this.refuseWire("userIdentity", r);
+    return u;
   }
 
-  lookupUser(email: string) {
-    return this.json<UserLookupResponse>("POST", "/api/v1/users/lookup", { email });
+  async lookupUser(email: string) {
+    const u = await this.json<UserLookupResponse>("POST", "/api/v1/users/lookup", { email });
+    const r = refusedUser(u);
+    if (r) this.refuseWire("lookupUser", r);
+    return u;
   }
 
   async vaultMembers(vaultId: string) {
-    return this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${pathSeg(vaultId)}/members`);
+    return this.reported("members", sanitizeMembers(await this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${pathSeg(vaultId)}/members`)));
   }
 
   async addVaultMember(vaultId: string, body: VaultMemberAdd) {
@@ -499,8 +532,8 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/restore`, body);
   }
 
-  deletedVaults() {
-    return this.json<DeletedVaultSummary[]>("GET", "/api/v1/vaults/deleted");
+  async deletedVaults() {
+    return this.reported("deletedVaults", sanitizeDeletedVaults(await this.json<DeletedVaultSummary[]>("GET", "/api/v1/vaults/deleted")));
   }
 
   /** `body` is the v2 leave proof (root cause A §6.2, branch A7) minted by store.leaveSharedVault; `{}` is the

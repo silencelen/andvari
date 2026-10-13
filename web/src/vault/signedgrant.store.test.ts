@@ -1,8 +1,7 @@
 import "fake-indexeddb/auto";
 import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { ApiClient } from "../api/client";
-import { ApiError } from "../api/client";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiClient, ApiError } from "../api/client";
 import type { AccountKeys, PersonalWrap, PushResponse, RemovedGrantInfo, SyncResponse, UserLookupResponse, VaultMemberAdd, VaultMemberSummary, WireGrant, WireItem, WireVault } from "../api/types";
 import { adIdkey, adUvk, adVk } from "../crypto/ad";
 import { fromB64, toB64 } from "../crypto/bytes";
@@ -20,6 +19,7 @@ import type { Contact } from "./accountstate";
 import { IdbVaultCache, openVaultCache } from "./idbcache";
 import { HELD_KEYS_KEY, MemberNotVerifiedError, OwnershipNotConfirmedError, VaultStore } from "./store";
 import { withOwned } from "./accountstate";
+import { decodeHeldKeys, decodeVouches } from "./trustrecords";
 
 /**
  * Signed vault grants on the path a real client takes (security review 2026-10, root cause A §1.4–§1.6, §3.2,
@@ -540,9 +540,9 @@ describe("A6 fix round", () => {
     await s1.sync();
     await s1.acceptLegacyVault(w.vaultId);
     expect(server.selfWraps).toHaveLength(1);
-    const lines = (local.get("grant.legacy.authorized") ?? "").split("\n");
-    expect(lines).toHaveLength(1);
-    expect(lines[0]!.split("|")).toEqual([w.vaultId, expect.stringMatching(/^[0-9a-f]{64}$/), "confirmed"]);
+    // A10: a JSON record (no delimiter-joined lines), one strict row.
+    expect(local.get("grant.legacy.authorized")!.startsWith("[")).toBe(true);
+    expect(decodeVouches(local.get("grant.legacy.authorized")).rows).toEqual([{ vaultId: w.vaultId, tag: expect.stringMatching(/^[0-9a-f]{64}$/), kind: "confirmed" }]);
 
     // A fresh store sharing the client state; the server now serves ANOTHER v1 key for the same vault.
     const forgedVk = randomBytes(32);
@@ -594,7 +594,7 @@ describe("A6 fix round", () => {
     await store.hydrate();
     await store.sync();
     expect(server.selfWraps.map((x) => x.vaultId)).toEqual([w.vaultId]);
-    expect((local.get("grant.legacy.authorized") ?? "").split("|")[2]).toBe("frozen");
+    expect(decodeVouches(local.get("grant.legacy.authorized")).rows.map((v) => v.kind)).toEqual(["frozen"]);
   });
 
   it("LOW-1: with the durable cache present and localStorage cleared, freeze evidence is not recomputed", async () => {
@@ -1179,7 +1179,95 @@ describe("A7 review MEDIUM-1 / LOW-1: the held-key memory and the vouch survive 
     expect(local.get(HELD_KEYS_KEY) ?? "").not.toContain(w.vaultId);
     await store.acceptLegacyVault(w.vaultId);
     await store.sync();
-    expect(local.get(HELD_KEYS_KEY) ?? "").toContain(`${w.vaultId}|${legacyTagOf(w.vk)}`);
+    expect(decodeHeldKeys(local.get(HELD_KEYS_KEY)).rows).toEqual([{ vaultId: w.vaultId, tag: legacyTagOf(w.vk) }]);
+  });
+});
+
+// ---- security review 2026-10, plugin scan (branch A10): wire-boundary ids + structured trust records ----
+
+describe("A10: structured trust records and the wire-boundary id check (store level)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    indexedDB = new FakeIDBFactory();
+  });
+
+  /** A second shared vault of the owner's; `vk` is its key. */
+  async function targetVault(w: World, name: string): Promise<{ vaultId: string; metaBlob: string; vk: Uint8Array }> {
+    const shared = w.owner.account.buildCreateSharedVault(name);
+    const vk = open(await uvkOf(w.owner), fromB64(shared.request.wrappedVk), adVk(shared.vaultId, w.owner.userId));
+    return { vaultId: shared.vaultId, metaBlob: shared.request.metaBlob, vk };
+  }
+
+  it("a legacy vouch record with a forged line is ignored on migration, and the genuine vouch survives", async () => {
+    const w = await world();
+    const t = await targetVault(w, "Target");
+    const decoy = "44444444-4444-4444-8444-444444444444";
+    const local = memoryClientState();
+    // A pre-A10 line record: the human's genuine Accept of "Household", and the line the scan's decoy wrote (its
+    // vaultId carried a line break and a forged `TARGET|sha256(Z)|confirmed` for the vault the server wants).
+    local.set("grant.legacy.authorized", [`${w.vaultId}|${legacyTagOf(w.vk)}|confirmed`, `${decoy}\n${t.vaultId}|${legacyTagOf(t.vk)}|confirmed|${"c".repeat(64)}|confirmed`].join("\n"));
+    local.set(HELD_KEYS_KEY, `${w.vaultId}|${legacyTagOf(w.vk)}\n${decoy}\n${t.vaultId}|${legacyTagOf(t.vk)}|x`);
+    const feedBoth: SyncResponse = {
+      rev: 9, full: true,
+      vaults: [personalRow(w.member), sharedRow(w), { vaultId: t.vaultId, type: "shared", rev: 3, metaBlob: t.metaBlob, createdAt: 0 }],
+      grants: [personalGrant(w.member), memberRow(w, 9, v1Seal(w), null), { vaultId: t.vaultId, userId: w.member.userId, role: "writer", wrappedVk: "", rev: 9, sealedVk: toB64(sealSharedGrant(fromB64(w.member.identityPub), t.vaultId, t.vk)) }],
+      items: [], removedGrants: [],
+    };
+    const server = new FakeServer(feedBoth);
+    const device = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), device, undefined, local);
+    // Migration happened at construction: JSON, only the well-formed rows.
+    expect(local.get("grant.legacy.authorized")!.startsWith("[")).toBe(true);
+    expect(decodeVouches(local.get("grant.legacy.authorized")).rows).toEqual([{ vaultId: w.vaultId, tag: legacyTagOf(w.vk), kind: "confirmed" }]);
+    expect(decodeHeldKeys(local.get(HELD_KEYS_KEY)).rows).toEqual([{ vaultId: w.vaultId, tag: legacyTagOf(w.vk) }]);
+    await store.sync();
+    expect(device.isLegacyReadOnly(w.vaultId), "the genuine vouch survives the migration").toBe(false);
+    expect(device.isLegacyReadOnly(t.vaultId), "the forged line vouched for nothing").toBe(true);
+    expect(server.selfWraps.map((x) => x.vaultId), "no self-wrap for the vault the server chose a key for").toEqual([w.vaultId]);
+    expect(store.legacyReviewVaults().map((r) => r.vaultId)).toEqual([t.vaultId]);
+  });
+
+  it("a decoy vault whose id carries a line break is refused at the wire, and Accept writes nothing for other vaults", async () => {
+    const w = await world();
+    const t = await targetVault(w, "Target");
+    const decoyKey = randomBytes(32);
+    const decoyId = `44444444-4444-4444-8444-444444444444\n${t.vaultId}|${legacyTagOf(t.vk)}|confirmed`;
+    const feedDecoy: SyncResponse = {
+      rev: 9, full: true,
+      vaults: [personalRow(w.member), { vaultId: decoyId, type: "shared", rev: 3, metaBlob: w.metaBlob, createdAt: 0 }, { vaultId: t.vaultId, type: "shared", rev: 3, metaBlob: t.metaBlob, createdAt: 0 }],
+      grants: [
+        personalGrant(w.member),
+        { vaultId: decoyId, userId: w.member.userId, role: "writer", wrappedVk: "", rev: 9, sealedVk: toB64(sealSharedGrant(fromB64(w.member.identityPub), decoyId, decoyKey)) },
+        { vaultId: t.vaultId, userId: w.member.userId, role: "writer", wrappedVk: "", rev: 9, sealedVk: toB64(sealSharedGrant(fromB64(w.member.identityPub), t.vaultId, t.vk)) },
+      ],
+      items: [], removedGrants: [],
+    };
+    // Through the REAL ApiClient (the wire boundary), fed by a stubbed fetch.
+    const server = new FakeServer(feedDecoy);
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      const body = u.includes("/api/v1/sync") ? await server.sync(0) : u.includes("/account/state") ? await server.accountState() : { rev: 10 };
+      return { ok: true, status: 200, statusText: "200", json: async () => body, text: async () => JSON.stringify(body) } as unknown as Response;
+    }));
+    try {
+      const client = new ApiClient("http://server", { accessToken: "a", refreshToken: "r" });
+      const local = memoryClientState();
+      const device = await unlock(w.member);
+      const store = new VaultStore(client, device, undefined, local);
+      await store.sync();
+      expect(device.hasVault(decoyId), "the decoy row never reached the account").toBe(false);
+      expect(store.vaults().some((v) => v.vaultId === decoyId)).toBe(false);
+      expect(store.legacyReviewVaults().map((r) => r.vaultId), "only the genuine legacy vault is offered for review").toEqual([t.vaultId]);
+      const notice = store.notices().find((n) => n.kind === "bad-id");
+      expect(notice?.reason).toBe("sync");
+      // The human accepts TARGET (the only card): the record holds exactly that vouch, as JSON, and nothing else.
+      await store.acceptLegacyVault(t.vaultId);
+      expect(decodeVouches(local.get("grant.legacy.authorized")).rows).toEqual([{ vaultId: t.vaultId, tag: legacyTagOf(t.vk), kind: "confirmed" }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
