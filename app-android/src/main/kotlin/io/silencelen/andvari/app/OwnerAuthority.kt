@@ -149,8 +149,9 @@ internal fun OwnershipConfirmCard(vm: AndvariViewModel, v: VaultInfo, onConfirme
 
 /**
  * §8.2 step 4, "Legacy grants": the members the SERVER lists as still on the older grant format. Nothing is re-shared
- * on its own: the owner confirms each row, which names the vault and the member as this device verified them. (A pair
- * this account already re-shared, for the same identity key, is renewed without a prompt when the list loads.)
+ * on its own: the owner confirms each row, which names the vault and the member as this device verified them. (A9,
+ * M-3: the issued-grants record no longer renews a pair without a prompt; it only adds the hint "you shared this
+ * vault with them on …" to the row.)
  */
 @Composable
 internal fun LegacyGrantsCard(vm: AndvariViewModel, v: VaultInfo) {
@@ -178,7 +179,8 @@ internal fun LegacyGrantsCard(vm: AndvariViewModel, v: VaultInfo) {
                     r.pinState == SyncEngine.MemberPinState.PINNED && r.verifiedLabel != null ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(
-                                "${r.verifiedLabel} (verified; the server calls them ${r.displayName}, ${r.email})",
+                                "${r.verifiedLabel} (verified; the server calls them ${r.displayName}, ${r.email})" +
+                                    (r.previouslySharedAt?.let { " · you shared this vault with them on ${sharedOn(it)}" } ?: ""),
                                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                             )
                             TextButton(onClick = { confirming = r }, enabled = !busy) { Text("Re-share…") }
@@ -223,3 +225,6 @@ internal fun LegacyGrantsCard(vm: AndvariViewModel, v: VaultInfo) {
         )
     }
 }
+
+/** A9 (M-3): the "previously shared on" hint's date (display only; it pre-ticks nothing). */
+private fun sharedOn(ms: Long): String = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(java.util.Date(ms))

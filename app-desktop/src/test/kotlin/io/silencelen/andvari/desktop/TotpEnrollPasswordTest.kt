@@ -26,7 +26,8 @@ class TotpEnrollPasswordTest {
     @Test
     fun theStateEnrollsWithThePasswordProof() {
         assertTrue(state.contains("fun beginTotpSetup(password: String)"), "beginTotpSetup must take the master password")
-        assertTrue(state.contains("totpSetupWithPassword(password)"), "enrollment must send the password proof")
+        // A9 (M-1): the proof is the account's fenced in-session derivation (KDF fence + the session's salt).
+        assertTrue(state.contains("totpSetupWithPassword(password, requireNotNull(account)"), "enrollment must send the password proof through the fenced derivation")
         assertFalse(state.contains("api!!.totpSetup()"), "the bare setup call is refused by the server outside the fresh-login window")
     }
 

@@ -27,7 +27,7 @@ class TotpEnrollPasswordTest {
     @Test
     fun theViewModelEnrollsWithThePasswordProof() {
         assertTrue(vmCode.contains("fun totpBegin(password: String)"), "totpBegin must take the master password")
-        assertTrue(vmCode.contains("totpSetupWithPassword(password)"), "enrollment must send the password proof")
+        assertTrue(vmCode.contains("totpSetupWithPassword(password, requireNotNull(account)"), "enrollment must send the password proof")
         assertFalse(vmCode.contains("api!!.totpSetup()"), "the bare setup call is refused by the server outside the fresh-login window")
     }
 
