@@ -473,8 +473,11 @@ strips them degrades every client to the poll path (correct, just slower).
   authoritative by itself (the server composes emailed links too): the admin's screen shows an
   **in-person code** beside the QR — the first 32 hex of `SHA-256("andvari/v1|enroll-check|" +
   (rfp or "-") + "|" + (ifp or "-") + "|" + (iu or "-"))` — and the invitee's client honours
-  `rfp`/`ifp`/`iu` only after the human TYPES it. Provenance semantics: spec 04 §6.5; vectors:
-  `spec/test-vectors/enrolllink.json` (`checkCodes`).
+  `rfp`/`ifp`/`iu` only after the human TYPES it **and affirms, first person, that they are reading
+  it from the admin's screen in person** (security review 2026-10, A5c: the code is an unkeyed hash
+  of the link, so a link that arrives together with "its code" proves nothing; without both acts the
+  client registers with no admin pin and the admin stays a pending verification). Provenance
+  semantics: spec 04 §6.5; vectors: `spec/test-vectors/enrolllink.json` (`checkCodes`).
   Registration is **invite-only, always** (even break-glass): `POST /auth/register
   { inviteToken, email, displayName, kdfSalt, kdfParams, authKey, wrappedUvk,
   identityPub, encryptedIdentitySeed, escrow?: { sealed, fingerprint },
