@@ -4,7 +4,8 @@
     "open: sampleBlob opens under uvkB64 with AD 'andvari/v1|account-state|{userId}' to the document `sample`. rejectOpen rows MUST fail to open for `userId` (another user's slot; another key = an injected blob).",
     "rejectDecode: plaintexts that open fine but are NOT a v1 document for userId; every engine MUST refuse them.",
     "merge(local, served, highWater) → {doc, rollback}: contacts union by userId, newest verifiedAt wins (tie: smaller identityPub string); tombstones union max, a tombstone >= verifiedAt removes the pin; orgRecoveryFp from the higher seq (local on tie/rollback); nonces union per vault keeping the max issuedAt, newest 256 by (issuedAt desc, nonce asc); seq = max(local, served, highWater, 0). rollback = served below highWater, or served withheld once highWater > 0. Contacts compared sorted by userId; maps compared as sets of entries.",
-    "A6b (security review 2026-10, branch A6b): issuedGrants union by (vaultId, userId), newest `at` wins (tie: the smaller keyHash), and an issuedTombstones entry (key \"<vaultId>|<userId>\") not older than the entry removes it; ownedVaults union (max), an ownedTombstones entry not older removes it. Like contacts, a rollback or a withheld blob never shrinks either: both copies are UVK-authenticated and the local one is kept. Documents without these keys decode with them empty."
+    "A6b (security review 2026-10, branch A6b): issuedGrants union by (vaultId, userId), newest `at` wins (tie: the smaller keyHash), and an issuedTombstones entry (key \"<vaultId>|<userId>\") not older than the entry removes it; ownedVaults union (max), an ownedTombstones entry not older removes it. Like contacts, a rollback or a withheld blob never shrinks either: both copies are UVK-authenticated and the local one is kept. Documents without these keys decode with them empty.",
+    "A9 (security review 2026-10, branch A9): `personal` = {vaultId, at} is the account's own personal-vault designation (written on register, on the migration choice, on a re-designation and on an accepted change). Tombstone-free: the entry with the newest `at` wins on merge (tie: the smaller vaultId), a rollback or a withheld blob never revives an older one, and a document without the key reads it as absent (null). vaultId MUST be a uuid, at MUST be a non-negative integer, no other keys."
   ],
   "userId": "33333333-3333-4333-8333-333333333333",
   "uvkB64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
@@ -103,6 +104,19 @@
     {
       "name": "a6b-owned-not-uuid",
       "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":1,\"contacts\":[],\"contactTombstones\":{},\"orgRecoveryFp\":null,\"consumedNonces\":{},\"ownedVaults\":{\"not-a-vault\":1}}"
+    }
+,
+    {
+      "name": "a9-personal-not-uuid",
+      "plaintext": "{\"v\": 1, \"userId\": \"33333333-3333-4333-8333-333333333333\", \"seq\": 1, \"personal\": {\"vaultId\": \"not-a-uuid\", \"at\": 1}}"
+    },
+    {
+      "name": "a9-personal-negative-at",
+      "plaintext": "{\"v\": 1, \"userId\": \"33333333-3333-4333-8333-333333333333\", \"seq\": 1, \"personal\": {\"vaultId\": \"11111111-1111-4111-8111-111111111111\", \"at\": -1}}"
+    },
+    {
+      "name": "a9-personal-unknown-key",
+      "plaintext": "{\"v\": 1, \"userId\": \"33333333-3333-4333-8333-333333333333\", \"seq\": 1, \"personal\": {\"vaultId\": \"11111111-1111-4111-8111-111111111111\", \"at\": 1, \"label\": \"x\"}}"
     }
   ],
   "merge": [
@@ -1646,6 +1660,282 @@
             "11111111-1111-4111-8111-111111111111": 10
           },
           "ownedTombstones": {}
+        }
+      }
+    },
+    {
+      "name": "a9-personal-newest-at-wins",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "11111111-1111-4111-8111-111111111111",
+          "at": 100
+        }
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 5,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "22222222-2222-4222-8222-222222222222",
+          "at": 200
+        }
+      },
+      "highWater": 4,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 5,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {},
+          "issuedGrants": [],
+          "issuedTombstones": {},
+          "ownedVaults": {},
+          "ownedTombstones": {},
+          "memberReceived": {},
+          "personal": {
+            "vaultId": "22222222-2222-4222-8222-222222222222",
+            "at": 200
+          }
+        }
+      }
+    },
+    {
+      "name": "a9-personal-rollback-does-not-revive-an-older-designation",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 6,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "11111111-1111-4111-8111-111111111111",
+          "at": 300
+        }
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 5,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "22222222-2222-4222-8222-222222222222",
+          "at": 200
+        }
+      },
+      "highWater": 6,
+      "expected": {
+        "rollback": true,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 6,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {},
+          "issuedGrants": [],
+          "issuedTombstones": {},
+          "ownedVaults": {},
+          "ownedTombstones": {},
+          "memberReceived": {},
+          "personal": {
+            "vaultId": "11111111-1111-4111-8111-111111111111",
+            "at": 300
+          }
+        }
+      }
+    },
+    {
+      "name": "a9-personal-tie-smaller-vault-id",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "22222222-2222-4222-8222-222222222222",
+          "at": 100
+        }
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "11111111-1111-4111-8111-111111111111",
+          "at": 100
+        }
+      },
+      "highWater": 4,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {},
+          "issuedGrants": [],
+          "issuedTombstones": {},
+          "ownedVaults": {},
+          "ownedTombstones": {},
+          "memberReceived": {},
+          "personal": {
+            "vaultId": "11111111-1111-4111-8111-111111111111",
+            "at": 100
+          }
+        }
+      }
+    },
+    {
+      "name": "a9-personal-absent-everywhere-stays-absent",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 5,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {}
+      },
+      "highWater": 4,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 5,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {},
+          "issuedGrants": [],
+          "issuedTombstones": {},
+          "ownedVaults": {},
+          "ownedTombstones": {},
+          "memberReceived": {}
+        }
+      }
+    },
+    {
+      "name": "a9-personal-only-local",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {},
+        "issuedGrants": [],
+        "issuedTombstones": {},
+        "ownedVaults": {},
+        "ownedTombstones": {},
+        "memberReceived": {},
+        "personal": {
+          "vaultId": "11111111-1111-4111-8111-111111111111",
+          "at": 100
+        }
+      },
+      "served": null,
+      "highWater": 4,
+      "expected": {
+        "rollback": true,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {},
+          "issuedGrants": [],
+          "issuedTombstones": {},
+          "ownedVaults": {},
+          "ownedTombstones": {},
+          "memberReceived": {},
+          "personal": {
+            "vaultId": "11111111-1111-4111-8111-111111111111",
+            "at": 100
+          }
         }
       }
     }

@@ -8,12 +8,13 @@ import type { EnrollPayload } from "./enrolllink";
  * twin of core `EnrollLink.checkCode`. The first 32 lowercase hex of
  * `SHA-256(UTF-8("andvari/v1|enroll-check|" + (rfp ?? "-") + "|" + (ifp ?? "-") + "|" + (iu ?? "-")))`.
  *
- * The admin's screen shows it under the QR; the invitee TYPES it. That typed match is the in-person
- * provenance a navigated link otherwise lacks: the server can compose an /enroll link too (it emails
- * invites), with its own `rfp`/`ifp`, and the person holding such a link has no admin screen to read the
- * code from. One 128-bit code authenticates `rfp`, `ifp` and `iu` together. Null when the link carries
- * none of them. Lives outside enrolllink.ts because that module must stay sodium/WebCrypto-free (it runs
- * at module load, before initSodium).
+ * The admin's screen shows it under the QR; the invitee TYPES it. The code is an unkeyed hash of the
+ * link itself, so it authenticates nothing on its own (the server that composed a link can print "the
+ * code" beside it): typing it only lets the human confirm they are reading the SAME link the admin's
+ * screen shows. What anchors a pin is the human ceremony, `enrolInPerson` below: the typed code AND the
+ * first-person affirmation made under `IN_PERSON_CODE_WARNING` (A5c). Null when the link carries none of
+ * the fields. Lives outside enrolllink.ts because that module must stay sodium/WebCrypto-free (it runs at
+ * module load, before initSodium).
  */
 export async function enrollCheckCode(payload: EnrollPayload): Promise<string | null> {
   if (!payload.rfp && !payload.ifp) return null;

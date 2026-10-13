@@ -92,7 +92,9 @@ class VaultKeyPrecedenceTest {
         // The swap is surfaced, not swallowed.
         assertTrue(device.vkMismatch(shared.vaultId), "a seal that opens to a different VK is a 'vault key mismatch' anomaly")
         // Provenance: a row that carries ANY seal is a shared vault, never a personal candidate (H64).
-        assertTrue(device.keyArrivedByMemberGrant(shared.vaultId))
+        // A9 (L-2): the bit comes from an ADOPTION through a seal or a verified grant, never from a seal the server
+        // attached beside our own wrap (ignored above); the personal-candidate filter refuses the row on its seal anyway.
+        assertFalse(device.keyArrivedByMemberGrant(shared.vaultId))
     }
 
     @Test
@@ -196,7 +198,9 @@ class VaultKeyPrecedenceTest {
         assertFalse(second.needsSelfWrap(wrappedOnly))
         // H64 still holds without the seal: a non-owner row is a shared vault. Since root cause A §4 (A5)
         // "personal" comes only from the personal wrap, so nothing here can make it personal.
-        assertTrue(second.keyArrivedByMemberGrant(shared.vaultId))
+        // A9 (L-2): a bare self-wrap row sets nothing on a second device (the row's shape is not provenance); the device
+        // that adopted the key through the seal recorded it, durably and in account state (LOW-R).
+        assertFalse(second.keyArrivedByMemberGrant(shared.vaultId))
         assertEquals("", second.personalVaultId)
 
         // And the seal is no longer load-bearing: with both present, a swapped seal changes nothing.

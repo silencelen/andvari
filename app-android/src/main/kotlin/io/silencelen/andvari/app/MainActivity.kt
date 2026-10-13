@@ -2302,7 +2302,11 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     }
     // Default = Personal (vaultInfos() sorts personal first). rememberSaveable keeps the pick across
     // a rotation mid-edit; keyed on itemId so a fresh editor session re-defaults to Personal.
-    var targetVaultId by rememberSaveable(itemId) { mutableStateOf(vaultChoices.firstOrNull()?.vaultId) }
+    // A9 review LOW-2: with NO personal vault in force (the designation is still a proposal, §4.3 "no default
+    // destination") there is no default at all — the human picks, or the save is refused with "Choose a vault".
+    val noPersonalVault = itemId == null && vm.personalVaultId().isEmpty()
+    var targetVaultId by rememberSaveable(itemId) { mutableStateOf(if (noPersonalVault) null else vaultChoices.firstOrNull()?.vaultId) }
+    var vaultError by remember(itemId) { mutableStateOf<String?>(null) }
     // rememberSaveable: every typed field survives Activity recreation (rotation / fold
     // posture change) — plain `remember` silently wiped them all.
     var name by rememberSaveable { mutableStateOf(initial.name) }
@@ -2416,8 +2420,10 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
         Text(if (itemId != null) "Edit" else if (isLogin) "New login" else if (isCard) "New card" else "New note", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
         ErrorBar(ui.error, vm::clearError)
-        // F18: show the vault picker ONLY for a new item with a real choice (>1 writable vault).
-        if (vaultChoices.size > 1) VaultPickerField(vaultChoices, targetVaultId) { targetVaultId = it }
+        // F18: show the vault picker ONLY for a new item with a real choice (>1 writable vault) — or, A9 review LOW-2,
+        // whenever no personal vault is in force (the pick is then required, even from a single choice).
+        if (vaultChoices.size > 1 || (noPersonalVault && vaultChoices.isNotEmpty())) VaultPickerField(vaultChoices, targetVaultId) { targetVaultId = it; vaultError = null }
+        vaultError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         Field("Name", name, { name = it }, imeAction = ImeAction.Next)
         if (isLogin) {
             Field("Username", username, { username = it }, mono = true, imeAction = ImeAction.Next)
@@ -2565,6 +2571,8 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 // L7: BLOCK, never silently drop a typed half (the pre-Tier-2 behavior stored
                 // an unreadable half as ABSENT, overwriting whatever the card had).
                 cardExpiryError = "expiry can’t be read — fix or clear it to save"
+            } else if (noPersonalVault && targetVaultId == null) {
+                vaultError = io.silencelen.andvari.core.client.HouseholdCopy.NO_PERSONAL_VAULT // A9 review LOW-2: never a guessed destination
             } else {
                 onSave(builtDoc(normalizedTotp), pendingUploads.toList(), targetVaultId)
             }

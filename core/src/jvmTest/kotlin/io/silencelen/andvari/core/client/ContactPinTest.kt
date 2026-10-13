@@ -118,11 +118,11 @@ class ContactPinTest {
         sync.sync()
         assertTrue(victim.hasVault(shared.vaultId))
         assertTrue(sync.accountState.contacts().isEmpty(), "the owner's served key is NOT a contact")
-        // The only write a sync makes on its own is the A1b (LOW-R) member-provenance record: never a contact.
-        for (w in stateWrites) {
-            val doc = victim.openAccountState(w)
-            assertTrue(doc.contacts.isEmpty(), "nothing pinned: no human verified anyone")
-            assertEquals(setOf(shared.vaultId), doc.memberReceived.keys, "only the member provenance is recorded")
-        }
+        // The only writes a sync makes on its own are the A1b (LOW-R) member-provenance record and, on the registering
+        // device, the A9 personal-vault designation: never a contact.
+        for (w in stateWrites) assertTrue(victim.openAccountState(w).contacts.isEmpty(), "nothing pinned: no human verified anyone")
+        val last = victim.openAccountState(stateWrites.last())
+        assertEquals(setOf(shared.vaultId), last.memberReceived.keys, "the member provenance is recorded")
+        assertEquals(victim.personalVaultId, last.personal?.vaultId, "and the registering device's designation")
     }
 }

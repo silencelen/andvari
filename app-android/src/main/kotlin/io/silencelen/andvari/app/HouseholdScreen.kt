@@ -277,7 +277,7 @@ fun PersonalVaultCard(vm: AndvariViewModel) {
                             busy = true
                             msg = runCatching { vm.redesignatePersonalVault(p, password) }.fold(
                                 { "Saved. New items now go to this vault by default." },
-                                { "Couldn't change it: wrong master password, or the server refused." },
+                                { redesignationError(it, "Couldn't change it: wrong master password, or the server refused.") },
                             )
                             password = ""
                             busy = false
@@ -327,6 +327,61 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
                 Text("This device kept the one it already had ($name), so nothing changed. To repair the server's copy, choose $name again in Settings (it asks for your master password), and tell your admin.", style = MaterialTheme.typography.bodySmall)
             }
         }
+        return
+    }
+    if (status == Account.PersonalStatus.PROPOSED) {
+        // A9 (M-2): a served wrap nothing on this device vouches for (no cached wrap, and no account designation or one
+        // for another vault). Nothing is in force until the human decides; "Use" only after the co-holders loaded.
+        val change = vm.personalChange() ?: return
+        var details by remember(change.servedVaultId) { mutableStateOf<io.silencelen.andvari.core.client.PersonalChangeDetails?>(null) }
+        var lookupFailed by remember(change.servedVaultId) { mutableStateOf(false) }
+        LaunchedEffect(change.servedVaultId, tick) {
+            runCatching { vm.describePersonalChange() }.onSuccess { details = it; lookupFailed = false }.onFailure { lookupFailed = true }
+        }
+        val newName = details?.servedName ?: vm.vaultDisplayName(change.servedVaultId)
+        val designated = change.currentVaultId.takeIf { it.isNotEmpty() }?.let { details?.currentName ?: vm.vaultDisplayName(it) }
+        Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            Column(Modifier.padding(12.dp)) {
+                Text(
+                    if (designated == null) "The server says your personal vault is $newName." else "Your account's personal vault is $designated, but the server sent $newName.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    if (designated == null) "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items need a vault picked by hand."
+                    else "Another of your devices chose $designated, or the server sent an older record. This device uses no personal vault until you decide.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (designated != null) {
+                    OutlinedButton(enabled = !busy, onClick = {
+                        scope.launch {
+                            busy = true
+                            err = null
+                            runCatching { vm.proposePersonalVault(change.currentVaultId) }
+                                .onSuccess { proposal = it }
+                                .onFailure { err = "Couldn't check who else holds $designated. Try again when you're connected." }
+                            busy = false
+                        }
+                    }) { Text("Keep $designated") }
+                }
+                val d = details
+                if (d != null) {
+                    val holders = if (d.servedCoHolders.isEmpty()) "nobody else" else d.servedCoHolders.joinToString(", ") { "${it.displayName} (${it.role})" }
+                    val origin = if (d.servedOrigin == PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER) "received by transfer" else "created by this account"
+                    Text("$newName, as reported by the server: $origin · also held by $holders.", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = {
+                        err = runCatching { vm.acceptPersonalChange() }.exceptionOrNull()?.let { "Couldn't confirm. Try again." }
+                        onChanged()
+                    }) { Text("Use $newName") }
+                } else if (lookupFailed) {
+                    Text("Couldn't check who else holds $newName, so using it isn't offered yet.", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { tick++ }) { Text("Try again") }
+                }
+                Text("To use another vault instead, choose it in Settings (it asks for your master password).", style = MaterialTheme.typography.bodySmall)
+                err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            }
+        }
+        val p = proposal
+        if (p != null) KeepCurrentDialog(vm, p, onDone = { proposal = null; onChanged() })
         return
     }
     if (status == Account.PersonalStatus.CHANGED) {
@@ -454,13 +509,20 @@ private fun KeepCurrentDialog(vm: AndvariViewModel, p: PersonalVaultProposal, on
             TextButton(enabled = !busy && password.isNotEmpty(), onClick = {
                 scope.launch {
                     busy = true
-                    val failed = runCatching { vm.redesignatePersonalVault(p, password) }.isFailure
+                    val failure = runCatching { vm.redesignatePersonalVault(p, password) }.exceptionOrNull()
                     password = ""
                     busy = false
-                    if (failed) err = "Couldn't keep it: wrong master password, or the server refused." else onDone()
+                    if (failure != null) err = redesignationError(failure, "Couldn't keep it: wrong master password, or the server refused.") else onDone()
                 }
             }) { Text("Keep it") }
         },
         dismissButton = { TextButton(onClick = { vm.cancelPersonalProposal(); onDone() }) { Text("Cancel") } },
     )
+}
+
+/** A9 (M-1): the re-designation reauth is fenced; say what happened instead of blaming the password for a stale session. */
+private fun redesignationError(t: Throwable, fallback: String): String = when (t) {
+    is io.silencelen.andvari.core.client.ReauthStaleSessionException -> io.silencelen.andvari.core.client.HouseholdCopy.REAUTH_STALE_SESSION
+    is io.silencelen.andvari.core.client.KdfPolicyViolationException -> io.silencelen.andvari.core.client.HouseholdCopy.WEAK_KDF_ACTION
+    else -> fallback
 }

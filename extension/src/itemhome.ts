@@ -4,21 +4,27 @@
  * production code path against spec/test-vectors/itemhome.json — the same rows core `ItemHome` and web
  * `vault/itemhome.ts` are graded on.
  *
- * `home(itemId)` is the vaultId of the FIRST row this browser applied for that itemId. The service worker keeps the
- * homes in storage.local (per server origin and user) and in the session snapshot, so they outlive a resync, an MV3
- * eviction and a browser restart. A later row for that itemId under another vault (live or tombstone) is not applied:
- * it never reaches the matched items, so it can never become a capture's update target, a TOTP-add target or a fill.
- * The first home on a fresh browser is the server's choice (the stated residual).
+ * `home(itemId)` is the vaultId of the FIRST row this browser APPLIED for that itemId (A9 L-1: applied, not merely seen —
+ * a blob-less tombstone or a row under a vault this session holds no key for never homes an item, so the server cannot
+ * home an item away from its genuine row by serving such a row first). The service worker keeps the homes in
+ * storage.local (per server origin and user) and in the session snapshot, so they outlive a resync, an MV3 eviction and a
+ * browser restart. A later row for that itemId under another vault (live or tombstone) is not applied: it never reaches
+ * the matched items, so it can never become a capture's update target, a TOTP-add target or a fill. The first home on a
+ * fresh browser is the server's choice among the rows it can apply (the stated residual).
  *
  * INV-WRITE-KEY needs no extra state here: the extension adopts only keys that open under this user's UVK (design §1.7;
  * grantkeys.ts), never a grant seal, so it never holds a legacy-read-only key. The seal gate below still refuses any
  * vault whose key the session does not hold and any itemId whose home is another vault.
  */
 
-export type Admit = "new_home" | "home" | "quarantine";
+/** `skip` (security review 2026-10, A9 L-1): no home yet, but the row CANNOT be applied on this browser — a tombstone, a
+ *  vault whose key this session does not hold, an envelope that does not open. No home is recorded (the home is the vault
+ *  of the first envelope this browser APPLIED, design §5.1), no anomaly, and the row is not admitted. */
+export type Admit = "new_home" | "skip" | "home" | "quarantine";
 
-export function admitRow(home: string | null | undefined, rowVaultId: string): Admit {
-  if (home === null || home === undefined) return "new_home";
+/** `applies`: whether this browser can apply the row now (live, key held, and it opens). Only an unhomed row reads it. */
+export function admitRow(home: string | null | undefined, rowVaultId: string, applies = true): Admit {
+  if (home === null || home === undefined) return applies ? "new_home" : "skip";
   return home === rowVaultId ? "home" : "quarantine";
 }
 
@@ -56,17 +62,24 @@ export class WrongVaultTally {
 }
 
 /** Admit a snapshot's rows in order against `homes` (updated in place): the rows to apply, the refusals, and whether
- *  any new home was recorded (the caller persists the map then). */
-export function admitRows<T extends { itemId: string; vaultId: string }>(rows: readonly T[], homes: Map<string, string>): { admitted: T[]; tally: WrongVaultTally; changed: boolean } {
+ *  any new home was recorded (the caller persists the map then). `applies` (A9 L-1) says whether an UNHOMED row can be
+ *  applied here — live, blob present, key held, and the envelope opens — so only a row this browser actually applies
+ *  can home its item; one that cannot is skipped (no home, no anomaly, not admitted). */
+export function admitRows<T extends { itemId: string; vaultId: string }>(
+  rows: readonly T[],
+  homes: Map<string, string>,
+  applies: (row: T) => boolean = () => true,
+): { admitted: T[]; tally: WrongVaultTally; changed: boolean } {
   const admitted: T[] = [];
   const tally = new WrongVaultTally();
   let changed = false;
   for (const r of rows) {
-    const v = admitRow(homes.get(r.itemId), r.vaultId);
+    const v = admitRow(homes.get(r.itemId), r.vaultId, applies(r));
     if (v === "quarantine") {
       tally.note(r.vaultId);
       continue;
     }
+    if (v === "skip") continue;
     if (v === "new_home") {
       homes.set(r.itemId, r.vaultId);
       changed = true;

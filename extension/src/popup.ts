@@ -182,6 +182,7 @@ async function refresh(): Promise<void> {
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
   el("personal-change").hidden = !(s.unlocked && s.personalChange); // A5b M-2: never a silent switch
   if (s.unlocked && s.personalChangeText) el("personal-change-text").textContent = s.personalChangeText; // LOW-3: both vaults named
+  el("personal-change-accept").textContent = s.unlocked && s.personalProposal ? "Use this personal vault" : "Use the new personal vault"; // A9 review MEDIUM-1
   if (s.unlocked && s.personalChange) await renderPersonalChangeChoice();
   else {
     el("personal-change-accept").hidden = true;

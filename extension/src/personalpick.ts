@@ -15,6 +15,8 @@ import { adVkPersonal, fromB64, open } from "./crypto.ts";
  *    the server WITHHELD it, an anomaly; the cached wrap stands ("withheld").
  *  - No wrap anywhere: NO personal vault. The extension never picks by a server label or role and never
  *    mints a wrap; a full client asks the human.
+ *  - A served wrap that opens on a browser with NO cached wrap (A9 review MEDIUM-1): a "proposed" vault, not a
+ *    default. Its key is installed for reading; nothing is captured into it until the human confirms it once.
  */
 
 export interface PersonalWrapWire {
@@ -24,7 +26,7 @@ export interface PersonalWrapWire {
 
 export type PersonalPick =
   | { vaultId: string; source: "wrap" | "withheld" | "none" | "unreadable" | "unreadable-cached" }
-  | { vaultId: string; source: "changed"; served: PersonalWrapWire };
+  | { vaultId: string; source: "changed" | "proposed"; served: PersonalWrapWire };
 
 function openWrap(wrap: PersonalWrapWire, uvk: Uint8Array, userId: string): Uint8Array | null {
   try {
@@ -48,7 +50,12 @@ export function pickPersonal(
     const vk = openWrap(wrap, uvk, userId);
     if (vk) {
       vaultKeys.set(wrap.vaultId, vk); // our own key either way (it opened under our UVK)
-      if (cached && cached.vaultId !== wrap.vaultId) {
+      // A9 review MEDIUM-1: with NOTHING cached (a fresh profile, cleared storage) the served wrap is a PROPOSAL, not a
+      // default: the server keeps every wrap the account ever minted and chooses which to serve, so a superseded one
+      // for a co-held vault would otherwise become the capture destination silently. No personal vault until the human
+      // confirms it once (the popup's describe/accept flow, which re-opens the wrap under the UVK and caches it).
+      if (!cached) return { vaultId: "", source: "proposed", served: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } };
+      if (cached.vaultId !== wrap.vaultId) {
         const cvk = cachedVk();
         if (cvk) {
           vaultKeys.set(cached.vaultId, cvk);

@@ -48,6 +48,8 @@ interface KdfUpgradeClient {
   changePassword(req: PasswordChangeRequest): Promise<unknown>;
 }
 interface KdfUpgradeAccount {
+  /** A9 (M-1): the one fenced in-session derivation (KDF fence + the session's salt) for the CURRENT password's proof. */
+  reauthAuthKey(password: string, keys: { kdfSalt: string; kdfParams: KdfParams }): Promise<string>;
   buildPasswordChange(
     newPassword: string,
     params: KdfParams,
@@ -96,7 +98,9 @@ export async function maybeKdfUpgrade(inputs: KdfUpgradeInputs): Promise<void> {
   try {
     // currentAuthKey proves the caller knows the present password (the server re-verifies it, exactly
     // like a user-initiated change) — derived from the CURRENT salt/params the login already used.
-    const currentAuthKey = await Account.deriveAuthKey(inputs.password, inputs.currentKdfSalt, inputs.currentKdfParams);
+    // A9 (M-1): through the one fenced in-session derivation (the unlock KDF fence, and only the salt this session
+    // unlocked with); a stale session derives nothing and the re-key simply waits for the next unlock.
+    const currentAuthKey = await inputs.account.reauthAuthKey(inputs.password, { kdfSalt: inputs.currentKdfSalt, kdfParams: inputs.currentKdfParams });
     const change = await inputs.account.buildPasswordChange(inputs.password, inputs.policyKdfParams);
     await inputs.client.changePassword({ currentAuthKey, ...change });
     // CR-07: replace the cached accountKeys with the post-upgrade wrappedUvk/params so an offline

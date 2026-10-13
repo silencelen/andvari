@@ -49,6 +49,10 @@ class AccountStateSync(
     // a restart on a host whose cache is memory-only. Both are a public counter or a UVK-sealed blob.
     private fun highWater(): Long = store(hwKey)?.toLongOrNull() ?: 0L
 
+    /** True once this device has merged (or written) account state: a served blob below its mark is a detectable
+     *  rollback. A device without one is FRESH to account state, and a served blob is as replayable as a wrap (A9). */
+    fun hasHighWater(): Boolean = highWater() > 0
+
     private fun loadLocal(): AccountStateDoc? = store(copyKey)?.let { sealed ->
         runCatching { account.openAccountState(sealed) }.getOrNull()
     }
@@ -176,10 +180,20 @@ class AccountStateSync(
      * owns the format ([readOnly]).
      */
     suspend fun update(change: (AccountStateDoc) -> AccountStateDoc) {
+        updateLocal(change)
+        runCatching { refresh() }
+    }
+
+    /**
+     * The LOCAL half of [update] (A9): adopt [change] into this device's sealed copy now, with no network call, so a
+     * non-suspending caller (an accepted personal-vault change, the registering device's first decision) can record its
+     * fact at once; the next [refresh] merges it with the served copy and writes it back (the merge keeps every local
+     * entry, so nothing served can undo it). Throws only when a newer client owns the format ([readOnly]).
+     */
+    fun updateLocal(change: (AccountStateDoc) -> AccountStateDoc) {
         if (readOnly) throw IllegalStateException("account state was written by a newer client")
         val base = loadLocal()?.let { AccountState.merge(account.userId, it, doc, highWater()).doc } ?: doc
         adopt(change(base).copy(seq = maxOf(base.seq, doc.seq)), null)
-        runCatching { refresh() }
     }
 
     /** The issued-grant record for ([vaultId], [userId]) (A6b). */

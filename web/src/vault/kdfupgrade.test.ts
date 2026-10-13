@@ -70,13 +70,13 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
   });
 
   const change = { newKdfSalt: "salt64", newKdfParams: FLOOR, newAuthKey: "new-auth", newWrappedUvk: "new-uvk" };
+  // A9 (M-1): the current-password proof is the account's fenced reauth derivation, not the pre-session static.
   const mocks = () => ({
     client: { changePassword: vi.fn(async () => undefined) },
-    account: { buildPasswordChange: vi.fn(async () => change) },
+    account: { buildPasswordChange: vi.fn(async () => change), reauthAuthKey: vi.fn(async () => "current-auth") },
   });
 
   it("FIRES the re-key exactly once: derives currentAuthKey, re-derives under the policy, PUTs the change", async () => {
-    const deriveSpy = vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     await maybeKdfUpgrade({
       client,
@@ -87,14 +87,13 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       policyKdfParams: FLOOR,
       mustChangePassword: false,
     });
-    expect(deriveSpy).toHaveBeenCalledWith("correct horse", "old-salt", BELOW_FLOOR);
+    expect(account.reauthAuthKey).toHaveBeenCalledWith("correct horse", { kdfSalt: "old-salt", kdfParams: BELOW_FLOOR });
     expect(account.buildPasswordChange).toHaveBeenCalledWith("correct horse", FLOOR); // re-key under the POLICY
     expect(client.changePassword).toHaveBeenCalledTimes(1);
     expect(client.changePassword).toHaveBeenCalledWith({ currentAuthKey: "current-auth", ...change });
   });
 
   it("CR-07: calls onUpgraded AFTER changePassword resolves (re-cache the post-upgrade accountKeys)", async () => {
-    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     const order: string[] = [];
     client.changePassword = vi.fn(async () => {
@@ -118,7 +117,6 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
   });
 
   it("CR-07: does NOT call onUpgraded when no upgrade fires (already at policy params)", async () => {
-    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     const onUpgraded = vi.fn();
     await maybeKdfUpgrade({
@@ -136,7 +134,6 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
   });
 
   it("CR-07: an onUpgraded failure is swallowed — the re-key still counts as done (best-effort)", async () => {
-    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     const onUpgraded = vi.fn(async () => {
       throw new Error("cache write blew up");
@@ -158,7 +155,6 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
   });
 
   it("does NOT fire when the account is ALREADY at the policy params (no argon2id, no PUT)", async () => {
-    const deriveSpy = vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     await maybeKdfUpgrade({
       client,
@@ -169,13 +165,12 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       policyKdfParams: FLOOR,
       mustChangePassword: false,
     });
-    expect(deriveSpy).not.toHaveBeenCalled();
+    expect(account.reauthAuthKey).not.toHaveBeenCalled();
     expect(account.buildPasswordChange).not.toHaveBeenCalled();
     expect(client.changePassword).not.toHaveBeenCalled();
   });
 
   it("does NOT fire while mustChangePassword is set, even though the policy would upgrade (A5)", async () => {
-    const deriveSpy = vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     await maybeKdfUpgrade({
       client,
@@ -186,12 +181,11 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       policyKdfParams: FLOOR,
       mustChangePassword: true,
     });
-    expect(deriveSpy).not.toHaveBeenCalled();
+    expect(account.reauthAuthKey).not.toHaveBeenCalled();
     expect(client.changePassword).not.toHaveBeenCalled();
   });
 
   it("does NOT fire on a downgrade policy (the web analogue of the offline / quick-unlock exclusion)", async () => {
-    const deriveSpy = vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { client, account } = mocks();
     await maybeKdfUpgrade({
       client,
@@ -203,11 +197,10 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       mustChangePassword: false,
     });
     expect(client.changePassword).not.toHaveBeenCalled();
-    expect(deriveSpy).not.toHaveBeenCalled();
+    expect(account.reauthAuthKey).not.toHaveBeenCalled();
   });
 
   it("SWALLOWS a changePassword failure (best-effort) — resolves, never rejects", async () => {
-    vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("current-auth");
     const { account } = mocks();
     const client = {
       changePassword: vi.fn(async () => {

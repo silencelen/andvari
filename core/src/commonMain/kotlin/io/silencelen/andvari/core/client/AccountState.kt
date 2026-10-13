@@ -1,6 +1,8 @@
 package io.silencelen.andvari.core.client
 
 import io.silencelen.andvari.core.crypto.Bytes
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -75,6 +77,17 @@ internal object ConsumedNonceSerializer : KSerializer<ConsumedNonce> {
 data class IssuedGrant(val vaultId: String, val userId: String, val keyHash: String, val at: Long)
 
 /**
+ * The account's own PERSONAL-VAULT DESIGNATION (security review 2026-10, branch A9, M-2): which vault this account last
+ * made personal, and when. Written on register, on the migration choice, on a re-designation and on an accepted change,
+ * never by anything the server served. Tombstone-free: the newest `at` wins on merge, so a re-designation simply writes
+ * a newer entry, and a rolled-back or withheld blob can never revive an older one on a device that merged the newer.
+ * A served `personalWrap` that names this vault is confirmed on any device; one naming another vault, or served to a
+ * device with no cached wrap and no designation, is a proposal the human confirms ([SyncEngine.decidePersonalLocally]).
+ */
+@Serializable
+data class PersonalDesignation(val vaultId: String, val at: Long)
+
+/**
  * The account-state plaintext (root cause A §4.2): `Envelope(UVK, JSON, Ad.accountState(userId))`.
  * Only this user's UVK can seal or open it, so the server can withhold or roll it back but never add
  * to it. [seq] is the authenticated high-water counter; the server's own `seq` is only a CAS token.
@@ -100,6 +113,11 @@ data class AccountStateDoc(
     /** A1b (A6b review LOW-R): vaults some device of this account first adopted the key of AS A MEMBER, vaultId → ms.
      *  Add-only (no tombstones), union-merged keeping the larger `at`, like [ownedVaults]. */
     val memberReceived: Map<String, Long> = emptyMap(),
+    /** A9 (M-2): the account's own personal-vault designation (see [PersonalDesignation]); absent in older documents and
+     *  omitted from the encoding while absent, so a document that never designated stays readable by older clients. */
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val personal: PersonalDesignation? = null,
 ) {
     fun contact(userId: String): Contact? = contacts.firstOrNull { it.userId == userId }
 
@@ -117,7 +135,7 @@ data class AccountStateDoc(
     /** True when there is nothing in the document worth writing. */
     fun isBlank(): Boolean = contacts.isEmpty() && consumedNonces.isEmpty() && orgRecoveryFp == null &&
         issuedGrants.isEmpty() && issuedTombstones.isEmpty() && ownedVaults.isEmpty() && ownedTombstones.isEmpty() &&
-        memberReceived.isEmpty()
+        memberReceived.isEmpty() && personal == null
 }
 
 class AccountStateException(message: String) : Exception(message)
@@ -182,6 +200,10 @@ object AccountState {
             if (!UUID_RE.matches(k)) throw AccountStateException("member-received vault id is not a uuid")
             if (at < 0) throw AccountStateException("member-received at is negative")
         }
+        doc.personal?.let { p ->
+            if (!UUID_RE.matches(p.vaultId)) throw AccountStateException("personal designation vault id is not a uuid")
+            if (p.at < 0) throw AccountStateException("personal designation at is negative")
+        }
         return doc
     }
 
@@ -197,6 +219,7 @@ object AccountState {
      *    tie removes: the fail-safe direction is "unpinned");
      *  - `orgRecoveryFp` from the document with the higher seq (the local copy on a tie or rollback);
      *  - nonces union per vault, newest [NONCE_CAP] kept;
+     *  - `personal` (A9): the designation with the newest `at` (tie: the smaller vaultId);
      *  - seq = max(local, served, highWater).
      * Rollback: a served seq below this device's [highWater], or a withheld blob once one was seen,
      * raises [Merged.rollback]. The flag changes ONE field: `orgRecoveryFp` is then taken from the local
@@ -267,12 +290,18 @@ object AccountState {
         // A1b (LOW-R): add-only union, the larger `at` per vault.
         val memberReceived = HashMap<String, Long>()
         for ((k, t) in docs.flatMap { it.memberReceived.entries }) memberReceived[k] = maxOf(memberReceived[k] ?: t, t)
+        // A9 (M-2): the personal designation with the newest `at` wins (tie: the smaller vaultId, so the merge is
+        // order-independent). Tombstone-free: a rollback or a withheld blob is simply the older copy, and loses.
+        val personal = docs.mapNotNull { it.personal }
+            .sortedWith(compareByDescending<PersonalDesignation> { it.at }.thenBy { it.vaultId })
+            .firstOrNull()
 
         val seq = maxOf(localSeq, servedSeq, highWater, 0)
         return Merged(
             AccountStateDoc(
                 VERSION, userId, seq, contacts, tombstones.toSortedMap(), fp, cappedNonces,
                 issued, issuedTomb.toSortedMap(), ownedLive.toSortedMap(), ownedTomb.toSortedMap(), memberReceived.toSortedMap(),
+                personal,
             ),
             rollback,
         )
@@ -280,6 +309,17 @@ object AccountState {
 
     /** The tombstone key for an issued grant. */
     fun pairKey(vaultId: String, userId: String): String = "$vaultId|$userId"
+
+    /**
+     * Record the account's personal-vault designation (A9, M-2): register, the migration choice, a re-designation, an
+     * accepted change. The new entry is pushed past the one it replaces whatever this device's clock says, so the newest
+     * human act always wins the merge.
+     */
+    fun withPersonal(doc: AccountStateDoc, vaultId: String, at: Long): AccountStateDoc {
+        val prev = doc.personal
+        val t = if (prev == null || prev.vaultId == vaultId) maxOf(at, prev?.at ?: -1L) else maxOf(at, prev.at + 1)
+        return doc.copy(personal = PersonalDesignation(vaultId, t))
+    }
 
     /**
      * Record a grant this account just signed (A6b). The entry replaces any earlier one for the pair, and its `at`

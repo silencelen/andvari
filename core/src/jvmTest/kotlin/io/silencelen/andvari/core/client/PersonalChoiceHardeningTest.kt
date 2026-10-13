@@ -123,6 +123,13 @@ class PersonalChoiceHardeningTest {
 
     private fun unlock(e: Enrolled, wrap: PersonalWrap?) = Account.unlock(e.reg.userId, password, e.keys.copy(personalWrap = wrap), crypto)
 
+    /** A9 (M-2): a first device with no designation on record confirms the served wrap once; from then on it is established. */
+    private suspend fun establish(engine: SyncEngine) {
+        engine.sync()
+        engine.describePersonalChange()
+        engine.acceptPersonalChange()
+    }
+
     // ---- M-1: durable cached wrap ----
 
     @Test
@@ -131,7 +138,7 @@ class PersonalChoiceHardeningTest {
         val device = MemoryDeviceState()
         // Session 1: the wrap is served. The offline cache is IN MEMORY (desktop default, org-forbid policy).
         val first = unlock(h.victim, h.victim.reg.personalWrap)
-        SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device).sync()
+        establish(SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device))
         assertEquals(h.victim.reg.personalVault.vaultId, first.personalVaultId)
 
         // Restart: the in-memory cache is gone (or a revocation purge wiped the durable one). Server withholds.
@@ -246,7 +253,7 @@ class PersonalChoiceHardeningTest {
         val device = MemoryDeviceState()
         // This device knows the real personal vault.
         val first = unlock(h.victim, h.victim.reg.personalWrap)
-        SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device).sync()
+        establish(SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device))
 
         // The server now serves a GENUINE wrap for the shared vault (a designation on another device, or a
         // replay of an older wrap). The device must not switch silently.
@@ -287,7 +294,7 @@ class PersonalChoiceHardeningTest {
         val h = household()
         val device = MemoryDeviceState()
         val first = unlock(h.victim, h.victim.reg.personalWrap)
-        SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device).sync()
+        establish(SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device))
         val again = unlock(h.victim, h.sharedWrap)
         val server = FakeServer(h.feed, mapOf(h.victim.reg.personalVault.vaultId to listOf(member(h.victim, "owner", "Victim"))))
         val engine = SyncEngine(api(server), again, InMemoryVaultCache(), deviceState = device)
@@ -307,7 +314,7 @@ class PersonalChoiceHardeningTest {
         val h = household()
         val device = MemoryDeviceState()
         val first = unlock(h.victim, h.victim.reg.personalWrap)
-        SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device).sync()
+        establish(SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device))
 
         val again = unlock(h.victim, h.sharedWrap)
         // The member lookup for the NEW vault fails (the server withholds it).
@@ -337,7 +344,7 @@ class PersonalChoiceHardeningTest {
         val h = household()
         val device = MemoryDeviceState()
         val first = unlock(h.victim, h.victim.reg.personalWrap)
-        SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device).sync()
+        establish(SyncEngine(api(FakeServer(h.feed)), first, InMemoryVaultCache(), deviceState = device))
 
         // The server serves the OWNER wrap where the personal wrap belongs: present, but it never opens.
         val junk = PersonalWrap(h.victim.reg.personalVault.vaultId, h.victim.reg.personalVault.wrappedVk)

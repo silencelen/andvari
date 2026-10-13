@@ -1353,7 +1353,9 @@ class DesktopState(
         // sign-in. (It also must never fire under the capture gate: rotating the login verifier would
         // strand the gate's stashed reauth proof.)
         if (gate) {
-            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams) }
+            // A9 (M-1): the gate's proof goes through the one fenced in-session derivation (the unlock KDF fence, and
+            // only the salt this session just unlocked with — these ARE that session's keys).
+            val authKey = withContext(Dispatchers.Default) { acct.reauthAuthKey(password, keys) }
             startRecoveryCapture(authKey)
         } else toVault()
     }
@@ -2870,7 +2872,7 @@ class DesktopState(
     /** Security review 2026-10: a first enrollment proves the master password (the server refuses a
      *  bare setup outside its fresh-login window). One argon2id pass — off the UI thread. */
     fun beginTotpSetup(password: String) = totpOp {
-        totpSetupInfo = withContext(Dispatchers.Default) { api!!.totpSetupWithPassword(password) }
+        totpSetupInfo = withContext(Dispatchers.Default) { api!!.totpSetupWithPassword(password, requireNotNull(account) { "locked" }) }
     }
 
     fun confirmTotp(code: String) = totpOp {

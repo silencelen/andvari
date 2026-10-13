@@ -552,11 +552,13 @@ class AndvariApi(
      * First-enrollment path for the native clients: derive the login authKey from the typed master
      * password under the account's OWN stored KDF salt/params (the values prelogin serves, so it
      * verifies against the server's login verifier) and send it as the password proof. One argon2id
-     * pass — callers run this off the UI thread.
+     * pass — callers run this off the UI thread. Security review 2026-10 (A9, M-1): the derivation is
+     * [Account.reauthAuthKey], the one fenced in-session derivation (KDF floor/ceiling, and only the
+     * salt THIS session unlocked with), so a served salt or weakened params derive nothing.
      */
-    suspend fun totpSetupWithPassword(password: String, crypto: CryptoProvider = createCryptoProvider()): TotpSetupResponse {
+    suspend fun totpSetupWithPassword(password: String, account: Account): TotpSetupResponse {
         val keys = accountKeys()
-        return totpSetup(Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto))
+        return totpSetup(account.reauthAuthKey(password, keys))
     }
     suspend fun totpConfirm(code: String): TotpStatus = call("POST", "/api/v1/account/totp/confirm", TotpCodeRequest(code))
     suspend fun totpDisable(code: String): TotpStatus = call("POST", "/api/v1/account/totp/disable", TotpCodeRequest(code))

@@ -106,6 +106,12 @@ export class AccountStateSync {
     return Number.isSafeInteger(v) && v > 0 ? v : 0;
   }
 
+  /** True once this browser has merged (or written) account state: a served blob below its mark is a detectable
+   *  rollback. A browser without one is FRESH to account state, and a served blob is as replayable as a wrap (A9). */
+  hasHighWater(): boolean {
+    return this.highWater() > 0;
+  }
+
   private loadLocal(): AccountStateDoc | null {
     const sealed = this.local.get("acctstate.copy");
     if (!sealed) return null;
@@ -235,11 +241,21 @@ export class AccountStateSync {
    * the next refresh merges it with the served copy and writes it back. Throws only when a newer client owns the format.
    */
   async update(change: (doc: AccountStateDoc) => AccountStateDoc): Promise<void> {
+    this.updateLocal(change);
+    await this.refresh().catch(() => {});
+  }
+
+  /**
+   * The LOCAL half of {@link update} (A9; core `updateLocal` twin): adopt `change` into this browser's sealed copy now,
+   * with no network call, so a synchronous caller (an accepted personal-vault change, the registering device's first
+   * decision) can record its fact at once; the next refresh merges it with the served copy and writes it back (the merge
+   * keeps every local entry, so nothing served can undo it). Throws only when a newer client owns the format.
+   */
+  updateLocal(change: (doc: AccountStateDoc) => AccountStateDoc): void {
     if (this.readOnly) throw new Error("account state was written by a newer client");
     const local = this.loadLocal();
     const base = local ? mergeAccountState(this.account.userId, local, this.doc, this.highWater()).doc : this.doc;
     this.adopt({ ...change(base), seq: Math.max(base.seq, this.doc.seq) }, null);
-    await this.refresh().catch(() => {});
   }
 
   /** The issued-grant record for (vaultId, userId) (A6b). */
