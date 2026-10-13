@@ -223,9 +223,14 @@ blob (contact pins, the verified org fingerprint, consumed nonces) is UVK-sealed
 add to it, but it can withhold it or roll it back; each device keeps a high-water seq and its own sealed
 copy and refuses the rollback, but a device that never held a newer copy cannot tell, and loses pins
 (fail safe: re-verify). (c) **pins are pairwise** (owner decision Q4): a household of N people needs a
-verification per pair; no admin-signed introductions. (d) The enrolment pin rests on the human typing
-the in-person code from the admin's screen (spec 04 §6.5); a member who types a code read to them by
-someone other than the admin, in person, gives that person the admin's slot.
+verification per pair; no admin-signed introductions. (d) The enrolment pin rests on two human acts
+(spec 04 §6.5): typing the in-person code from the admin's screen, and affirming, under the stop warning,
+that the admin's screen is in front of them (A5c). The code is an unkeyed hash of the link, and nothing
+the invitee's client could verify instead is beyond the reach of the server that composed the link, so no
+keyed code would change this; the control is the human assertion, re-checked by the client from the raw
+inputs, and a navigated link plus a code on its own leaves the admin a pending verification, never a pin.
+A member who ticks the affirmation and types a code read to them by someone other than the admin, in
+person or, despite the warning, from an email, gives that person the admin's slot.
 
 **R15 (signed grants and the compatibility window — security review 2026-10, root cause A §1.4–§1.7, §8.2;
 branch A6).** Residuals accepted: (a) **legacy keys** (spec 01 §6): while the window is open a client still
