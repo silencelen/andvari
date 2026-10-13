@@ -2369,10 +2369,12 @@ class AndvariViewModel(
     private fun boundVault(itemId: String): String? = _ui.value.items.firstOrNull { it.itemId == itemId }?.vaultId
 
     fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError) {
-        // F18: [vaultId] is the NEW-item vault picker's choice. saveWithUploads HONORS it only
-        // when itemId == null; for an existing item it re-targets the item's OWN vault (its blob
-        // AD binds that vault; the server enforces vault_mismatch), so a stray picker value can
-        // never re-home an edited item. The editor also passes null when editing (belt + braces).
+        // F18 + INV-EDIT (root cause A §5.1, A1b): for a NEW item [vaultId] is the vault picker's
+        // choice (null = personal). For an EXISTING item it is REQUIRED and must be the vault the
+        // editor was bound to when it opened ([editorVaultId], or the planned item's vault for the
+        // health / autofill writes): core seals the edit under exactly that vault, refuses it with
+        // "This item changed vaults; reopen it." when the item's home differs now, and throws on a
+        // null (UNBOUND) — an edit is never re-targeted by a lookup, and never passes null.
         // F71: a NEW-item save mints its draft id ONCE per editor session — a retry after a
         // transport failure reuses it, so the durably queued first attempt and the retry apply
         // as the SAME item instead of a duplicate (desktop's draftItemId pattern).
