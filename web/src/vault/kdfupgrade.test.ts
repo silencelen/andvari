@@ -1,6 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { KdfParams } from "../crypto/keys";
 import { initSodium } from "../crypto/sodium";
+import { adUvk } from "../crypto/ad";
+import { fromB64, toB64 } from "../crypto/bytes";
+import { open } from "../crypto/envelope";
+import { fingerprint } from "../crypto/escrow";
+import { authKey, masterKey, wrapKey } from "../crypto/keys";
+import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { Account } from "./account";
 import { maybeKdfUpgrade, shouldUpgrade } from "./kdfupgrade";
 
@@ -84,10 +90,12 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       password: "correct horse",
       currentKdfSalt: "old-salt",
       currentKdfParams: BELOW_FLOOR,
+      currentWrappedUvk: "old-wrap",
       policyKdfParams: FLOOR,
       mustChangePassword: false,
     });
-    expect(account.reauthAuthKey).toHaveBeenCalledWith("correct horse", { kdfSalt: "old-salt", kdfParams: BELOW_FLOOR });
+    // F3 (A10): the proof opens the served wrap, so the wrap rides along with the salt and params.
+    expect(account.reauthAuthKey).toHaveBeenCalledWith("correct horse", { kdfSalt: "old-salt", kdfParams: BELOW_FLOOR, wrappedUvk: "old-wrap" });
     expect(account.buildPasswordChange).toHaveBeenCalledWith("correct horse", FLOOR); // re-key under the POLICY
     expect(client.changePassword).toHaveBeenCalledTimes(1);
     expect(client.changePassword).toHaveBeenCalledWith({ currentAuthKey: "current-auth", ...change });
@@ -108,6 +116,7 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       password: "correct horse",
       currentKdfSalt: "old-salt",
       currentKdfParams: BELOW_FLOOR,
+      currentWrappedUvk: "old-wrap",
       policyKdfParams: FLOOR,
       mustChangePassword: false,
       onUpgraded,
@@ -125,6 +134,7 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       password: "pw",
       currentKdfSalt: "s",
       currentKdfParams: FLOOR,
+      currentWrappedUvk: "old-wrap",
       policyKdfParams: FLOOR,
       mustChangePassword: false,
       onUpgraded,
@@ -145,6 +155,7 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
         password: "pw",
         currentKdfSalt: "s",
         currentKdfParams: BELOW_FLOOR,
+        currentWrappedUvk: "old-wrap",
         policyKdfParams: FLOOR,
         mustChangePassword: false,
         onUpgraded,
@@ -162,6 +173,7 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       password: "pw",
       currentKdfSalt: "s",
       currentKdfParams: FLOOR,
+      currentWrappedUvk: "old-wrap",
       policyKdfParams: FLOOR,
       mustChangePassword: false,
     });
@@ -178,6 +190,7 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       password: "temp",
       currentKdfSalt: "s",
       currentKdfParams: BELOW_FLOOR,
+      currentWrappedUvk: "old-wrap",
       policyKdfParams: FLOOR,
       mustChangePassword: true,
     });
@@ -193,6 +206,7 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
       password: "pw",
       currentKdfSalt: "s",
       currentKdfParams: RAISED,
+      currentWrappedUvk: "old-wrap",
       policyKdfParams: FLOOR,
       mustChangePassword: false,
     });
@@ -214,10 +228,65 @@ describe("maybeKdfUpgrade — best-effort driver", () => {
         password: "pw",
         currentKdfSalt: "s",
         currentKdfParams: BELOW_FLOOR,
+        currentWrappedUvk: "old-wrap",
         policyKdfParams: FLOOR,
         mustChangePassword: false,
       }),
     ).resolves.toBeUndefined();
     expect(client.changePassword).toHaveBeenCalledTimes(1);
   });
+});
+
+/**
+ * Security review 2026-10 plugin scan F3 (A10, an A9 regression): the driver's current-password proof is
+ * `Account.reauthAuthKey`, which OPENS the served wrappedUvk to the session UVK. The driver passed only the salt and
+ * params, so the proof threw inside the catch-all and the silent upgrade never ran on web. Driven here with a REAL
+ * Account (the mocks above cannot see the shape of the keys object): the re-key must derive the current authKey,
+ * re-wrap the SAME UVK under the policy's params, and PUT the change.
+ */
+describe("maybeKdfUpgrade — with a real Account (F3)", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("derives the current proof from the served wrap and uploads a re-wrap of the same UVK under the policy params", async () => {
+    const recovery = boxKeypairFromSeed(randomBytes(32));
+    const password = "correct horse battery staple";
+    const email = `kdf-${Math.random().toString(16).slice(2)}@example.com`;
+    const { request, account } = await Account.enroll({
+      inviteToken: "t", email, displayName: email, password, kdfParams: FLOOR,
+      recoveryPublicKey: recovery.publicKey, recoveryFingerprint: await fingerprint(recovery.publicKey),
+    });
+    const keys = {
+      kdfSalt: request.kdfSalt, kdfParams: request.kdfParams, wrappedUvk: request.wrappedUvk, encryptedIdentitySeed: request.encryptedIdentitySeed,
+      identityPub: request.identityPub, escrowFingerprint: request.escrow!.fingerprint, personalWrap: request.personalWrap,
+    };
+    const device = await Account.unlock(request.userId, password, keys);
+    const puts: { currentAuthKey: string; newKdfSalt: string; newKdfParams: KdfParams; newAuthKey: string; newWrappedUvk: string }[] = [];
+    let upgraded = 0;
+    await maybeKdfUpgrade({
+      client: { changePassword: async (req) => { puts.push(req); } },
+      account: device,
+      password,
+      currentKdfSalt: keys.kdfSalt,
+      currentKdfParams: keys.kdfParams,
+      currentWrappedUvk: keys.wrappedUvk,
+      policyKdfParams: RAISED,
+      mustChangePassword: false,
+      onUpgraded: () => { upgraded++; },
+    });
+    expect(puts, "the re-key ran exactly once").toHaveLength(1);
+    expect(upgraded).toBe(1);
+    const put = puts[0]!;
+    expect(put.newKdfParams).toEqual(RAISED);
+    // The proof is the CURRENT password's auth key under the current salt/params...
+    expect(put.currentAuthKey).toBe(toB64(await authKey(masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams))));
+    // ...and the uploaded wrap opens, under the NEW salt/params, to the SAME UVK the old wrap held.
+    const oldUvk = open(await wrapKey(masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams)), fromB64(keys.wrappedUvk), adUvk(request.userId));
+    const newUvk = open(await wrapKey(masterKey(password, fromB64(put.newKdfSalt), put.newKdfParams)), fromB64(put.newWrappedUvk), adUvk(request.userId));
+    expect(toB64(newUvk)).toBe(toB64(oldUvk));
+    expect(put.newKdfSalt).not.toBe(keys.kdfSalt);
+    expect(put.newAuthKey).toBe(toB64(await authKey(masterKey(password, fromB64(put.newKdfSalt), put.newKdfParams))));
+    expect(account.userId).toBe(device.userId);
+  }, 120_000);
 });
