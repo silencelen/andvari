@@ -56,22 +56,33 @@ reference instance the shipped builds default to; it is not privileged in the pr
 |---|---|---|
 | **Web** | TypeScript + React (Vite) — an independent implementation of the spec | served by every server at its own origin |
 | **Android** | Kotlin / Jetpack Compose, on `:core` | an APK you build, serve from your instance's `/downloads` (`ANDVARI_DOWNLOADS_DIR`) **and list in `/downloads/manifest.json`** |
-| **Desktop** | Compose for Desktop, on `:core` — `.msi` (Windows), `.deb` (Linux) | as above |
+| **Desktop** | Compose for Desktop, on `:core` — `.msi` (Windows), `.deb` + Arch `.pkg.tar.zst` (Linux) | as above |
 | **Browser extension** | MV3, Chromium + Firefox, pure-JS `@noble` crypto (no WASM, no `eval`) | Chrome Web Store (unlisted) + a Mozilla-signed `.xpi` with a self-hosted update channel |
 
 Dropping a build into the downloads directory publishes nothing on its own: the file is
 served, but the clients' "get andvari on your other devices" hub reads
 `/downloads/manifest.json` and shows a platform as unpublished until that file names it.
-Each platform key — `android`, `windows`, `linux` — wants a `version` **and** a `url`;
-with either missing the row stays "isn't published yet". A same-origin path is fine (it
-inherits the page's scheme; only an http(s) result is ever rendered as a link). This is
-the phone-shaped half of audit F09: the `android` key did not exist at all before 0.21.0,
-so an APK served exactly as this table documented could never appear in any client.
+Each platform key — `android`, `windows`, `linux` (the `.deb`), `linuxArch` (the pacman
+package) — wants a `version` **and** a `url`; with either missing the row stays "isn't
+published yet". A same-origin path is fine (it inherits the page's scheme; only an http(s)
+result is ever rendered as a link). This is the phone-shaped half of audit F09: the
+`android` key did not exist at all before 0.21.0, so an APK served exactly as this table
+documented could never appear in any client. `linuxArch` is additive the same way: a
+manifest without it is still valid, and only the Arch row stays unpublished.
 
 ```jsonc
-{ "android": { "version": "0.25.0", "url": "/downloads/andvari-0.25.0.apk" },
-  "linux":   { "version": "0.25.0", "url": "/downloads/andvari_0.25.0_amd64.deb" } }
+{ "android":   { "version": "0.25.0", "url": "/downloads/andvari-0.25.0.apk" },
+  "linux":     { "version": "0.25.0", "url": "/downloads/andvari-0.25.0.deb" },
+  "linuxArch": { "version": "0.25.0", "url": "/downloads/andvari-0.25.0-x86_64.pkg.tar.zst" } }
 ```
+
+**Installing on Linux** is a manual package install either way — no client runs an installer:
+`sudo apt install ./andvari-<ver>.deb` on Debian/Ubuntu, `sudo pacman -U
+andvari-<ver>-x86_64.pkg.tar.zst` on Arch-family distros (Omarchy, Arch, Manjaro — anything
+whose os-release `ID` or `ID_LIKE` says `arch`). Both packages install the same tree under
+`/opt/andvari` and carry a detached, armored GPG signature (`.asc`) under the release key
+in `docs/runbooks/release-signing-keys.md` §3 — verify with `gpg --verify <file>.asc <file>`.
+Both are produced together by `scripts/build-linux.sh`.
 
 Two independent crypto implementations — Kotlin (`core/`) and TypeScript (`web/src/crypto`
 plus the extension's `extension/src/crypto.ts`) — are held in byte-lockstep by the shared
@@ -100,14 +111,14 @@ instance also serves at `<your-origin>/selfhost` alongside downloadable copies o
 | `core/` | Kotlin Multiplatform (android + jvm): crypto, models, sync engine, client cache |
 | `server/` | ktor JVM sync server (depends on `:core`) |
 | `app-android/` | Android client |
-| `app-desktop/` | Compose for Desktop client (Windows `.msi`, Linux `.deb`) |
+| `app-desktop/` | Compose for Desktop client (Windows `.msi`, Linux `.deb` + Arch `.pkg.tar.zst`) |
 | `web/` | Independent TypeScript implementation of the spec (Vite + React) |
 | `extension/` | MV3 browser extension, Chromium + Firefox — in-browser fill/save (pure-JS @noble crypto) |
 | `deploy/` | The self-host bundle: `docker-compose.yml`, the caddy overlay, `andvari.env.template`, `bringup.sh` |
 | `tools/vector-gen` | Emits most of `spec/test-vectors/*.json` from the Kotlin reference implementation (the rest are hand-authored — see below) |
 | `tools/recovery-cli` / `tools/backup-cli` | Offline escrow ceremony/recovery + offline `.andvari` backup reader (verify/dump/extract) |
 | `tools/update-signer` | Signs the `/downloads` update manifest the extension's update channel verifies |
-| `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh`, `e2e.sh`, `publish-image.sh`, `publish-extension.sh`, `gh-release.sh` (assembles the GitHub release: served names, generated + signed `SHA256SUMS`), and the Windows release ceremony (`build-windows.ps1`, `prestige-release.ps1`, `signandvari.ps1`) |
+| `scripts/` | `verify.sh` (the every-ship gate — see Build), `build.sh` (Android), `build-linux.sh` (the `.deb` + Arch package from one build, both GPG-signed; `package-arch.sh` is the generic app-image → pacman packager it drives), `e2e.sh`, `publish-image.sh`, `publish-extension.sh`, `gh-release.sh` (assembles the GitHub release: served names, generated + signed `SHA256SUMS`), and the Windows release ceremony (`build-windows.ps1`, `prestige-release.ps1`, `signandvari.ps1`) |
 
 Some vector files are hand-authored fixtures rather than `vector-gen` output;
 `spec/test-vectors/README.md` is the provenance manifest and carries the per-file list and

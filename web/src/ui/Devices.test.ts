@@ -83,6 +83,26 @@ describe("windowsRowState (downloads manifest → Windows row)", () => {
     expect(platformRowState(null, "linux")).toEqual({ kind: "loading" });
     expect(platformRowState("error", "linux")).toEqual({ kind: "unpublished" });
   });
+
+  it("the Arch column reads its own linuxArch entry — additive beside linux, never derived from it", () => {
+    const both = {
+      linux: { version: "0.28.0", url: "/downloads/andvari-0.28.0.deb" },
+      linuxArch: { version: "0.28.0", url: "/downloads/andvari-0.28.0-x86_64.pkg.tar.zst" },
+    };
+    expect(platformRowState(both, "linuxArch")).toEqual({
+      kind: "available",
+      version: "0.28.0",
+      url: "/downloads/andvari-0.28.0-x86_64.pkg.tar.zst",
+    });
+    expect(platformRowState(both, "linux").kind).toBe("available");
+    // A manifest from before the Arch package (the live seq-13 shape): the deb row is untouched
+    // and the Arch row is honestly unpublished — not an error, not a copy of the deb link.
+    const debOnly = { linux: { version: "0.27.0", url: "/downloads/andvari-0.27.0.deb" } };
+    expect(platformRowState(debOnly, "linuxArch")).toEqual({ kind: "unpublished" });
+    expect(platformRowState(debOnly, "linux").kind).toBe("available");
+    expect(platformRowState(null, "linuxArch")).toEqual({ kind: "loading" });
+    expect(platformRowState("error", "linuxArch")).toEqual({ kind: "unpublished" });
+  });
 });
 
 describe("extensionRowState (downloads manifest → browser-extension row)", () => {
@@ -224,6 +244,7 @@ describe("DevicesCard — endpoint-agnostic (design 2026-07-15 §5.4.4: no origi
       expect(html).toContain("Checking…"); // no effect under static markup → manifest null → loading rows
       expect(html).toContain("Windows");
       expect(html).toContain("Linux");
+      expect(html).toContain("Arch Linux"); // the pacman row, beside the deb row
       expect(html).toContain("Browser extension");
       expect(html).not.toContain("home network"); // the public-origin "hidden" copy is deleted
     }

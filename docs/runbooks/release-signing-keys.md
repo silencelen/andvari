@@ -143,7 +143,21 @@ convenience: it is now the difference between a publish and a quarantine.
   classifies this itself (signature present, correct cert, timestamped). It is not a signing
   failure; do not "fix" the chain.
 
-## 3. Linux deb signing — GPG (detached `.asc`)
+## 3. Linux package signing — GPG (detached `.asc`): the `.deb` AND the Arch `.pkg.tar.zst`
+- **Both Linux packages, one key, one treatment (2026-10-13).** `scripts/build-linux.sh` builds the
+  `.deb` and the Arch pacman package `andvari-<ver>-x86_64.pkg.tar.zst` from ONE gradle build
+  (it proves the two carry the same application jar), then detach-signs both with the key below.
+  The signed manifest carries the Arch package as the additive `linuxArch` entry
+  (`{version,url,sha256}`), emitted by `release-spec.sh` beside `linux` and listed in its
+  `intendedKeys`; `prestige-release.ps1` proves the SERVED package hashes to the spec exactly as it
+  does for the deb. Users verify both the same way:
+  `gpg --verify andvari-<ver>-x86_64.pkg.tar.zst.asc andvari-<ver>-x86_64.pkg.tar.zst`
+- **ARMORED `.asc`, never a binary `.sig`, for the Arch package** — this is load-bearing, not
+  style. `pacman -U` auto-verifies a `<pkg>.sig` sidecar sitting beside the file against **pacman's
+  own keyring**, and the household release key is deliberately not in it, so a `.sig` would make
+  every install fail with "invalid or corrupted package (PGP signature)". The `.asc` is for a human
+  running `gpg --verify`, exactly like the deb's; installing stays `sudo pacman -U <file>` by hand,
+  as `dpkg -i` is for the deb (no Linux client runs an installer).
 - **Key:** `andvari releases <releases@monahanhosting.com>` (ed25519, sign-only)
 - **CURRENT key (rotated 2026-07-23):** **Fingerprint `741CF143A5E1EDF3B9CBE923D1CC699A598417FC`** ·
   **Expires 2028-07-22** · machine-local, no passphrase, plus an offline-keyring backup so a keyring

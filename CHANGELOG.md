@@ -4,6 +4,28 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## Unreleased
+
+**Desktop — an Arch Linux package beside the deb.** The household's Omarchy (Arch-family) desktops
+get a native pacman package, `andvari-<ver>-x86_64.pkg.tar.zst`, built from the SAME build as the
+`.deb` by the new `scripts/build-linux.sh` (one gradle invocation; the script proves both carry the
+same application jar) via the generic `scripts/package-arch.sh`. Same `/opt/andvari` tree, same
+GPL-3.0-or-later licence file, the deb's `Depends:` translated into Arch package names, and the same
+release key signing it — as a detached *armored* `.asc`, never a `.sig` (pacman would verify a
+`.sig` sidecar against its own keyring and refuse the install). Installing stays manual:
+`sudo pacman -U <file>`, as `dpkg -i` is for the deb.
+- The signed update manifest gains an **additive** `linuxArch` entry (`version`, `url`, `sha256`):
+  `release-spec.sh` emits it and lists it in `intendedKeys`; `prestige-release.ps1` splices it, proves
+  the served package hashes to the spec (the deb's proof, twinned), and admits the key's one-time
+  introduction into a live manifest that predates it; `signandvari.ps1` reads it back after publish;
+  `gh-release.sh` stages the package + `.asc` under the served name and cross-checks it against the
+  spec; `prune-artifacts.sh` keeps/drops it with its release. Every existing manifest key is unchanged.
+- The desktop app checks for updates against `linuxArch` on Arch-family installs (os-release `ID` or
+  any `ID_LIKE` token equal to `arch`, which is how Omarchy reports) and against `linux` elsewhere,
+  falling back to `linux` on a manifest from before the Arch package. The AndvariApi device-platform
+  tag stays `linux` — it names the OS, not the package format.
+- The web "your other devices" card gains an **Arch Linux** row (`Arch package (.pkg.tar.zst)`).
+
 ## 0.27.0 (2026-09-14) — the third audit, closed on every platform · fleet 0.27.0, extension 0.27.0
 
 *A full audit of every platform — the third — found no crypto defect and a long list of the same

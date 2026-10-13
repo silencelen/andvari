@@ -38,6 +38,9 @@ touch "$DL"/andvari-0.6.0.deb \
       "$DL"/andvari-0.26.1.deb "$DL"/andvari-0.26.1.deb.asc "$DL"/andvari-0.26.1.msi \
       "$DL"/andvari-0.26.2.deb "$DL"/andvari-0.26.2.deb.asc "$DL"/andvari-0.26.2.msi \
       "$DL"/andvari-0.26.3.deb "$DL"/andvari-0.26.3.deb.asc "$DL"/andvari-0.26.3.msi \
+      "$DL"/andvari-0.26.1-x86_64.pkg.tar.zst "$DL"/andvari-0.26.1-x86_64.pkg.tar.zst.asc \
+      "$DL"/andvari-0.26.2-x86_64.pkg.tar.zst "$DL"/andvari-0.26.2-x86_64.pkg.tar.zst.asc \
+      "$DL"/andvari-0.26.3-x86_64.pkg.tar.zst "$DL"/andvari-0.26.3-x86_64.pkg.tar.zst.asc \
       "$DL"/andvari-extension-chrome-0.25.0.zip "$DL"/andvari-extension-firefox-0.25.0.xpi \
       "$DL"/andvari-extension-chrome-0.26.0.zip "$DL"/andvari-extension-firefox-0.26.0.xpi \
       "$DL"/manifest.json.bak "$DL"/manifest.json.sig.bak \
@@ -48,6 +51,7 @@ cat > "$DL/manifest.json" <<'JSON'
 {
   "seq": 12,
   "linux":   { "version": "0.26.3", "url": "/downloads/andvari-0.26.3.deb" },
+  "linuxArch": { "version": "0.26.3", "url": "/downloads/andvari-0.26.3-x86_64.pkg.tar.zst" },
   "windows": { "version": "0.26.3", "url": "/downloads/andvari-0.26.3.msi" },
   "browserExtension": {
     "version": "0.26.0",
@@ -91,6 +95,7 @@ must_exist manifest.json.sig                          "the live signature"
 must_exist firefox-updates.json                       "the auto-update channel"
 must_exist andvari-0.26.3.deb                         "referenced by the live manifest"
 must_exist andvari-0.26.3.msi                         "referenced by the live manifest"
+must_exist andvari-0.26.3-x86_64.pkg.tar.zst          "referenced by the live manifest (linuxArch)"
 must_exist andvari-extension-chrome-0.26.0.zip        "referenced by the live manifest"
 must_exist andvari-extension-firefox-0.25.0.xpi       "referenced by firefox-updates.json — dropping it strands every Firefox install"
 
@@ -98,10 +103,14 @@ must_exist andvari-extension-firefox-0.25.0.xpi       "referenced by firefox-upd
 must_exist andvari-0.26.2.deb                         "previous release"
 must_exist andvari-0.26.2.deb.asc                     "previous release's signature — a release is kept whole"
 must_exist andvari-0.26.2.msi                         "previous release"
+must_exist andvari-0.26.2-x86_64.pkg.tar.zst          "previous release's Arch package — same fleet track as the deb"
+must_exist andvari-0.26.2-x86_64.pkg.tar.zst.asc      "previous release's Arch signature — a release is kept whole"
 must_exist andvari-extension-chrome-0.25.0.zip        "previous extension release (its own track)"
 must_be_gone andvari-0.26.1.deb                       "three releases back"
 must_be_gone andvari-0.26.1.deb.asc                   "three releases back"
 must_be_gone andvari-0.26.1.msi                       "three releases back"
+must_be_gone andvari-0.26.1-x86_64.pkg.tar.zst        "three releases back — the Arch package is pruned with its release, not left as 'unmanaged'"
+must_be_gone andvari-0.26.1-x86_64.pkg.tar.zst.asc    "three releases back"
 must_be_gone andvari-0.19.1.deb                       "ancient"
 must_be_gone andvari-0.6.0.deb                        "ancient and unsigned"
 

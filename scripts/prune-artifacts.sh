@@ -215,7 +215,7 @@ EOM
   # legitimately-empty result would abort the run. An empty reference set is a real state (a
   # manifest naming nothing) and it must degrade to "protect nothing extra", not to a crash.
   DL_REFERENCED+="$(printf '%s\n%s\n' "$DL_MANIFEST" "$DL_FFUPD" \
-                      | grep -oE '"[^"]*\.(apk|zip|xpi|deb|msi|asc)"' | tr -d '"' | sed 's#.*/##' | sort -u || true)"
+                      | grep -oE '"[^"]*\.(apk|zip|xpi|deb|msi|zst|asc)"' | tr -d '"' | sed 's#.*/##' | sort -u || true)"
   dl_is_referenced() { printf '%s\n' "$DL_REFERENCED" | grep -qxF "$1"; }
 
   DL_MOVE=() DL_DELETE=() DL_UNMANAGED=() DL_KEEP=()
@@ -236,15 +236,17 @@ EOM
     esac
     if [[ "$f" =~ ^andvari-extension-(chrome|firefox)-([0-9]+\.[0-9]+\.[0-9]+)\.(zip|xpi)$ ]]; then
       DL_EXT_VERS+=("${BASH_REMATCH[2]}")
-    elif [[ "$f" =~ ^andvari-([0-9]+\.[0-9]+\.[0-9]+)\.(deb|msi|apk)(\.asc)?$ ]]; then
+    elif [[ "$f" =~ ^andvari-([0-9]+\.[0-9]+\.[0-9]+)(\.(deb|msi|apk)|-x86_64\.pkg\.tar\.zst)(\.asc)?$ ]]; then
       DL_FLEET_VERS+=("${BASH_REMATCH[1]}")
     else
       DL_UNMANAGED+=("$f")
     fi
   done <<< "$DL_LIST"
 
-  # The newest KEEP_RELEASES versions on each track survive whole: a release's deb, its signature
-  # and its MSI are kept or dropped together, so /downloads can never offer half a release.
+  # The newest KEEP_RELEASES versions on each track survive whole: a release's deb, its Arch
+  # package, their signatures and its MSI are kept or dropped together, so /downloads can never
+  # offer half a release. (The pacman name carries the version before `-x86_64.pkg.tar.zst`;
+  # the pkgrel is not in the served name — release-spec.sh owns that rename.)
   # `|| true` again, and it is load-bearing here: an EMPTY track (no extension artifacts served at
   # all) makes the pipeline exit 1, which would have aborted the whole run before any of the
   # fleet-track work was applied. An absent track means an empty keep-set, nothing more.
@@ -259,7 +261,7 @@ EOM
     v="" keepset=""
     if [[ "$f" =~ ^andvari-extension-(chrome|firefox)-([0-9]+\.[0-9]+\.[0-9]+)\.(zip|xpi)$ ]]; then
       v="${BASH_REMATCH[2]}"; keepset="$DL_EXT_KEEP"
-    elif [[ "$f" =~ ^andvari-([0-9]+\.[0-9]+\.[0-9]+)\.(deb|msi|apk)(\.asc)?$ ]]; then
+    elif [[ "$f" =~ ^andvari-([0-9]+\.[0-9]+\.[0-9]+)(\.(deb|msi|apk)|-x86_64\.pkg\.tar\.zst)(\.asc)?$ ]]; then
       v="${BASH_REMATCH[1]}"; keepset="$DL_FLEET_KEEP"
     else
       continue
