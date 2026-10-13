@@ -23,6 +23,18 @@ export interface Contact {
 /** One consumed lifecycle nonce, wire form `["<nonce>", <issuedAt>]`. */
 export type ConsumedNonce = [string, number];
 
+/**
+ * One vault grant THIS account signed (security review 2026-10, root cause A, branch A6b; core `IssuedGrant` twin):
+ * the (vault, member) pair and hex SHA-256 of the identity key it was sealed to. A re-issue to a recorded pair, for
+ * the SAME key, needs no prompt; anything else needs a human on the device to confirm it.
+ */
+export interface IssuedGrant {
+  vaultId: string;
+  userId: string;
+  keyHash: string;
+  at: number;
+}
+
 export interface AccountStateDoc {
   v: 1;
   userId: string;
@@ -31,6 +43,15 @@ export interface AccountStateDoc {
   contactTombstones: Record<string, number>;
   orgRecoveryFp: string | null;
   consumedNonces: Record<string, ConsumedNonce[]>;
+  /** A6b: every grant this account signed from A6b on. */
+  issuedGrants: IssuedGrant[];
+  /** A6b: `"<vaultId>|<userId>"` → ms; written when the owner removes the member. */
+  issuedTombstones: Record<string, number>;
+  /** A6b: vaults this account OWNS by its own evidence (created, accepted by transfer, or confirmed with a password
+   *  reauth), vaultId → ms. The server's `role=owner` label is never an input. */
+  ownedVaults: Record<string, number>;
+  /** A6b: vaultId → ms; written when the account transfers the vault away or leaves it. */
+  ownedTombstones: Record<string, number>;
 }
 
 export class AccountStateError extends Error {}
@@ -41,11 +62,37 @@ export const ACCOUNT_STATE_SEALED_MAX = 65536;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
-const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces"];
+const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones"];
 const CONTACT_KEYS = ["userId", "identityPub", "label", "verifiedAt", "method"];
+const ISSUED_KEYS = ["vaultId", "userId", "keyHash", "at"];
 
 export function emptyAccountState(userId: string): AccountStateDoc {
-  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {} };
+  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {} };
+}
+
+/** The tombstone key for an issued grant. */
+export const pairKey = (vaultId: string, userId: string): string => `${vaultId}|${userId}`;
+
+const byPair = (a: IssuedGrant, b: IssuedGrant): number =>
+  a.vaultId < b.vaultId ? -1 : a.vaultId > b.vaultId ? 1 : a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0;
+
+/** The issued-grant record for (vaultId, userId), when one is in force (core `AccountStateDoc.issued`). */
+export function issuedFor(doc: AccountStateDoc, vaultId: string, userId: string): IssuedGrant | null {
+  const g = doc.issuedGrants.find((x) => x.vaultId === vaultId && x.userId === userId);
+  return g && g.at > (doc.issuedTombstones[pairKey(vaultId, userId)] ?? -1) ? g : null;
+}
+
+/** True when this account's own evidence says it owns `vaultId` (core `AccountStateDoc.owns`). */
+export function ownsVault(doc: AccountStateDoc, vaultId: string): boolean {
+  const at = doc.ownedVaults[vaultId];
+  return at !== undefined && at > (doc.ownedTombstones[vaultId] ?? -1);
+}
+
+/** True when there is nothing in the document worth writing. */
+export function isBlankAccountState(doc: AccountStateDoc): boolean {
+  return doc.contacts.length === 0 && Object.keys(doc.consumedNonces).length === 0 && doc.orgRecoveryFp === null &&
+    doc.issuedGrants.length === 0 && Object.keys(doc.issuedTombstones).length === 0 &&
+    Object.keys(doc.ownedVaults).length === 0 && Object.keys(doc.ownedTombstones).length === 0;
 }
 
 /** Deterministic encoding: fixed key order, contacts by userId, sorted maps. */
@@ -62,7 +109,22 @@ export function encodeAccountState(doc: AccountStateDoc): string {
     contactTombstones: sortedRecord(doc.contactTombstones),
     orgRecoveryFp: doc.orgRecoveryFp,
     consumedNonces: sortedRecord(doc.consumedNonces),
+    issuedGrants: [...doc.issuedGrants].sort(byPair).map((g) => ({ vaultId: g.vaultId, userId: g.userId, keyHash: g.keyHash, at: g.at })),
+    issuedTombstones: sortedRecord(doc.issuedTombstones),
+    ownedVaults: sortedRecord(doc.ownedVaults),
+    ownedTombstones: sortedRecord(doc.ownedTombstones),
   });
+}
+
+function intRecord(raw: unknown, what: string): Record<string, number> {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r !== "object" || Array.isArray(r)) throw new AccountStateError(`${what} is not an object`);
+  const out: Record<string, number> = {};
+  for (const [k, t] of Object.entries(r)) {
+    if (!isInt(t)) throw new AccountStateError(`${what} entry is not an integer`);
+    out[k] = t;
+  }
+  return out;
 }
 
 const isInt = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n);
@@ -122,7 +184,33 @@ export function decodeAccountState(userId: string, plaintext: string): AccountSt
       return [e[0], e[1]] as ConsumedNonce;
     });
   }
-  return { v: 1, userId, seq: o.seq, contacts, contactTombstones: tombstones, orgRecoveryFp: fp as string | null, consumedNonces: nonces };
+  // A6b: the issued-grants and owned-vaults records (absent in older documents: empty).
+  const issuedGrants: IssuedGrant[] = [];
+  const rawI = o.issuedGrants ?? [];
+  if (!Array.isArray(rawI)) throw new AccountStateError("issued grants are not an array");
+  for (const e of rawI as unknown[]) {
+    if (!e || typeof e !== "object" || Array.isArray(e)) throw new AccountStateError("issued grant is not an object");
+    const r = e as Record<string, unknown>;
+    for (const k of Object.keys(r)) if (!ISSUED_KEYS.includes(k)) throw new AccountStateError(`unknown issued grant key ${k}`);
+    if (typeof r.vaultId !== "string" || !UUID_RE.test(r.vaultId) || typeof r.userId !== "string" || !UUID_RE.test(r.userId)) {
+      throw new AccountStateError("issued grant id is not a uuid");
+    }
+    if (typeof r.keyHash !== "string" || !HEX64_RE.test(r.keyHash)) throw new AccountStateError("issued grant keyHash is not 64 hex");
+    if (!isInt(r.at) || r.at < 0) throw new AccountStateError("issued grant at is invalid");
+    issuedGrants.push({ vaultId: r.vaultId, userId: r.userId, keyHash: r.keyHash, at: r.at });
+  }
+  if (new Set(issuedGrants.map((x) => pairKey(x.vaultId, x.userId))).size !== issuedGrants.length) throw new AccountStateError("duplicate issued grant");
+  const issuedTombstones = intRecord(o.issuedTombstones, "issued tombstones");
+  const ownedVaults = intRecord(o.ownedVaults, "owned vaults");
+  for (const [k, t] of Object.entries(ownedVaults)) {
+    if (!UUID_RE.test(k)) throw new AccountStateError("owned vault id is not a uuid");
+    if (t < 0) throw new AccountStateError("owned vault at is negative");
+  }
+  const ownedTombstones = intRecord(o.ownedTombstones, "owned tombstones");
+  return {
+    v: 1, userId, seq: o.seq, contacts, contactTombstones: tombstones, orgRecoveryFp: fp as string | null, consumedNonces: nonces,
+    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones,
+  };
 }
 
 export interface MergedAccountState {
@@ -177,10 +265,68 @@ export function mergeAccountState(
   const preferServed = served !== null && !rollback && servedSeq > localSeq;
   const fp = preferServed ? (served!.orgRecoveryFp ?? local?.orgRecoveryFp ?? null) : (local?.orgRecoveryFp ?? served?.orgRecoveryFp ?? null);
   const sortedTomb = Object.fromEntries(Object.keys(tombstones).sort().map((k) => [k, tombstones[k]!]));
+  // A6b (core twin): issued grants union by pair, newest `at` wins (tie: the smaller keyHash), a tombstone not older
+  // removes; owned vaults union (max), a tombstone not older removes. A rollback cannot shrink either.
+  const unionMax = (pick: (d: AccountStateDoc) => Record<string, number>): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const d of docs) for (const [k, t] of Object.entries(pick(d))) out[k] = Math.max(out[k] ?? t, t);
+    return Object.fromEntries(Object.keys(out).sort().map((k) => [k, out[k]!]));
+  };
+  const issuedTombstones = unionMax((d) => d.issuedTombstones);
+  const pairs = new Map<string, IssuedGrant>();
+  for (const gr of docs.flatMap((d) => d.issuedGrants)) {
+    const k = pairKey(gr.vaultId, gr.userId);
+    const cur = pairs.get(k);
+    if (!cur || gr.at > cur.at || (gr.at === cur.at && gr.keyHash < cur.keyHash)) pairs.set(k, gr);
+  }
+  const issuedGrants = [...pairs.entries()]
+    .filter(([k, gr]) => (issuedTombstones[k] ?? Number.MIN_SAFE_INTEGER) < gr.at)
+    .map(([, gr]) => gr)
+    .sort(byPair);
+  const ownedTombstones = unionMax((d) => d.ownedTombstones);
+  const ownedAll = unionMax((d) => d.ownedVaults);
+  const ownedVaults = Object.fromEntries(Object.entries(ownedAll).filter(([k, t]) => (ownedTombstones[k] ?? Number.MIN_SAFE_INTEGER) < t));
   return {
-    doc: { v: 1, userId, seq: Math.max(localSeq, servedSeq, highWater, 0), contacts, contactTombstones: sortedTomb, orgRecoveryFp: fp, consumedNonces },
+    doc: {
+      v: 1, userId, seq: Math.max(localSeq, servedSeq, highWater, 0), contacts, contactTombstones: sortedTomb, orgRecoveryFp: fp, consumedNonces,
+      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones,
+    },
     rollback,
   };
+}
+
+/** Record a grant this account just signed (A6b; core `AccountState.withIssued` twin). */
+export function withIssued(doc: AccountStateDoc, vaultId: string, userId: string, keyHash: string, at: number): AccountStateDoc {
+  const k = pairKey(vaultId, userId);
+  const prev = doc.issuedGrants.find((x) => x.vaultId === vaultId && x.userId === userId);
+  const t = Math.max(at, (doc.issuedTombstones[k] ?? -1) + 1, prev?.at ?? -1);
+  return { ...doc, issuedGrants: [...doc.issuedGrants.filter((x) => !(x.vaultId === vaultId && x.userId === userId)), { vaultId, userId, keyHash, at: t }].sort(byPair) };
+}
+
+/** Tombstone the issued grant for (vaultId, userId): the owner removed the member (A6b). */
+export function withoutIssued(doc: AccountStateDoc, vaultId: string, userId: string, at: number): AccountStateDoc {
+  const k = pairKey(vaultId, userId);
+  const prev = doc.issuedGrants.find((x) => x.vaultId === vaultId && x.userId === userId);
+  const t = Math.max(at, prev?.at ?? -1, doc.issuedTombstones[k] ?? -1);
+  return {
+    ...doc,
+    issuedGrants: doc.issuedGrants.filter((x) => !(x.vaultId === vaultId && x.userId === userId)),
+    issuedTombstones: { ...doc.issuedTombstones, [k]: t },
+  };
+}
+
+/** Record that this account owns `vaultId` (created, accepted, or confirmed with a reauth; A6b). */
+export function withOwned(doc: AccountStateDoc, vaultId: string, at: number): AccountStateDoc {
+  const t = Math.max(at, (doc.ownedTombstones[vaultId] ?? -1) + 1, doc.ownedVaults[vaultId] ?? -1);
+  return { ...doc, ownedVaults: { ...doc.ownedVaults, [vaultId]: t } };
+}
+
+/** Tombstone ownership of `vaultId`: the account transferred it away or left it (A6b). */
+export function withoutOwned(doc: AccountStateDoc, vaultId: string, at: number): AccountStateDoc {
+  const t = Math.max(at, doc.ownedVaults[vaultId] ?? -1, doc.ownedTombstones[vaultId] ?? -1);
+  const owned = { ...doc.ownedVaults };
+  delete owned[vaultId];
+  return { ...doc, ownedVaults: owned, ownedTombstones: { ...doc.ownedTombstones, [vaultId]: t } };
 }
 
 /**

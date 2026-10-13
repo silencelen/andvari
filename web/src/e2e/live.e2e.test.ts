@@ -281,9 +281,10 @@ describe.skipIf(!BASE)("live server e2e", () => {
     // Family sharing (P5) over the real routes + WebSocket: admin A creates a shared vault,
     // adds invitee C as writer after the out-of-band fingerprint check, C's dirty-bell fires,
     // C decrypts A's shared item; A removes C; C's next sync purges the vault.
-    const share = account.buildCreateSharedVault("Family");
-    await clientA.createVault(share.request);
-    await storeA.sync();
+    // A6b: created through the store, which records this account's own evidence that it owns the vault (the
+    // owner-only add below is refused on the server's role label alone).
+    const share = { vaultId: await storeA.createSharedVault("Family") };
+    expect(storeA.ownsVault(share.vaultId), "the creator's ownership record").toBe(true);
     await storeA.save(null, { type: "login", name: "shared-wifi", login: { username: "home", password: "sh4red" } }, [], undefined, share.vaultId);
 
     const lookedUp = await clientA.lookupUser(inviteEmail);
