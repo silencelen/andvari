@@ -303,6 +303,15 @@ object HouseholdCopy {
         "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made."
 
     /**
+     * Security review 2026-10 (plugin scan F1; branch A10): the server sent rows whose ids are not ids (a line break,
+     * a record delimiter, a second id inside one); they were refused at the wire and never stored. Danger tone; no
+     * vault name (nothing in such a row is trusted). TWIN of web Vault.tsx noticeBody "bad-id", byte-equal, pinned by
+     * web/src/ui/vault-copy.test.ts.
+     */
+    const val BAD_ID_NOTICE: String =
+        "The server sent records with malformed ids. andvari ignored them and kept your vaults as they were. Tell your admin — the server may be misbehaving."
+
+    /**
      * Root cause A §5.1 INV-HOME (branch A1b): the server sent an item under another vault than the one this device holds
      * it in; it was not applied (quarantined), once per pull. Danger tone. TWIN of web Vault.tsx noticeBody
      * "wrong-vault", byte-equal, pinned by web/src/ui/vault-copy.test.ts.

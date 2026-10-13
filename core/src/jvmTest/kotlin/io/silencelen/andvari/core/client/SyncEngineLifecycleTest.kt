@@ -300,7 +300,8 @@ class SyncEngineLifecycleTest {
     @Test
     fun unknownVaultRevocation_silentNoOp() = runBlocking<Unit> {
         val s = seededMember()
-        s.server.queue.add(SyncResponse(6, false, emptyList(), emptyList(), emptyList(), listOf("a-vault-we-never-had")))
+        // (A10: ids are UUID-checked at the wire, so the unknown vault must at least be a well-formed id.)
+        s.server.queue.add(SyncResponse(6, false, emptyList(), emptyList(), emptyList(), listOf(uuid())))
         s.engine.sync()
         assertTrue(s.engine.notices().isEmpty())
         assertTrue(s.engine.heldVaultInfos().isEmpty())
@@ -313,10 +314,11 @@ class SyncEngineLifecycleTest {
         val server = FakeServer()
         val engine = SyncEngine(server.api(), member, InMemoryVaultCache())
         // First pull (since=0) already carries removedGrants for a vault this device never held.
+        val goneVault = uuid() // A10: a well-formed id (a malformed one is refused at the wire with its own notice)
         server.queue.add(
             SyncResponse(
-                5, true, emptyList(), emptyList(), emptyList(), listOf("gone-vault"),
-                listOf(RemovedGrantInfo("gone-vault", "deleted", deleteId = "x", deleteProof = "y")),
+                5, true, emptyList(), emptyList(), emptyList(), listOf(goneVault),
+                listOf(RemovedGrantInfo(goneVault, "deleted", deleteId = "x", deleteProof = "y")),
             ),
         )
         engine.sync()
