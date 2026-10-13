@@ -333,6 +333,8 @@ class SaveConfirmActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
             runCatching {
+                // INV-EDIT (A1b): an update names the vault of the item its doc was read from (provenance (a)).
+                var boundVault: String? = null
                 val doc = when (plan) {
                     is CardPlan.Update -> {
                         // Re-read at save time (a sync may have advanced it since resolve), then
@@ -341,6 +343,7 @@ class SaveConfirmActivity : ComponentActivity() {
                         // the matched number; brand recomputed (the stored field is display-only).
                         val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
                             ?: throw SaveStageException("That card is no longer in your vault.")
+                        boundVault = existing.vaultId
                         val c = existing.doc.card ?: CardData()
                         existing.doc.copy(
                             card = c.copy(
@@ -369,7 +372,7 @@ class SaveConfirmActivity : ComponentActivity() {
                     )
                 }
                 val itemId = (plan as? CardPlan.Update)?.itemId // null → new item in the personal vault
-                withContext(Dispatchers.IO) { engine.save(itemId, doc) }
+                withContext(Dispatchers.IO) { engine.save(itemId, doc, boundVault) }
             }.onSuccess { outcome ->
                 announceIfQueued(outcome)
                 setResult(RESULT_OK) // something was saved, whatever the login stage decides
@@ -413,7 +416,7 @@ class SaveConfirmActivity : ComponentActivity() {
                         val existing = engine.items().firstOrNull { it.itemId == plan.itemId }
                             ?: throw SaveStageException("That login is no longer in your vault.")
                         val doc = existing.doc.copy(login = (existing.doc.login ?: LoginData()).copy(password = creds.password))
-                        withContext(Dispatchers.IO) { engine.save(plan.itemId, doc) }
+                        withContext(Dispatchers.IO) { engine.save(plan.itemId, doc, existing.vaultId) } // INV-EDIT (A1b)
                     }
                 }
             }.onSuccess { outcome ->
