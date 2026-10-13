@@ -183,23 +183,22 @@ interface VaultCache {
     // SAME transaction that moves the vault to the holding area), survive a restart, and survive a resync [clear].
     // Neither is ever written from a server value.
 
-    /** This device's consumed removal nonces, by vaultId (never shrinks; only a namespace purge removes it). */
+    /** This device's consumed removal nonces, by vaultId (never shrinks; only a namespace purge removes it). A
+     *  [TrustRecords.ConsumedNonce] JSON record (A10); the pre-A10 line record migrates on first read. */
     fun consumedNonces(): Map<String, List<ConsumedNonce>> {
         val out = LinkedHashMap<String, MutableList<ConsumedNonce>>()
-        for (line in clientState(CONSUMED_NONCES_KEY)?.split('\n').orEmpty()) {
-            val p = line.split('|')
-            if (p.size != 3) continue
-            val at = p[2].toLongOrNull() ?: continue
-            out.getOrPut(p[0]) { mutableListOf() }.add(ConsumedNonce(p[1], at))
-        }
+        for (n in consumedNonceRows()) out.getOrPut(n.vaultId) { mutableListOf() }.add(ConsumedNonce(n.nonce, n.issuedAt))
         return out
     }
 
+    private fun consumedNonceRows(): List<TrustRecords.ConsumedNonce> =
+        TrustRecords.load(CONSUMED_NONCES_KEY, ::clientState, ::setClientState, TrustRecords::decodeConsumedNonces, TrustRecords::encodeConsumedNonces)
+
     /** Record one consumed `(vaultId, nonce, issuedAt)`. Idempotent. */
     fun addConsumedNonce(vaultId: String, nonce: String, issuedAt: Long) {
-        val lines = clientState(CONSUMED_NONCES_KEY)?.split('\n')?.filter { it.isNotEmpty() }.orEmpty()
-        if (lines.any { it.startsWith("$vaultId|$nonce|") }) return
-        setClientState(CONSUMED_NONCES_KEY, (lines + "$vaultId|$nonce|$issuedAt").joinToString("\n"))
+        val rows = consumedNonceRows()
+        if (rows.any { it.vaultId == vaultId && it.nonce == nonce }) return
+        setClientState(CONSUMED_NONCES_KEY, TrustRecords.encodeConsumedNonces(rows + TrustRecords.ConsumedNonce(vaultId, nonce, issuedAt)))
     }
 
     /** The device-local wall-clock time this device last saw [vaultId] go from not-live to live (§6.3 step 6). */

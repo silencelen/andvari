@@ -47,6 +47,22 @@ import {
 } from "./itemhome";
 import { pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
+import {
+  decodeHeldKeys,
+  decodeIdSet,
+  decodeTokenSet,
+  decodeTombstones,
+  decodeVouches,
+  encodeHeldKeys,
+  encodeIdSet,
+  encodeTokenSet,
+  encodeTombstones,
+  encodeVouches,
+  loadRecord,
+  type HeldKey,
+  type Tombstone,
+  type Vouch,
+} from "./trustrecords";
 import { type CoHolder, type PersonalCandidate, type PersonalChange, type PersonalChoiceInfo, type PersonalVaultProposal, personalVaultChoices } from "./personalvault";
 import { type HeldVaultRecord, NullCache, type PullBatch, type QueuedPreEdit, type VaultCache } from "./idbcache";
 
@@ -153,7 +169,11 @@ export interface LifecycleNotice {
     // Root cause A §5.1 INV-HOME (A1b): the server sent an item under another vault than the one this device holds it
     // in (or a conflict row disagreeing about its vault); NOT applied. One per pull; vaultId = the first offending
     // row's vault, parkedCount = how many rows were refused; vaultName "".
-    | "wrong-vault";
+    | "wrong-vault"
+    // Security review 2026-10 plugin scan F1 (A10): the server sent rows whose ids are not UUIDs; they were dropped at
+    // the wire (api/wireids.ts). vaultId and vaultName are "" (no id of theirs is trusted), reason = the endpoint,
+    // parkedCount = how many ids were refused.
+    | "bad-id";
   /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
   purgeAt?: number;
   /** verified delete: N of the member's edits parked for replay on restore (F21).
@@ -294,15 +314,17 @@ export interface PersonalChangeDetails {
 }
 
 // Root cause A §8.2 (A6) client-state keys (per user, survive a reload). Core SyncEngine twins. The legacy vouches
-// are lines "vaultId|tag|kind" (tag = hex SHA-256 of the vouched key, kind = frozen | confirmed; A6 review HIGH-1).
+// are a trustrecords.ts `Vouch` JSON record (tag = hex SHA-256 of the vouched key, kind = frozen | confirmed; A6
+// review HIGH-1; A10: JSON with a strict decode, the pre-A10 `vaultId|tag|kind` lines migrate on first read).
 // The freeze marker lives in the durable cache itself (VaultCache.freezeDone, A6 review LOW-1).
 const LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized";
+/** grantIds of pending invitations the human declined (a trustrecords.ts token set). */
 const DECLINED_KEY = "grant.declined";
-/** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches (core twin). */
+/** Branch A7: the per-vault held-key memory, a trustrecords.ts `HeldKey` JSON record beside the vouches (core twin). */
 export const HELD_KEYS_KEY = "grant.held.keys";
-/** A6b review MEDIUM-1: vaults this browser first adopted a key for as a MEMBER (durable provenance). */
+/** A6b review MEDIUM-1: vaults this browser first adopted a key for as a MEMBER (durable provenance; an id set). */
 export const MEMBER_GRANTED_KEY = "grant.member.granted";
-/** A9 (M-3): `"<vaultId>|<userId>|<ms>"` lines, one per member THIS browser removed (durable client state). */
+/** A9 (M-3): one trustrecords.ts `Tombstone` per member THIS browser removed (durable client state). */
 export const ISSUED_TOMBSTONES_KEY = "grant.issued.tombstones";
 /** LifecycleNotice.reason on a `left` notice whose leave carried no proof (in-window, §8.6). Core `LEFT_UNPROVEN`. */
 export const LEFT_UNPROVEN = "unproven";
@@ -928,12 +950,23 @@ export class VaultStore {
 
   // ---- signed grants (security review 2026-10, root cause A §1.4–§1.6, §3.2, §8.2; branch A6; core twin) ----
 
-  private persistedSet(key: string): Set<string> {
-    return new Set((this.clientState.get(key) ?? "").split("\n").filter((x) => x.length > 0));
+  // ---- device-local trust records (security review 2026-10, plugin scan F2; branch A10; core twin) ----
+  // Every record is a trustrecords.ts JSON record with a strict decode; a pre-A10 line record migrates on first read.
+
+  private persistedHeldKeys(): HeldKey[] {
+    return loadRecord(HELD_KEYS_KEY, (k) => this.clientState.get(k), (k, v) => this.clientState.set(k, v), decodeHeldKeys, encodeHeldKeys);
   }
 
-  private persistSet(key: string, set: Set<string>): void {
-    this.clientState.set(key, set.size === 0 ? null : [...set].sort().join("\n"));
+  private persistHeldKeyRows(rows: HeldKey[]): void {
+    this.clientState.set(HELD_KEYS_KEY, encodeHeldKeys(rows));
+  }
+
+  private persistedMemberGranted(): Set<string> {
+    return new Set(loadRecord(MEMBER_GRANTED_KEY, (k) => this.clientState.get(k), (k, v) => this.clientState.set(k, v), decodeIdSet, encodeIdSet));
+  }
+
+  private persistedDeclined(): Set<string> {
+    return new Set(loadRecord(DECLINED_KEY, (k) => this.clientState.get(k), (k, v) => this.clientState.set(k, v), decodeTokenSet, encodeTokenSet));
   }
 
   /**
@@ -954,19 +987,15 @@ export class VaultStore {
     await this.cache.setFreezeDone();
   }
 
-  /** Persisted vouches: lines "vaultId|tag|kind". A line with no tag is ignored; no kind reads as "confirmed". */
-  private persistedVouches(): Map<string, { vaultId: string; tag: string; kind: LegacyVouchKind }> {
-    const out = new Map<string, { vaultId: string; tag: string; kind: LegacyVouchKind }>();
-    for (const line of this.persistedSet(LEGACY_AUTHORIZED_KEY)) {
-      const [vaultId, tag, kind] = line.split("|");
-      if (!vaultId || !tag || !/^[0-9a-f]{64}$/.test(tag)) continue;
-      out.set(vaultId, { vaultId, tag, kind: kind === "frozen" ? "frozen" : "confirmed" });
-    }
+  /** Persisted vouches (a `Vouch` JSON record, strict; a row with no tag is no vouch). */
+  private persistedVouches(): Map<string, Vouch> {
+    const out = new Map<string, Vouch>();
+    for (const v of loadRecord(LEGACY_AUTHORIZED_KEY, (k) => this.clientState.get(k), (k, val) => this.clientState.set(k, val), decodeVouches, encodeVouches)) out.set(v.vaultId, v);
     return out;
   }
 
-  private persistVouches(m: Map<string, { vaultId: string; tag: string; kind: LegacyVouchKind }>): void {
-    this.persistSet(LEGACY_AUTHORIZED_KEY, new Set([...m.values()].map((v) => `${v.vaultId}|${v.tag}|${v.kind}`)));
+  private persistVouches(m: Map<string, Vouch>): void {
+    this.clientState.set(LEGACY_AUTHORIZED_KEY, encodeVouches(m.values()));
   }
 
   /** Vouch for the key HELD for `vaultId` now (its tag is recorded, so no other key for the vault is covered). */
@@ -983,24 +1012,21 @@ export class VaultStore {
 
   /** Push the persisted held-key tags into the account (the durable record wins). */
   private loadHeldKeys(): void {
-    for (const line of this.persistedSet(HELD_KEYS_KEY)) {
-      const [vaultId, tag] = line.split("|");
-      if (vaultId && tag) this.account.rememberHeldKey(vaultId, tag);
-    }
+    for (const h of this.persistedHeldKeys()) this.account.rememberHeldKey(h.vaultId, h.tag);
   }
 
   /** Persist the tag of every vault the account adopted a key for and this device has no tag for yet. A recorded
    *  tag is never overwritten here; only hardDropLocal removes one, with the vault. */
   private persistHeldKeys(): void {
-    const persisted = this.persistedSet(HELD_KEYS_KEY);
-    const known = new Set([...persisted].map((l) => l.split("|")[0]));
+    const persisted = this.persistedHeldKeys();
+    const known = new Set(persisted.map((h) => h.vaultId));
     let changed = false;
     for (const [vaultId, tag] of this.account.heldKeyTagsSnapshot()) {
       if (known.has(vaultId)) continue;
-      persisted.add(`${vaultId}|${tag}`);
+      persisted.push({ vaultId, tag });
       changed = true;
     }
-    if (changed) this.persistSet(HELD_KEYS_KEY, persisted);
+    if (changed) this.persistHeldKeyRows(persisted);
     this.persistMemberGranted();
   }
 
@@ -1089,7 +1115,7 @@ export class VaultStore {
 
   /** Pending invitations the human has not declined. */
   pendingInvitations(): PendingInvitation[] {
-    const declined = this.persistedSet(DECLINED_KEY);
+    const declined = this.persistedDeclined();
     return this.account
       .pendingGrants()
       // A held LEGACY key with a pending v2 grant is listed too: verifying the sender upgrades it.
@@ -1146,9 +1172,9 @@ export class VaultStore {
 
   /** "Decline": hide `inv` on this browser (by grantId, so a re-issued grant asks again). */
   declineInvitation(inv: PendingInvitation): void {
-    const d = this.persistedSet(DECLINED_KEY);
+    const d = this.persistedDeclined();
     d.add(inv.grantIdB64);
-    this.persistSet(DECLINED_KEY, d);
+    this.clientState.set(DECLINED_KEY, encodeTokenSet(d));
   }
 
   /** §8.2 "Review your shared vaults": vaults readable only through an unconfirmed v1 seal. */
@@ -1230,7 +1256,7 @@ export class VaultStore {
 
   /** A6b review MEDIUM-1: this browser first adopted `vaultId`'s key as a MEMBER, now or in an earlier session. */
   receivedAsMember(vaultId: string): boolean {
-    return this.account.keyArrivedByMemberGrant(vaultId) || this.persistedSet(MEMBER_GRANTED_KEY).has(vaultId) ||
+    return this.account.keyArrivedByMemberGrant(vaultId) || this.persistedMemberGranted().has(vaultId) ||
       this.accountState.doc.memberReceived[vaultId] !== undefined;
   }
 
@@ -1240,21 +1266,21 @@ export class VaultStore {
    * served row is owner-shaped still asks for the transfer acknowledgement. Best effort; retried next sync.
    */
   private async flushMemberReceived(): Promise<void> {
-    const local = [...this.persistedSet(MEMBER_GRANTED_KEY)].filter((id) => this.accountState.doc.memberReceived[id] === undefined);
+    const local = [...this.persistedMemberGranted()].filter((id) => this.accountState.doc.memberReceived[id] === undefined);
     if (local.length === 0) return;
     const at = Date.now();
     await this.accountState.update((d) => withMemberReceived(d, local, at)).catch(() => {});
   }
 
   private persistMemberGranted(): void {
-    const persisted = this.persistedSet(MEMBER_GRANTED_KEY);
+    const persisted = this.persistedMemberGranted();
     let changed = false;
     for (const vaultId of this.vaultsById.keys()) {
       if (persisted.has(vaultId) || !this.account.keyArrivedByMemberGrant(vaultId)) continue;
       persisted.add(vaultId);
       changed = true;
     }
-    if (changed) this.persistSet(MEMBER_GRANTED_KEY, persisted);
+    if (changed) this.clientState.set(MEMBER_GRANTED_KEY, encodeIdSet(persisted));
   }
 
   private ownershipBasisOk(vaultId: string): boolean {
@@ -1403,17 +1429,18 @@ export class VaultStore {
   // ---- A9 (M-3): the removing browser's own durable tombstones ----
 
   /** The ms at which THIS browser removed `userId` from `vaultId` (durable client state), or null. */
+  private issuedTombstonesHere(): Tombstone[] {
+    return loadRecord(ISSUED_TOMBSTONES_KEY, (k) => this.clientState.get(k), (k, v) => this.clientState.set(k, v), decodeTombstones, encodeTombstones);
+  }
+
   private issuedTombstoneHere(vaultId: string, userId: string): number | null {
-    const ats = (this.clientState.get(ISSUED_TOMBSTONES_KEY) ?? "").split("\n").flatMap((line) => {
-      const parts = line.split("|");
-      return parts.length === 3 && parts[0] === vaultId && parts[1] === userId && Number.isSafeInteger(Number(parts[2])) ? [Number(parts[2])] : [];
-    });
+    const ats = this.issuedTombstonesHere().filter((t) => t.vaultId === vaultId && t.userId === userId).map((t) => t.at);
     return ats.length ? Math.max(...ats) : null;
   }
 
   private recordIssuedTombstoneHere(vaultId: string, userId: string, at: number): void {
-    const lines = (this.clientState.get(ISSUED_TOMBSTONES_KEY) ?? "").split("\n").filter((l) => l && !l.startsWith(`${vaultId}|${userId}|`));
-    this.clientState.set(ISSUED_TOMBSTONES_KEY, [...lines, `${vaultId}|${userId}|${at}`].sort().join("\n"));
+    const rows = this.issuedTombstonesHere().filter((t) => !(t.vaultId === vaultId && t.userId === userId));
+    this.clientState.set(ISSUED_TOMBSTONES_KEY, encodeTombstones([...rows, { vaultId, userId, at }]));
   }
 
   /** The owner tapped "Re-share <vault> with <member>" on `row` (rule a). Only a row this store offered in the current
@@ -1475,6 +1502,10 @@ export class VaultStore {
       } catch {
         return null;
       }
+    };
+    // A10: a served row with a malformed id was dropped at the wire (api/wireids.ts); say so once per pull.
+    this.api.onRefusedIds = (endpoint, refused) => {
+      this.pushNotice({ id: this.account.newItemId(), vaultId: "", vaultName: "", kind: "bad-id", parkedCount: refused.length, reason: endpoint });
     };
     for (const v of this.persistedVouches().values()) this.account.authorizeLegacyKey(v.vaultId, v.tag, v.kind);
     this.loadHeldKeys();
@@ -3001,9 +3032,9 @@ export class VaultStore {
       this.account.forgetKeyMemory(vaultId);
       const vouches = this.persistedVouches();
       if (vouches.delete(vaultId)) this.persistVouches(vouches);
-      const held = this.persistedSet(HELD_KEYS_KEY);
-      const keep = new Set([...held].filter((l) => !l.startsWith(`${vaultId}|`)));
-      if (keep.size !== held.size) this.persistSet(HELD_KEYS_KEY, keep);
+      const held = this.persistedHeldKeys();
+      const keep = held.filter((h) => h.vaultId !== vaultId);
+      if (keep.length !== held.length) this.persistHeldKeyRows(keep);
     }
     // The vault is no longer live on this device (§6.3 liveSince).
     this.liveSince.delete(vaultId);

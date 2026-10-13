@@ -296,3 +296,24 @@ test("H67/R39 — the mapper turns that terminal into `keys_damaged`, never a cr
   // The whole point of H67: a damaged row must never come back as the wrong-password sentence.
   assert.ok(!mapper.includes("bad_credentials"), "no credentials verdict may be reachable before the damaged-keys row");
 });
+
+// ---- security review 2026-10, plugin scan F1/F2 (branch A10): wire-boundary ids + strict storage records ----
+// The leaves (wireids.ts, trustrecords.ts) are behaviour-tested; these pins hold the CALL SITES, which a leaf test
+// cannot see (the H90 gap).
+
+test("A10: the worker's api client reports refused ids, and the api sanitises sync/members/keys/login at the wire", () => {
+  const api = readFileSync(new URL("./api.ts", import.meta.url), "utf-8");
+  assert.ok(bg.includes("a.onRefusedIds = (endpoint, refused) =>"), "makeApi wires onRefusedIds");
+  assert.ok(api.includes('this.reported("sync", sanitizeSync('), "sync() passes the wire-id check");
+  assert.ok(api.includes('this.reported("members", sanitizeMembers('), "vaultMembers() passes the wire-id check");
+  assert.ok(api.includes('this.reported("accountKeys", sanitizeAccountKeys('), "getAccountKeys() passes the wire-id check");
+  assert.ok(api.includes("const r = refusedSession(s);") && api.includes('"bad_wire_id"'), "login() refuses a malformed session id");
+});
+
+test("A10: every storage.local trust record is read through its strict decoder", () => {
+  assert.ok(bg.includes("const d = decodeItemHomes((await chrome.storage.local.get(k))[k]);"), "loadHomes decodes strictly");
+  assert.ok(bg.includes("[homesKey(userId)]: encodeItemHomes(homes)"), "saveHomes writes only well-formed pairs");
+  assert.ok(bg.includes("const d = decodePersonalWrap((await chrome.storage.local.get(key))[key]);"), "the personal-wrap cache decodes strictly");
+  assert.ok(bg.includes("const d = decodePersonalChange((await chrome.storage.local.get(k))[k]);"), "the pending change decodes strictly");
+  assert.ok(!/as PersonalWrapWire \| undefined/.test(bg) && !/as Record<string, string> \| undefined/.test(bg), "no raw cast reads a trust record any more");
+});

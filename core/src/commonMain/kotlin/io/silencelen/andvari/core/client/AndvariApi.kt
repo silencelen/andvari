@@ -76,6 +76,7 @@ import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import io.silencelen.andvari.core.model.WireIds
 import kotlinx.serialization.json.Json
 
 open class ApiException(val status: Int, val code: String, message: String) : Exception(message)
@@ -120,6 +121,24 @@ class AndvariApi(
 ) {
     private val clientHeader = "$platform/$ANDVARI_CLIENT_VERSION"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    /**
+     * Security review 2026-10 (plugin scan F1, branch A10): every server-supplied id is checked against the UUID
+     * grammar here, at the wire boundary ([WireIds]); a row with a malformed id is dropped before any caller sees it
+     * and reported here as `(endpoint, refusals)`. The engine surfaces it as a `bad-id` anomaly notice. A session or
+     * identity row with a malformed id is refused outright (`bad_wire_id`).
+     */
+    var onRefusedIds: (endpoint: String, refused: List<WireIds.Refusal>) -> Unit = { _, _ -> }
+
+    private fun <T> WireIds.Sanitized<T>.reported(endpoint: String): T {
+        if (refused.isNotEmpty()) onRefusedIds(endpoint, refused)
+        return value
+    }
+
+    private fun refuseWire(endpoint: String, r: WireIds.Refusal): Nothing {
+        onRefusedIds(endpoint, listOf(r))
+        throw ApiException(0, "bad_wire_id", "the server sent a malformed ${r.field} on $endpoint")
+    }
 
     private val http = engine.config {
         install(ContentNegotiation) { json(this@AndvariApi.json) }
@@ -282,7 +301,8 @@ class AndvariApi(
     }
 
     /** The identity key the server holds for [userId]: UNTRUSTED until a human verifies it. */
-    suspend fun userIdentity(userId: String): UserLookupResponse = call("GET", "/api/v1/users/${pathSeg(userId)}/identity")
+    suspend fun userIdentity(userId: String): UserLookupResponse =
+        call<UserLookupResponse>("GET", "/api/v1/users/${pathSeg(userId)}/identity").also { u -> WireIds.refusedUser(u)?.let { refuseWire("userIdentity", it) } }
 
     // ---- per-member self-service recovery (design 2026-07-12 §F.3 + 2026-07-13 piece-binding) ----
     // Shared surface for the native recovery screens + the vault-entry capture gate. Web keeps its own
@@ -339,7 +359,7 @@ class AndvariApi(
 
     /** Item undelete (feature): the caller's tombstoned items (grant-scoped server-side). */
     suspend fun deletedItems(): List<DeletedItem> =
-        call<DeletedItemsResponse>("GET", "/api/v1/items/deleted").items
+        WireIds.sanitizeDeletedItems(call<DeletedItemsResponse>("GET", "/api/v1/items/deleted").items).reported("deletedItems")
 
     /** Item undelete (feature): restore a tombstoned item from a re-encrypted version; returns the new rev. */
     suspend fun restoreItem(itemId: String, upload: ItemUpload): Long =
@@ -358,28 +378,27 @@ class AndvariApi(
         return p
     }
 
-    suspend fun register(req: RegisterRequest): SessionResponse {
-        val s: SessionResponse = call("POST", "/api/v1/auth/register", req, auth = false)
-        KdfUpgrade.requireServerKdfParams(s.accountKeys.kdfParams) // H1: fence BEFORE installing the session
-        setTokens(Tokens(s.accessToken, s.refreshToken))
-        return s
-    }
+    suspend fun register(req: RegisterRequest): SessionResponse = session("register", call("POST", "/api/v1/auth/register", req, auth = false))
 
-    suspend fun login(req: LoginRequest): SessionResponse {
-        val s: SessionResponse = call("POST", "/api/v1/auth/login", req, auth = false)
+    suspend fun login(req: LoginRequest): SessionResponse = session("login", call("POST", "/api/v1/auth/login", req, auth = false))
+
+    /** The two fences a served session passes BEFORE it is installed: the KDF floor (H1) and the id grammar (A10). */
+    private fun session(endpoint: String, s: SessionResponse): SessionResponse {
         KdfUpgrade.requireServerKdfParams(s.accountKeys.kdfParams) // H1: fence BEFORE installing the session
+        WireIds.refusedSession(s)?.let { refuseWire(endpoint, it) }
+        val keys = WireIds.sanitizeAccountKeys(s.accountKeys).reported(endpoint)
         setTokens(Tokens(s.accessToken, s.refreshToken))
-        return s
+        return if (keys === s.accountKeys) s else s.copy(accountKeys = keys)
     }
 
     suspend fun accountKeys(): AccountKeys {
         // H1 fence (spec 05 T1): re-unlock / KdfReKey / autofill all derive under these stored params.
         val k: AccountKeys = call("GET", "/api/v1/account/keys")
         KdfUpgrade.requireServerKdfParams(k.kdfParams)
-        return k
+        return WireIds.sanitizeAccountKeys(k).reported("accountKeys")
     }
 
-    suspend fun sync(since: Long): SyncResponse = call("GET", "/api/v1/sync?since=$since")
+    suspend fun sync(since: Long): SyncResponse = WireIds.sanitizeSync(call("GET", "/api/v1/sync?since=$since")).reported("sync")
 
     suspend fun push(req: PushRequest): PushResponse = call("POST", "/api/v1/sync/push", req)
 
@@ -387,9 +406,11 @@ class AndvariApi(
 
     suspend fun createVault(req: CreateVaultRequest): CreateVaultResponse = call("POST", "/api/v1/vaults", req)
 
-    suspend fun lookupUser(email: String): UserLookupResponse = call("POST", "/api/v1/users/lookup", UserLookupRequest(email))
+    suspend fun lookupUser(email: String): UserLookupResponse =
+        call<UserLookupResponse>("POST", "/api/v1/users/lookup", UserLookupRequest(email)).also { u -> WireIds.refusedUser(u)?.let { refuseWire("lookupUser", it) } }
 
-    suspend fun vaultMembers(vaultId: String): List<VaultMemberSummary> = call("GET", "/api/v1/vaults/${pathSeg(vaultId)}/members")
+    suspend fun vaultMembers(vaultId: String): List<VaultMemberSummary> =
+        WireIds.sanitizeMembers(call("GET", "/api/v1/vaults/${pathSeg(vaultId)}/members")).reported("members")
 
     suspend fun addVaultMember(vaultId: String, req: VaultMemberAdd): CreateVaultResponse =
         call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/members", req)
@@ -426,7 +447,7 @@ class AndvariApi(
     suspend fun restoreVault(vaultId: String, req: VaultRestoreRequest): CreateVaultResponse =
         call("POST", "/api/v1/vaults/${pathSeg(vaultId)}/restore", req)
 
-    suspend fun deletedVaults(): List<DeletedVaultSummary> = call("GET", "/api/v1/vaults/deleted")
+    suspend fun deletedVaults(): List<DeletedVaultSummary> = WireIds.sanitizeDeletedVaults(call("GET", "/api/v1/vaults/deleted")).reported("deletedVaults")
 
     /** [proof] is the v2 leave proof (root cause A §6.2, branch A7), minted by [SyncEngine.leaveSharedVault]; the
      *  `null` default (empty body) is the pre-A7 shape the server still accepts in the compatibility window. */

@@ -119,6 +119,18 @@ export function newRemovalNonce(): string {
   return toB64(randomBytes(16));
 }
 
+/**
+ * The grammar a v1 (legacy) removal nonce must have to be VERIFIED at all (A10 review LOW-1): the token grammar the
+ * consumed record stores (trustrecords.ts ConsumedNonceRow, `[A-Za-z0-9_-]{1,128}`). Pre-A7 clients minted a UUID,
+ * the vectors carry base64url too; both fit. A nonce the consumed record could not represent would be verified but
+ * never consumed, and so replay on that browser — it is refused before any MAC instead. Core `isLegacyNonce` twin.
+ */
+export const LEGACY_NONCE_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+export function isLegacyNonce(nonce: string): boolean {
+  return LEGACY_NONCE_RE.test(nonce);
+}
+
 /** True for a well-formed v2 nonce: base64url that decodes to exactly 16 bytes and re-encodes to itself. */
 export function isV2Nonce(nonce: string): boolean {
   try {
@@ -175,6 +187,8 @@ export async function decideRemoval(input: {
       return (proof ?? null) === null && (nonce ?? null) === null ? { verdict: "left_unproven", step: "legacy" } : { verdict: "anomaly", step: "fields" };
     }
     if (!proof || !nonce) return { verdict: "anomaly", step: "fields" };
+    // A10 review LOW-1: a nonce the consumed record cannot hold is never verified (it could not be consumed).
+    if (!isLegacyNonce(nonce)) return { verdict: "anomaly", step: "fields" };
     let expected: string;
     try {
       expected = await removeProof(key, vaultId, myUserId, nonce);

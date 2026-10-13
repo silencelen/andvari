@@ -74,7 +74,20 @@ across password changes.
 **Retention (migration safety).** When `PUT /escrow/self` replaces a member's blob the server keeps
 the PREVIOUS one (`escrow_legacy`, the oldest undrilled one wins) until a fleet drill passes on the new
 one (§4 drill hook). A defective new seal therefore cannot strand a member: the admin download still
-carries the retained blob (`legacySealed`), and `recover --legacy` opens it.
+carries the retained blob (`legacySealed`), and `recover --legacy` opens it. **Only a blob sealed to the
+CURRENT org key is ever retained or served** (security review 2026-10, plugin scan F4): the replaced blob
+is kept only when its `fingerprint` equals the instance's `ANDVARI_RECOVERY_FINGERPRINT` (the same-key
+v1 → v2 migration); a blob sealed to a retired key — the re-seal after a T9 re-ceremony — is deleted as
+before, since keeping it would hand the stolen sheet's holder every re-sealed member's UVK until a
+drill happened to run. An org-key rotation is a config change, so at every start the server purges
+each `escrow_legacy` row whose fingerprint is not the current one (one audit row `escrow_legacy_purged`
+per account), and the admin download joins `escrow_legacy` on the current fingerprint, so a row an older
+build left behind, or a database restored across a rotation, is never served even before that purge.
+Because that purge keys on the configured string, the server checks at load that
+`ANDVARI_RECOVERY_FINGERPRINT` is the SHA-256 of `ANDVARI_RECOVERY_PUBKEY` (§1) and REFUSES TO START
+otherwise (A10 review LOW-2): a typo'd fingerprint would refuse every member's re-seal and purge every
+retained blob under the real key. An instance with no key or no fingerprint is unconfigured, not
+mismatched, and starts with the escrow routes off and the purge a no-op.
 
 ## 4. Ceremony & flows (normative steps; an instance's own operator runbook wraps them)
 
@@ -168,7 +181,9 @@ the new fingerprint as the re-seal target).
 **Drill hook.** `verify` prints a receipt `{"passed":[{"userId","sealedSha256"}]}` (hex SHA-256 of
 each passed blob; nothing secret). The admin posts it via `POST /admin/escrow/drill` (web admin
 panel: "Record a fleet drill"); the server drops `escrow_legacy` only for accounts whose CURRENT blob
-hashes to the drilled one, keeps it otherwise, and audits each drop `escrow_legacy_dropped`.
+hashes to the drilled one, keeps it otherwise, and audits each drop `escrow_legacy_dropped`. The drill
+hook is the only thing that drops a retained blob under the current key; a restart under the same key
+purges nothing (§3 retention).
 
 **v1 → v2 migration (§8.4 of the security review design).** New enrolments seal v2. An existing member,
 on the next FULL-PASSWORD unlock, sees `escrowNeedsV2` in `AccountKeys` (a server hint: the stored blob

@@ -1,4 +1,4 @@
-import type { PasswordChangeRequest } from "../api/types";
+import type { AccountKeys, PasswordChangeRequest } from "../api/types";
 import { KDF_MAX_MEM_BYTES, KDF_MAX_OPS, KDF_MIN_MEM_BYTES, KDF_MIN_OPS, type KdfParams } from "../crypto/keys";
 import { Account } from "./account";
 
@@ -48,12 +48,18 @@ interface KdfUpgradeClient {
   changePassword(req: PasswordChangeRequest): Promise<unknown>;
 }
 interface KdfUpgradeAccount {
-  /** A9 (M-1): the one fenced in-session derivation (KDF fence + the session's salt) for the CURRENT password's proof. */
-  reauthAuthKey(password: string, keys: { kdfSalt: string; kdfParams: KdfParams }): Promise<string>;
-  buildPasswordChange(
+  /**
+   * A9 (M-1): the one fenced in-session derivation (KDF fence + the session's salt) for the CURRENT password's proof.
+   * Security review 2026-10 plugin scan F3 (A10): the proof OPENS the served `wrappedUvk` to this session's UVK, so the
+   * keys object must carry it — declared as a function PROPERTY with the real `Account.reauthAuthKey` parameter type,
+   * so TypeScript checks it contravariantly (a method signature is bivariant and hid the missing field, which made the
+   * call throw inside the catch-all and the upgrade silently never run).
+   */
+  reauthAuthKey: (password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams" | "wrappedUvk">) => Promise<string>;
+  buildPasswordChange: (
     newPassword: string,
     params: KdfParams,
-  ): Promise<{ newKdfSalt: string; newKdfParams: KdfParams; newAuthKey: string; newWrappedUvk: string }>;
+  ) => Promise<{ newKdfSalt: string; newKdfParams: KdfParams; newAuthKey: string; newWrappedUvk: string }>;
 }
 
 export interface KdfUpgradeInputs {
@@ -61,9 +67,11 @@ export interface KdfUpgradeInputs {
   account: KdfUpgradeAccount;
   /** The master password the caller just verified this unlock — re-derived under the new params. */
   password: string;
-  /** The account's CURRENT server salt/params (the same accountKeys/prelogin values this unlock used). */
+  /** The account's CURRENT server salt/params/wrap (the same accountKeys values this unlock used). The wrap is what
+   *  the reauth proof opens (F3): without it the proof cannot run and no re-key ever happens. */
   currentKdfSalt: string;
   currentKdfParams: KdfParams;
+  currentWrappedUvk: string;
   /** The LIVE-fetched org policy's target params — never a stale/persisted value (App.loadPolicy). */
   policyKdfParams: KdfParams;
   /** A5: an admin recovery left a temporary password live — never silently re-key it (Android parity). */
@@ -100,7 +108,11 @@ export async function maybeKdfUpgrade(inputs: KdfUpgradeInputs): Promise<void> {
     // like a user-initiated change) — derived from the CURRENT salt/params the login already used.
     // A9 (M-1): through the one fenced in-session derivation (the unlock KDF fence, and only the salt this session
     // unlocked with); a stale session derives nothing and the re-key simply waits for the next unlock.
-    const currentAuthKey = await inputs.account.reauthAuthKey(inputs.password, { kdfSalt: inputs.currentKdfSalt, kdfParams: inputs.currentKdfParams });
+    const currentAuthKey = await inputs.account.reauthAuthKey(inputs.password, {
+      kdfSalt: inputs.currentKdfSalt,
+      kdfParams: inputs.currentKdfParams,
+      wrappedUvk: inputs.currentWrappedUvk,
+    });
     const change = await inputs.account.buildPasswordChange(inputs.password, inputs.policyKdfParams);
     await inputs.client.changePassword({ currentAuthKey, ...change });
     // CR-07: replace the cached accountKeys with the post-upgrade wrappedUvk/params so an offline

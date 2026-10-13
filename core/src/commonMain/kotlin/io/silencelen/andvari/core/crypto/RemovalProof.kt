@@ -112,6 +112,8 @@ object RemovalProof {
             return if (proof == null && nonce == null) Decision(Verdict.LEFT_UNPROVEN, "legacy") else Decision(Verdict.ANOMALY, "fields")
         }
         if (proof.isNullOrEmpty() || nonce.isNullOrEmpty()) return Decision(Verdict.ANOMALY, "fields")
+        // A10 review LOW-1: a nonce the consumed record cannot hold is never verified (it could not be consumed).
+        if (!LifecycleProof.isLegacyNonce(nonce)) return Decision(Verdict.ANOMALY, "fields")
         val expected = runCatching { LifecycleProof.remove(crypto, lifecycleKey, vaultId, myUserId, nonce) }.getOrNull()
             ?: return Decision(Verdict.ANOMALY, "mac")
         if (!LifecycleProof.verify(expected, proof)) return Decision(Verdict.ANOMALY, "mac")

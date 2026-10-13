@@ -539,7 +539,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       // when already current or must-change. LIVE policy only (App.loadPolicy) — never a stale value.
       // CR-07: on a successful silent re-key, replace the durable cache's accountKeys (mirrors the
       // user-initiated Settings change at Settings.tsx) — else the pre-upgrade wrap lingers offline.
-      if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword, onUpgraded: () => refreshCachedAccountKeys(client, account.userId) });
+      if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, currentWrappedUvk: s.accountKeys.wrappedUvk, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword, onUpgraded: () => refreshCachedAccountKeys(client, account.userId) });
       onReady(account, store, meta);
     } catch (e) {
       if (e instanceof ApiError && e.code === "totp_required") {

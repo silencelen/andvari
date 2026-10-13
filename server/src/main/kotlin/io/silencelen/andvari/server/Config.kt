@@ -134,6 +134,21 @@ class Config(
 
     val escrowConfigured: Boolean get() = recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()
 
+    init {
+        // A10 review LOW-2 (security review 2026-10): the configured fingerprint is what `PUT /escrow/self` accepts
+        // and what the startup purge of retired `escrow_legacy` rows keys on (App.purgeRetiredEscrowLegacy). It is
+        // the key's own SHA-256 (spec 04 §1) and nothing else: a typo'd ANDVARI_RECOVERY_FINGERPRINT would refuse
+        // every member's re-seal AND purge every retained blob under the real key, irreversibly — so a mismatch
+        // refuses to start. An unconfigured instance (no key, or no fingerprint) is not checked (escrowConfigured
+        // is false, the escrow routes answer 503, the purge is a no-op).
+        if (recoveryPublicKey.size == 32 && recoveryFingerprint.isNotEmpty()) {
+            val own = Bytes.toHexLower(ServerCrypto.sha256(recoveryPublicKey))
+            if (recoveryFingerprint != own) {
+                error("ANDVARI_RECOVERY_FINGERPRINT is not the SHA-256 of ANDVARI_RECOVERY_PUBKEY (expected $own) — refusing to start: a wrong fingerprint would refuse every escrow re-seal and purge the retained blobs under the real key")
+            }
+        }
+    }
+
     /**
      * [trustedProxyCidrs] parsed ONCE (H14) — the trust gate is on the hottest request path and
      * must not re-parse strings per call. Malformed entries are dropped rather than thrown on:

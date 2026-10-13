@@ -61,7 +61,7 @@ class SyncEngineLiveItemIdsTest {
                 // (fail-closed) — exactly the "N items need an app update" row on an older build.
                 envelope(newerFvId, personal, fv = 99, blob = sealed),
                 // A vault this device holds no key for (an unarrived grant): persisted, unreadable.
-                envelope(unheldId, "vault-we-do-not-hold", fv = 1, blob = "opaque"),
+                envelope(unheldId, "7a7a7a7a-0000-4000-8000-0000000000aa", fv = 1, blob = "opaque"), // A10: a well-formed id
                 envelope(goneId, personal, fv = 1, blob = null, deleted = true),
             ),
             removedGrants = emptyList(),

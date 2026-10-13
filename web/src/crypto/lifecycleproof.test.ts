@@ -100,6 +100,32 @@ describe("lifecycle-proof vectors", () => {
     }
   });
 
+  // A10 review LOW-1: an in-window v1 nonce the consumed record cannot represent (outside the token grammar) used to
+  // be VERIFIED but never consumed, so it replayed on that device. It is now the `fields` anomaly, before any MAC.
+  // Core twin: LegacyNonceGrammarTest.
+  it("a v1 nonce outside the token grammar is the fields anomaly and consumes nothing", async () => {
+    const key = await lifecycleKey(fromB64(v.vk));
+    const t = v.verdicts;
+    const decide = async (nonce: string) =>
+      decideRemoval({
+        lifecycleKey: key, vaultId: t.vaultId, myUserId: t.myUserId, reason: "removed", proofV: null,
+        proof: await removeProof(key, t.vaultId, t.myUserId, nonce), nonce, issuedAt: null,
+        consumed: new Set(), consumedAccount: new Set(), liveSince: null, now: 1_760_000_000_000,
+      });
+    for (const bad of ["a b", `AAECAwQFBgcICQoLDA0ODw\n${t.vaultId}`, " ", "nonce\t1", "x".repeat(129), "AAEC+AwQ/Bg="]) {
+      const d = await decide(bad);
+      expect(d.verdict, JSON.stringify(bad)).toBe("anomaly");
+      expect(d.step).toBe("fields");
+      expect(d.consume).toBeUndefined();
+    }
+    // Pre-A7 clients minted a UUID; the vectors also carry base64url nonces. Both are token-shaped and still verify.
+    for (const ok of ["5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60", "AAECAwQFBgcICQoLDA0ODw"]) {
+      const d = await decide(ok);
+      expect(d.verdict, ok).toBe("valid_legacy");
+      expect(d.consume?.[0]).toBe(ok);
+    }
+  });
+
   it("verify rejects tamper and garbage without throwing", () => {
     const a = (v.cases[0] as { proof: string }).proof;
     expect(verifyProof(a, a.slice(0, -1) + (a.slice(-1) === "A" ? "B" : "A"))).toBe(false);
