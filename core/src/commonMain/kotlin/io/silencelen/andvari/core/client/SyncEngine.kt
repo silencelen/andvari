@@ -67,7 +67,10 @@ data class LifecycleNotice(
      *  present and does not open (no seal fallback; the vault stays keyless).
      *  `wrong-vault` (root cause A §5.1 INV-HOME, branch A1b): the server sent an item under another vault than the
      *  one this device holds it in (or a conflict row that disagrees about its vault); the row was NOT applied. One
-     *  per pull; [vaultId] is the first offending row's vault and [parkedCount] how many rows were refused. */
+     *  per pull; [vaultId] is the first offending row's vault and [parkedCount] how many rows were refused.
+     *  `bad-id` (security review 2026-10 plugin scan F1, A10): the server sent rows whose ids are not UUIDs; they were
+     *  dropped at the wire. [vaultId] and [vaultName] are "" (no id of theirs is trusted), [reason] the endpoint,
+     *  [parkedCount] how many ids were refused. */
     val kind: String,
     /** verified delete: the server-erase deadline (for the "kept sealed until…" line). */
     val purgeAt: Long? = null,
@@ -293,12 +296,13 @@ class SyncEngine(
         const val VAULT_NAME_FALLBACK = "(vault)"
 
         // Root cause A §8.2 (branch A6), in the cache's client state (which survives a resync).
-        /** v1-only vault keys this device vouches for, as `vaultId|sha256(VK)|frozen|confirmed` lines (pre-upgrade
-         *  evidence, or the human's Accept): the vouch covers that exact key, not whatever the server serves next. */
+        /** v1-only vault keys this device vouches for (pre-upgrade evidence, or the human's Accept): the vouch covers
+         *  that exact key, not whatever the server serves next. A [TrustRecords.Vouch] JSON record (A10; the pre-A10
+         *  `vaultId|tag|kind` lines migrate on first read). */
         internal const val LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized"
         /** Set once the §8.2 freeze ran (or was ruled out) on this cache: later v1 grants are never frozen. */
         internal const val FREEZE_DONE_KEY = "grant.freeze.done"
-        /** grantIds of pending invitations the human declined. */
+        /** grantIds of pending invitations the human declined ([TrustRecords] token set). */
         internal const val DECLINED_KEY = "grant.declined"
         /** [LifecycleNotice.reason] on a `left` notice whose leave carried no proof (in-window, §8.6): the copy adds
          *  "Didn't do this? Tell your admin". */
@@ -311,13 +315,14 @@ class SyncEngine(
         const val ALREADY_RECORDED = "already-recorded"
         /** [LifecycleNotice.reason] on a `removed` notice attributed by a v1 (legacy) proof, in-window (A7 review LOW-3). */
         const val REMOVED_LEGACY = "legacy"
-        /** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches. */
+        /** Branch A7: the per-vault held-key memory, a [TrustRecords.HeldKey] JSON record beside the vouches (A10). */
         internal const val HELD_KEYS_KEY = "grant.held.keys"
 
-        /** A6b review MEDIUM-1: vaults this device first adopted a key for as a MEMBER (durable provenance). */
+        /** A6b review MEDIUM-1: vaults this device first adopted a key for as a MEMBER (durable provenance; a
+         *  [TrustRecords] id set). */
         internal const val MEMBER_GRANTED_KEY = "grant.member.granted"
 
-        /** A9 (M-3): `"<vaultId>|<userId>|<ms>"` lines, one per member THIS device removed (durable device state). */
+        /** A9 (M-3): one [TrustRecords.Tombstone] per member THIS device removed (durable device state). */
         internal const val ISSUED_TOMBSTONES_KEY = "grant.issued.tombstones"
     }
 
@@ -584,31 +589,48 @@ class SyncEngine(
                 runCatching { GrantPin(Bytes.fromB64(c.identityPub), accountState.isCurrent(c)) }.getOrNull()
             }
         }
-        for (entry in persistedSet(LEGACY_AUTHORIZED_KEY)) {
-            val parts = entry.split('|')
-            val tag = parts.getOrNull(1) ?: continue // bound to the exact key vouched for; no tag, no vouch
-            account.authorizeLegacyKey(parts[0], tag, frozen = parts.getOrNull(2) == "frozen")
+        // A10: a served row with a malformed id was dropped at the wire ([WireIds]); say so once per pull.
+        api.onRefusedIds = { endpoint, refused ->
+            pushNotice(LifecycleNotice(account.newItemId(), "", "", "bad-id", parkedCount = refused.size, reason = endpoint))
         }
+        // The vouches are bound to the exact key vouched for: a row with no tag is no vouch (the strict decode has none).
+        for (v in persistedVouches()) account.authorizeLegacyKey(v.vaultId, v.tag, frozen = v.kind == "frozen")
         loadHeldKeys()
     }
+
+    // ---- device-local trust records (security review 2026-10, plugin scan F1; branch A10) ----
+    // Every record is a [TrustRecords] JSON record with a strict decode; a pre-A10 line record migrates on first read.
+
+    private fun persistedVouches(): List<TrustRecords.Vouch> =
+        TrustRecords.load(LEGACY_AUTHORIZED_KEY, cache::clientState, cache::setClientState, TrustRecords::decodeVouches, TrustRecords::encodeVouches)
+
+    private fun persistVouches(rows: List<TrustRecords.Vouch>) = cache.setClientState(LEGACY_AUTHORIZED_KEY, TrustRecords.encodeVouches(rows))
+
+    private fun persistedHeldKeys(): List<TrustRecords.HeldKey> =
+        TrustRecords.load(HELD_KEYS_KEY, cache::clientState, cache::setClientState, TrustRecords::decodeHeldKeys, TrustRecords::encodeHeldKeys)
+
+    private fun persistHeldKeyRows(rows: List<TrustRecords.HeldKey>) = cache.setClientState(HELD_KEYS_KEY, TrustRecords.encodeHeldKeys(rows))
+
+    private fun persistedMemberGranted(): Set<String> =
+        TrustRecords.load(MEMBER_GRANTED_KEY, cache::clientState, cache::setClientState, TrustRecords::decodeIdSet, TrustRecords::encodeIdSet).toSet()
+
+    private fun persistedDeclined(): Set<String> =
+        TrustRecords.load(DECLINED_KEY, cache::clientState, cache::setClientState, TrustRecords::decodeTokenSet, TrustRecords::encodeTokenSet).toSet()
 
     // ---- per-vault held-key memory (security review 2026-10, root cause A, branch A7; R15(g)) ----
 
     /** Push the persisted held-key tags into the account (the durable record wins). */
     private fun loadHeldKeys() {
-        for (entry in persistedSet(HELD_KEYS_KEY)) {
-            val parts = entry.split('|')
-            if (parts.size == 2) account.rememberHeldKey(parts[0], parts[1])
-        }
+        for (h in persistedHeldKeys()) account.rememberHeldKey(h.vaultId, h.tag)
     }
 
     /** Persist the tag of every vault the account adopted a key for and this device has no tag for yet. A recorded
      *  tag is never overwritten here; only [hardDropLocal] removes one, with the vault. */
     private fun persistHeldKeys() {
-        val persisted = persistedSet(HELD_KEYS_KEY)
-        val known = persisted.mapTo(HashSet()) { it.substringBefore('|') }
-        val added = account.heldKeyTagsSnapshot().filterKeys { it !in known }.map { (v, t) -> "$v|$t" }
-        if (added.isNotEmpty()) persistSet(HELD_KEYS_KEY, persisted + added)
+        val persisted = persistedHeldKeys()
+        val known = persisted.mapTo(HashSet()) { it.vaultId }
+        val added = account.heldKeyTagsSnapshot().filterKeys { it !in known }.map { (v, t) -> TrustRecords.HeldKey(v, t) }
+        if (added.isNotEmpty()) persistHeldKeyRows(persisted + added)
         persistMemberGranted()
     }
 
@@ -898,13 +920,6 @@ class SyncEngine(
 
     // ---- signed grants (security review 2026-10, root cause A §1.4–§1.6, §3.2, §8.2; branch A6) ----
 
-    private fun persistedSet(key: String): Set<String> =
-        cache.clientState(key)?.split('\n')?.filter { it.isNotEmpty() }?.toSet() ?: emptySet()
-
-    private fun persistSet(key: String, set: Set<String>) {
-        cache.setClientState(key, if (set.isEmpty()) null else set.sorted().joinToString("\n"))
-    }
-
     /**
      * §8.2 step 3, once per cache: a v1-only key is FROZEN (self-wrapped silently) when this cache already held
      * the vault's grant row AND an item that decrypted under it before this release ran here. The server would
@@ -926,8 +941,8 @@ class SyncEngine(
     /** Persist and apply a §8.2 vouch for the key [vaultId] holds NOW (bound to that key's tag). */
     private fun vouchLegacy(vaultId: String, frozen: Boolean) {
         val tag = account.legacyKeyTag(vaultId) ?: return
-        val others = persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }
-        persistSet(LEGACY_AUTHORIZED_KEY, (others + "$vaultId|$tag|${if (frozen) "frozen" else "confirmed"}").toSet())
+        val others = persistedVouches().filterNot { it.vaultId == vaultId }
+        persistVouches(others + TrustRecords.Vouch(vaultId, tag, if (frozen) "frozen" else "confirmed"))
         account.authorizeLegacyKey(vaultId, tag, frozen)
     }
 
@@ -975,7 +990,7 @@ class SyncEngine(
 
     /** Pending invitations the human has not declined. */
     fun pendingInvitations(): List<PendingInvitation> {
-        val declined = persistedSet(DECLINED_KEY)
+        val declined = persistedDeclined()
         // A vault held only through an unvouched legacy seal whose row now carries a pending v2 grant is listed
         // too: verifying the sender confirms the key (it is off the review card, A6 review LOW-2).
         return account.pendingGrants().filter {
@@ -1017,7 +1032,7 @@ class SyncEngine(
 
     /** "Decline": hide [inv] on this device (by grantId, so a re-issued grant asks again). */
     fun declineInvitation(inv: PendingInvitation) {
-        persistSet(DECLINED_KEY, persistedSet(DECLINED_KEY) + inv.grantIdB64)
+        cache.setClientState(DECLINED_KEY, TrustRecords.encodeTokenSet(persistedDeclined() + inv.grantIdB64))
     }
 
     /** §8.2 "Review your shared vaults": the vaults readable only through an unconfirmed v1 seal. */
@@ -1106,13 +1121,13 @@ class SyncEngine(
     /** A6b review MEDIUM-1: this device first adopted [vaultId]'s key as a MEMBER (a seal, a v2 grant, a non-owner
      *  row), now or in an earlier session (the durable record; the in-memory bit is rebuilt from served rows). */
     fun receivedAsMember(vaultId: String): Boolean =
-        account.keyArrivedByMemberGrant(vaultId) || vaultId in persistedSet(MEMBER_GRANTED_KEY) ||
+        account.keyArrivedByMemberGrant(vaultId) || vaultId in persistedMemberGranted() ||
             accountState.doc.receivedAsMember(vaultId)
 
     private fun persistMemberGranted() {
-        val persisted = persistedSet(MEMBER_GRANTED_KEY)
+        val persisted = persistedMemberGranted()
         val added = cache.vaults().map { it.vaultId }.filter { it !in persisted && account.keyArrivedByMemberGrant(it) }
-        if (added.isNotEmpty()) persistSet(MEMBER_GRANTED_KEY, persisted + added)
+        if (added.isNotEmpty()) cache.setClientState(MEMBER_GRANTED_KEY, TrustRecords.encodeIdSet(persisted + added))
     }
 
     /**
@@ -1121,7 +1136,7 @@ class SyncEngine(
      * owner-shaped still asks for the transfer acknowledgement. Best effort: a failed write is retried next sync.
      */
     private suspend fun flushMemberReceived() {
-        val local = persistedSet(MEMBER_GRANTED_KEY).filter { !accountState.doc.receivedAsMember(it) }
+        val local = persistedMemberGranted().filter { !accountState.doc.receivedAsMember(it) }
         if (local.isEmpty()) return
         val at = nowMs()
         runCatching { accountState.update { d -> AccountState.withMemberReceived(d, local, at) } }
@@ -1267,16 +1282,15 @@ class SyncEngine(
     // ---- A9 (M-3): the removing device's own durable tombstones ----
 
     /** The ms at which THIS device removed [userId] from [vaultId] (durable device state), or null. */
+    private fun issuedTombstonesHere(): List<TrustRecords.Tombstone> =
+        TrustRecords.load(ISSUED_TOMBSTONES_KEY, ::personalGet, ::personalSet, TrustRecords::decodeTombstones, TrustRecords::encodeTombstones)
+
     private fun issuedTombstoneHere(vaultId: String, userId: String): Long? =
-        personalGet(ISSUED_TOMBSTONES_KEY)?.split('\n')?.mapNotNull { line ->
-            val parts = line.split('|')
-            if (parts.size == 3 && parts[0] == vaultId && parts[1] == userId) parts[2].toLongOrNull() else null
-        }?.maxOrNull()
+        issuedTombstonesHere().filter { it.vaultId == vaultId && it.userId == userId }.maxOfOrNull { it.at }
 
     private fun recordIssuedTombstoneHere(vaultId: String, userId: String, at: Long) {
-        val lines = personalGet(ISSUED_TOMBSTONES_KEY)?.split('\n')?.filter { it.isNotEmpty() }.orEmpty()
-            .filterNot { it.startsWith("$vaultId|$userId|") }
-        personalSet(ISSUED_TOMBSTONES_KEY, (lines + "$vaultId|$userId|$at").sorted().joinToString("\n"))
+        val rows = issuedTombstonesHere().filterNot { it.vaultId == vaultId && it.userId == userId }
+        personalSet(ISSUED_TOMBSTONES_KEY, TrustRecords.encodeTombstones(rows + TrustRecords.Tombstone(vaultId, userId, at)))
     }
 
     /** The rows the last [loadLegacyGrants] for [vaultId] returned (empty until one ran). */
@@ -1988,8 +2002,8 @@ class SyncEngine(
         cache.setLiveSince(vaultId, null)
         if (forgetKeyMemory) {
             account.forgetKeyMemory(vaultId)
-            persistSet(LEGACY_AUTHORIZED_KEY, persistedSet(LEGACY_AUTHORIZED_KEY).filterNot { it.startsWith("$vaultId|") }.toSet())
-            persistSet(HELD_KEYS_KEY, persistedSet(HELD_KEYS_KEY).filterNot { it.startsWith("$vaultId|") }.toSet())
+            persistVouches(persistedVouches().filterNot { it.vaultId == vaultId })
+            persistHeldKeyRows(persistedHeldKeys().filterNot { it.vaultId == vaultId })
         }
     }
 
