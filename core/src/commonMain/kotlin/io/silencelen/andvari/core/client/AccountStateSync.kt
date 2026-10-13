@@ -44,9 +44,12 @@ class AccountStateSync(
 
     private var serverSeq: Long = 0
 
-    private fun highWater(): Long = local.clientState(hwKey)?.toLongOrNull() ?: 0L
+    // A6b: the high-water mark and the sealed local copy live in the durable device state when the host has one (the
+    // same store as pins.confirmed), so the issued-grants and owned-vaults records, and the rollback check, survive
+    // a restart on a host whose cache is memory-only. Both are a public counter or a UVK-sealed blob.
+    private fun highWater(): Long = store(hwKey)?.toLongOrNull() ?: 0L
 
-    private fun loadLocal(): AccountStateDoc? = local.clientState(copyKey)?.let { sealed ->
+    private fun loadLocal(): AccountStateDoc? = store(copyKey)?.let { sealed ->
         runCatching { account.openAccountState(sealed) }.getOrNull()
     }
 
@@ -117,7 +120,7 @@ class AccountStateSync(
             }
             // Root cause A §6.2 (branch A7): this device's consumed removal nonces merge into account state at the next
             // flush. The merge is a union that never drops a local entry, so served state can never shrink the set.
-            val baseDoc = loadLocal() ?: doc.takeIf { it.seq > 0 || it.contacts.isNotEmpty() || it.consumedNonces.isNotEmpty() }
+            val baseDoc = loadLocal() ?: doc.takeIf { it.seq > 0 || !it.isBlank() }
             val deviceNonces = local.consumedNonces()
             val localDoc = if (deviceNonces.isEmpty()) baseDoc else AccountState.withConsumed(baseDoc ?: AccountState.empty(account.userId), deviceNonces)
             val hw = highWater()
@@ -133,9 +136,7 @@ class AccountStateSync(
                 adopt(merged.doc, resp.sealedState)
                 return doc
             }
-            if (served == null && localDoc == null && merged.doc.contacts.isEmpty() && merged.doc.consumedNonces.isEmpty() &&
-                merged.doc.orgRecoveryFp == null
-            ) {
+            if (served == null && localDoc == null && merged.doc.isBlank()) {
                 // Nothing to say yet: do not create an empty blob just to have one (§8.2 step 1 creates
                 // it lazily, on the first pin).
                 doc = merged.doc
@@ -163,10 +164,29 @@ class AccountStateSync(
 
     private fun adopt(next: AccountStateDoc, sealed: String?) {
         doc = next
-        if (next.seq > highWater()) local.setClientState(hwKey, next.seq.toString())
+        if (next.seq > highWater()) storeSet(hwKey, next.seq.toString())
         val copy = sealed ?: runCatching { account.sealAccountState(next) }.getOrNull()
-        if (copy != null) local.setClientState(copyKey, copy)
+        if (copy != null) storeSet(copyKey, copy)
     }
+
+    /**
+     * Apply [change] to this account's own state (A6b: the issued-grants and owned-vaults records). LOCAL FIRST: the
+     * change is adopted and sealed into this device's copy at once, so it is in force here even if the write below
+     * fails; the next [refresh] merges it with the served copy and writes it back. Throws only when a newer client
+     * owns the format ([readOnly]).
+     */
+    suspend fun update(change: (AccountStateDoc) -> AccountStateDoc) {
+        if (readOnly) throw IllegalStateException("account state was written by a newer client")
+        val base = loadLocal()?.let { AccountState.merge(account.userId, it, doc, highWater()).doc } ?: doc
+        adopt(change(base).copy(seq = maxOf(base.seq, doc.seq)), null)
+        runCatching { refresh() }
+    }
+
+    /** The issued-grant record for ([vaultId], [userId]) (A6b). */
+    fun issued(vaultId: String, userId: String): IssuedGrant? = doc.issued(vaultId, userId)
+
+    /** True when this account's own, UVK-authenticated evidence says it owns [vaultId] (A6b). */
+    fun owns(vaultId: String): Boolean = doc.owns(vaultId)
 
     /**
      * Pin a contact that [ContactPin] built from a HUMAN comparison. Refuses a pin for this account

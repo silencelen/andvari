@@ -98,6 +98,62 @@ data class LegacyVaultReview(val vaultId: String, val name: String?, val itemCou
 class MemberNotVerifiedException(val userId: String) :
     Exception("verify this member before sharing with them (their identity code is not confirmed on this device)")
 
+/** A6b: an owner-only signing action on a vault this account has no evidence of owning (the server's `role=owner`
+ *  label is not evidence). The UI asks "You own <vault>?" ([SyncEngine.confirmOwnership]) first. */
+class OwnershipNotConfirmedException(val vaultId: String) :
+    Exception("confirm that you own this vault first (this device has no record that you created it or accepted it)")
+
+/** A6b review MEDIUM-1: the vault's key reached this device as a MEMBER; claiming it needs the human's explicit
+ *  "This vault's owner transferred it to me" on top of the password. */
+class OwnershipTransferAckRequiredException(val vaultId: String) :
+    Exception("this device received this vault as a member: confirm that its owner transferred it to you")
+
+/**
+ * What "You own <vault>?" shows (A6b review MEDIUM-1), like A5b's personal-vault choice. [reportedOwner],
+ * [lastTransferTo]/[lastTransferSeq], [coHolders] and [origin] are AS REPORTED BY THE SERVER; [receivedAsMember] is
+ * this device's own record that it first got the key as a member (then the dialog asks for the transfer acknowledgement).
+ */
+data class OwnershipClaim(
+    val vaultId: String,
+    val vaultName: String?,
+    val reportedOwner: CoHolder?,
+    val lastTransferTo: CoHolder?,
+    val lastTransferSeq: Long?,
+    val coHolders: List<CoHolder>,
+    val origin: PersonalChoiceInfo.Origin,
+    val receivedAsMember: Boolean,
+)
+
+/** A6b: a re-issue with no human confirmation and no matching issued-grants record. */
+class ReissueNotAuthorizedException(val vaultId: String, val userId: String) :
+    Exception("re-sharing this vault with this member needs your confirmation")
+
+/** A6b: the master password given for a reauth does not open this account's key. */
+class ReauthFailedException : Exception("that master password isn't right")
+
+/**
+ * One row of the "Legacy grants" list (§8.2 step 4, A6b). Everything but [verifiedLabel] and [pinState] is what the
+ * SERVER reports: the list itself comes from the server, so the owner confirms each row ("Re-share <vault> with
+ * <member>?"), and only that confirmation signs.
+ */
+data class LegacyGrantRow(
+    val vaultId: String,
+    /** Decrypted under the held key (null when it does not decrypt). */
+    val vaultName: String?,
+    val userId: String,
+    /** Server-reported. */
+    val displayName: String,
+    /** Server-reported. */
+    val email: String,
+    /** The key the server serves for the member; must equal the pin for a confirmation. */
+    val identityPub: String,
+    /** The label of this device's CURRENT pin for the member (a human verified it); null when not pinned here. */
+    val verifiedLabel: String?,
+    val pinState: SyncEngine.MemberPinState,
+    /** False when this account has no evidence of owning the vault yet ("You own <vault>?" first). */
+    val ownershipConfirmed: Boolean,
+)
+
 /** A5b review LOW-1/LOW-2 (closed in A6): what "Use the new personal vault" would mean, loaded BEFORE it is
  *  offered. The co-holder lists and origin are what the SERVER reports. */
 data class PersonalChangeDetails(
@@ -241,6 +297,9 @@ class SyncEngine(
         const val REMOVED_LEGACY = "legacy"
         /** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches. */
         internal const val HELD_KEYS_KEY = "grant.held.keys"
+
+        /** A6b review MEDIUM-1: vaults this device first adopted a key for as a MEMBER (durable provenance). */
+        internal const val MEMBER_GRANTED_KEY = "grant.member.granted"
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -530,6 +589,7 @@ class SyncEngine(
         val known = persisted.mapTo(HashSet()) { it.substringBefore('|') }
         val added = account.heldKeyTagsSnapshot().filterKeys { it !in known }.map { (v, t) -> "$v|$t" }
         if (added.isNotEmpty()) persistSet(HELD_KEYS_KEY, persisted + added)
+        persistMemberGranted()
     }
 
     // ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7) ----
@@ -938,58 +998,205 @@ class SyncEngine(
         }
     }
 
+    // ---- grant authority (security review 2026-10, root cause A, branch A6b) ----
+    //
+    // THE INVARIANT: this client never signs or seals a vault key to a user unless (a) a human on this device
+    // confirmed that (vault, user) pair now ([addVaultMember] from the add-member screen, [confirmReissue] from the
+    // "Legacy grants" list), or (b) the pair is in this account's UVK-authenticated issued-grants record for the SAME
+    // identity key ([reissueGrant]). And no owner-only signing action (add member, re-issue, transfer offer) runs on
+    // the strength of the server's `role=owner` label: it needs this account's own owned-vaults record ([ownsVault]),
+    // written at creation, at transfer accept, or by a password-reauthed "You own <vault>?" ([confirmOwnership]).
+    // The server's member list and `legacyGrant` flag only decide what is SHOWN.
+
+    /** True when this account's own evidence (account state, UVK-authenticated) says it owns [vaultId]. */
+    fun ownsVault(vaultId: String): Boolean = accountState.owns(vaultId)
+
     /**
-     * Add [userId] to [vaultId] (owner, §1.5). Only a member PINNED and current on this device; the v2 grant and,
-     * in the compatibility window, the dual-sent v1 seal are both sealed to the PIN key. Throws
-     * [MemberNotVerifiedException] otherwise (the UI runs "Verify a household member" first).
+     * The server reports this account as [vaultId]'s owner, but this account has no evidence of it: the vault was
+     * created before A6b, or on a device whose record never synced. The first owner action asks "You own <vault>?".
+     */
+    fun ownershipNeedsConfirmation(vaultId: String): Boolean =
+        account.hasVault(vaultId) && account.serverRoleFor(vaultId) == "owner" && !ownsVault(vaultId) &&
+            vaultId != account.personalVaultId
+
+    private fun requireOwned(vaultId: String) {
+        if (!ownsVault(vaultId)) throw OwnershipNotConfirmedException(vaultId)
+    }
+
+    private var pendingOwnershipClaim: OwnershipClaim? = null
+
+    /** A6b review MEDIUM-1: this device first adopted [vaultId]'s key as a MEMBER (a seal, a v2 grant, a non-owner
+     *  row), now or in an earlier session (the durable record; the in-memory bit is rebuilt from served rows). */
+    fun receivedAsMember(vaultId: String): Boolean =
+        account.keyArrivedByMemberGrant(vaultId) || vaultId in persistedSet(MEMBER_GRANTED_KEY)
+
+    private fun persistMemberGranted() {
+        val persisted = persistedSet(MEMBER_GRANTED_KEY)
+        val added = cache.vaults().map { it.vaultId }.filter { it !in persisted && account.keyArrivedByMemberGrant(it) }
+        if (added.isNotEmpty()) persistSet(MEMBER_GRANTED_KEY, persisted + added)
+    }
+
+    /**
+     * Step 1 of "You own <vault>?" (A6b review MEDIUM-1): what the confirmation must show, loaded BEFORE it is offered.
+     * Everything but [OwnershipClaim.receivedAsMember] is what the SERVER reports (who it lists as owner, its last
+     * completed transfer, the co-holders); it informs, it decides nothing. Mints nothing. Refuses a vault whose key
+     * does not come from this account's own UVK wrap, and THROWS when the members cannot be loaded (the dialog must
+     * name them). Supersedes any earlier claim.
+     */
+    suspend fun describeOwnership(vaultId: String): OwnershipClaim {
+        pendingOwnershipClaim = null
+        if (!account.hasVault(vaultId) || !account.keyFromOwnUvkWrap(vaultId) || account.isLegacyReadOnly(vaultId) ||
+            account.heldKeyContradictsVouch(vaultId)
+        ) throw VaultKeyNotVerifiedException(vaultId)
+        val members = api.vaultMembers(vaultId).map { CoHolder(it.userId, it.displayName, it.email, it.role) }
+        val row = cache.vaults().firstOrNull { it.vaultId == vaultId }
+        val lt = row?.lastTransfer
+        return OwnershipClaim(
+            vaultId = vaultId,
+            vaultName = row?.let { account.decryptVaultName(vaultId, it.metaBlob) }?.takeIf { it != VAULT_NAME_FALLBACK },
+            reportedOwner = members.firstOrNull { it.role == "owner" },
+            lastTransferTo = lt?.let { t -> members.firstOrNull { it.userId == t.newOwnerUserId } ?: CoHolder(t.newOwnerUserId, "", "", "") },
+            lastTransferSeq = lt?.seq,
+            coHolders = members.filter { it.userId != account.userId },
+            origin = originOf(vaultId),
+            receivedAsMember = receivedAsMember(vaultId),
+        ).also { pendingOwnershipClaim = it }
+    }
+
+    /** Drop a claim the human cancelled. */
+    fun cancelOwnershipClaim() { pendingOwnershipClaim = null }
+
+    /**
+     * Step 2, "You own <vault>?" confirmed (A6b): only the claim this engine described ([describeOwnership]) and still
+     * holds; a fresh master-password reauth checked on this device against the UVK this session holds
+     * ([Account.verifyPassword]); and, for a vault this device received as a MEMBER, the human's explicit second
+     * acknowledgement [transferredToMe] ("This vault's owner transferred it to me": a genuine owner whose vault was
+     * transferred to them before A6b is in exactly this state, so it is not refused outright). Records [vaultId] as owned.
+     */
+    suspend fun confirmOwnership(claim: OwnershipClaim, password: String, transferredToMe: Boolean = false) {
+        check(claim === pendingOwnershipClaim) { "that ownership confirmation was not described here (or is stale)" }
+        val vaultId = claim.vaultId
+        if (!account.hasVault(vaultId) || !account.keyFromOwnUvkWrap(vaultId) || account.isLegacyReadOnly(vaultId) ||
+            account.heldKeyContradictsVouch(vaultId)
+        ) throw VaultKeyNotVerifiedException(vaultId)
+        if (receivedAsMember(vaultId) && !transferredToMe) throw OwnershipTransferAckRequiredException(vaultId)
+        val keys = api.accountKeys()
+        val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { account.verifyPassword(password, keys) }
+        if (!ok) throw ReauthFailedException()
+        pendingOwnershipClaim = null
+        accountState.update { AccountState.withOwned(it, vaultId, nowMs()) }
+    }
+
+    /** Create a shared vault (owner): this account's own evidence that it owns it is recorded at once. */
+    suspend fun createSharedVault(name: String): String {
+        val nv = account.buildCreateSharedVault(name)
+        try {
+            api.createVault(nv.request)
+        } catch (e: Throwable) {
+            account.removeVault(nv.vaultId) // roll back the optimistic local registration
+            throw e
+        }
+        runCatching { accountState.update { AccountState.withOwned(it, nv.vaultId, nowMs()) } }
+        reconcileSync()
+        return nv.vaultId
+    }
+
+    private fun keyHash(identityPubB64: String): String = Bytes.toHexLower(account.cryptoProvider().sha256(Bytes.fromB64(identityPubB64)))
+
+    private suspend fun recordIssued(vaultId: String, pin: Contact) {
+        runCatching { accountState.update { AccountState.withIssued(it, vaultId, pin.userId, keyHash(pin.identityPub), nowMs()) } }
+    }
+
+    /**
+     * Add [userId] to [vaultId] (owner, §1.5). A human picked this vault and this member on the add-member screen
+     * (rule a). Only a vault this account OWNS by its own evidence ([OwnershipNotConfirmedException] otherwise) and a
+     * member PINNED and current on this device ([MemberNotVerifiedException] otherwise); the v2 grant and, in the
+     * compatibility window, the dual-sent v1 seal are both sealed to the PIN key. The pair is then recorded.
      */
     suspend fun addVaultMember(vaultId: String, userId: String, role: String) {
+        requireOwned(vaultId)
         val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
         val signed = account.buildSignedGrant(vaultId, pin)
         val sealed = account.wrapVkForMember(Bytes.fromB64(pin.identityPub), vaultId)
         api.addVaultMember(vaultId, VaultMemberAdd(userId, role, sealed, signed))
+        recordIssued(vaultId, pin)
     }
 
-    /** §8.2 step 4: re-issue [userId]'s grant for [vaultId] as v2 with the SAME key (owner, pinned member). */
-    suspend fun reissueGrant(vaultId: String, userId: String) {
-        val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
-        api.reissueGrant(vaultId, userId, GrantReissueRequest(account.buildSignedGrant(vaultId, pin)))
-        reissuedThisSession.add("$vaultId|$userId")
+    private suspend fun postReissue(vaultId: String, pin: Contact) {
+        api.reissueGrant(vaultId, pin.userId, GrantReissueRequest(account.buildSignedGrant(vaultId, pin)))
+        recordIssued(vaultId, pin)
     }
-
-    private val reissuedThisSession = mutableSetOf<String>()
-    private val legacyMembersByVault = HashMap<String, List<VaultMemberSummary>>()
-    private val reissueCheckedWith = HashMap<String, String>()
 
     /**
-     * §8.2 step 4, best effort: for every shared vault this account OWNS, re-issue v2 to each member the server
-     * hints still has a legacy grant (a hint only) and whom this device has pinned (current, same key). Members
-     * that are not pinned stay in [legacyGrantMembers] ("Verify <name> to secure their access"). The member list
-     * is re-read when this device's current pins change, not on every poll.
+     * §8.2 step 4 WITHOUT a prompt (rule b only): re-issue [userId]'s grant for [vaultId] as v2 with the SAME key, when
+     * this account owns the vault by its own evidence and the pair is in its issued-grants record for the key now
+     * pinned. Anything else throws ([ReissueNotAuthorizedException]): it needs [confirmReissue].
      */
-    private suspend fun reissueLegacyGrants() {
-        val pinsTag = accountState.doc.contacts.filter { accountState.isCurrent(it) }.joinToString(",") { it.userId + ":" + it.identityPub }
-        for (v in cache.vaults()) {
-            val vaultId = v.vaultId
-            if (!account.hasVault(vaultId) || vaultId == account.personalVaultId) continue
-            if (account.serverRoleFor(vaultId) != "owner" || account.isLegacyReadOnly(vaultId)) continue
-            if (reissueCheckedWith[vaultId] == pinsTag) continue
-            val members = runCatching { api.vaultMembers(vaultId) }.getOrNull() ?: continue
-            reissueCheckedWith[vaultId] = pinsTag
-            val legacy = members.filter { it.legacyGrant == true && it.role != "owner" && it.userId != account.userId }
-            val left = mutableListOf<VaultMemberSummary>()
-            for (m in legacy) {
-                if ("$vaultId|${m.userId}" in reissuedThisSession) continue
-                if (memberPinState(m.userId, m.identityPub) == MemberPinState.PINNED && runCatching { reissueGrant(vaultId, m.userId) }.isSuccess) continue
-                left.add(m)
-            }
-            legacyMembersByVault[vaultId] = left
-        }
+    suspend fun reissueGrant(vaultId: String, userId: String) {
+        requireOwned(vaultId)
+        val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
+        val rec = accountState.issued(vaultId, userId)
+        if (rec == null || rec.keyHash != keyHash(pin.identityPub)) throw ReissueNotAuthorizedException(vaultId, userId)
+        postReissue(vaultId, pin)
     }
 
-    /** The "legacy grants" list for an owned vault: members still holding only a v1 grant whom this device could
-     *  not re-issue to (not pinned, key changed). From the last check; empty until one ran. */
-    fun legacyGrantMembers(vaultId: String): List<VaultMemberSummary> = legacyMembersByVault[vaultId].orEmpty()
+    private val legacyRowsByVault = HashMap<String, List<LegacyGrantRow>>()
+
+    /** Vaults a verified transfer moved away from this account during a pull; tombstoned at the end of [sync]. */
+    private val ownershipReleases = LinkedHashSet<String>()
+
+    private suspend fun flushOwnershipReleases() {
+        if (ownershipReleases.isEmpty()) return
+        val ids = ownershipReleases.toList()
+        ownershipReleases.clear()
+        runCatching { accountState.update { d -> ids.fold(d) { acc, id -> AccountState.withoutOwned(acc, id, nowMs()) } } }
+    }
+
+    /**
+     * The "Legacy grants" list for [vaultId] (§8.2 step 4, A6b): the members the SERVER lists as still holding only a
+     * v1 grant (a hint), each with the vault name and, when pinned and current here, the member's VERIFIED label.
+     * Loading it re-issues, without a prompt, only the pairs in this account's issued-grants record for the same key
+     * (rule b); every other row waits for the owner's per-row confirmation ([confirmReissue]). Never called by
+     * [sync]. Throws when the member list cannot be loaded.
+     */
+    suspend fun loadLegacyGrants(vaultId: String): List<LegacyGrantRow> {
+        legacyRowsByVault.remove(vaultId)
+        if (!account.hasVault(vaultId) || account.isLegacyReadOnly(vaultId)) return emptyList()
+        val members = api.vaultMembers(vaultId)
+        val name = cache.vaults().firstOrNull { it.vaultId == vaultId }?.let { account.decryptVaultName(vaultId, it.metaBlob) }
+            ?.takeIf { it != VAULT_NAME_FALLBACK }
+        val owned = ownsVault(vaultId)
+        val rows = mutableListOf<LegacyGrantRow>()
+        for (m in members) {
+            if (m.legacyGrant != true || m.role == "owner" || m.userId == account.userId) continue
+            val state = memberPinState(m.userId, m.identityPub)
+            val pin = accountState.currentPin(m.userId)
+            if (owned && state == MemberPinState.PINNED && pin != null && accountState.issued(vaultId, m.userId)?.keyHash == keyHash(pin.identityPub)) {
+                if (runCatching { postReissue(vaultId, pin) }.isSuccess) continue
+            }
+            rows.add(LegacyGrantRow(vaultId, name, m.userId, m.displayName, m.email, m.identityPub, pin?.label?.takeIf { state == MemberPinState.PINNED }, state, owned))
+        }
+        legacyRowsByVault[vaultId] = rows
+        return rows
+    }
+
+    /** The rows the last [loadLegacyGrants] for [vaultId] returned (empty until one ran). */
+    fun legacyGrantRows(vaultId: String): List<LegacyGrantRow> = legacyRowsByVault[vaultId].orEmpty()
+
+    /**
+     * The owner tapped "Re-share <vault> with <member>" on [row] (rule a). Only a row this engine itself offered in
+     * the current list is accepted, once; the vault must be owned by this account's evidence and the member pinned
+     * and current here with the key the row shows. Signs and seals to the PIN key, then records the pair.
+     */
+    suspend fun confirmReissue(row: LegacyGrantRow) {
+        val offered = legacyRowsByVault[row.vaultId].orEmpty()
+        check(offered.any { it === row }) { "that re-share was not offered here (or the list is stale)" }
+        requireOwned(row.vaultId)
+        val pin = accountState.currentPin(row.userId) ?: throw MemberNotVerifiedException(row.userId)
+        if (memberPinState(row.userId, row.identityPub) != MemberPinState.PINNED) throw MemberNotVerifiedException(row.userId)
+        postReissue(row.vaultId, pin)
+        legacyRowsByVault[row.vaultId] = offered.filterNot { it === row }
+    }
 
     // ---- A5b review LOW-1 / LOW-2: "Use the new personal vault" only once its co-holders loaded ----
 
@@ -1078,13 +1285,14 @@ class SyncEngine(
         // Root cause A (branch A6). Pins may have changed: re-run §1.4 for rows not yet adopted (pending
         // invitations, legacy keys an owner re-issued). Then the member self-wrap (§3.2), minted ONLY for a key
         // from a verified v2 grant or a v1 key this device froze or the human confirmed (never for a key only an
-        // unconfirmed v1 seal vouches for: the A1 laundering bug). Then the owner's §8.2 step 4 re-issue.
+        // unconfirmed v1 seal vouches for: the A1 laundering bug). The owner's §8.2 step 4 re-issue is NOT run here
+        // (A6b): it needs the owner's confirmation, or the issued-grants record, through the "Legacy grants" list.
         reevaluateGrants()
         persistHeldKeys()
         markLiveVaults()
         surfaceGrantStates()
         postAuthorizedSelfWraps()
-        runCatching { reissueLegacyGrants() }
+        flushOwnershipReleases()
     }
 
     /**
@@ -1664,6 +1872,8 @@ class SyncEngine(
             val name = account.decryptVaultName(vaultId, vault.metaBlob) ?: VAULT_NAME_FALLBACK
             if (verified) {
                 cache.setLastVerifiedTransferSeq(vaultId, lt.seq)
+                // A6b: a verified transfer to someone else ends this account's ownership evidence (only ever removes).
+                if (lt.newOwnerUserId != account.userId && ownsVault(vaultId)) ownershipReleases.add(vaultId)
                 // A verified completion supersedes any earlier unverified-sighting warning.
                 noticeList.removeAll { it.vaultId == vaultId && it.kind == "transfer-anomaly" }
                 if (noticeable) {
@@ -1785,6 +1995,8 @@ class SyncEngine(
         val issuedAt = nowMs()
         val proof = LifecycleProof.leave(account.cryptoProvider(), account.lifecycleKeyFor(vaultId), vaultId, account.userId, nonce, issuedAt)
         api.leaveVault(vaultId, io.silencelen.andvari.core.model.VaultLeaveRequest(proofV = 2, proof = proof, nonce = nonce, issuedAt = issuedAt))
+        // A6b: leaving ends this account's ownership evidence for the vault (if it had any).
+        if (ownsVault(vaultId)) runCatching { accountState.update { AccountState.withoutOwned(it, vaultId, nowMs()) } }
         suppressDrop.add(vaultId)
         try {
             reconcileSync(onFailure = { hardDropLocal(vaultId, forgetKeyMemory = true) })
@@ -1803,11 +2015,14 @@ class SyncEngine(
         val issuedAt = nowMs()
         val proof = LifecycleProof.removeV2(account.cryptoProvider(), account.lifecycleKeyFor(vaultId), vaultId, userId, nonce, issuedAt)
         api.removeVaultMember(vaultId, userId, io.silencelen.andvari.core.model.VaultMemberRemoveRequest(proof = proof, nonce = nonce, proofV = 2, issuedAt = issuedAt))
+        // A6b: a removed member's pair leaves the issued-grants record (tombstoned): a later re-issue needs a human.
+        runCatching { accountState.update { AccountState.withoutIssued(it, vaultId, userId, nowMs()) } }
         reconcileSync()
     }
 
     /** TRANSFER offer. seq = the vault's last completed transfer seq + 1 (= transferSeq+1). */
     suspend fun offerTransfer(vaultId: String, toUserId: String) {
+        requireOwned(vaultId) // A6b: an owner-only action, never on the server's role label alone
         val seq = (cache.vaults().find { it.vaultId == vaultId }?.lastTransfer?.seq ?: 0L) + 1
         val offerId = account.newItemId()
         val expiresAt = nowMs() + 14 * DAY_MS
@@ -1846,6 +2061,8 @@ class SyncEngine(
         val proof = LifecycleProof.accept(crypto, key, vaultId, pt.offerId, account.userId, pt.seq, wrappedVk)
         api.acceptTransfer(vaultId, TransferAcceptRequest(pt.offerId, wrappedVk, proof))
         incomingByVault.remove(vaultId)
+        // A6b: this account accepted the vault, verified under its key: its own evidence of ownership.
+        runCatching { accountState.update { AccountState.withOwned(it, vaultId, nowMs()) } }
         reconcileSync()
     }
 

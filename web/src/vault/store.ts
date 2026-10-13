@@ -28,10 +28,10 @@ import {
   restoreProof,
   verifyProof,
 } from "../crypto/lifecycleproof";
-import { randomBytes, sha256 } from "../crypto/provider";
+import { randomBytes, sha256, sha256Sync } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
-import { ITEM_FORMAT_VERSION, type Account, type LegacyVouchKind } from "./account";
-import type { ConsumedNonce, Contact } from "./accountstate";
+import { ITEM_FORMAT_VERSION, type Account, type LegacyVouchKind, VaultKeyNotVerifiedError } from "./account";
+import { type ConsumedNonce, type Contact, withIssued, withoutIssued, withOwned, withoutOwned } from "./accountstate";
 import { pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
 import { type CoHolder, type PersonalCandidate, type PersonalChange, type PersonalChoiceInfo, type PersonalVaultProposal, personalVaultChoices } from "./personalvault";
@@ -177,6 +177,75 @@ export interface LegacyVaultReview {
 export type MemberPinState = "pinned" | "key-changed" | "needs-verification";
 
 /** add-member refused a member not pinned (or not current) on this device (§1.5): verify them first. */
+/** A6b: an owner-only signing action on a vault this account has no evidence of owning (the server's `role=owner`
+ *  label is not evidence). The UI asks "You own <vault>?" (confirmOwnership) first. */
+export class OwnershipNotConfirmedError extends Error {
+  constructor(readonly vaultId: string) {
+    super("Confirm that you own this vault first — this device has no record that you created it or accepted it.");
+    this.name = "OwnershipNotConfirmedError";
+  }
+}
+
+/** A6b review MEDIUM-1: the vault's key reached this browser as a MEMBER; claiming it needs the explicit
+ *  "This vault's owner transferred it to me" on top of the password. */
+export class OwnershipTransferAckRequiredError extends Error {
+  constructor(readonly vaultId: string) {
+    super("This device received this vault as a member: confirm that its owner transferred it to you.");
+    this.name = "OwnershipTransferAckRequiredError";
+  }
+}
+
+/** What "You own <vault>?" shows (A6b review MEDIUM-1; core `OwnershipClaim` twin). All but `receivedAsMember` is AS
+ *  REPORTED BY THE SERVER. */
+export interface OwnershipClaim {
+  vaultId: string;
+  vaultName: string | null;
+  reportedOwner: CoHolder | null;
+  lastTransferTo: CoHolder | null;
+  lastTransferSeq: number | null;
+  coHolders: CoHolder[];
+  origin: "created" | "received";
+  receivedAsMember: boolean;
+}
+
+/** A6b: a re-issue with no human confirmation and no matching issued-grants record. */
+export class ReissueNotAuthorizedError extends Error {
+  constructor(readonly vaultId: string, readonly userId: string) {
+    super("Re-sharing this vault with this member needs your confirmation.");
+    this.name = "ReissueNotAuthorizedError";
+  }
+}
+
+/** A6b: the master password given for a reauth does not open this account's key. */
+export class ReauthFailedError extends Error {
+  constructor() {
+    super("That master password isn't right.");
+    this.name = "ReauthFailedError";
+  }
+}
+
+/**
+ * One row of the "Legacy grants" list (§8.2 step 4, A6b; core `LegacyGrantRow` twin). Everything but `verifiedLabel`
+ * and `pinState` is what the SERVER reports: the list itself comes from the server, so the owner confirms each row.
+ */
+export interface LegacyGrantRow {
+  vaultId: string;
+  /** Decrypted under the held key (null when it does not decrypt). */
+  vaultName: string | null;
+  userId: string;
+  /** Server-reported. */
+  displayName: string;
+  /** Server-reported. */
+  email: string;
+  /** The key the server serves for the member; must equal the pin for a confirmation. */
+  identityPub: string;
+  /** The label of this device's CURRENT pin for the member (a human verified it); null when not pinned here. */
+  verifiedLabel: string | null;
+  pinState: MemberPinState;
+  /** False when this account has no evidence of owning the vault yet ("You own <vault>?" first). */
+  ownershipConfirmed: boolean;
+}
+
 export class MemberNotVerifiedError extends Error {
   constructor(readonly userId: string) {
     super("Verify this member before sharing with them — their identity code is not confirmed on this device.");
@@ -202,6 +271,8 @@ const LEGACY_AUTHORIZED_KEY = "grant.legacy.authorized";
 const DECLINED_KEY = "grant.declined";
 /** Branch A7: the per-vault held-key memory, `vaultId|sha256(VK)` lines, stored beside the vouches (core twin). */
 export const HELD_KEYS_KEY = "grant.held.keys";
+/** A6b review MEDIUM-1: vaults this browser first adopted a key for as a MEMBER (durable provenance). */
+export const MEMBER_GRANTED_KEY = "grant.member.granted";
 /** LifecycleNotice.reason on a `left` notice whose leave carried no proof (in-window, §8.6). Core `LEFT_UNPROVEN`. */
 export const LEFT_UNPROVEN = "unproven";
 /** LifecycleNotice.reason on a `replay-denied` raised by a consumed removal nonce (§6.3 step 5). Core `REMOVAL_REPLAY`. */
@@ -811,6 +882,7 @@ export class VaultStore {
       changed = true;
     }
     if (changed) this.persistSet(HELD_KEYS_KEY, persisted);
+    this.persistMemberGranted();
   }
 
   // ---- removal proofs v2 (security review 2026-10, root cause A §6; branch A7; core SyncEngine twin) ----
@@ -1010,69 +1082,226 @@ export class VaultStore {
     }
   }
 
-  /** Add `userId` to `vaultId` (owner, §1.5): only a member PINNED and current here; the v2 grant and the
-   *  dual-sent v1 seal are both sealed to the PIN key. Throws {@link MemberNotVerifiedError} otherwise. */
+  // ---- grant authority (security review 2026-10, root cause A, branch A6b; core SyncEngine twin) ----
+  //
+  // THE INVARIANT: this client never signs or seals a vault key to a user unless (a) a human in this browser
+  // confirmed that (vault, user) pair now (addVaultMember from the add-member form, confirmReissue from the "Legacy
+  // grants" list), or (b) the pair is in this account's UVK-authenticated issued-grants record for the SAME identity
+  // key (reissueGrant). No owner-only signing action (add member, re-issue, transfer offer) runs on the strength of
+  // the server's `role=owner` label: it needs this account's owned-vaults record (ownsVault), written at creation,
+  // at transfer accept, or by a password-reauthed "You own <vault>?" (confirmOwnership). The server's member list and
+  // `legacyGrant` flag only decide what is SHOWN.
+
+  /** True when this account's own evidence (account state, UVK-authenticated) says it owns `vaultId`. */
+  ownsVault(vaultId: string): boolean {
+    return this.accountState.owns(vaultId);
+  }
+
+  /** The server reports this account as the owner, but this account has no evidence of it: ask "You own <vault>?". */
+  ownershipNeedsConfirmation(vaultId: string): boolean {
+    return this.account.hasVault(vaultId) && this.account.serverRoleFor(vaultId) === "owner" && !this.ownsVault(vaultId) &&
+      vaultId !== this.account.personalVaultId;
+  }
+
+  private requireOwned(vaultId: string): void {
+    if (!this.ownsVault(vaultId)) throw new OwnershipNotConfirmedError(vaultId);
+  }
+
+  private pendingOwnershipClaim: OwnershipClaim | null = null;
+
+  /** A6b review MEDIUM-1: this browser first adopted `vaultId`'s key as a MEMBER, now or in an earlier session. */
+  receivedAsMember(vaultId: string): boolean {
+    return this.account.keyArrivedByMemberGrant(vaultId) || this.persistedSet(MEMBER_GRANTED_KEY).has(vaultId);
+  }
+
+  private persistMemberGranted(): void {
+    const persisted = this.persistedSet(MEMBER_GRANTED_KEY);
+    let changed = false;
+    for (const vaultId of this.vaultsById.keys()) {
+      if (persisted.has(vaultId) || !this.account.keyArrivedByMemberGrant(vaultId)) continue;
+      persisted.add(vaultId);
+      changed = true;
+    }
+    if (changed) this.persistSet(MEMBER_GRANTED_KEY, persisted);
+  }
+
+  private ownershipBasisOk(vaultId: string): boolean {
+    return this.account.hasVault(vaultId) && this.account.keyFromOwnUvkWrap(vaultId) && !this.account.isLegacyReadOnly(vaultId) &&
+      !this.account.heldKeyContradictsVouch(vaultId);
+  }
+
+  /**
+   * Step 1 of "You own <vault>?" (A6b review MEDIUM-1; core twin): what the confirmation shows, loaded BEFORE it is
+   * offered. All but `receivedAsMember` is AS REPORTED BY THE SERVER. Mints nothing; throws when the members cannot be
+   * loaded. Supersedes any earlier claim.
+   */
+  async describeOwnership(vaultId: string): Promise<OwnershipClaim> {
+    this.pendingOwnershipClaim = null;
+    if (!this.ownershipBasisOk(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    const members = (await this.api.vaultMembers(vaultId)).map((m) => ({ userId: m.userId, displayName: m.displayName, email: m.email, role: m.role }));
+    const row = this.vaultsById.get(vaultId);
+    const lt = row?.lastTransfer ?? null;
+    let vaultName: string | null = null;
+    if (row) {
+      const n = this.account.decryptVaultName(vaultId, row.metaBlob);
+      vaultName = n && n !== "(vault)" ? n : null;
+    }
+    const claim: OwnershipClaim = {
+      vaultId,
+      vaultName,
+      reportedOwner: members.find((m) => m.role === "owner") ?? null,
+      lastTransferTo: lt ? (members.find((m) => m.userId === lt.newOwnerUserId) ?? { userId: lt.newOwnerUserId, displayName: "", email: "", role: "" }) : null,
+      lastTransferSeq: lt ? lt.seq : null,
+      coHolders: members.filter((m) => m.userId !== this.account.userId),
+      origin: lt?.newOwnerUserId === this.account.userId ? "received" : "created",
+      receivedAsMember: this.receivedAsMember(vaultId),
+    };
+    this.pendingOwnershipClaim = claim;
+    return claim;
+  }
+
+  cancelOwnershipClaim(): void {
+    this.pendingOwnershipClaim = null;
+  }
+
+  /**
+   * Step 2, "You own <vault>?" confirmed (A6b): only the claim this store described and still holds; a fresh
+   * master-password reauth checked in this browser against the session's UVK; and, for a vault this browser received
+   * as a MEMBER, the explicit `transferredToMe` acknowledgement ("This vault's owner transferred it to me"; a genuine
+   * pre-A6b transfer recipient is in exactly this state, so it is not refused outright). Records the ownership.
+   */
+  async confirmOwnership(claim: OwnershipClaim, password: string, transferredToMe = false): Promise<void> {
+    if (claim !== this.pendingOwnershipClaim) throw new Error("that ownership confirmation was not described here (or is stale)");
+    const vaultId = claim.vaultId;
+    if (!this.ownershipBasisOk(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
+    if (this.receivedAsMember(vaultId) && !transferredToMe) throw new OwnershipTransferAckRequiredError(vaultId);
+    const keys = await this.api.accountKeys();
+    if (!(await this.account.verifyPassword(password, keys))) throw new ReauthFailedError();
+    this.pendingOwnershipClaim = null;
+    await this.accountState.update((d) => withOwned(d, vaultId, Date.now()));
+  }
+
+  /** Create a shared vault (owner): this account's own evidence that it owns it is recorded at once. */
+  async createSharedVault(name: string): Promise<string> {
+    const { request, vaultId } = this.account.buildCreateSharedVault(name);
+    try {
+      await this.api.createVault(request);
+    } catch (e) {
+      this.account.removeVault(vaultId); // roll back the optimistic local registration
+      throw e;
+    }
+    await this.accountState.update((d) => withOwned(d, vaultId, Date.now())).catch(() => {});
+    await this.sync();
+    return vaultId;
+  }
+
+  private static keyHash(identityPub: string): string {
+    return toHexLower(sha256Sync(fromB64(identityPub)));
+  }
+
+  private async recordIssued(vaultId: string, pin: Contact): Promise<void> {
+    await this.accountState.update((d) => withIssued(d, vaultId, pin.userId, VaultStore.keyHash(pin.identityPub), Date.now())).catch(() => {});
+  }
+
+  /** Add `userId` to `vaultId` (owner, §1.5). A human picked this vault and member on the add form (rule a). Only a
+   *  vault this account OWNS by its own evidence ({@link OwnershipNotConfirmedError}) and a member PINNED and current
+   *  here ({@link MemberNotVerifiedError}); the v2 grant and the dual-sent v1 seal are both sealed to the PIN key, and
+   *  the pair is recorded. */
   async addVaultMember(vaultId: string, userId: string, role: string): Promise<void> {
+    this.requireOwned(vaultId);
     const pin = this.accountState.currentPin(userId);
     if (!pin) throw new MemberNotVerifiedError(userId);
     const signedGrant = this.account.buildSignedGrant(vaultId, pin);
     const sealedVk = this.account.wrapVkForMember(fromB64(pin.identityPub), vaultId);
     await this.api.addVaultMember(vaultId, { userId, role, sealedVk, signedGrant });
+    await this.recordIssued(vaultId, pin);
   }
 
-  /** §8.2 step 4: re-issue `userId`'s grant for `vaultId` as v2 with the SAME key (owner, pinned member). */
+  private async postReissue(vaultId: string, pin: Contact): Promise<void> {
+    await this.api.reissueGrant(vaultId, pin.userId, { signedGrant: this.account.buildSignedGrant(vaultId, pin) });
+    await this.recordIssued(vaultId, pin);
+  }
+
+  /** §8.2 step 4 WITHOUT a prompt (rule b only): the vault is owned by this account's evidence and the pair is in its
+   *  issued-grants record for the key now pinned. Anything else throws ({@link ReissueNotAuthorizedError}). */
   async reissueGrant(vaultId: string, userId: string): Promise<void> {
+    this.requireOwned(vaultId);
     const pin = this.accountState.currentPin(userId);
     if (!pin) throw new MemberNotVerifiedError(userId);
-    await this.api.reissueGrant(vaultId, userId, { signedGrant: this.account.buildSignedGrant(vaultId, pin) });
-    this.reissuedThisSession.add(`${vaultId}|${userId}`);
+    const rec = this.accountState.issued(vaultId, userId);
+    if (!rec || rec.keyHash !== VaultStore.keyHash(pin.identityPub)) throw new ReissueNotAuthorizedError(vaultId, userId);
+    await this.postReissue(vaultId, pin);
   }
 
-  private readonly reissuedThisSession = new Set<string>();
-  private readonly legacyMembersByVault = new Map<string, VaultMemberSummary[]>();
-  private readonly reissueCheckedWith = new Map<string, string>();
+  private readonly legacyRowsByVault = new Map<string, LegacyGrantRow[]>();
 
-  /** §8.2 step 4, best effort: re-issue v2 to legacy members (server hint) this device has pinned (current, same
-   *  key); the rest stay in {@link legacyGrantMembers}. Re-read only when the current pins change. */
-  private async reissueLegacyGrants(): Promise<void> {
-    const pinsTag = this.accountState.doc.contacts
-      .filter((c) => this.accountState.isCurrent(c))
-      .map((c) => `${c.userId}:${c.identityPub}`)
-      .join(",");
-    for (const v of [...this.vaultsById.values()]) {
-      const vaultId = v.vaultId;
-      if (!this.account.hasVault(vaultId) || vaultId === this.account.personalVaultId) continue;
-      if (this.account.serverRoleFor(vaultId) !== "owner" || this.account.isLegacyReadOnly(vaultId)) continue;
-      if (this.reissueCheckedWith.get(vaultId) === pinsTag) continue;
-      let members: VaultMemberSummary[];
-      try {
-        members = await this.api.vaultMembers(vaultId);
-      } catch {
-        continue;
-      }
-      this.reissueCheckedWith.set(vaultId, pinsTag);
-      const left: VaultMemberSummary[] = [];
-      for (const m of members) {
-        if (m.legacyGrant !== true || m.role === "owner" || m.userId === this.account.userId) continue;
-        if (this.reissuedThisSession.has(`${vaultId}|${m.userId}`)) continue;
-        if (this.memberPinState(m.userId, m.identityPub) === "pinned") {
-          try {
-            await this.reissueGrant(vaultId, m.userId);
-            continue;
-          } catch {
-            /* listed below */
-          }
-        }
-        left.push(m);
-      }
-      this.legacyMembersByVault.set(vaultId, left);
+  /**
+   * The "Legacy grants" list for `vaultId` (§8.2 step 4, A6b): members the SERVER lists as still on a v1 grant (a hint),
+   * each with the vault name and, when pinned and current here, the member's VERIFIED label. Loading it re-issues,
+   * without a prompt, only the pairs in the issued-grants record for the same key (rule b); every other row waits for
+   * the owner's per-row confirmation ({@link confirmReissue}). Never called by sync(). Throws when the member list
+   * cannot be loaded.
+   */
+  async loadLegacyGrants(vaultId: string): Promise<LegacyGrantRow[]> {
+    this.legacyRowsByVault.delete(vaultId);
+    if (!this.account.hasVault(vaultId) || this.account.isLegacyReadOnly(vaultId)) return [];
+    const members = await this.api.vaultMembers(vaultId);
+    const v = this.vaultsById.get(vaultId);
+    let vaultName: string | null = null;
+    if (v) {
+      const n = this.account.decryptVaultName(vaultId, v.metaBlob);
+      vaultName = n && n !== "(vault)" ? n : null;
     }
+    const owned = this.ownsVault(vaultId);
+    const rows: LegacyGrantRow[] = [];
+    for (const m of members) {
+      if (m.legacyGrant !== true || m.role === "owner" || m.userId === this.account.userId) continue;
+      const state = this.memberPinState(m.userId, m.identityPub);
+      const pin = this.accountState.currentPin(m.userId);
+      if (owned && state === "pinned" && pin && this.accountState.issued(vaultId, m.userId)?.keyHash === VaultStore.keyHash(pin.identityPub)) {
+        try {
+          await this.postReissue(vaultId, pin);
+          continue;
+        } catch {
+          /* listed below */
+        }
+      }
+      rows.push({
+        vaultId, vaultName, userId: m.userId, displayName: m.displayName, email: m.email, identityPub: m.identityPub,
+        verifiedLabel: state === "pinned" && pin ? pin.label : null, pinState: state, ownershipConfirmed: owned,
+      });
+    }
+    this.legacyRowsByVault.set(vaultId, rows);
+    return rows;
   }
 
-  /** The "legacy grants" list for an owned vault: members still on a v1 grant whom this device could not re-issue
-   *  to (not pinned here, or their key changed). From the last check. */
-  legacyGrantMembers(vaultId: string): VaultMemberSummary[] {
-    return this.legacyMembersByVault.get(vaultId) ?? [];
+  /** The rows the last {@link loadLegacyGrants} for `vaultId` returned (empty until one ran). */
+  legacyGrantRows(vaultId: string): LegacyGrantRow[] {
+    return this.legacyRowsByVault.get(vaultId) ?? [];
+  }
+
+  /** The owner tapped "Re-share <vault> with <member>" on `row` (rule a). Only a row this store offered in the current
+   *  list is accepted, once; the vault must be owned by this account's evidence and the member pinned and current
+   *  here with the key the row shows. Signs and seals to the PIN key, then records the pair. */
+  async confirmReissue(row: LegacyGrantRow): Promise<void> {
+    const offered = this.legacyRowsByVault.get(row.vaultId) ?? [];
+    if (!offered.includes(row)) throw new Error("that re-share was not offered here (or the list is stale)");
+    this.requireOwned(row.vaultId);
+    const pin = this.accountState.currentPin(row.userId);
+    if (!pin || this.memberPinState(row.userId, row.identityPub) !== "pinned") throw new MemberNotVerifiedError(row.userId);
+    await this.postReissue(row.vaultId, pin);
+    this.legacyRowsByVault.set(row.vaultId, offered.filter((r) => r !== row));
+  }
+
+  /** Vaults a verified transfer moved away from this account during a pull; tombstoned at the end of sync(). */
+  private readonly ownershipReleases = new Set<string>();
+
+  private async flushOwnershipReleases(): Promise<void> {
+    if (this.ownershipReleases.size === 0) return;
+    const ids = [...this.ownershipReleases];
+    this.ownershipReleases.clear();
+    const now = Date.now();
+    await this.accountState.update((d) => ids.reduce((acc, id) => withoutOwned(acc, id, now), d)).catch(() => {});
   }
 
   /** Vaults a re-designation may offer: held, and keyed from our own UVK wrap (never a seal). */
@@ -1228,14 +1457,14 @@ export class VaultStore {
     await this.accountState.refresh().catch(() => {});
     // Root cause A (A6, core SyncEngine.sync twin): pins may have changed, so re-run §1.4 for rows not yet adopted;
     // then the member self-wrap (§3.2), minted ONLY for a key from a verified v2 grant or a v1 key this device
-    // froze or the human confirmed (never an unconfirmed v1 seal: the A1 laundering bug); then the owner's
-    // §8.2 step 4 re-issue.
+    // froze or the human confirmed (never an unconfirmed v1 seal: the A1 laundering bug). The owner's §8.2 step 4
+    // re-issue is NOT run here (A6b): it needs the owner's confirmation, or the issued-grants record.
     this.reevaluateGrants();
     this.persistHeldKeys();
     this.markLiveVaults();
     this.surfaceGrantStates();
     await this.postAuthorizedSelfWraps();
-    await this.reissueLegacyGrants().catch(() => {});
+    await this.flushOwnershipReleases();
     try {
       await this.surfaceStagedDenials();
     } finally {
@@ -2596,6 +2825,8 @@ export class VaultStore {
         // (via a fabricated huge seq) mute all future incoming offers this session.
         this.lastTransferSeqSeen.set(vaultId, lt.seq);
         this.recordPullOp((b) => b.setLastVerifiedTransferSeq(vaultId, lt.seq)); // durable floor (§D.1)
+        // A6b: a verified transfer to someone else ends this account's ownership evidence (only ever removes).
+        if (lt.newOwnerUserId !== this.account.userId && this.ownsVault(vaultId)) this.ownershipReleases.add(vaultId);
         // A verified completion supersedes any earlier unverified-sighting warning for this
         // vault — the anomaly resolved (e.g. wrapHash arrived on a later pull).
         this.noticeList = this.noticeList.filter((x) => !(x.vaultId === vaultId && x.kind === "transfer-anomaly"));
@@ -3452,6 +3683,8 @@ export class VaultStore {
     const key = await this.account.lifecycleKeyFor(vaultId);
     const proof = await removeV2Proof(key, vaultId, userId, nonce, issuedAt);
     await this.api.removeVaultMember(vaultId, userId, { proofV: 2, proof, nonce, issuedAt });
+    // A6b: a removed member's pair leaves the issued-grants record (tombstoned): a later re-issue needs a human.
+    await this.accountState.update((d) => withoutIssued(d, vaultId, userId, Date.now())).catch(() => {});
   }
 
   /** The caller's own in-grace deleted vaults — re-opens each VK from the wrappedVk it already
@@ -3492,6 +3725,8 @@ export class VaultStore {
     const issuedAt = Date.now();
     const proof = await leaveProof(await this.account.lifecycleKeyFor(vaultId), vaultId, this.account.userId, nonce, issuedAt);
     await this.api.leaveVault(vaultId, { proofV: 2, proof, nonce, issuedAt });
+    // A6b: leaving ends this account's ownership evidence for the vault (if it had any).
+    if (this.ownsVault(vaultId)) await this.accountState.update((d) => withoutOwned(d, vaultId, Date.now())).catch(() => {});
     this.suppressDrop.add(vaultId);
     try {
       try {
@@ -3506,6 +3741,7 @@ export class VaultStore {
 
   /** TRANSFER offer. seq = transferSeq+1 (= the vault's lastTransfer.seq + 1). */
   async offerTransfer(vaultId: string, toUserId: string): Promise<void> {
+    this.requireOwned(vaultId); // A6b: an owner-only action, never on the server's role label alone
     const vault = this.vaultsById.get(vaultId);
     const seq = (vault?.lastTransfer?.seq ?? 0) + 1;
     const offerId = crypto.randomUUID();
@@ -3550,6 +3786,8 @@ export class VaultStore {
     const proof = await acceptProof(key, vaultId, pt.offerId, this.account.userId, pt.seq, wrappedVk);
     await this.api.acceptTransfer(vaultId, { offerId: pt.offerId, wrappedVk, proof });
     this.incomingByVault.delete(vaultId);
+    // A6b: this account accepted the vault, verified under its key: its own evidence of ownership.
+    await this.accountState.update((d) => withOwned(d, vaultId, Date.now())).catch(() => {});
     try {
       await this.sync();
     } catch (e) {

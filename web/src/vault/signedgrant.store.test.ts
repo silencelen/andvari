@@ -18,7 +18,8 @@ import { Account, legacyTagOf, VaultKeyNotVerifiedError } from "./account";
 import { memoryClientState } from "./accountstatesync";
 import type { Contact } from "./accountstate";
 import { IdbVaultCache, openVaultCache } from "./idbcache";
-import { HELD_KEYS_KEY, MemberNotVerifiedError, VaultStore } from "./store";
+import { HELD_KEYS_KEY, MemberNotVerifiedError, OwnershipNotConfirmedError, VaultStore } from "./store";
+import { withOwned } from "./accountstate";
 
 /**
  * Signed vault grants on the path a real client takes (security review 2026-10, root cause A §1.4–§1.6, §3.2,
@@ -402,6 +403,10 @@ describe("A6 — signed grants (VaultStore)", () => {
     });
     const store = new VaultStore(server.asClient(), await unlock(w.owner), undefined, memoryClientState());
     await store.sync();
+    // A6b: the owner's own evidence of ownership (seeded directly here; in the app: the creation record, a transfer
+    // accept, or the password-reauthed "You own <vault>?").
+    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer")).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+    await store.accountState.update((d) => withOwned(d, w.vaultId, 1));
     await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer")).rejects.toBeInstanceOf(MemberNotVerifiedError);
     expect(server.adds).toEqual([]);
 
@@ -422,7 +427,7 @@ describe("A6 — signed grants (VaultStore)", () => {
     expect(toB64(openSharedGrant(me.publicKey, me.privateKey, w.vaultId, fromB64(add.sealedVk)))).toBe(toB64(w.vk));
   });
 
-  it("the owner re-issues legacy grants to pinned members and lists the rest", async () => {
+  it("the owner re-issues legacy grants only on confirmation and lists the rest", async () => {
     const w = await world();
     const unpinned = await enroll("a6-unpinned");
     const server = new FakeServer({
@@ -436,8 +441,15 @@ describe("A6 — signed grants (VaultStore)", () => {
     ];
     const store = new VaultStore(server.asClient(), await unlock(w.owner), undefined, memoryClientState());
     await store.sync();
+    await store.accountState.update((d) => withOwned(d, w.vaultId, 1)); // A6b: ownership evidence (see above)
     await store.accountState.pin(pinOf(w.member, "Member"));
     await store.sync();
+    expect(server.reissues, "A6b: sync() never re-issues").toEqual([]);
+    const rows = await store.loadLegacyGrants(w.vaultId);
+    expect(rows.map((r) => r.userId).sort()).toEqual([w.member.userId, unpinned.userId].sort());
+    expect(server.reissues, "listing signs nothing for an unrecorded pair").toEqual([]);
+    await expect(store.confirmReissue(rows.find((r) => r.userId === unpinned.userId)!)).rejects.toBeInstanceOf(MemberNotVerifiedError);
+    await store.confirmReissue(rows.find((r) => r.userId === w.member.userId)!);
     expect(server.reissues.map((r) => [r.vaultId, r.userId])).toEqual([[w.vaultId, w.member.userId]]);
     const me = boxKeypairFromSeed(await seedOf(w.member));
     const opened = openSignedGrant({
@@ -445,7 +457,8 @@ describe("A6 — signed grants (VaultStore)", () => {
       pinFor: (uid) => (uid === w.owner.userId ? { identityPub: fromB64(w.owner.identityPub), current: true } : null), heldVk: w.vk,
     });
     expect(opened.verdict).toBe("adopt");
-    expect(store.legacyGrantMembers(w.vaultId).map((m) => m.userId)).toEqual([unpinned.userId]);
+    expect(store.legacyGrantRows(w.vaultId).map((m) => m.userId)).toEqual([unpinned.userId]);
+    expect(store.legacyGrantRows(w.vaultId)[0]!.pinState).toBe("needs-verification");
     await store.sync();
     expect(server.reissues).toHaveLength(1);
   });

@@ -356,12 +356,43 @@ key signs only through the flows that need it (today: escrow v2).
     by serving older authentic blobs in ascending order.) A grant from a pinned, current contact is adopted with the notice
     "You were added to <vault> by <contact>" (owner decision Q5). Vectors:
     `spec/test-vectors/sharedgrant-v2.json`.
+  - **Grant authority, sender side (NORMATIVE; security review 2026-10, root cause A, branch A6b).**
+    A client never signs or seals a VK to a user unless (a) a HUMAN on that device confirmed that
+    (vault, user) pair now: the add-member action, or a per-row "Re-share <vault> with <member>?" on
+    the owner's "Legacy grants" list (each row names the vault and the member's VERIFIED label; the
+    copy says the list itself comes from the server; a batch is allowed only if every row shows both
+    and the owner confirms the list as a whole), or (b) the pair is in this account's **issued-grants
+    record** for the SAME identity key. The record lives in the account state (spec 03 §3,
+    `issuedGrants` = `[{vaultId, userId, keyHash = hex SHA-256 of the identity key sealed to, at}]`,
+    `issuedTombstones` keyed `"<vaultId>|<userId>"`): every grant the account signs is recorded, a
+    removal tombstones the pair, and, being UVK-sealed and union-merged, it is shared by every device of
+    the owner and cannot be shrunk by a withheld or rolled-back blob. Grants signed before A6b are
+    never in it, so their re-issue always needs (a). Nothing re-issues automatically: the re-issue is
+    NOT part of sync; only loading the "Legacy grants" list renews, without a prompt, the pairs (b)
+    covers. **Ownership is the account's own evidence, never the `role=owner` label**: add member,
+    re-issue and the transfer offer require the vault to be in the account state's `ownedVaults`
+    (written when this account creates the vault, when it accepts a transfer, or by a one-time
+    "You own <vault>?" confirmation behind a fresh master-password reauth checked on the device against
+    the UVK the session holds — the served AccountKeys must pass the unlock KDF floor/ceiling fence and
+    carry the salt this session unlocked with, so a replayed pre-password-change AccountKeys never lets an
+    old password pass; the confirmation first loads and shows, "as reported by the server", the vault's
+    owner, its last completed transfer and its co-holders, is worded "Only confirm if you created this
+    vault, or its owner transferred it to you", and is refused for a vault whose key is not from the
+    account's own UVK wrap; for a vault this device first adopted as a MEMBER (a durable device-local
+    record, not rebuilt from served rows) it also needs the explicit acknowledgement "This vault's owner
+    transferred it to me", which a genuine pre-A6b transfer recipient gives; tombstoned in `ownedTombstones` when the account transfers the vault away,
+    on a transfer verified under the vault key, or leaves it). The owner wrap is minted only by a transfer
+    accept, after the offer verified under the vault key. The server's role label is display only ("as
+    reported by the server"); without the record the owner panel shows only "You own <vault>?". The
+    member list and its `legacyGrant` flag (spec 03 §10) decide what is SHOWN, never what is signed.
+    Vectors: `spec/test-vectors/accountstate.json` (the `a6b-*` rows).
   - **Legacy (v1-only) keys (NORMATIVE in the compatibility window; root cause A §8.2, §8.6).**
     A key whose only origin is a v1 `sealedVk` is LEGACY-READ-ONLY: readable, but no client
     seals anything under it (item writes, conflict copies, renames, transfer re-wraps, imports,
     capture/update targets), and every write path treats the vault as `reader`. It stops being
     read-only only when (a) a verified v2 grant for the same vault arrives (the owner's re-issue,
-    `PUT /vaults/{id}/members/{userId}/grant`, carries the SAME key; a verified grant carrying a
+    `PUT /vaults/{id}/members/{userId}/grant`, carries the SAME key and is sent only under the grant
+    authority rule above; a verified grant carrying a
     DIFFERENT key never replaces a held legacy key: it is the `vk_mismatch` anomaly and the held key,
     read-only or vouched, stays), or (b) this
     device FROZE it: once per cache, on the first run of a release with this rule, a vault whose
