@@ -322,4 +322,31 @@ class ItemHomeAcceptanceTest {
         assertTrue(g.newItemId != w.x, "move/copy mint a fresh id")
         assertFailsWith<ItemChangedVaultsException> { engine.runGesture(g.copy(sourceVaultId = w.s)) }
     }
+
+    /**
+     * A1b review LOW-1 (availability): the conflict-copy id is deterministic, so a server can pre-claim
+     * `home(copyId)` under another vault and make the seal of the copy refuse. The refusal is right; it must not
+     * escape the materializer and fail THIS sync and every later one while the flag stands. Expected: the sync
+     * completes, the row is skipped, the wrong-vault notice is raised (once), and the next sync is clean too.
+     */
+    @Test
+    fun aPreClaimedConflictCopyHomeDoesNotFailTheSync() = runBlocking<Unit> {
+        val w = World(writable = true)
+        val server = Server()
+        val (_, engine) = client(w, server, cold = false)
+        val flaggedAtHome = w.victim.account.encryptItem(w.p, w.x, w.bait).let { WireItem(w.x, w.p, 6, 1, 2, false, true, it.formatVersion, it.attachmentIds, it.blob) }
+        val copyId = ConflictCopy.id(crypto, w.x, 6)
+        // A TOMBSTONE under S: it records home(copyId) = S (a tombstone is a row like any other) without leaving a
+        // live copy row, so the materializer must mint the copy and its seal under P is refused.
+        val preClaim = WireItem(copyId, w.s, 7, 1, 2, true, false, 1, emptyList(), null)
+        server.queue.add(SyncResponse(9, false, listOf(w.sRow), listOf(w.sGrant), listOf(preClaim, flaggedAtHome), emptyList()))
+        engine.sync() // must not throw
+        assertEquals(1, engine.notices().count { it.kind == "wrong-vault" }, "the refused copy seal is the wrong-vault anomaly: ${engine.notices().map { it.kind }}")
+        assertTrue(server.pushed.none { it.vaultId == w.s && it.itemId == copyId }, "no copy sealed under S")
+        assertEquals(w.p, engine.item(w.x)?.vaultId)
+        val first = engine.notices().single { it.kind == "wrong-vault" }.id
+        engine.sync() // the flag still stands server-side; later syncs keep working
+        val again = engine.notices().single { it.kind == "wrong-vault" } // pushNotice collapses a repeat of the same vault+kind
+        assertTrue(again.id != first, "reported again on the next pull (a fresh notice), never silent, never fatal")
+    }
 }
