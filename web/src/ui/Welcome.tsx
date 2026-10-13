@@ -1016,7 +1016,11 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
 
       {inPersonLink && (
         <div className="check-block">
-          {/* A5c: in the waived posture the code field sits BEHIND the first-person in-person affirmation
+          {/* A5c: the stop warning comes FIRST, in every posture, so the human reads it before either
+              affirmation tick (the waived tick just below; the required-affirm tick FingerprintProvenance
+              renders after this block) and before the code field (A5c review LOW-1/LOW-2). */}
+          <div className="msg err" style={{ display: "block" }}>{IN_PERSON_CODE_WARNING}</div>
+          {/* In the waived posture the code field sits BEHIND the first-person in-person affirmation
               (required-affirm has its own tick below, and the seal needs the code regardless). Unticked,
               the enrolment goes ahead with no admin pin: a pending verification, not an error. */}
           {posture !== "required-affirm" && (
@@ -1027,7 +1031,6 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
           )}
           {posture === "required-affirm" || inPersonAffirmed ? (
             <>
-              <div className="msg err" style={{ display: "block" }}>{IN_PERSON_CODE_WARNING}</div>
               <Field
                 label="In-person code — type the 32 characters your admin's screen shows beside the QR"
                 prompt

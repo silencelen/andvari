@@ -33,6 +33,20 @@ describe("web enrolment — the admin pin needs in-person evidence, never a navi
     expect(IN_PERSON_CODE_WARNING).toContain("Never use a code from an email or message.");
   });
 
+  it("the warning PRECEDES both affirmation ticks and the code field in source order, so the human reads it before deciding (review LOW-1/LOW-2)", () => {
+    const warning = welcomeCode.indexOf("{IN_PERSON_CODE_WARNING}");
+    const waivedTick = welcomeCode.indexOf("checked={inPersonAffirmed}");
+    const affirmTick = welcomeCode.indexOf("checked={p.affirmConfirmed}");
+    const codeField = welcomeCode.indexOf("value={inPersonEntry}");
+    expect(warning).toBeGreaterThan(-1);
+    expect(waivedTick).toBeGreaterThan(warning);
+    expect(affirmTick).toBeGreaterThan(warning);
+    expect(codeField).toBeGreaterThan(warning);
+    // ...and it is rendered unconditionally within the in-person block: no tick gates it. (A stripped JSX
+    // comment leaves an empty `{}` expression behind, which is allowed between the two.)
+    expect(welcomeCode).toMatch(/<div className="check-block">\s*(?:\{\s*\}\s*)*<div className="msg err" style=\{\{ display: "block" \}\}>\{IN_PERSON_CODE_WARNING\}<\/div>/);
+  });
+
   it("the pin is decided from the raw evidence (typed code + first-person affirmation), not a boolean", () => {
     // The evidence object is built from the human's two acts: the affirmation is the posture's own
     // first-person tick (required-affirm) or the waived posture's "I'm with my admin right now".
