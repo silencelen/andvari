@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import { admitRow, admitRows, conflictDecision, editDecision, sealDecision, sealGate, serverItemDecision, WRONG_VAULT_LINE, wrongVaultLine } from "./itemhome.ts";
 
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
-type Row = { itemId: string; vaultId: string; deleted?: boolean; conflict?: boolean };
+type Row = { itemId: string; vaultId: string; deleted?: boolean; conflict?: boolean; unheld?: boolean };
 const v = JSON.parse(readFileSync(vectorsDir + "itemhome.json", "utf8")) as {
-  admit: { name: string; home: string | null; vaultId: string; expect: string }[];
+  admit: { name: string; home: string | null; vaultId: string; applies?: boolean; expect: string }[];
   pulls: { name: string; homes: Record<string, string>; rows: Row[]; expect: { verdicts: string[]; homes: Record<string, string>; anomalies: number; materialize: { itemId: string; vaultId: string }[] } }[];
   conflict: { name: string; twin: string | null; flagged: string; home: string | null; expect: string }[];
   serverItem: { name: string; pushed: string; losing: string; home: string | null; expect: string }[];
@@ -20,7 +20,7 @@ const v = JSON.parse(readFileSync(vectorsDir + "itemhome.json", "utf8")) as {
 };
 
 test("itemhome.json admit rows", () => {
-  for (const c of v.admit) assert.equal(admitRow(c.home, c.vaultId), c.expect, c.name);
+  for (const c of v.admit) assert.equal(admitRow(c.home, c.vaultId, c.applies ?? true), c.expect, c.name);
 });
 
 test("itemhome.json pulls, through admitRows (the worker's resync/unlock path)", () => {
@@ -28,12 +28,15 @@ test("itemhome.json pulls, through admitRows (the worker's resync/unlock path)",
   for (const c of v.pulls) {
     const homes = new Map(Object.entries(c.homes));
     const shadow = new Map(homes);
+    // A9: a row applies only when it is live and under a vault this device holds the key for (the worker also needs
+    // the envelope to open; the vectors cannot express that, the applied test does).
+    const applies = (r: Row) => !r.deleted && !r.unheld;
     const verdicts = c.rows.map((r) => {
-      const verdict = admitRow(shadow.get(r.itemId), r.vaultId);
+      const verdict = admitRow(shadow.get(r.itemId), r.vaultId, applies(r));
       if (verdict === "new_home") shadow.set(r.itemId, r.vaultId);
       return verdict;
     });
-    const { admitted, tally } = admitRows(c.rows, homes);
+    const { admitted, tally } = admitRows(c.rows, homes, applies);
     assert.deepEqual(verdicts, c.expect.verdicts, `${c.name}: verdicts`);
     assert.deepEqual(Object.fromEntries(homes), c.expect.homes, `${c.name}: homes`);
     const twins = new Map<string, string>();

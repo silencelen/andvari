@@ -1211,7 +1211,9 @@ function ensureLoaded(): Promise<void> {
         // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         waitingGrants: typeof snap.waitingGrants === "number" ? snap.waitingGrants : 0,
-        homes: new Map(Object.entries(snap.homes ?? {})),
+        // A1b item homes: a snapshot persisted before they existed carries none; the durable record in storage.local
+        // is reloaded then (A9: an empty map here would have been taken as authoritative and overwritten it).
+        homes: snap.homes ? new Map(Object.entries(snap.homes)) : await loadHomes(snap.userId),
         wrongVault: typeof snap.wrongVault === "number" ? snap.wrongVault : 0,
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
@@ -2848,6 +2850,11 @@ function saveHomes(userId: string, homes: Map<string, string>): Promise<void> {
  * browser's homes, THEN decrypt only the admitted ones. A row under another vault than its item's home (live or
  * tombstone) never reaches session.items, so it is never matched, filled, updated by a capture or given a TOTP. The
  * refusals are counted for the popup's "wrong vault" line. New homes are persisted.
+ *
+ * A9 (L-1): an UNHOMED row homes its item only if this browser actually APPLIES it — live, blob present, key held, and
+ * the envelope opens to a well-formed doc (the open happens once, here; the admitted rows reuse it). A blob-less
+ * tombstone or a row under a vault this session holds no key for is skipped: no home, no anomaly. Before A9 such a row
+ * served first homed the item to the server's vault and quarantined the genuine row on this browser for good.
  */
 async function homeAndDecrypt(
   sync: SyncResponse,
@@ -2856,33 +2863,51 @@ async function homeAndDecrypt(
   homes?: Map<string, string>,
 ): Promise<{ items: DecryptedItem[]; homes: Map<string, string>; wrongVault: number }> {
   const h = homes ?? (await loadHomes(userId));
-  const { admitted, tally, changed } = admitRows(sync.items, h);
+  const opened = new Map<SyncResponse["items"][number], DecryptedItem>();
+  const applies = (it: SyncResponse["items"][number]): boolean => {
+    if (it.deleted || !it.blob || !vaultKeys.has(it.vaultId)) return false;
+    const d = decryptItem(it, vaultKeys);
+    if (d) opened.set(it, d);
+    return d !== null;
+  };
+  const { admitted, tally, changed } = admitRows(sync.items, h, applies);
   if (changed) await saveHomes(userId, h);
-  return { items: decryptItems({ ...sync, items: admitted }, vaultKeys), homes: h, wrongVault: tally.refused };
+  const items: DecryptedItem[] = [];
+  for (const it of admitted) {
+    const d = opened.get(it) ?? decryptItem(it, vaultKeys);
+    if (d) items.push(d);
+  }
+  return { items, homes: h, wrongVault: tally.refused };
+}
+
+/** One row, decrypted under a held key to a well-formed doc, or null (tombstone, no key, undecryptable, malformed). */
+function decryptItem(it: SyncResponse["items"][number], vaultKeys: Map<string, Uint8Array>): DecryptedItem | null {
+  if (it.deleted || !it.blob) return null;
+  // Fail closed above the read ceiling (web account.ts parity): an fv this client doesn't
+  // understand may carry doc semantics an edit would corrupt. Items we CAN read carry their
+  // fv onto the session item, and every re-seal AD-binds + rewires that SAME fv (the server
+  // refuses per-item fv downgrades) — so nothing we touch can ever downgrade or upgrade.
+  if (it.formatVersion > MAX_ITEM_FORMAT_VERSION) return null;
+  const vk = vaultKeys.get(it.vaultId);
+  if (!vk) return null;
+  try {
+    const doc: unknown = JSON.parse(
+      new TextDecoder().decode(open(vk, fromB64(it.blob), adItem(it.vaultId, it.itemId, it.formatVersion))),
+    );
+    // spec 02 §3.2 (security review 2026-10): any writer of a shared vault can seal any JSON
+    // under its VK — a malformed doc is skipped like an undecryptable one, never admitted.
+    if (itemDocProblem(doc) !== null) return null;
+    return { itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc: doc as ItemDoc };
+  } catch {
+    return null; // undecryptable — skip
+  }
 }
 
 function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): DecryptedItem[] {
   const items: DecryptedItem[] = [];
   for (const it of sync.items) {
-    if (it.deleted || !it.blob) continue;
-    // Fail closed above the read ceiling (web account.ts parity): an fv this client doesn't
-    // understand may carry doc semantics an edit would corrupt. Items we CAN read carry their
-    // fv onto the session item, and every re-seal AD-binds + rewires that SAME fv (the server
-    // refuses per-item fv downgrades) — so nothing we touch can ever downgrade or upgrade.
-    if (it.formatVersion > MAX_ITEM_FORMAT_VERSION) continue;
-    const vk = vaultKeys.get(it.vaultId);
-    if (!vk) continue;
-    try {
-      const doc: unknown = JSON.parse(
-        new TextDecoder().decode(open(vk, fromB64(it.blob), adItem(it.vaultId, it.itemId, it.formatVersion))),
-      );
-      // spec 02 §3.2 (security review 2026-10): any writer of a shared vault can seal any JSON
-      // under its VK — a malformed doc is skipped like an undecryptable one, never admitted.
-      if (itemDocProblem(doc) !== null) continue;
-      items.push({ itemId: it.itemId, vaultId: it.vaultId, rev: it.rev, formatVersion: it.formatVersion, doc: doc as ItemDoc });
-    } catch {
-      /* undecryptable — skip */
-    }
+    const d = decryptItem(it, vaultKeys);
+    if (d) items.push(d);
   }
   return items;
 }
