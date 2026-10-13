@@ -332,7 +332,14 @@ anomaly warning instead of the attributed notice. Wording only, fail-closed.
 **R17 (item home — security review 2026-10, root cause A §5; branch A1b; spec 02 §7.2).** Closes review A-4.
 Residuals accepted: (a) **the home is device-local**, so the server chooses the FIRST home of an itemId on a
 fresh device (or one whose cache was wiped: sign-out, a policy purge, a demoted web cache), exactly as it
-already chooses which rows a fresh device sees; from then on no served row moves the item. A server that serves
+already chooses which rows a fresh device sees; from then on no served row moves the item. The same holds for
+every SESSION of a client with no durable cache: cache-less web (`NullCache`, the default until the per-device
+opt-in, spec 02 §8.1) and a native host on the in-memory cache (desktop before cache consent, org-forbid mode)
+hold their homes in memory only, so each unlock starts fresh and the server picks the first home of every item
+in each such session. Confidentiality holds there as well: a served row under the server's vault that wins the
+first-home race leaves the genuine row QUARANTINED, never decrypted into the working set, so no plaintext of the
+genuine vault is ever sealed under the server's key; what the user sees is the server's own plaintext, and the
+wrong-vault notice is raised on that pull. A server that serves
 a fresh device an item ONLY under a vault it keys reads nothing new (the plaintext it serves is its own). (b)
 **the extension keeps its homes per server origin and user in browser storage** and rebuilds them from the
 first snapshot after that storage is cleared. (c) **quarantined rows are kept as ciphertext** for diagnosis
