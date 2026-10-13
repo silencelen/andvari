@@ -20,9 +20,11 @@ import io.silencelen.andvari.core.model.EscrowDrillPass
 import io.silencelen.andvari.core.model.EscrowDrillReceipt
 import io.silencelen.andvari.core.model.EscrowDrillResult
 import io.silencelen.andvari.core.model.EscrowUpload
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -109,6 +111,88 @@ class EscrowLegacyRetentionTest : P4TestSupport() {
         val same = client.download(admin, admin.userId).sealed
         assertEquals(HttpStatusCode.OK, client.escrowSelf(admin, same).status)
         assertNull(client.download(admin, admin.userId).legacySealed)
+    }
+
+    // ---- security review 2026-10, plugin scan F4 (branch A10): a retired org key never keeps a blob alive ----
+
+    /** The same instance after an org-key rotation (T9 re-ceremony): a NEW recovery keypair, same database. */
+    private fun rotated(dbPath: String, recovery2: io.silencelen.andvari.core.crypto.KeyPairBytes) = Config(
+        host = "127.0.0.1", port = 0, dbPath = dbPath,
+        blobDir = File(tmpDir, "blobs-rot-${System.nanoTime()}").absolutePath, webDir = null,
+        recoveryPublicKey = recovery2.publicKey, recoveryFingerprint = Escrow.fingerprint(crypto, recovery2.publicKey),
+        enumSecret = ByteArray(32) { 7 }, publicHostname = null, bootstrapToken = bootstrapToken,
+    )
+
+    @Test
+    fun rotation_aReplacedBlobSealedToTheRetiredKeyIsNotRetained() {
+        val before = config()
+        val admin = VirtualClient("admin@x.com", "legacy retention password 5")
+        testApplication {
+            application { andvariModule(buildServices(before, Notifier())) }
+            jsonClient(this).register(admin, bootstrapToken) // a v1 blob under K1
+        }
+        val recovery2 = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        val after = rotated(before.dbPath, recovery2)
+        testApplication {
+            application { andvariModule(buildServices(after, Notifier())) }
+            val client = jsonClient(this)
+            // The member re-seals to K2 (F57: escrowStale). The K1 blob it replaces is NOT retained — it is exactly
+            // the blob the rotation was meant to retire — so the download carries the K2 blob alone.
+            val v2 = admin.sealEscrowV2(recovery2.publicKey, after.recoveryFingerprint)
+            val put = client.put("/api/v1/escrow/self") { contentType(ContentType.Application.Json); authed(admin); setBody(EscrowUpload(v2, after.recoveryFingerprint)) }
+            assertEquals(HttpStatusCode.OK, put.status, put.bodyAsText())
+            val d = client.download(admin, admin.userId)
+            assertEquals(v2, d.sealed)
+            assertNull(d.legacySealed, "a blob sealed to the retired key is never retained")
+        }
+    }
+
+    @Test
+    fun rotation_startupPurgesRetainedBlobsUnderAnyOtherKey_andADownloadNeverServesOne() {
+        val before = config()
+        val admin = VirtualClient("admin@x.com", "legacy retention password 6")
+        val services1 = buildServices(before, Notifier())
+        testApplication {
+            application { andvariModule(services1) }
+            val client = jsonClient(this)
+            client.register(admin, bootstrapToken)
+            // The same-key v1 → v2 migration retains the v1 blob (the §8.4 case that retention exists for).
+            val v2a = admin.sealEscrowV2(recovery.publicKey, fingerprint)
+            assertEquals(HttpStatusCode.OK, client.escrowSelf(admin, v2a).status)
+            assertNotNull(client.download(admin, admin.userId).legacySealed)
+            // (c) Never served: a retained row whose fingerprint is not the current one is invisible to the download
+            // even before any purge runs (a row an older build left behind, or a database restored across a rotation).
+            services1.repo.db.tx { c -> c.exec("UPDATE escrow_legacy SET fingerprint=? WHERE userId=?", "retired-" + fingerprint, admin.userId) }
+            assertNull(client.download(admin, admin.userId).legacySealed, "a legacy blob under another key is not served")
+            assertEquals(1, services1.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM escrow_legacy WHERE userId=?", admin.userId) { it.getInt(1) } })
+        }
+        // (b) The rotation: the instance restarts with K2. Every retained blob under any other key is purged at startup.
+        val recovery2 = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        val after = rotated(before.dbPath, recovery2)
+        val services2 = buildServices(after, Notifier())
+        testApplication {
+            application { andvariModule(services2) }
+            val client = jsonClient(this)
+            assertEquals(0, services2.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM escrow_legacy") { it.getInt(1) } }, "purged at startup")
+            assertNull(client.download(admin, admin.userId).legacySealed)
+            assertEquals(admin.userId, client.auditRows(admin, "escrow_legacy_purged").single().meta, "the purge is audited per account")
+            // A retained blob under the CURRENT key is untouched by a restart (the drill hook is what drops it).
+            val v2b = admin.sealEscrowV2(recovery2.publicKey, after.recoveryFingerprint)
+            assertEquals(HttpStatusCode.OK, client.put("/api/v1/escrow/self") { contentType(ContentType.Application.Json); authed(admin); setBody(EscrowUpload(v2b, after.recoveryFingerprint)) }.status)
+            val v2c = admin.sealEscrowV2(recovery2.publicKey, after.recoveryFingerprint)
+            assertEquals(HttpStatusCode.OK, client.put("/api/v1/escrow/self") { contentType(ContentType.Application.Json); authed(admin); setBody(EscrowUpload(v2c, after.recoveryFingerprint)) }.status)
+            assertEquals(v2b, client.download(admin, admin.userId).legacySealed, "same-key retention still works after the rotation")
+        }
+        val services3 = buildServices(rotated(before.dbPath, recovery2), Notifier())
+        testApplication {
+            application { andvariModule(services3) }
+            val client = jsonClient(this)
+            assertNotNull(client.download(admin, admin.userId).legacySealed, "a restart under the SAME key purges nothing")
+            // (the drill hook keeps its job)
+            val ok = client.drill(admin, EscrowDrillReceipt(listOf(EscrowDrillPass(admin.userId, sha(client.download(admin, admin.userId).sealed)))))
+            assertEquals(EscrowDrillResult(listOf(admin.userId), emptyList()), json.decodeFromString(EscrowDrillResult.serializer(), ok.bodyAsText()))
+            assertNull(client.download(admin, admin.userId).legacySealed)
+        }
     }
 
     @Test

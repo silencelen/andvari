@@ -254,6 +254,7 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     val db = Db(config.dbPath)
     val repo = Repo(db)
     seedBootstrap(repo, config)
+    purgeRetiredEscrowLegacy(repo, config)
     val http = HttpClient(Java)
     val service = Service(repo, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
     val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
@@ -323,6 +324,24 @@ private suspend fun ApplicationCall.respondFileContent(file: File) {
  * this re-checks because a Config can be built without fromEnv, and says so loudly — an empty
  * users table with no way in is an operator problem worth one line in the boot log.
  */
+/**
+ * Security review 2026-10, plugin scan F4 (A10): an org-key rotation is a config change (a new
+ * ANDVARI_RECOVERY_FINGERPRINT at restart), so this is where it takes effect on the retained blobs.
+ * Every `escrow_legacy` row sealed to any key but the current one is purged, one audit row per
+ * account (`escrow_legacy_purged`, meta = the member). A retained blob under the CURRENT key is
+ * untouched: the drill hook (AdminService.applyDrillReceipt) is what drops those. Unconfigured
+ * escrow purges nothing (the key is not rotated, it is absent — spec 04 §6 waived instances).
+ */
+internal fun purgeRetiredEscrowLegacy(repo: Repo, config: Config) {
+    if (!config.escrowConfigured) return
+    repo.db.tx { c ->
+        val retired = c.queryAll("SELECT userId FROM escrow_legacy WHERE fingerprint<>?", config.recoveryFingerprint) { it.getString(1) }
+        if (retired.isEmpty()) return@tx
+        c.exec("DELETE FROM escrow_legacy WHERE fingerprint<>?", config.recoveryFingerprint)
+        for (userId in retired) repo.auditOn(c, "escrow_legacy_purged", null, null, null, userId)
+    }
+}
+
 private fun seedBootstrap(repo: Repo, config: Config) {
     val userCount = repo.db.read { it.queryOne("SELECT COUNT(*) FROM users") { rs -> rs.getInt(1) } ?: 0 }
     if (userCount > 0) return
@@ -975,9 +994,13 @@ fun Application.andvariModule(services: Services) {
                 // kept as `escrow_legacy` until a fleet drill passes on the new one, so a defective
                 // (e.g. first-generation v2) seal can never strand the member. INSERT OR IGNORE keeps
                 // the OLDEST undrilled blob; an identical re-upload retains nothing.
+                // Plugin scan F4 (A10): ONLY a blob sealed to the CURRENT org key is retained (the
+                // same-key v1 → v2 migration). A blob sealed to a retired key — the F57 re-seal after a
+                // T9 re-ceremony — is the blob the rotation exists to retire; keeping it would hand the
+                // stolen sheet's holder every re-sealed member's UVK until a drill happened to run.
                 c.exec(
-                    "INSERT OR IGNORE INTO escrow_legacy(userId,sealed,fingerprint,updatedAt,retainedAt) SELECT userId,sealed,fingerprint,updatedAt,? FROM escrow WHERE userId=? AND sealed<>?",
-                    now(), p.userId, body.sealed,
+                    "INSERT OR IGNORE INTO escrow_legacy(userId,sealed,fingerprint,updatedAt,retainedAt) SELECT userId,sealed,fingerprint,updatedAt,? FROM escrow WHERE userId=? AND sealed<>? AND fingerprint=?",
+                    now(), p.userId, body.sealed, config.recoveryFingerprint,
                 )
                 c.exec(
                     "INSERT INTO escrow(userId,sealed,fingerprint,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET sealed=excluded.sealed, fingerprint=excluded.fingerprint, updatedAt=excluded.updatedAt",

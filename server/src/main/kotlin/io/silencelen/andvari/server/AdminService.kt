@@ -186,13 +186,17 @@ class AdminService(private val repo: Repo, private val config: Config) {
     }
 
     /** Design §2.5: the escrow blob + the identity file the recovery CLI checks it against + the
-     *  retained legacy blob (§8.4). Null when the account has no escrow row (waived / unknown id). */
+     *  retained legacy blob (§8.4). Null when the account has no escrow row (waived / unknown id).
+     *  Plugin scan F4 (A10): a retained blob is served ONLY when it is sealed to the CURRENT org key;
+     *  one under a retired key (a row an older build kept, or a database restored across a rotation)
+     *  is never served, whether or not the startup purge has run yet. */
     fun escrowDownload(userId: String): AdminEscrowDownload? = repo.db.read { c ->
         c.queryOne(
             """SELECT e.sealed, u.encryptedIdentitySeed, u.identityPub, l.sealed
-               FROM escrow e JOIN users u ON u.userId = e.userId LEFT JOIN escrow_legacy l ON l.userId = e.userId
+               FROM escrow e JOIN users u ON u.userId = e.userId
+               LEFT JOIN escrow_legacy l ON l.userId = e.userId AND l.fingerprint = ?
                WHERE e.userId=?""",
-            userId,
+            config.recoveryFingerprint, userId,
         ) { rs -> AdminEscrowDownload(userId, rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)) }
     }
 
