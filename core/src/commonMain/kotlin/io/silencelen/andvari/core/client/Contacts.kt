@@ -41,7 +41,8 @@ class ServedIdentity(val userId: String, val identityPub: String)
  *    human-only prefix rule: exactly 32 hex after normalising, never a machine-supplied value).
  *  - [fromQr]: a camera scan of the other person's identity QR, compared at FULL length.
  *  - [fromEnrolLink]: the in-person enrolment link's `ifp`/`iu`, ONLY after the invitee typed the
- *    in-person code shown on the admin's screen ([EnrollLink.checkCode]), compared at full length.
+ *    in-person code shown on the admin's screen ([EnrollLink.checkCode]) AND affirmed, first person, that
+ *    they are reading that screen in person (A5c), compared at full length.
  */
 object ContactPin {
     private val HEX64_RE = Regex("^[0-9a-f]{64}$")
@@ -67,19 +68,27 @@ object ContactPin {
     }
 
     /**
-     * [inPersonVerified] is the caller's statement that the human typed the link's in-person code and
-     * it matched ([EnrollLink.checkCodeMatches]); without it the link is just text the server could
-     * have composed, and nothing is pinned.
+     * The in-person evidence is two HUMAN acts, both re-checked here from the raw inputs (security review
+     * 2026-10, A5c — API review #4): [typedCode], the in-person code the invitee typed from the admin's screen
+     * ([EnrollLink.checkCodeMatches]), and [inPersonAffirmed], their first-person statement that they are
+     * reading that screen right now. The code is an unkeyed hash of the link itself, so whoever composed the
+     * link (the server emails invites) can hand the invitee "the code" through the same channel; nothing the
+     * invitee's client can verify is beyond the server's reach, so the anchor is necessarily the human's
+     * comparison, and a navigated link plus a correct code is never in-person evidence on its own. Without
+     * both, the link is just text the server could have composed, nothing is pinned, and the admin stays a
+     * pending verification for the "Verify a household member" ceremony.
      */
     fun fromEnrolLink(
         crypto: CryptoProvider,
         payload: EnrollPayload,
-        inPersonVerified: Boolean,
+        typedCode: String,
+        inPersonAffirmed: Boolean,
         served: ServedIdentity,
         label: String,
         now: Long,
     ): Contact? {
-        if (!inPersonVerified) return null
+        if (!inPersonAffirmed) return null
+        if (!EnrollLink.checkCodeMatches(crypto, payload, typedCode)) return null
         val ifp = payload.ifp ?: return null
         val iu = payload.iu ?: return null
         if (!HEX64_RE.matches(ifp) || iu != served.userId) return null
