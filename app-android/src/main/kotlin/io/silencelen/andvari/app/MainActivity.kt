@@ -1718,7 +1718,7 @@ fun VaultScreen(vm: AndvariViewModel, ui: UiState) {
             when {
                 // Completion callbacks capture the STABLE vm, never composition state: a
                 // save finishing across an Activity recreation still closes the editor.
-                editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads, vId -> vm.saveItem(editorItemId, doc, uploads, vId) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
+                editorInitial != null -> ItemEditor(vm, ui, editorItemId, editorInitial, onSave = { doc, uploads, vId -> vm.saveItem(editorItemId, doc, uploads, if (editorItemId != null) vm.editorVaultId else vId) { vm.closeEditor() } }, onCancel = { vm.closeEditor() })
                 current != null -> ItemDetail(vm, ui, current, onEdit = { vm.openEditor(current.itemId) }, onDelete = { vm.deleteItem(current.itemId); detailId = null }, onBack = { detailId = null })
                 // Cut K (v2 #19): LazyColumn — the eager Column composed EVERY row on every
                 // keystroke (the 10k-scale freeze class the import dialogs cap against).
@@ -2098,7 +2098,7 @@ private fun ItemHistorySection(vm: AndvariViewModel, ui: UiState, item: VaultIte
             onDismissRequest = { confirmRestore = null },
             title = { Text("Restore this version?") },
             text = { Text("The item's current version will be replaced by the one from ${java.time.Instant.ofEpochMilli(v.archivedAt).toString().take(10)}. The replaced version stays in history.") },
-            confirmButton = { TextButton(onClick = { confirmRestore = null; vm.restoreVersion(item.itemId, v.doc) { onRestored() } }) { Text("Restore") } },
+            confirmButton = { TextButton(onClick = { confirmRestore = null; vm.restoreVersion(item.itemId, item.vaultId, v.doc) { onRestored() } }) { Text("Restore") } },
             dismissButton = { TextButton(onClick = { confirmRestore = null }) { Text("Cancel") } },
         )
     }

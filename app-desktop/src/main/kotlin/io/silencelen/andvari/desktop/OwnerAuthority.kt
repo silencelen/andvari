@@ -33,7 +33,9 @@ import io.silencelen.andvari.core.client.CoHolder
 import io.silencelen.andvari.core.client.LegacyGrantRow
 import io.silencelen.andvari.core.client.OwnershipClaim
 import io.silencelen.andvari.core.client.OwnershipTransferAckRequiredException
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ReauthFailedException
+import io.silencelen.andvari.core.client.ReauthStaleSessionException
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.VaultInfo
 import kotlinx.coroutines.launch
@@ -130,7 +132,9 @@ internal fun OwnershipConfirmCard(vm: DesktopState, v: VaultInfo, onConfirmed: (
                             onConfirmed()
                         } else {
                             err = when (failure) {
-                                is ReauthFailedException -> "That master password isn't right."
+                                is ReauthFailedException -> HouseholdCopy.REAUTH_FAILED
+                                // A1b (A6b carry-forward): a session salt that is stale since a password change / KDF upgrade.
+                                is ReauthStaleSessionException -> HouseholdCopy.REAUTH_STALE_SESSION
                                 is OwnershipTransferAckRequiredException -> "Tick “This vault's owner transferred it to me” only if that is true."
                                 else -> "Couldn't confirm it. Try again."
                             }

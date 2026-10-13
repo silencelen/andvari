@@ -1171,10 +1171,19 @@ class AndvariViewModel(
     var editorGenerateOnOpen by mutableStateOf(false)
         private set
 
+    /**
+     * INV-EDIT (security review 2026-10, root cause A §5.1; branch A1b): the vault the editor session was bound to when
+     * it OPENED on an existing item. The save names it ([saveItem]'s vaultId); a home that changed since refuses the save
+     * ("This item changed vaults; reopen it.") instead of re-targeting it. Null for a new item.
+     */
+    var editorVaultId by mutableStateOf<String?>(null)
+        private set
+
     fun openEditor(itemId: String?, newType: String = "login", generate: Boolean = false) {
         editorPendingUploads.clear() // a fresh editor session never inherits stale picks
         draftItemId = null // …nor a previous session's draft id (reusing one would OVERWRITE that item)
         editorItemId = itemId
+        editorVaultId = itemId?.let { engine?.item(it)?.vaultId }
         editorNewType = newType
         editorGenerateOnOpen = generate
         editorOpen = true
@@ -1183,6 +1192,7 @@ class AndvariViewModel(
     fun closeEditor() {
         editorOpen = false
         editorItemId = null
+        editorVaultId = null
         editorPendingUploads.clear()
         editorGenerateOnOpen = false
         draftItemId = null // cancel or success: the next editor session starts a fresh draft
@@ -2351,6 +2361,13 @@ class AndvariViewModel(
         else -> "Recovery failed. Please try again."
     }
 
+    /**
+     * INV-EDIT for the Health / duplicates writes (A1b): the vault of the planned item in the SAME `_ui.value.items`
+     * snapshot the plan's doc was drawn from (that doc was decrypted from that envelope). Never a lookup at save time;
+     * core refuses the write if the item's home has changed since.
+     */
+    private fun boundVault(itemId: String): String? = _ui.value.items.firstOrNull { it.itemId == itemId }?.vaultId
+
     fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError) {
         // F18: [vaultId] is the NEW-item vault picker's choice. saveWithUploads HONORS it only
         // when itemId == null; for an existing item it re-targets the item's OWN vault (its blob
@@ -2375,8 +2392,8 @@ class AndvariViewModel(
 
     /** Item history restore (H03): an ordinary save of the archived doc with every attachment
      *  ref the live item no longer carries stripped — see [SyncEngine.versionDocForRestore]. */
-    fun restoreVersion(itemId: String, version: ItemDoc, onSaved: () -> Unit = {}) =
-        saveItem(itemId, engine?.versionDocForRestore(itemId, version) ?: version, onSaved = onSaved)
+    fun restoreVersion(itemId: String, vaultId: String, version: ItemDoc, onSaved: () -> Unit = {}) =
+        saveItem(itemId, engine?.versionDocForRestore(itemId, version) ?: version, vaultId = vaultId, onSaved = onSaved) // bound to the item's vault (INV-EDIT)
 
     fun deleteItem(itemId: String) = op {
         val outcome = engine!!.remove(itemId)
@@ -3859,7 +3876,7 @@ class AndvariViewModel(
             return
         }
         _ui.value = _ui.value.copy(healthMessage = null) // a new verdict clears the last refusal (web's setMsg(null))
-        saveItem(write.itemId, write.doc) {
+        saveItem(write.itemId, write.doc, vaultId = boundVault(write.itemId)) {
             // H27 (web Staleness.tsx:137 twin): "gone" records the verdict and then OFFERS a
             // delete, once the save has landed; any other verdict withdraws a standing offer.
             // H117 (design §4's verdict→follow-up table, the other half): "bad" offers the two
@@ -3923,7 +3940,7 @@ class AndvariViewModel(
         // H72: the row leaves the snoozed list and re-enters the ranking — an outcome the user
         // cannot see when "Show snoozed" is off, because the row simply disappears. Web's twin
         // sentence (Staleness.tsx), stated on the save actually landing, never before it.
-        saveItem(write.itemId, write.doc) { _ui.value = _ui.value.copy(healthMessage = BACK_ON_THE_LIST) }
+        saveItem(write.itemId, write.doc, vaultId = boundVault(write.itemId)) { _ui.value = _ui.value.copy(healthMessage = BACK_ON_THE_LIST) }
     }
 
     // ---- the verification run ----
@@ -4010,9 +4027,9 @@ class AndvariViewModel(
      * it is the string the always-composed live region announces (H31) — a `notice` set behind
      * the health screen would be both silent to TalkBack and, on the vault list, unexplained.
      */
-    private fun runMergePlan(plan: Duplicates.MergePlan, success: (Int) -> String, partial: String) =
+    private fun runMergePlan(plan: Duplicates.MergePlan, success: (Int) -> String, partial: String, vaultId: String? = boundVault(plan.survivorId)) =
         op(mapError = HouseholdCopy::forSaveError) {
-            engine!!.saveWithUploads(plan.survivorId, plan.doc, emptyList(), null)
+            engine!!.saveWithUploads(plan.survivorId, plan.doc, emptyList(), vaultId) // INV-EDIT: the planned item's vault
             // Past this line a failure is PARTIAL, never "nothing happened" — hence the local
             // catch rather than letting op()'s mapper claim the save didn't land.
             try {
@@ -4064,10 +4081,11 @@ class AndvariViewModel(
         // sentences web gives them (H72) — "Back on the list." is the same string Unsnooze uses,
         // because it is the same statement.
         val restoring = signature.isEmpty()
+        val bound = writes.associate { it.itemId to boundVault(it.itemId) } // INV-EDIT: the planned items' vaults
         op(mapError = HouseholdCopy::forSaveError) {
             var written = 0
             try {
-                for (w in writes) { engine!!.saveWithUploads(w.itemId, w.doc, emptyList(), null); written++ }
+                for (w in writes) { engine!!.saveWithUploads(w.itemId, w.doc, emptyList(), bound[w.itemId]); written++ }
             } catch (t: Throwable) {
                 // A per-copy write: some members may already carry the acknowledgment, so the
                 // group can come back until a retry lands. Web's sentence says exactly that.
