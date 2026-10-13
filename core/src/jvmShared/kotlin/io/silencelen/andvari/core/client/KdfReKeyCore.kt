@@ -115,7 +115,9 @@ object KdfReKeyCore {
                 uvk.fill(0)
                 wrapNew.fill(0)
             }
-            val currentAuth = Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams, crypto)
+            // A9 (M-1): the proof of the CURRENT password goes through the one fenced in-session derivation (the
+            // unlock KDF fence, and only the salt this session unlocked with); a stale session derives nothing.
+            val currentAuth = account.reauthAuthKey(password, keys)
             api.changePassword(
                 PasswordChangeRequest(
                     currentAuthKey = currentAuth,

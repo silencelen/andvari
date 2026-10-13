@@ -239,7 +239,6 @@ class ReissueAuthorityTest {
         assertTrue(engine.ownershipNeedsConfirmation(w.vaultId), "the owner UI asks 'You own <vault>?' first")
         assertFailsWith<OwnershipNotConfirmedException>("add member refused") { engine.addVaultMember(w.vaultId, colluder.userId, "writer") }
         assertFailsWith<OwnershipNotConfirmedException>("transfer offer refused") { engine.offerTransfer(w.vaultId, colluder.userId) }
-        assertFailsWith<OwnershipNotConfirmedException>("silent re-issue refused") { engine.reissueGrant(w.vaultId, colluder.userId) }
         // The list may SHOW the row (the server listed it), but its confirmation refuses without ownership evidence.
         val row = engine.loadLegacyGrants(w.vaultId).single()
         assertFalse(row.ownershipConfirmed)
@@ -309,10 +308,10 @@ class ReissueAuthorityTest {
         assertEquals(1, server.reissues.size, "sync() adds nothing")
     }
 
-    // ---- rule (b): the issued-grants record, bound to the identity key ----
+    // ---- the issued-grants record, bound to the identity key: an annotation, never an authority (A9, M-3) ----
 
     @Test
-    fun aRecordedPairReissuesSilentlyAndTheSamePairWithAnotherKeyDoesNot() = runBlocking<Unit> {
+    fun aRecordedPairOnlyAnnotatesTheRowAndEveryReissueIsTheOwnersTap() = runBlocking<Unit> {
         val owner = enroll("a6b-owner")
         val member = enroll("a6b-member")
         val (engine, server, vaultId) = ownerWithCreatedVault(owner)
@@ -321,9 +320,14 @@ class ReissueAuthorityTest {
         val rec = assertNotNull(engine.accountState.issued(vaultId, member.userId), "an add records the pair")
         assertEquals(Bytes.toHexLower(crypto.sha256(Bytes.fromB64(member.reg.identityPub))), rec.keyHash)
 
-        // The server now lists the member as legacy (e.g. after a key-format migration): re-issued without a prompt.
+        // The server now lists the member as legacy (e.g. after a key-format migration). Before A9 the recorded pair
+        // was re-issued without a prompt (rule b); the record is relayed by the server, which can withhold a removal
+        // tombstone from a device that never saw it, so the record is now a hint on the row and the owner taps.
         server.members[vaultId] = listOf(summary(owner, "Owner", "owner"), summary(member, "Member", "writer", legacy = true))
-        assertTrue(engine.loadLegacyGrants(vaultId).isEmpty(), "nothing to confirm")
+        val first = engine.loadLegacyGrants(vaultId).single()
+        assertTrue(server.reissues.isEmpty(), "a recorded pair is never re-issued without the owner's confirmation")
+        assertEquals(rec.at, first.previouslySharedAt, "the record annotates: 'you shared this vault with them on …'")
+        engine.confirmReissue(first)
         val (v, u, signed) = server.reissues.single()
         assertEquals(vaultId to member.userId, v to u)
         assertEquals(32, opensForMember(member, owner, vaultId, signed).size)
@@ -336,10 +340,9 @@ class ReissueAuthorityTest {
             summary(owner, "Owner", "owner"),
             VaultMemberSummary(member.userId, "m@example.com", "Member", "writer", Bytes.toB64(newKey), 0, legacyGrant = true),
         )
-        assertFailsWith<ReissueNotAuthorizedException> { engine.reissueGrant(vaultId, member.userId) }
         val row = engine.loadLegacyGrants(vaultId).single()
         assertEquals(member.userId, row.userId)
-        assertEquals(1, server.reissues.size, "a different identity key is never re-issued silently")
+        assertEquals(1, server.reissues.size, "a different identity key is never re-issued silently either")
         engine.confirmReissue(row)
         assertEquals(2, server.reissues.size, "only the owner's confirmation re-issues to the new key")
         assertEquals(Bytes.toHexLower(crypto.sha256(newKey)), engine.accountState.issued(vaultId, member.userId)!!.keyHash)
@@ -463,6 +466,9 @@ class ReissueAuthorityTest {
         )
         server.members[w.vaultId] = listOf(summary(w.member, "Member", "owner"), summary(w.owner, "Owner", "writer"))
         val engine = SyncEngine(api(server), unlock(w.member), InMemoryVaultCache())
+        // A9 (L-2): the member-granted bit comes from authenticated provenance, here the owner's VERIFIED v2 grant beside
+        // the self-wrap, which needs the owner pinned on this device (as it was when the member accepted the grant).
+        engine.accountState.pin(pinOf(w.owner, "Owner"))
         engine.sync()
         return engine to server
     }
@@ -525,7 +531,7 @@ class ReissueAuthorityTest {
         server.members[w.vaultId] = listOf(summary(w.member, "Member", "owner"))
         val cache = InMemoryVaultCache()
         val ds = MemoryDeviceState()
-        SyncEngine(api(server), unlock(w.member), cache, deviceState = ds).sync()
+        SyncEngine(api(server), unlock(w.member), cache, deviceState = ds).also { it.accountState.pin(pinOf(w.owner, "Owner")); it.sync() } // A9 (L-2): the grant verifies
         server.feed = SyncResponse(12, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 12, w.metaBlob, 0)),
             listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "owner", selfWrap, 12, null)), emptyList(), emptyList())
         val restarted = SyncEngine(api(server), unlock(w.member), cache, deviceState = ds)
@@ -553,7 +559,7 @@ class ReissueAuthorityTest {
             keys = w.member.keys,
         )
         server.members[w.vaultId] = listOf(summary(w.member, "Member", "owner"))
-        SyncEngine(api(server), unlock(w.member), InMemoryVaultCache(), deviceState = MemoryDeviceState()).sync()
+        SyncEngine(api(server), unlock(w.member), InMemoryVaultCache(), deviceState = MemoryDeviceState()).also { it.accountState.pin(pinOf(w.owner, "Owner")); it.sync() } // A9 (L-2)
         // Another device of the same member: nothing local, and its FIRST served row is owner-shaped.
         server.feed = SyncResponse(12, true, listOf(personalRow(w.member), WireVault(w.vaultId, "shared", 12, w.metaBlob, 0)),
             listOf(personalGrant(w.member), WireGrant(w.vaultId, w.member.userId, "owner", selfWrap, 12, null)), emptyList(), emptyList())

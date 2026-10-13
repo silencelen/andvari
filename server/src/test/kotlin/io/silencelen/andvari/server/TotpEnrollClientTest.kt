@@ -28,7 +28,7 @@ class TotpEnrollClientTest : P4TestSupport() {
         val api = AndvariApi("", createClient { })
         val policy = api.clientPolicy()
         val password = "native enrol password one"
-        val (req, _) = Account.enroll(
+        val (req, account) = Account.enroll(
             inviteToken = bootstrapToken, email = "native@x.com", displayName = "N", password = password,
             params = policy.kdfParams, recoveryPublicKey = Bytes.fromB64(api.recoveryPubkey()),
             recoveryFingerprint = policy.recoveryFingerprint, deviceName = "native", crypto = crypto,
@@ -40,10 +40,11 @@ class TotpEnrollClientTest : P4TestSupport() {
         val bare = assertFailsWith<ApiException> { api.totpSetup() }
         assertEquals("reauth_required", bare.code)
         // …a wrong password is refused, not silently ignored…
-        val wrong = assertFailsWith<ApiException> { api.totpSetupWithPassword("not the password") }
+        // (A9, M-1: the proof is the account's fenced in-session derivation; the enrolled session's salt is current.)
+        val wrong = assertFailsWith<ApiException> { api.totpSetupWithPassword("not the password", account) }
         assertEquals("reauth_failed", wrong.code)
         // …and the client's password-carrying enrolment goes through.
-        val setup = api.totpSetupWithPassword(password)
+        val setup = api.totpSetupWithPassword(password, account)
         assertTrue(setup.secretBase32.isNotEmpty())
         assertEquals(TotpStatus(enrolled = false, pendingSetup = true), api.totpStatus())
         api.totpConfirm(totpCode(setup.secretBase32))
