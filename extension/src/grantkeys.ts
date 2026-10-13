@@ -120,6 +120,14 @@ export function personalChangeNotice(currentName: string | null, newName: string
     `The server says your personal vault was changed to ${next} on another device (or it sent an older record).`;
 }
 
+/** A9 review MEDIUM-1: the popup line for a served wrap this browser never confirmed (no cached wrap). Confirming is
+ *  the describe/accept flow below it, or any full client; until then nothing is captured. */
+export function personalProposalNotice(newName: string | null): string {
+  const next = newName ? `“${newName}”` : "a vault";
+  return `This browser hasn't confirmed your personal vault yet, so it can't save new logins. ` +
+    `Open andvari to confirm your personal vault, or confirm ${next} below.`;
+}
+
 /** A co-holder as the popup shows it: what the SERVER reports (it informs; it decides nothing). */
 export interface CoHolderView {
   displayName: string;
