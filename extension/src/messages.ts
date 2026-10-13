@@ -487,6 +487,8 @@ export type Res<T extends Req["type"]> = T extends "status"
       /** Root cause A §1.7 (A6): shared vaults whose grant has no UVK wrap yet — the extension never opens a
        *  grant seal (Q8), so they wait for a full client ("open andvari to review"). */
       waitingGrants: number;
+      /** Root cause A §5.1 INV-HOME (A1b): rows the last snapshot sent under the wrong vault (not applied). */
+      wrongVault: number;
     }
   : T extends "personalAcceptChange"
     ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" | "coholders_not_loaded" }
