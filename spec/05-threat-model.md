@@ -230,7 +230,22 @@ the invitee's client could verify instead is beyond the reach of the server that
 keyed code would change this; the control is the human assertion, re-checked by the client from the raw
 inputs, and a navigated link plus a code on its own leaves the admin a pending verification, never a pin.
 A member who ticks the affirmation and types a code read to them by someone other than the admin, in
-person or, despite the warning, from an email, gives that person the admin's slot.
+person or, despite the warning, from an email, gives that person the admin's slot. (e) **The designation rides
+the account state (branch A9, the second API-review pass, MEDIUM):** the server keeps every wrap the account ever
+minted and chooses which to serve, and a device with no cached wrap (new, reinstalled, wiped) had nothing to
+contradict a superseded wrap for a co-held vault, so every default save there landed where co-holders read it.
+Now the account's own designation (`personal`, spec 03 §3: UVK-sealed, newest wins, written on register, on the
+migration choice, on a re-designation and on an accepted change) vouches for a served wrap on any device; a
+served wrap it does not name, or one served to a device with no cache and no designation (a fresh account, or
+account state withheld), is a PROPOSAL: nothing is in force (no default destination), the human sees the vault's
+server-reported co-holders and origin and confirms it, or re-designates with the password. An established device
+whose cached wrap the server keeps serving is unchanged. The "never switch silently" rule also holds inside the
+account type itself: a second apply while a wrap is in force is a notice, never a switch. What remains: a
+fresh device the server serves an OLDER authentic account-state blob together with the matching older wrap
+adopts that pair (the designation is replayable where no high-water mark exists yet, the (b) class of residual);
+an established device detects the rollback. And the extension, which never reads account state, still takes
+the served wrap as its default save target on a browser with no cached wrap until a full client's
+confirmation re-serves it (its captures seal only under keys the user's UVK wraps).
 
 **R15 (signed grants and the compatibility window — security review 2026-10, root cause A §1.4–§1.7, §8.2;
 branch A6).** Residuals accepted: (a) **legacy keys** (spec 01 §6): while the window is open a client still
@@ -305,7 +320,26 @@ offer is a MAC, R16(a)); it still needs the target's explicit "Become the owner"
 owns is one the target already held, so it adds a sharing authority, not a key. (iv) the reauth is refused
 on a session whose unlock salt is unknown or stale (after an in-session password change or a KDF upgrade)
 until the next unlock: fail closed. Since branch A1b the refusal says how to recover, "Lock and unlock andvari,
-then try again", byte-identical on every client, instead of "That master password isn't right".
+then try again", byte-identical on every client, instead of "That master password isn't right". (v) **Rule (b)
+removed (branch A9, the second API-review pass, MEDIUM; owner-review item recorded in the private plan):** the
+prompt-free renewal of a pair in the issued-grants record trusted the record's presence on the signing device,
+but the record is relayed by the server, which can withhold the removal tombstone from a device that never saw
+it (its high-water mark sits below the tombstone, so no rollback is detectable) and then list the removed
+member as legacy; `recordIssued` after the renewal would then outrank the owner's tombstone on every device.
+Every signing of a VK to a member is now the owner's per-row tap; the record only annotates the row ("you
+shared this vault with them on …"), and the removing device keeps its own durable tombstone so it never shows
+the removed pair as previously shared whatever account state it is later served. The cost is one tap per
+member per key-format migration. What remains: a device that never saw the tombstone still SHOWS the hint for
+a removed member (display only; no authority follows from it), and a human who re-shares with someone they
+removed is not stopped (the copy says the list comes from the server). (vi) **The member-granted bit is
+provenance, not shape (A9, LOW):** it is set only when the key was ADOPTED through a v1 seal or a verified v2
+grant, when a VERIFIED v2 grant from a pinned sender sits beside the account's own self-wrap, or when the row
+is not an owner row and no UVK wrap of the account's own opened — never from a seal or grant field the server
+attached beside the account's own UVK wrap (ignored, as A1 requires) or from a relabelled role, which would
+otherwise become add-only durable evidence that makes the genuine creator answer a false "its owner
+transferred it to me" forever. What remains: a member whose devices never verified the owner (an unpinned
+sender beside a self-wrap) records no provenance on that device and relies on the account state's
+`memberReceived`, written by the device that adopted the key through the grant.
 
 **R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
 (a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
@@ -337,7 +371,13 @@ anomaly warning instead of the attributed notice. Wording only, fail-closed.
 **R17 (item home — security review 2026-10, root cause A §5; branch A1b; spec 02 §7.2).** Closes review A-4.
 Residuals accepted: (a) **the home is device-local**, so the server chooses the FIRST home of an itemId on a
 fresh device (or one whose cache was wiped: sign-out, a policy purge, a demoted web cache), exactly as it
-already chooses which rows a fresh device sees; from then on no served row moves the item. The same holds for
+already chooses which rows a fresh device sees; from then on no served row moves the item. **Narrowed in
+branch A9 (LOW, every engine):** the first home is the vault of the first row this device APPLIED (live, blob
+present, key held, envelope opened), never of a row it merely saw: a blob-less tombstone or a row under a
+vault this device holds no key for, served first, records nothing (`skip`), so the server's choice is only
+among rows the device can actually apply, and it can no longer home an item away from its genuine row (and
+quarantine that row for good) with a row it needs no key to mint. A ciphertext row kept for a key that arrives
+later homes the item when it is applied then, if the item still has no home. The same holds for
 every SESSION of a client with no durable cache: cache-less web (`NullCache`, the default until the per-device
 opt-in, spec 02 §8.1) and a native host on the in-memory cache (desktop before cache consent, org-forbid mode)
 hold their homes in memory only, so each unlock starts fresh and the server picks the first home of every item
