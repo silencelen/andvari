@@ -252,6 +252,12 @@ proposal, it has no capture destination until the popup's describe/accept confir
 an account asks exactly once; the registering device never does. What remains: a default save while a proposal is
 pending is refused ("Choose a vault for this item."), never redirected.
 
+**R16 addendum (A10 review LOW-1).** An in-window v1 `remove` proof is verified only when its nonce is in the
+token grammar the consumed record stores (`[A-Za-z0-9_-]{1,128}`, which covers the UUIDs pre-A7 clients
+minted and the vectors' base64url); any other nonce is the `fields` anomaly before the MAC. Before this, a
+nonce the record could not represent was verified, never consumed, and so replayed on that device. The
+record encoders now throw on a malformed row rather than drop it, so no caller can repeat that shape.
+
 **R18 (server-supplied ids and the device-local trust records — security review 2026-10, plugin scan F1/F2;
 branch A10).** Every id a server supplies (vaultId, userId, itemId, deviceId, the user ids riding a transfer)
 is checked against the lowercase UUID grammar at the wire boundary on all three engines, in the API client,
