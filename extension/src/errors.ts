@@ -25,8 +25,8 @@ type UnlockCode =
   | "server_error"
   | "network"
   | "unknown";
-type SaveErrorCode = "locked" | "conflict" | "rejected" | "failed";
-type TotpAddCode = "locked" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
+type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed";
+type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
@@ -130,6 +130,8 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
   switch (code) {
     case "locked":
       return "Could not save — unlock andvari and try again.";
+    case "no_personal_vault":
+      return NO_PERSONAL_VAULT_CONFIRM; // A9 review MEDIUM-1
     case "conflict":
       // H20 (2026-09-13 audit): a `conflict` push status is a write the server APPLIED (spec 03
       // §5), so "changed elsewhere — open it in the web vault" told the user the save did not
@@ -149,6 +151,10 @@ export function saveErrorCopy(code: SaveErrorCode | undefined): string {
   }
 }
 
+/** A9 review MEDIUM-1 (the §1.7 pattern): the browser holds no confirmed personal vault — a served wrap it never
+ *  confirmed is a proposal, not a capture destination — so a save or TOTP add is refused with the way through. */
+export const NO_PERSONAL_VAULT_CONFIRM = "Open andvari to confirm your personal vault.";
+
 /** TOTP-add success line (design 2026-08-12) — the popup's paste-add result. */
 export const TOTP_ADDED = "One-time code added.";
 
@@ -161,6 +167,8 @@ export function totpAddErrorCopy(code: TotpAddCode | undefined): string {
   switch (code) {
     case "locked":
       return "andvari locked before it could add the code — unlock and try again.";
+    case "no_personal_vault":
+      return NO_PERSONAL_VAULT_CONFIRM; // A9 review MEDIUM-1
     case "invalid":
       return "That doesn't look like a one-time-code secret — paste the otpauth:// link or the setup key.";
     case "exists":

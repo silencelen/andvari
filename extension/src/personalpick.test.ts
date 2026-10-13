@@ -14,7 +14,8 @@ const enc = (s: string) => new TextEncoder().encode(s);
 
 test("the personal wrap decides, and its key is installed first", () => {
   const keys = new Map<string, Uint8Array>([[w.vaultId, new Uint8Array(32).fill(1)]]); // a row served a different key
-  const p = pickPersonal({ vaultId: w.vaultId, wrappedVk: w.personalWrapB64 }, uvk, w.userId, keys);
+  const cached = { vaultId: w.vaultId, wrappedVk: w.personalWrapB64 }; // A9 review: a browser that confirmed it before
+  const p = pickPersonal({ vaultId: w.vaultId, wrappedVk: w.personalWrapB64 }, uvk, w.userId, keys, { cached });
   assert.deepEqual(p, { vaultId: w.vaultId, source: "wrap" });
   assert.equal(toB64(keys.get(w.vaultId)!), w.vkB64);
 });
@@ -58,8 +59,8 @@ test("A5b M-2/L-2: a served wrap naming ANOTHER vault than the cached one does n
   const p = pickPersonal({ vaultId: o.vaultId, wrappedVk: o.wrappedVk }, uvk, w.userId, keys, { cached: { vaultId: w.vaultId, wrappedVk: w.personalWrapB64 } });
   assert.deepEqual(p, { vaultId: w.vaultId, source: "changed", served: { vaultId: o.vaultId, wrappedVk: o.wrappedVk } });
   assert.equal(toB64(keys.get(w.vaultId)!), w.vkB64, "the cached personal vault stays in force");
-  // The same served wrap with nothing cached is simply the personal wrap (no device history to compare).
-  assert.deepEqual(pickPersonal({ vaultId: o.vaultId, wrappedVk: o.wrappedVk }, uvk, w.userId, new Map()), { vaultId: o.vaultId, source: "wrap" });
+  // The same served wrap with nothing cached is a PROPOSAL (A9 review MEDIUM-1): no device history vouches for it.
+  assert.equal(pickPersonal({ vaultId: o.vaultId, wrappedVk: o.wrappedVk }, uvk, w.userId, new Map()).source, "proposed");
 });
 
 test("A5b L-1: a junk served wrap keeps the valid cached wrap (flagged), instead of leaving no personal vault", () => {
