@@ -105,11 +105,11 @@ describe("contact pins come only from a human", () => {
     await store.sync();
     expect(victim.hasVault(shared.vaultId)).toBe(true);
     expect(store.accountState.contacts()).toHaveLength(0);
-    // The only write a sync makes on its own is the A1b (LOW-R) member-provenance record: never a contact.
-    for (const w of writes) {
-      const doc = victim.openAccountState(w);
-      expect(doc.contacts).toHaveLength(0);
-      expect(Object.keys(doc.memberReceived)).toEqual([shared.vaultId]);
-    }
+    // The only writes a sync makes on its own are the A1b (LOW-R) member-provenance record and, on the registering
+    // device, the A9 personal-vault designation: never a contact.
+    for (const w of writes) expect(victim.openAccountState(w).contacts).toHaveLength(0);
+    const last = victim.openAccountState(writes[writes.length - 1]!);
+    expect(Object.keys(last.memberReceived)).toEqual([shared.vaultId]);
+    expect(last.personal?.vaultId).toBe(victim.personalVaultId);
   });
 });

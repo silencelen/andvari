@@ -16,13 +16,14 @@ describe("beginTotpEnrolment", () => {
 
   it("derives the authKey from the typed password under the account's KDF params and sends it", async () => {
     const keys = { kdfSalt: "SALT", kdfParams: { memBytes: 67108864, ops: 3, parallelism: 1 } };
-    const derive = vi.spyOn(Account, "deriveAuthKey").mockResolvedValue("DERIVED");
+    // A9 (M-1): the proof is the account's fenced reauth derivation (KDF fence + the session's salt), never the static.
+    const account = { reauthAuthKey: vi.fn(async () => "DERIVED") };
     const client = {
       accountKeys: vi.fn(async () => keys),
       totpSetup: vi.fn(async (k?: string) => ({ secretBase32: "S", otpauthUri: `otpauth://${k}` })),
     };
-    const setup = await beginTotpEnrolment(client as unknown as Pick<ApiClient, "accountKeys" | "totpSetup">, "hunter2 hunter2");
-    expect(derive).toHaveBeenCalledWith("hunter2 hunter2", "SALT", keys.kdfParams);
+    const setup = await beginTotpEnrolment(client as unknown as Pick<ApiClient, "accountKeys" | "totpSetup">, "hunter2 hunter2", account as unknown as Account);
+    expect(account.reauthAuthKey).toHaveBeenCalledWith("hunter2 hunter2", keys);
     expect(client.totpSetup).toHaveBeenCalledWith("DERIVED");
     expect(setup.otpauthUri).toBe("otpauth://DERIVED");
   });
@@ -33,7 +34,7 @@ describe("Settings TotpCard — the enable step asks for the master password", (
   const card = src.slice(src.indexOf("function TotpCard("), src.indexOf("function PasswordCard("));
 
   it("enrolls through beginTotpEnrolment with the typed password, never the bare call", () => {
-    expect(card).toContain("beginTotpEnrolment(client, password)");
+    expect(card).toContain("beginTotpEnrolment(client, password, account)");
     expect(card).not.toContain("client.totpSetup()");
   });
 

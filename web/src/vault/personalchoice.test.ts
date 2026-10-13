@@ -101,6 +101,13 @@ async function household() {
 
 const unlock = (e: Enrolled, wrap: PersonalWrap | null) => Account.unlock(e.userId, e.password, { ...e.keys, personalWrap: wrap });
 
+/** A9 (M-2): a first device with no designation on record confirms the served wrap once; from then on it is established. */
+async function establish(store: VaultStore): Promise<void> {
+  await store.sync();
+  await store.describePersonalChange();
+  store.acceptPersonalChange();
+}
+
 describe("A5b — the personal-vault choice", () => {
   beforeAll(async () => {
     await initSodium();
@@ -109,7 +116,7 @@ describe("A5b — the personal-vault choice", () => {
   it("M-1: a withheld wrap stays withheld after a reload (the client state outlives the vault cache)", async () => {
     const h = await household();
     const local = memoryClientState();
-    await new VaultStore(new FakeApi(h.rows).asClient(), await unlock(h.victim, h.victim.personalWrap), undefined, local).sync();
+    await establish(new VaultStore(new FakeApi(h.rows).asClient(), await unlock(h.victim, h.victim.personalWrap), undefined, local));
     const again = await unlock(h.victim, null);
     const store = new VaultStore(new FakeApi(h.rows).asClient(), again, undefined, local); // NullCache: nothing durable
     await store.sync();
@@ -185,7 +192,7 @@ describe("A5b — the personal-vault choice", () => {
   it("M-2 / L-2: a served wrap naming a different vault raises the change notice instead of switching silently", async () => {
     const h = await household();
     const local = memoryClientState();
-    await new VaultStore(new FakeApi(h.rows).asClient(), await unlock(h.victim, h.victim.personalWrap), undefined, local).sync();
+    await establish(new VaultStore(new FakeApi(h.rows).asClient(), await unlock(h.victim, h.victim.personalWrap), undefined, local));
 
     const again = await unlock(h.victim, h.sharedWrap);
     const api = new FakeApi(h.rows);
@@ -218,7 +225,7 @@ describe("A5b — the personal-vault choice", () => {
   it("L-1: a junk served wrap keeps the valid cached wrap, flags it, and marks the device's vault", async () => {
     const h = await household();
     const local = memoryClientState();
-    await new VaultStore(new FakeApi(h.rows).asClient(), await unlock(h.victim, h.victim.personalWrap), undefined, local).sync();
+    await establish(new VaultStore(new FakeApi(h.rows).asClient(), await unlock(h.victim, h.victim.personalWrap), undefined, local));
 
     const again = await unlock(h.victim, { vaultId: h.victim.personalVaultId, wrappedVk: h.victim.personalWrappedVk });
     expect(again.personalStatus).toBe("unreadable");

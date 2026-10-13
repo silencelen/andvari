@@ -221,7 +221,9 @@ export async function unlockExistingSession(
     // §C6 — the ONLINE capture gate is UNCHANGED (hard-block until captured). The OFFLINE path
     // never reaches it: it proceeds with meta.offlineRecoveryReminder (the persistent in-vault nag).
     if (!offline && needsRecoveryCapture(keys)) {
-      const currentAuthKey = await Account.deriveAuthKey(password, keys.kdfSalt, keys.kdfParams);
+      // A9 (M-1): the gate's proof goes through the one fenced in-session derivation (these are the keys this
+      // session just unlocked with, so the session-salt check holds by construction).
+      const currentAuthKey = await account.reauthAuthKey(password, keys);
       return { kind: "capture", account, store, meta, currentAuthKey };
     }
     return { kind: "ready", account, store, meta };

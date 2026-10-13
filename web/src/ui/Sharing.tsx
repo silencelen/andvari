@@ -727,6 +727,7 @@ function LegacyGrantsPanel({ store, vault, refreshKey }: { store: VaultStore; va
               ) : (
                 <>
                   {r.verifiedLabel} <span className="muted">(verified; the server calls them {r.displayName}, {r.email})</span>{" "}
+                  {r.previouslySharedAt !== null ? <span className="muted">· you shared this vault with them on {fmtDay(r.previouslySharedAt)}{" "}</span> : null}
                   <button type="button" className="link" onClick={() => setConfirming(r.userId)}>Re-share “{vaultName(r)}”…</button>
                 </>
               )

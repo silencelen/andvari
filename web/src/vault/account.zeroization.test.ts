@@ -103,7 +103,9 @@ const KDF: KdfParams = { v: 1, alg: "argon2id13", ops: 1, memBytes: 8192 }; // t
 const PASSWORD = "correct horse battery staple";
 
 type Enrolled = Awaited<ReturnType<typeof Account.enroll>>;
-const enroll = () => Account.enroll({ inviteToken: "inv", email: "a@x.com", displayName: "a", password: PASSWORD, kdfParams: KDF });
+const enroll = (kdfParams: KdfParams = KDF) => Account.enroll({ inviteToken: "inv", email: "a@x.com", displayName: "a", password: PASSWORD, kdfParams });
+// A9 (M-1): Account.deriveAuthKey applies the KDF floor/ceiling fence, so that one test enrols at the real floor.
+const FLOOR: KdfParams = { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 };
 const keysOf = (r: Enrolled): AccountKeys => ({
   kdfSalt: r.request.kdfSalt,
   kdfParams: r.request.kdfParams,
@@ -153,7 +155,7 @@ describe("Account zeroization (audit H80, spec 01 §2)", () => {
   });
 
   it("deriveAuthKey wipes the MK and still returns the intact credential", async () => {
-    const r = await enroll();
+    const r = await enroll(FLOOR);
     rec.reset();
     const b64 = await Account.deriveAuthKey(PASSWORD, r.request.kdfSalt, r.request.kdfParams);
     expect(b64).toBe(r.request.authKey); // the encoded credential is intact…

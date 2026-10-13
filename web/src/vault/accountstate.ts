@@ -35,6 +35,18 @@ export interface IssuedGrant {
   at: number;
 }
 
+/**
+ * The account's own PERSONAL-VAULT DESIGNATION (security review 2026-10, branch A9, M-2; core `PersonalDesignation`
+ * twin): which vault this account last made personal, and when. Written on register, on the migration choice, on a
+ * re-designation and on an accepted change, never by anything the server served. Tombstone-free: the newest `at` wins on
+ * merge (tie: the smaller vaultId), so a rolled-back or withheld blob can never revive an older one on a device that
+ * merged the newer. Absent (null) in older documents, and omitted from the encoding while absent.
+ */
+export interface PersonalDesignation {
+  vaultId: string;
+  at: number;
+}
+
 export interface AccountStateDoc {
   v: 1;
   userId: string;
@@ -55,6 +67,8 @@ export interface AccountStateDoc {
   /** A1b (A6b review LOW-R): vaults some device of this account first adopted the key of AS A MEMBER, vaultId → ms.
    *  Add-only (no tombstones), union-merged keeping the larger `at`, like `ownedVaults`. */
   memberReceived: Record<string, number>;
+  /** A9 (M-2): the account's own personal-vault designation, or null. */
+  personal: PersonalDesignation | null;
 }
 
 export class AccountStateError extends Error {}
@@ -65,12 +79,13 @@ export const ACCOUNT_STATE_SEALED_MAX = 65536;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
-const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones", "memberReceived"];
+const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones", "memberReceived", "personal"];
+const PERSONAL_KEYS = ["vaultId", "at"];
 const CONTACT_KEYS = ["userId", "identityPub", "label", "verifiedAt", "method"];
 const ISSUED_KEYS = ["vaultId", "userId", "keyHash", "at"];
 
 export function emptyAccountState(userId: string): AccountStateDoc {
-  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {}, memberReceived: {} };
+  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {}, memberReceived: {}, personal: null };
 }
 
 /** The tombstone key for an issued grant. */
@@ -96,7 +111,7 @@ export function isBlankAccountState(doc: AccountStateDoc): boolean {
   return doc.contacts.length === 0 && Object.keys(doc.consumedNonces).length === 0 && doc.orgRecoveryFp === null &&
     doc.issuedGrants.length === 0 && Object.keys(doc.issuedTombstones).length === 0 &&
     Object.keys(doc.ownedVaults).length === 0 && Object.keys(doc.ownedTombstones).length === 0 &&
-    Object.keys(doc.memberReceived).length === 0;
+    Object.keys(doc.memberReceived).length === 0 && doc.personal === null;
 }
 
 /** Deterministic encoding: fixed key order, contacts by userId, sorted maps. */
@@ -118,6 +133,8 @@ export function encodeAccountState(doc: AccountStateDoc): string {
     ownedVaults: sortedRecord(doc.ownedVaults),
     ownedTombstones: sortedRecord(doc.ownedTombstones),
     memberReceived: sortedRecord(doc.memberReceived),
+    // A9: omitted while absent, so a document that never designated stays readable by older clients.
+    ...(doc.personal ? { personal: { vaultId: doc.personal.vaultId, at: doc.personal.at } } : {}),
   });
 }
 
@@ -217,9 +234,19 @@ export function decodeAccountState(userId: string, plaintext: string): AccountSt
     if (!UUID_RE.test(k)) throw new AccountStateError("member-received vault id is not a uuid");
     if (t < 0) throw new AccountStateError("member-received at is negative");
   }
+  // A9: the personal designation (absent or null in older documents).
+  let personal: PersonalDesignation | null = null;
+  if (o.personal !== undefined && o.personal !== null) {
+    const p = o.personal as Record<string, unknown>;
+    if (typeof p !== "object" || Array.isArray(p)) throw new AccountStateError("personal designation is not an object");
+    for (const k of Object.keys(p)) if (!PERSONAL_KEYS.includes(k)) throw new AccountStateError(`unknown personal designation key ${k}`);
+    if (typeof p.vaultId !== "string" || !UUID_RE.test(p.vaultId)) throw new AccountStateError("personal designation vault id is not a uuid");
+    if (!isInt(p.at) || p.at < 0) throw new AccountStateError("personal designation at is invalid");
+    personal = { vaultId: p.vaultId, at: p.at };
+  }
   return {
     v: 1, userId, seq: o.seq, contacts, contactTombstones: tombstones, orgRecoveryFp: fp as string | null, consumedNonces: nonces,
-    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived,
+    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived, personal,
   };
 }
 
@@ -297,13 +324,28 @@ export function mergeAccountState(
   const ownedAll = unionMax((d) => d.ownedVaults);
   const ownedVaults = Object.fromEntries(Object.entries(ownedAll).filter(([k, t]) => (ownedTombstones[k] ?? Number.MIN_SAFE_INTEGER) < t));
   const memberReceived = unionMax((d) => d.memberReceived ?? {}); // A1b (LOW-R): add-only union, the larger `at`
+  // A9 (M-2): the designation with the newest `at` wins (tie: the smaller vaultId). Tombstone-free: a rollback or a
+  // withheld blob is simply the older copy, and loses.
+  const personal = docs.map((d) => d.personal).filter((p): p is PersonalDesignation => p !== null && p !== undefined)
+    .sort((a, b) => (b.at !== a.at ? b.at - a.at : a.vaultId < b.vaultId ? -1 : a.vaultId > b.vaultId ? 1 : 0))[0] ?? null;
   return {
     doc: {
       v: 1, userId, seq: Math.max(localSeq, servedSeq, highWater, 0), contacts, contactTombstones: sortedTomb, orgRecoveryFp: fp, consumedNonces,
-      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived,
+      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived, personal,
     },
     rollback,
   };
+}
+
+/**
+ * Record the account's personal-vault designation (A9, M-2; core `AccountState.withPersonal` twin): register, the
+ * migration choice, a re-designation, an accepted change. The new entry is pushed past the one it replaces whatever this
+ * device's clock says, so the newest human act always wins the merge.
+ */
+export function withPersonal(doc: AccountStateDoc, vaultId: string, at: number): AccountStateDoc {
+  const prev = doc.personal;
+  const t = !prev || prev.vaultId === vaultId ? Math.max(at, prev?.at ?? -1) : Math.max(at, prev.at + 1);
+  return { ...doc, personal: { vaultId, at: t } };
 }
 
 /** Record that some device of this account received `vaultIds` as a member (A1b, LOW-R; core `withMemberReceived`). */
