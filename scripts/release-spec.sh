@@ -16,7 +16,10 @@
 # (the MSI it builds itself) plus `seq`/`signedAt`.
 #
 # Output (specVersion 1):
-#   { specVersion, generatedAt, intendedKeys[], linux{}, browserExtension{} }
+#   { specVersion, generatedAt, intendedKeys[], linux{}, linuxArch{}, browserExtension{} }
+# `linux` is the Debian package, `linuxArch` the Arch pacman package built beside it by
+# scripts/build-linux.sh — same fleet version, its own url + sha256. The key is ADDITIVE: every
+# pre-existing key keeps its exact shape, and a client that does not know `linuxArch` ignores it.
 # `intendedKeys` names the manifest keys this spec is authoritative for. The operator-side
 # watcher that publishes the signed bundle uses it as an allow-list: any OTHER manifest key
 # must come back byte-identical to what is already live, so a release that means to bump the
@@ -112,6 +115,10 @@ crosscheck_sums() {
 }
 
 DEB_LOCAL="$(resolve_one "linux .deb for $VERSION" "$REPO_DIR/app-desktop/build/compose/binaries/main/deb/andvari_${VERSION}-*_amd64.deb")"
+# The Arch package scripts/build-linux.sh wrote from the SAME build as the deb (it proves that
+# itself). Required, not optional: the ceremony's intendedKeys must match exactly, so a release
+# without the pacman package is a release this spec refuses to describe.
+PKG_LOCAL="$(resolve_one "linux Arch package for $VERSION" "$REPO_DIR/app-desktop/build/compose/binaries/main/arch/andvari-${VERSION}-*-x86_64.pkg.tar.zst")"
 EXT_DIR="$REPO_DIR/extension/artifacts"
 CHROME_LOCAL="$EXT_DIR/andvari-extension-chrome-${EXT_VERSION}.zip"
 FIREFOX_LOCAL="$EXT_DIR/andvari-extension-firefox-${EXT_VERSION}.xpi"
@@ -120,6 +127,7 @@ FIREFOX_LOCAL="$EXT_DIR/andvari-extension-firefox-${EXT_VERSION}.xpi"
 [ -f "$FIREFOX_LOCAL" ] || die "firefox signed xpi not found: $FIREFOX_LOCAL (run: scripts/publish-extension.sh --firefox — the manifest must point at the AMO-SIGNED .xpi, never the raw .zip)"
 
 DEB_SHA="$(hash_of "$DEB_LOCAL")"
+PKG_SHA="$(hash_of "$PKG_LOCAL")"
 CHROME_SHA="$(hash_of "$CHROME_LOCAL")"
 FIREFOX_SHA="$(hash_of "$FIREFOX_LOCAL")"
 
@@ -127,10 +135,16 @@ EXT_SUMS="$EXT_DIR/SHA256SUMS-${EXT_VERSION}.txt"
 crosscheck_sums "$CHROME_LOCAL"  "$(basename "$CHROME_LOCAL")"  "$CHROME_SHA"  "$EXT_SUMS"
 crosscheck_sums "$FIREFOX_LOCAL" "$(basename "$FIREFOX_LOCAL")" "$FIREFOX_SHA" "$EXT_SUMS"
 echo "release-spec: NOTE: no local cross-check for the deb — packaging writes no SHA256SUMS for it; its sha256 comes from hashing the file directly (the SERVED copy is verified against this hash by prestige-release.ps1 preflight)" >&2
+# package-arch.sh writes a one-line `<pkg>.sha256` sidecar at build time — the same shape as a
+# SHA256SUMS line, so the generic cross-check applies: a rebuild after hashing is caught here.
+crosscheck_sums "$PKG_LOCAL" "$(basename "$PKG_LOCAL")" "$PKG_SHA" "$PKG_LOCAL.sha256"
 
 # Published names differ from build-output names: the compose plugin emits Debian's
-# andvari_<ver>-<rev>_amd64.deb, /downloads serves andvari-<ver>.deb.
+# andvari_<ver>-<rev>_amd64.deb, /downloads serves andvari-<ver>.deb; package-arch.sh emits
+# pacman's andvari-<ver>-<pkgrel>-x86_64.pkg.tar.zst, /downloads serves
+# andvari-<ver>-x86_64.pkg.tar.zst (the pkgrel is pacman bookkeeping, not a fleet version).
 DEB_PUBLISHED="andvari-${VERSION}.deb"
+PKG_PUBLISHED="andvari-${VERSION}-x86_64.pkg.tar.zst"
 
 # ---------------------------------------------------------------------------
 # emit
@@ -147,6 +161,9 @@ jq -n \
   --arg version       "$VERSION" \
   --arg debUrl        "/downloads/${DEB_PUBLISHED}" \
   --arg debSha        "$DEB_SHA" \
+  --arg pkgUrl        "/downloads/${PKG_PUBLISHED}" \
+  --arg pkgSha        "$PKG_SHA" \
+  --arg pkgLocal      "$PKG_LOCAL" \
   --arg extVersion    "$EXT_VERSION" \
   --arg chromeStore   "$CHROME_STORE_URL" \
   --arg chromeUrl     "/downloads/$(basename "$CHROME_LOCAL")" \
@@ -159,11 +176,16 @@ jq -n \
   '{
      specVersion: 1,
      generatedAt: $generatedAt,
-     intendedKeys: ["linux", "browserExtension"],
+     intendedKeys: ["linux", "linuxArch", "browserExtension"],
      linux: {
        version: $version,
        url: $debUrl,
        sha256: $debSha
+     },
+     linuxArch: {
+       version: $version,
+       url: $pkgUrl,
+       sha256: $pkgSha
      },
      browserExtension: {
        version: $extVersion,
@@ -173,6 +195,7 @@ jq -n \
      },
      artifacts: {
        deb:     { localPath: $debLocal,     sha256: $debSha },
+       arch:    { localPath: $pkgLocal,     sha256: $pkgSha },
        chrome:  { localPath: $chromeLocal,  sha256: $chromeSha },
        firefox: { localPath: $firefoxLocal, sha256: $firefoxSha }
      }
@@ -187,6 +210,7 @@ trap - EXIT
 
 echo "release-spec: wrote $OUT" >&2
 echo "release-spec:   linux            $VERSION      $DEB_PUBLISHED  ($DEB_SHA)" >&2
+echo "release-spec:   linuxArch        $VERSION      $PKG_PUBLISHED  ($PKG_SHA)" >&2
 echo "release-spec:   browserExtension $EXT_VERSION  $(basename "$CHROME_LOCAL") + $(basename "$FIREFOX_LOCAL")" >&2
 
 # ---------------------------------------------------------------------------

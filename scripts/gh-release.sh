@@ -162,6 +162,24 @@ done
   (key 741CF143…, docs/runbooks/release-signing-keys.md §3)"
 add "$(stage "$DEB_ASC" "$DEB_SERVED.asc")"
 
+# The Arch pacman package scripts/build-linux.sh built beside the deb, plus its detached ARMORED
+# signature — same key, same rules, same served-name convention (/downloads and the manifest's
+# linuxArch.url say andvari-<ver>-x86_64.pkg.tar.zst; the pkgrel in the build-output name is
+# pacman bookkeeping). `.asc`, never `.sig`: pacman reads a `<pkg>.sig` sidecar as ITS signature
+# and refuses the install because the release key is not in pacman's keyring.
+PKG_SERVED="andvari-${VERSION}-x86_64.pkg.tar.zst"
+PKG_BUILD_GLOB="$REPO_DIR/app-desktop/build/compose/binaries/main/arch/andvari-${VERSION}-*-x86_64.pkg.tar.zst"
+PKG_LOCAL="$(resolve_one "linux Arch package for $VERSION" "$PKG_BUILD_GLOB")"
+add "$(stage "$PKG_LOCAL" "$PKG_SERVED")"
+PKG_ASC=""
+for cand in "$STAGE/$PKG_SERVED.asc" "$PKG_LOCAL.asc" "$(dirname "$PKG_LOCAL")/$PKG_SERVED.asc"; do
+  [ -f "$cand" ] && { PKG_ASC="$cand"; break; }
+done
+[ -n "$PKG_ASC" ] || die "no detached signature for the Arch package — scripts/build-linux.sh signs it, or by hand:
+    gpg --armor --detach-sign --output $STAGE/$PKG_SERVED.asc $STAGE/$PKG_SERVED
+  (key 741CF143…, docs/runbooks/release-signing-keys.md §3)"
+add "$(stage "$PKG_ASC" "$PKG_SERVED.asc")"
+
 # Windows and Android are built elsewhere (the MSI on the signing workstation), so they are
 # explicit paths rather than a glob into a build dir that will not exist on this host.
 [ -n "$MSI" ] && add "$(stage "$MSI" "andvari-${VERSION}.msi")"
@@ -212,6 +230,16 @@ if [ -f "$SPEC" ] && command -v jq >/dev/null 2>&1; then
     got="$(sha256sum "$STAGE/$DEB_SERVED" | cut -d' ' -f1)"
     [ "$got" = "$spec_sha" ] || die "the deb being uploaded ($got) is NOT the one release-spec.json describes for /downloads ($spec_sha) — one of the two is stale; do not publish both"
     note "cross-checked $DEB_SERVED against release-spec.json — same bytes as /downloads"
+    # Same check for the Arch package: the spec's linuxArch entry is what the signed manifest will
+    # carry, so the release page must describe those bytes and no others.
+    spec_pkg_sha="$(jq -r '.linuxArch.sha256 // empty' "$SPEC")"
+    if [ -n "$spec_pkg_sha" ]; then
+      got_pkg="$(sha256sum "$STAGE/$PKG_SERVED" | cut -d' ' -f1)"
+      [ "$got_pkg" = "$spec_pkg_sha" ] || die "the Arch package being uploaded ($got_pkg) is NOT the one release-spec.json describes for /downloads ($spec_pkg_sha) — one of the two is stale; do not publish both"
+      note "cross-checked $PKG_SERVED against release-spec.json — same bytes as /downloads"
+    else
+      note "WARNING: release-spec.json for $VERSION has no linuxArch entry — regenerate it with the current release-spec.sh so the manifest and this release describe the same Arch package"
+    fi
   else
     note "release-spec.json is for ${spec_ver:-<none>}, not $VERSION — no cross-check"
   fi
@@ -293,3 +321,4 @@ note "uploaded ${#ASSETS[@]} asset(s) to $TAG"
 note "verify as a stranger would:"
 note "  gh release download $TAG && sha256sum -c $SUMS && gpg --verify $SUMS.asc $SUMS"
 note "  gpg --verify $DEB_SERVED.asc $DEB_SERVED"
+note "  gpg --verify $PKG_SERVED.asc $PKG_SERVED"

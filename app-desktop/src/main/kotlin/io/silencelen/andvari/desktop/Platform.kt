@@ -52,9 +52,16 @@ fun clearVaultClipboard() {
 }
 
 @Serializable
-private data class DownloadsManifest(
+internal data class DownloadsManifest(
     val windows: PlatformBuild? = null,
+    // The Debian package. Its AndvariApi device-platform tag is "linux" and STAYS "linux" for the
+    // Arch build too — that tag names the device's OS to the server, not a package format.
     val linux: PlatformBuild? = null,
+    // The Arch pacman package built beside the deb (scripts/build-linux.sh): the same fleet
+    // version as `linux`, its own url + sha256. ADDITIVE in the signed manifest — a manifest
+    // from before the Arch package simply lacks it (null here), and [selectPlatformBuild] then
+    // falls back to `linux`, whose version is the same fleet version.
+    val linuxArch: PlatformBuild? = null,
     // Audit F09, wave 3: the phone platform, carried here so this model is the honest mirror of
     // the manifest web's Devices card reads (Devices.tsx names this file as its twin). [checkForUpdate]
     // never SELECTS it — a desktop build compares itself against its own OS entry only, and there is
@@ -75,7 +82,45 @@ private data class DownloadsManifest(
 // [downloadsUrl], never `url`, and the OS-level installer signature (Authenticode MSI / GPG deb) is
 // the load-bearing integrity control, never `sha256`.
 @Serializable
-private data class PlatformBuild(val version: String = "", val url: String = "", val sha256: String = "")
+internal data class PlatformBuild(val version: String = "", val url: String = "", val sha256: String = "")
+
+/**
+ * The house convention for "this is an Arch-family install": os-release(5) `ID` equal to `arch`,
+ * or ANY `ID_LIKE` token equal to `arch` (Omarchy reports `ID=omarchy` / `ID_LIKE=arch`; Arch
+ * itself `ID=arch`; Manjaro `ID_LIKE=arch`). Token equality, never a prefix match — `archcraft`
+ * is not `arch`. Pure over the file's text so it is unit-testable; quoting is optional per the
+ * spec and both quote styles are stripped.
+ */
+internal fun isArchLike(osRelease: String): Boolean = osRelease.lineSequence().any { raw ->
+    val line = raw.trim()
+    val eq = line.indexOf('=')
+    if (eq <= 0 || line.startsWith("#")) return@any false
+    val key = line.substring(0, eq).trim()
+    val value = line.substring(eq + 1).trim().trim('"', '\'')
+    when (key) {
+        "ID" -> value == "arch"
+        "ID_LIKE" -> value.split(' ', '\t').any { it == "arch" }
+        else -> false
+    }
+}
+
+/** os-release(5): `/etc/os-release` first, `/usr/lib/os-release` as the documented fallback; empty when neither reads. */
+private fun readOsRelease(): String =
+    listOf("/etc/os-release", "/usr/lib/os-release").firstNotNullOfOrNull { p ->
+        runCatching { java.io.File(p).takeIf { it.isFile }?.readText() }.getOrNull()
+    } ?: ""
+
+/**
+ * The manifest entry THIS build compares itself against — a build must never nag about another
+ * package family's version. Windows → `windows`. Arch-family Linux → `linuxArch`, falling back
+ * to `linux` when the manifest predates the Arch package (same fleet version either way, and the
+ * nag only opens `/downloads`, where both packages are listed). Any other Linux → `linux`.
+ */
+internal fun selectPlatformBuild(manifest: DownloadsManifest, isWindows: Boolean, isArch: Boolean): PlatformBuild? = when {
+    isWindows -> manifest.windows
+    isArch -> manifest.linuxArch?.takeIf { it.version.isNotBlank() } ?: manifest.linux
+    else -> manifest.linux
+}
 
 /** Where to download an update — surfaced to the user next to the banner. */
 fun downloadsUrl(baseUrl: String): String = "$baseUrl/downloads"
@@ -200,7 +245,8 @@ fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
     // floorSeq (not the raw stored seq) is the effective floor — never below MIN_SEQ (§M-D4a).
     if (manifest.seq < floorSeq) return UpdateCheck.Unverified
     val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
-    val available = (if (isWindows) manifest.windows else manifest.linux)?.version?.takeIf { it.isNotBlank() }
+    val isArch = !isWindows && isArchLike(readOsRelease())
+    val available = selectPlatformBuild(manifest, isWindows, isArch)?.version?.takeIf { it.isNotBlank() }
     return when {
         available != null && compareVersions(available, DESKTOP_VERSION) > 0 -> UpdateCheck.Available(available, manifest.seq)
         updateChannelStale(manifest.signedAt) -> UpdateCheck.Stale(manifest.seq)

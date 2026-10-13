@@ -34,7 +34,13 @@ export interface ExtensionBuild {
 }
 export interface DownloadsManifest {
   windows?: PlatformBuild | null;
+  /** The Debian package. */
   linux?: PlatformBuild | null;
+  /** The Arch pacman package built beside the deb (scripts/build-linux.sh) — same fleet version,
+   *  its own url. ADDITIVE: a manifest from before the Arch package simply lacks the key and the
+   *  row renders the same honest "isn't published yet" as any other absent platform. The desktop
+   *  twin (Platform.kt DownloadsManifest) carries the same key. */
+  linuxArch?: PlatformBuild | null;
   /** Audit F09: the phone platform. Self-hosters are told (README) to serve an APK from their
    *  instance's /downloads — with no key here there was nothing to advertise it with, and the
    *  card silently had no Android row at all while every other platform got an honest
@@ -74,7 +80,7 @@ export function coerceManifest(parsed: unknown): DownloadsManifest | "error" {
  */
 export function platformRowState(
   manifest: DownloadsManifest | null | "error",
-  key: "windows" | "linux" | "android",
+  key: "windows" | "linux" | "linuxArch" | "android",
 ): PlatformRow {
   if (manifest === null) return { kind: "loading" };
   const build = manifest === "error" ? null : manifest[key];
@@ -262,6 +268,14 @@ export function DevicesCard({ origin, canonicalOrigin }: { origin?: string; cano
       <div className="field">
         <label>Linux</label>
         <PlatformRowView state={platformRowState(manifest, "linux")} noun="Linux package (.deb)" />
+      </div>
+
+      {/* The Arch-family row (Omarchy, Arch, Manjaro …): the pacman package built beside the deb.
+          Installing stays manual — `sudo pacman -U <file>` — exactly like the deb's `dpkg -i`;
+          no Linux client runs an installer and this row changes nothing about that. */}
+      <div className="field">
+        <label>Arch Linux</label>
+        <PlatformRowView state={platformRowState(manifest, "linuxArch")} noun="Arch package (.pkg.tar.zst)" />
       </div>
 
       <div className="field">

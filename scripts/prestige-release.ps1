@@ -99,6 +99,12 @@ $ReplaceablePaths = @(
     'linux.version'
     'linux.url'
     'linux.sha256'
+    # The Arch pacman package built beside the deb (scripts/build-linux.sh). ADDITIVE: the release
+    # that introduces it ADDS the key to the live manifest - the one case step 4's "no added keys"
+    # rule admits, and only for exactly these three leaves.
+    'linuxArch.version'
+    'linuxArch.url'
+    'linuxArch.sha256'
     'browserExtension.version'
     'browserExtension.chromeUrl'
     'browserExtension.firefoxUrl'
@@ -484,7 +490,7 @@ if (-not $AllowUnsignedBase) {
 
 # The spec is emitted by scripts/release-spec.sh on the build host, alongside the artifacts it has
 # already uploaded, so the operator never types a checksum. Its shape (specVersion 1) is:
-#   { specVersion, generatedAt, intendedKeys[], linux{version,url,sha256},
+#   { specVersion, generatedAt, intendedKeys[], linux{version,url,sha256}, linuxArch{version,url,sha256},
 #     browserExtension{version,chromeStoreUrl,chromeUrl,firefoxUrl}, artifacts{...} }
 # NOTE: specVersion is the SCHEMA version, not the release version, and there is no top-level
 # `version` key - the fleet version lives at .linux.version.
@@ -498,7 +504,7 @@ if ([int]$specSchema -ne 1) {
 # drifted apart - and the failure mode is a release that quietly rewrites an entry nobody meant to
 # touch. Fail instead.
 $intendedKeys   = @(Get-RequiredMember -Node $spec.Json -Name 'intendedKeys' -Where 'release spec')
-$expectIntended = @('linux', 'browserExtension')
+$expectIntended = @('linux', 'linuxArch', 'browserExtension')
 $keysExtra   = @($intendedKeys   | Where-Object { $expectIntended -notcontains $_ })
 $keysMissing = @($expectIntended | Where-Object { $intendedKeys   -notcontains $_ })
 if ($keysExtra.Count -or $keysMissing.Count) {
@@ -557,6 +563,22 @@ if ($servedDebSha -ne $preDebSha) {
     Die "the deb served at $BaseUrl$preDebUrl hashes to $servedDebSha but the release spec says $preDebSha - the rename/upload step published different bytes than the spec hashed. Re-upload the deb (or regenerate + republish the spec on the build host), then re-run."
 }
 Write-Ok "served deb $preDebUrl hashes to the spec's sha256 - rename/upload agreement proven"
+
+# --- served Arch package: the deb's twin, same proof ---------------------------------------------
+# package-arch.sh emits pacman's andvari-<ver>-<pkgrel>-x86_64.pkg.tar.zst; /downloads serves
+# andvari-<ver>-x86_64.pkg.tar.zst. Same rename-by-convention, same reason to PROVE it here.
+$preArch    = Get-RequiredMember -Node $spec.Json -Name 'linuxArch' -Where 'release spec'
+$prePkgUrl  = [string](Get-RequiredMember -Node $preArch -Name 'url'    -Where 'release spec .linuxArch')
+$prePkgSha  = ([string](Get-RequiredMember -Node $preArch -Name 'sha256' -Where 'release spec .linuxArch')).ToLowerInvariant()
+if ($prePkgUrl -notmatch '^/downloads/[A-Za-z0-9._-]+$') { Die "release spec linuxArch.url '$prePkgUrl' is not a /downloads/<file> path" }
+if ($prePkgSha -notmatch '^[0-9a-f]{64}$') { Die 'release spec .linuxArch.sha256 is not a 64-char hex digest' }
+$servedPkgPath = Get-FileFromUrl -Url "$BaseUrl$prePkgUrl" -What 'served linux Arch package'
+$servedPkgSha  = Get-Sha256Lower -Path $servedPkgPath
+Remove-Item -LiteralPath $servedPkgPath -Force -ErrorAction SilentlyContinue
+if ($servedPkgSha -ne $prePkgSha) {
+    Die "the Arch package served at $BaseUrl$prePkgUrl hashes to $servedPkgSha but the release spec says $prePkgSha - the rename/upload step published different bytes than the spec hashed. Re-upload the package (or regenerate + republish the spec on the build host), then re-run."
+}
+Write-Ok "served Arch package $prePkgUrl hashes to the spec's sha256 - rename/upload agreement proven"
 
 # --- update-signer jar (built here so a missing jar fails before the MSI build, not after) -------
 $SignerJar = Join-Path $RepoRoot 'tools\update-signer\build\libs\andvari-update-signer.jar'
@@ -752,20 +774,26 @@ Write-Ok "seq $liveSeq (live) -> $newSeq (new)"
 
 # --- validate the spec's fields ------------------------------------------------------------------
 $specLinux = Get-RequiredMember -Node $spec.Json -Name 'linux'            -Where 'release spec'
+$specArch  = Get-RequiredMember -Node $spec.Json -Name 'linuxArch'        -Where 'release spec'
 $specExt   = Get-RequiredMember -Node $spec.Json -Name 'browserExtension' -Where 'release spec'
 
 $linuxVersion = [string](Get-RequiredMember -Node $specLinux -Name 'version' -Where 'release spec .linux')
 $linuxUrl     = [string](Get-RequiredMember -Node $specLinux -Name 'url'     -Where 'release spec .linux')
 $linuxSha     = ([string](Get-RequiredMember -Node $specLinux -Name 'sha256' -Where 'release spec .linux')).ToLowerInvariant()
+$archVersion  = [string](Get-RequiredMember -Node $specArch -Name 'version'  -Where 'release spec .linuxArch')
+$archUrl      = [string](Get-RequiredMember -Node $specArch -Name 'url'      -Where 'release spec .linuxArch')
+$archSha      = ([string](Get-RequiredMember -Node $specArch -Name 'sha256'  -Where 'release spec .linuxArch')).ToLowerInvariant()
 $extVersion   = [string](Get-RequiredMember -Node $specExt -Name 'version'    -Where 'release spec .browserExtension')
 $extChromeUrl = [string](Get-RequiredMember -Node $specExt -Name 'chromeUrl'  -Where 'release spec .browserExtension')
 $extFirefoxUrl= [string](Get-RequiredMember -Node $specExt -Name 'firefoxUrl' -Where 'release spec .browserExtension')
 
 # linux and windows share the fleet version; the extension versions independently.
 if ($linuxVersion -ne $Version) { Die "release spec .linux.version is $linuxVersion but -Version is $Version" }
+if ($archVersion -ne $Version) { Die "release spec .linuxArch.version is $archVersion but -Version is $Version" }
 if ($extVersion -notmatch '^\d+\.\d+\.\d+$') { Die "release spec .browserExtension.version '$extVersion' is not X.Y.Z" }
 if ($linuxSha -notmatch '^[0-9a-f]{64}$') { Die "release spec .linux.sha256 is not a 64-char hex digest" }
-foreach ($pair in @(@('linux.url', $linuxUrl), @('browserExtension.chromeUrl', $extChromeUrl), @('browserExtension.firefoxUrl', $extFirefoxUrl))) {
+if ($archSha -notmatch '^[0-9a-f]{64}$') { Die "release spec .linuxArch.sha256 is not a 64-char hex digest" }
+foreach ($pair in @(@('linux.url', $linuxUrl), @('linuxArch.url', $archUrl), @('browserExtension.chromeUrl', $extChromeUrl), @('browserExtension.firefoxUrl', $extFirefoxUrl))) {
     if ($pair[1] -notmatch '^/downloads/[A-Za-z0-9._-]+$') { Die "release spec $($pair[0]) '$($pair[1])' is not a /downloads/<file> path" }
 }
 # The spec may also carry a windows block; it is IGNORED. The only authoritative source for the
@@ -780,6 +808,8 @@ if (Test-JsonMember -Node $spec.Json -Name 'windows') { Write-Info 'release spec
 
 Write-Ok "linux   $linuxVersion  $linuxUrl"
 Write-Ok "linux   sha256 $linuxSha"
+Write-Ok "arch    $archVersion  $archUrl"
+Write-Ok "arch    sha256 $archSha"
 Write-Ok "ext     $extVersion  $extChromeUrl / $extFirefoxUrl"
 Write-Ok "windows $Version  /downloads/$MsiName  sha256 $msiSha$(if (-not $msiIsReal) { '  (PLACEHOLDER)' })"
 
@@ -808,6 +838,20 @@ $newObj.signedAt                      = $signedAt
 $newObj.linux.version                 = $linuxVersion
 $newObj.linux.url                     = $linuxUrl
 $newObj.linux.sha256                  = $linuxSha
+# linuxArch: replaced in place once the live manifest carries it; ADDED by the first release that
+# ships the Arch package. That addition is the only "new key" step 4's diff admits, and it admits
+# exactly these three leaves - the live manifest is otherwise still the base, byte for byte.
+$liveHadArch = Test-JsonMember -Node $baseObj -Name 'linuxArch'
+if ($liveHadArch) {
+    $newObj.linuxArch.version         = $archVersion
+    $newObj.linuxArch.url             = $archUrl
+    $newObj.linuxArch.sha256          = $archSha
+}
+else {
+    Write-Warn2 'the live manifest has no linuxArch entry - this release INTRODUCES it (appended after the existing keys; every existing key is carried over untouched)'
+    $archNode = [pscustomobject][ordered]@{ version = $archVersion; url = $archUrl; sha256 = $archSha }
+    $newObj | Add-Member -MemberType NoteProperty -Name 'linuxArch' -Value $archNode
+}
 $newObj.browserExtension.version      = $extVersion
 $newObj.browserExtension.chromeUrl    = $extChromeUrl
 $newObj.browserExtension.firefoxUrl   = $extFirefoxUrl
@@ -828,6 +872,12 @@ $newLeaves  = Get-JsonLeafMap -Node $roundTrip
 
 $added   = @($newLeaves.Keys  | Where-Object { -not $baseLeaves.ContainsKey($_) })
 $removed = @($baseLeaves.Keys | Where-Object { -not $newLeaves.ContainsKey($_) })
+# The one admitted addition: the three linuxArch leaves, and only on the release that introduces
+# the entry (a live manifest that already has it must not grow a fourth leaf under it either).
+if (-not $liveHadArch) {
+    $archIntroduced = @('linuxArch.version', 'linuxArch.url', 'linuxArch.sha256')
+    $added = @($added | Where-Object { $archIntroduced -notcontains $_ })
+}
 if ($added.Count)   { Die "assembled manifest ADDS key(s) the live manifest does not have: $($added -join ', ')" }
 if ($removed.Count) { Die "assembled manifest DROPS key(s) present in the live manifest: $($removed -join ', ')" }
 
@@ -842,6 +892,9 @@ $expected = @{
     'linux.version'                = $linuxVersion
     'linux.url'                    = $linuxUrl
     'linux.sha256'                 = $linuxSha
+    'linuxArch.version'            = $archVersion
+    'linuxArch.url'                = $archUrl
+    'linuxArch.sha256'             = $archSha
     'browserExtension.version'     = $extVersion
     'browserExtension.chromeUrl'   = $extChromeUrl
     'browserExtension.firefoxUrl'  = $extFirefoxUrl

@@ -495,7 +495,9 @@ else {
     $served  = $servedRaw | ConvertFrom-Json
     $rbFail  = @()
 
-    foreach ($plat in @('linux', 'windows')) {
+    # linuxArch (the Arch pacman package) shares the fleet version with the deb and the MSI, and
+    # release-spec.sh emits it on every release, so an absent entry is as loud as an absent linux.
+    foreach ($plat in @('linux', 'linuxArch', 'windows')) {
         $node = $served.$plat
         if (-not $node -or -not $node.version) {
             Write-Warn2 ("the served manifest names no '{0}' version - that platform reads as unpublished in every client's downloads hub." -f $plat)
@@ -519,7 +521,7 @@ else {
     }
 
     $servedSignedAt = if ($servedRaw -match '"signedAt"\s*:\s*"([^"]+)"') { $matches[1] } else { '(unreadable)' }
-    Write-Ok ("served manifest names {0} on linux + windows, signedAt {1}" -f $Version, $servedSignedAt)
+    Write-Ok ("served manifest names {0} on linux + linuxArch + windows, signedAt {1}" -f $Version, $servedSignedAt)
     if ($served.browserExtension -and $served.browserExtension.version) {
         Write-Info ("browserExtension stays at {0} (this ceremony does not move it)" -f $served.browserExtension.version)
     }
