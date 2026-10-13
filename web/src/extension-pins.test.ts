@@ -1533,7 +1533,8 @@ describe("H03 / R37 — the push MutationResult union is one union on every push
   });
   it("the extension's SaveErrorCode carries the permanent `rejected` rung in both twins", () => {
     for (const f of ["messages.ts", "errors.ts"]) {
-      expect(readFileSync(extensionSrc + f, "utf-8"), f).toMatch(/type SaveErrorCode = "locked" \| "conflict" \| "rejected" \| "failed";/);
+      // A9 review MEDIUM-1 added `no_personal_vault` (a served wrap the browser never confirmed is no capture destination).
+      expect(readFileSync(extensionSrc + f, "utf-8"), f).toMatch(/type SaveErrorCode = "locked" \| "no_personal_vault" \| "conflict" \| "rejected" \| "failed";/);
     }
   });
 });

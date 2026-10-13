@@ -106,6 +106,12 @@ export class AccountStateSync {
     return Number.isSafeInteger(v) && v > 0 ? v : 0;
   }
 
+  /** True once this browser has merged (or written) account state: a served blob below its mark is a detectable
+   *  rollback. A browser without one is FRESH to account state, and a served blob is as replayable as a wrap (A9). */
+  hasHighWater(): boolean {
+    return this.highWater() > 0;
+  }
+
   private loadLocal(): AccountStateDoc | null {
     const sealed = this.local.get("acctstate.copy");
     if (!sealed) return null;

@@ -246,10 +246,16 @@ describe("A1b item home + reauth copy — the core HouseholdCopy twins", () => {
   it("the stale-salt reauth says how to recover, byte-equal with HouseholdCopy.REAUTH_STALE_SESSION", () => {
     expect(kt("REAUTH_STALE_SESSION")).toBe("Lock and unlock andvari, then try again.");
     expect(accountTs).toContain(`super(${JSON.stringify(kt("REAUTH_STALE_SESSION"))});`);
-    expect(storeTs).toContain("export { ReauthStaleSessionError };");
+    expect(storeTs).toContain("export { ReauthFailedError, ReauthStaleSessionError };");
   });
 
   it("the wrong-password reauth is HouseholdCopy.REAUTH_FAILED byte-equal", () => {
-    expect(storeTs).toContain(`super(${JSON.stringify(kt("REAUTH_FAILED"))});`);
+    expect(accountTs).toContain(`super(${JSON.stringify(kt("REAUTH_FAILED"))});`); // A9 review: beside reauthAuthKey
+    expect(storeTs).toContain("export { ReauthFailedError, ReauthStaleSessionError };");
+  });
+
+  it("the no-personal-vault refusal is HouseholdCopy.NO_PERSONAL_VAULT byte-equal (A9 review LOW-2)", () => {
+    expect(kt("NO_PERSONAL_VAULT")).toBe("Choose a vault for this item.");
+    expect(storeTs).toContain(`super(${JSON.stringify(kt("NO_PERSONAL_VAULT"))});`);
   });
 });

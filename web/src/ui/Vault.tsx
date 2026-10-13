@@ -729,7 +729,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           <Editor
             initial={editing}
             policy={policy}
-            vaultChoices={selected === null && hasWritableShared ? newItemVaultChoices : undefined}
+            vaultChoices={selected === null && (hasWritableShared || !account.personalVaultId) ? newItemVaultChoices : undefined}
             generateOnOpen={editorGenerate}
             onSave={save}
             onCancel={() => { setEditing(null); setEditorGenerate(false); }}
@@ -1978,8 +1978,11 @@ function expiryYearChoices(stored: (string | undefined)[]): string[] {
 
 function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCancel, backRef }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; generateOnOpen?: boolean; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void; backRef?: React.MutableRefObject<(() => void) | null> }) {
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
-  // New items only: which vault to create in (existing items never move vaults).
-  const [vaultId, setVaultId] = useState<string | undefined>(vaultChoices?.[0]?.vaultId);
+  // New items only: which vault to create in (existing items never move vaults). A9 review LOW-2: the default is the
+  // PERSONAL vault; with none in force there is no default — the human picks (the select shows a placeholder) and Save
+  // stays disabled until then, so nothing lands in a shared vault by omission.
+  const [vaultId, setVaultId] = useState<string | undefined>(vaultChoices?.find((v) => v.type === "personal")?.vaultId);
+  const needsVaultPick = vaultChoices !== undefined && vaultId === undefined;
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [fileErr, setFileErr] = useState("");
@@ -2180,9 +2183,10 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
         {confirmCancel ? "Discard changes?" : `${BACK_GLYPH} Cancel`}
       </button>
       <h2 style={{ marginTop: 12 }}>{initial.name ? "Edit" : isLogin ? "New login" : isCard ? "New card" : "New note"}</h2>
-      {vaultChoices && vaultChoices.length > 1 && (
+      {vaultChoices && (vaultChoices.length > 1 || needsVaultPick) && (
         <Field label="Vault">
-          <select value={vaultId} onChange={(e) => setVaultId(e.target.value)}>
+          <select value={vaultId ?? ""} onChange={(e) => setVaultId(e.target.value || undefined)}>
+            {needsVaultPick && <option value="">Choose a vault for this item.</option>}
             {vaultChoices.map((v) => (
               <option key={v.vaultId} value={v.vaultId}>
                 {v.name}{v.type === "personal" ? "" : " (shared)"}
@@ -2310,7 +2314,7 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
 
       {saveErr && <Msg kind="err">{saveErr}</Msg>}
       <div className="actions">
-        <button className="primary" disabled={busy || !doc.name}>
+        <button className="primary" disabled={busy || !doc.name || needsVaultPick}>
           {busy ? (progress && progress.total > 0 ? `Sealing… ${Math.min(progress.done + 1, progress.total)}/${progress.total}` : "Sealing…") : "Save"}
         </button>
         <button type="button" className="ghost" onClick={cancel}>{confirmCancel ? "Discard changes?" : "Cancel"}</button>
