@@ -23,6 +23,7 @@ import io.silencelen.andvari.core.model.EscrowUpload
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -193,6 +194,53 @@ class EscrowLegacyRetentionTest : P4TestSupport() {
             assertEquals(EscrowDrillResult(listOf(admin.userId), emptyList()), json.decodeFromString(EscrowDrillResult.serializer(), ok.bodyAsText()))
             assertNull(client.download(admin, admin.userId).legacySealed)
         }
+    }
+
+    // ---- A10 review LOW-2: the startup purge keys on the configured fingerprint, so that string is checked ----
+
+    private fun envOf(vararg pairs: Pair<String, String>): (String) -> String? {
+        val m = mapOf("ANDVARI_ENUM_SECRET" to Bytes.toB64(ByteArray(32) { 3 }), *pairs)
+        return { name -> m[name] }
+    }
+
+    @Test
+    fun aConfiguredFingerprintThatIsNotTheKeysOwn_refusesToStart() {
+        val pub = Bytes.toB64(recovery.publicKey)
+        // fromEnv: an operator typo (one hex digit off, uppercase, a stray space) must never reach the purge.
+        for (wrong in listOf(fingerprint.dropLast(1) + (if (fingerprint.last() == 'a') "b" else "a"), fingerprint.uppercase(), " $fingerprint", "deadbeef")) {
+            val e = assertFailsWith<IllegalStateException>(wrong) {
+                Config.fromEnv(envOf("ANDVARI_RECOVERY_PUBKEY" to pub, "ANDVARI_RECOVERY_FINGERPRINT" to wrong))
+            }
+            assertTrue(e.message!!.contains("ANDVARI_RECOVERY_FINGERPRINT"), e.message)
+        }
+        // The constructor enforces it too (a test-built or programmatic Config cannot bypass the check).
+        assertFailsWith<IllegalStateException> { rotated(config().dbPath, recovery).let { Config(host = it.host, port = 0, dbPath = it.dbPath, blobDir = it.blobDir, webDir = null, recoveryPublicKey = recovery.publicKey, recoveryFingerprint = "deadbeef", enumSecret = ByteArray(32) { 7 }, publicHostname = null, bootstrapToken = bootstrapToken) } }
+        // The matching fingerprint starts; so does an unconfigured instance (no key, no fingerprint).
+        assertEquals(fingerprint, Config.fromEnv(envOf("ANDVARI_RECOVERY_PUBKEY" to pub, "ANDVARI_RECOVERY_FINGERPRINT" to fingerprint)).recoveryFingerprint)
+        assertFalse(Config.fromEnv(envOf()).escrowConfigured)
+    }
+
+    @Test
+    fun anUnconfiguredRestart_purgesNothing_andAMatchingRestartPurgesOnlyRetiredRows() {
+        val before = config()
+        val admin = VirtualClient("admin@x.com", "legacy retention password 7")
+        val services1 = buildServices(before, Notifier())
+        testApplication {
+            application { andvariModule(services1) }
+            val client = jsonClient(this)
+            client.register(admin, bootstrapToken)
+            assertEquals(HttpStatusCode.OK, client.escrowSelf(admin, admin.sealEscrowV2(recovery.publicKey, fingerprint)).status)
+            assertNotNull(client.download(admin, admin.userId).legacySealed)
+        }
+        // Escrow unconfigured (the key dropped from the env): the purge has no current key to compare against and
+        // touches nothing, so a transient misconfiguration cannot destroy the retained blobs.
+        val unconfigured = buildServices(config(escrowConfigured = false, dbPath = before.dbPath), Notifier())
+        assertEquals(1, unconfigured.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM escrow_legacy") { it.getInt(1) } }, "unconfigured: nothing purged")
+        unconfigured.repo.db.close()
+        // The matching key again: the retained blob is under the current key and stays.
+        val same = buildServices(config(dbPath = before.dbPath), Notifier())
+        assertEquals(1, same.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM escrow_legacy") { it.getInt(1) } }, "same key: nothing purged")
+        same.repo.db.close()
     }
 
     @Test
