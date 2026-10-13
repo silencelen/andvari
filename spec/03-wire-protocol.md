@@ -178,9 +178,14 @@ cache OFF.
 - `GET /account/state` → `{ sealedState: string | null, seq }`; `PUT /account/state { sealedState,
   baseSeq }` → `{ sealedState, seq }` or `409 stale_state` (root cause A §4.2). ONE opaque blob per
   user, `Envelope(UVK, JSON, "andvari/v1|account-state|{userId}")`, holding the verified contact
-  pins (pairwise, owner decision Q4), the verified org recovery fingerprint and consumed lifecycle
+  pins (pairwise, owner decision Q4), the verified org recovery fingerprint, consumed lifecycle
   nonces (removal proofs v2, branch A7: each device's own durable consumed set merges in at the next
-  flush, and a served copy never shrinks it). `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
+  flush, and a served copy never shrinks it), and (branch A6b, spec 01 §6 "Grant authority") the
+  issued-grants record (`issuedGrants`, `issuedTombstones`) and the owned-vaults record
+  (`ownedVaults`, `ownedTombstones`), both unioned on merge with a not-older tombstone removing an
+  entry, so a rollback cannot shrink them; a document without these keys reads them as empty. Native
+  clients keep the high-water seq and their sealed copy in the durable device state when the host has
+  one, so both survive a restart on a memory-only cache. `seq` is a compare-and-set counter only (`baseSeq` must equal it); the authenticated seq
   lives inside the blob. Clients merge on every read and on a 409 (contacts union by userId, newest
   `verifiedAt` wins, a tombstone not older than a pin removes it; nonces unioned, newest 256 per
   vault) and keep a local high-water seq: a served seq below it, or a withheld blob after one was
@@ -683,7 +688,8 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   identityPub, addedAt, status?, legacyGrant? }]` (active grants only). `legacyGrant` (additive,
   security review 2026-10, root cause A §8.2 step 4) is `true` when the member's grant carries
   neither a v2 `signedGrant` nor a self-wrap, so its devices hold the key only from a v1 seal; a
-  HINT for the owner's client (re-issue to pinned members, list the rest), never an input to a
+  HINT for the owner's client (it lists those members for the owner to confirm one by one; branch
+  A6b: nothing is re-issued on the hint, spec 01 §6 "Grant authority"), never an input to a
   security decision; always `false` for the owner. Any active member may call
   (transparency: every member can re-verify who holds the VK). Foreign vaultId → 403
   (hidden-as-403). **Refused on the public break-glass origin** (§11 closed a drift where
@@ -698,7 +704,9 @@ sit-at-home operation). Every call is audited (ids/roles only, never names).
   the server stores and delivers both on the member's grant. Audited `vault_member_add`.
 - `PUT /api/v1/vaults/{vaultId}/members/{userId}/grant { signedGrant }` → `200 {rev}` (security
   review 2026-10, root cause A §8.2 step 4). The owner re-issues a member's grant as v2 with the
-  SAME vault key, so a member holding the key only from a v1 seal can confirm it. Owner only;
+  SAME vault key, so a member holding the key only from a v1 seal can confirm it. A client sends it
+  only after the owner confirmed the (vault, member) pair, or for a pair in its issued-grants record
+  with the same identity key (spec 01 §6 "Grant authority", branch A6b). Owner only;
   never self (`400 cannot_target_self`) or the owner row (`400 cannot_target_owner`); the target
   needs an active grant (`404 not_a_member`); `signedGrant` base64url ≤ 2100 chars. Stores only
   `signedGrant` (role, `sealedVk` and any self-wrap untouched) and bumps the grant rev so the
