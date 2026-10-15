@@ -4,27 +4,115 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
-## Unreleased
+## 0.28.0 (2026-10-15) — the server is no longer trusted with your keys · fleet 0.28.0, extension 0.28.0
 
-**Desktop — an Arch Linux package beside the deb.** The household's Omarchy (Arch-family) desktops
-get a native pacman package, `andvari-<ver>-x86_64.pkg.tar.zst`, built from the SAME build as the
-`.deb` by the new `scripts/build-linux.sh` (one gradle invocation; the script proves both carry the
-same application jar) via the generic `scripts/package-arch.sh`. Same `/opt/andvari` tree, same
-GPL-3.0-or-later licence file, the deb's `Depends:` translated into Arch package names, and the same
-release key signing it — as a detached *armored* `.asc`, never a `.sig` (pacman would verify a
-`.sig` sidecar against its own keyring and refuse the install). Installing stays manual:
-`sudo pacman -U <file>`, as `dpkg -i` is for the deb.
-- The signed update manifest gains an **additive** `linuxArch` entry (`version`, `url`, `sha256`):
-  `release-spec.sh` emits it and lists it in `intendedKeys`; `prestige-release.ps1` splices it, proves
-  the served package hashes to the spec (the deb's proof, twinned), and admits the key's one-time
-  introduction into a live manifest that predates it; `signandvari.ps1` reads it back after publish;
-  `gh-release.sh` stages the package + `.asc` under the served name and cross-checks it against the
-  spec; `prune-artifacts.sh` keeps/drops it with its release. Every existing manifest key is unchanged.
-- The desktop app checks for updates against `linuxArch` on Arch-family installs (os-release `ID` or
-  any `ID_LIKE` token equal to `arch`, which is how Omarchy reports) and against `linux` elsewhere,
-  falling back to `linux` on a manifest from before the Arch package. The AndvariApi device-platform
-  tag stays `linux` — it names the OS, not the package format.
-- The web "your other devices" card gains an **Arch Linux** row (`Arch package (.pkg.tar.zst)`).
+*Security review 2026-10 checked every platform again, this time assuming the vault server itself
+is hostile. It still found no way for the server to read your passwords. But it found several
+places where a hostile server could hand your app a key or a label and have it believed: a shared
+vault's key, the recovery copy of your account, which vault counts as "personal", and the notice
+that someone left. In the browser extension it also found a way for a web page to trick the
+login dropdown into filling a saved password. On Android, another app could ask for logins under a
+false name. All of it is fixed. Shared keys and recovery copies now carry the sender's signature,
+and your devices remember what they have already checked. A few one-time prompts come with that.
+They are listed first.*
+
+**What you will notice, once, after you update**
+- **Some shared vaults may show as read-only for a while.** A shared vault in the older format
+  shows read-only on a device until you accept it or the vault's owner re-issues it. Until then it
+  is missing from the browser extension. Nothing has been lost. Owners: verify each member once
+  (one tap per member) and re-share. Each re-share is one confirmation per member.
+- **A "re-seal your recovery copy" card.** Everyone sees it once. It moves your account's recovery
+  copy to the new signed format.
+- **Every new device and browser profile confirms its personal vault once.** The browser extension
+  cannot save new logins until you do this.
+- **Contact verification is per device.** Verifying a household member on your phone does not count
+  for your laptop. Each device asks once per contact.
+- **Leave and removal notices.** If someone leaves a shared vault from an app that is not updated
+  yet, your updated devices show "Didn't do this? Tell your admin". If that person really left, you
+  can ignore it. If you are still on 0.27.0, you may see a warning when someone is genuinely
+  removed. Updating clears it.
+- **A vault that reports a key mismatch** recovers when you leave it and the owner adds you back.
+  This can also show up once if a device trusted a bad key before the upgrade. In that case the
+  owner's genuine re-share is what shows the mismatch.
+
+**The serious ones**
+- **Browser extension:** a web page can no longer cover or overlay the login dropdown to trigger a
+  fill. Fills from a page are tied to the page's own site. On Firefox, where the browser cannot
+  report whether the dropdown is covered, in-page fills point you to the toolbar button.
+- **Android autofill:** the app that asks for a fill is checked when the fill request is created,
+  so another app cannot claim to be your browser. Card fills go only into the field you are in.
+- **Shared vaults and recovery:** the server can no longer slip in a vault key, a recovery copy, a
+  "personal" label or a "left the vault" notice that your app accepts. Each one is now signed by
+  the person it comes from, bound to who it is for, and checked against what your device already
+  remembers.
+- **Master password breach check:** it no longer sends anything derived from your master password
+  or backup passphrase to the server. The check for item passwords stays. The server's stored
+  check results are deleted.
+
+**Autofill, sharing and polish**
+- Autofill matching is stricter: a browser's own package name never matches as an app, and the
+  extension no longer reads one-time codes from page text.
+- Data from other household members is checked before it is shown: malformed items are set aside
+  instead of breaking the list, the CSV formula warning covers every column, and a bad attachment
+  size is refused.
+- Fingerprints you compare by eye are now 128 bits (32 hex characters), and the recovery key is
+  compared in full.
+- **Desktop, Arch Linux:** a native pacman package, `andvari-<ver>-x86_64.pkg.tar.zst`, ships beside
+  the `.deb`, signed with the same release key. Install it with `sudo pacman -U <file>`, as
+  `dpkg -i` is for the deb. The desktop app checks for updates against it on Arch-family systems.
+
+**For self-hosters: read before you upgrade**
+- **Ship the server and every client together.** The schema moves to **v15**. The compatibility
+  window stays open in this release: older clients keep working and the server minimum client
+  version is unchanged. The next release closes the window.
+- **The server refuses to start** if `ANDVARI_RECOVERY_FINGERPRINT` is not
+  `sha256(ANDVARI_RECOVERY_PUBKEY)`. The error prints the expected value. Fix the environment
+  before you deploy. Do not relax the check.
+- **The device-local trust-record migration is one-way.** The first unlock after the upgrade
+  rewrites every trust record on the device as JSON. A pre-0.28.0 build reads them as empty, and its
+  shared vaults look unaccepted until they are accepted again.
+- **Retire every `recovery-cli` jar built before 0.28.0.** Older jars open recovery copies without
+  the identity check. From this release on, the CLI and the app are version-coupled. Run a recovery drill with
+  the new jar.
+
+**Under the hood, for readers**
+- *Grants and escrow (spec 01, 04):* vault-key grants and escrow blobs are sign-then-seal, using
+  Ed25519 over a strict `SignedStatement` codec with recipient id, vault id and a purpose tag inside
+  the signature. Escrow v2 is bound to the user being recovered. v1 grants are accepted read-only
+  ("Accept anyway") during the window. v1 escrow stays openable only under the identity check.
+  Re-issue is never automatic: owner-only signing needs a UVK-authenticated owned-vaults record, and
+  each re-share is a per-row owner confirmation. The issued-grants record is display only.
+- *Key precedence and item homes (spec 02 §7.2):* the UVK-wrapped vault key is canonical and a
+  server-delivered key never outranks it. A v1-seal-only key is never self-wrapped. Each device
+  records an item's first vault, quarantines a later row under another vault, and seals item
+  plaintext only through one provenance-bearing helper.
+- *Account state and personal vault (spec 05 R14):* "personal" is a signed, client-held property of
+  the account state, with a high-water mark and a sealed copy in device state, never a server label.
+  Re-designation needs a fenced in-session password proof. Contact pins are pairwise and per device.
+  The admin pin needs a typed code plus an in-person affirmation.
+- *Removal proofs v2 (spec 05 R16):* single-use nonces and a freshness window, required for every
+  removal including "left". No v1 dual-send. A proof-less "left" is shown with the "Didn't do this?"
+  qualifier.
+- *Untrusted ids:* server-supplied ids are UUID-validated at the wire on every client, path segments
+  are refuse-then-encode, and device-local trust records are strict JSON (see the one-way migration
+  above). Retired-key `escrow_legacy` rows are purged at startup and no longer served.
+- *Server hardening:* WebSocket frame and upgrade-body caps; a blank bootstrap token counts as unset
+  and a short one refuses start; first TOTP enrolment needs the current auth key or a fresh password
+  login; login re-checks the verifier inside the session-mint transaction; every recovery-verify
+  failure is audited; a 2 MiB item cap, a 128 MiB per-user live-item quota and a push rate limit;
+  the breach relay is stateless (the schema drops `hibp_cache` under `secure_delete`). Web sign-out
+  refreshes then revokes, and says so when it cannot confirm the revocation.
+- *Residuals carried into the next release:* the grant-to-vault-authority binding (spec 05 R15(f)),
+  a fresh device's first-verified-key trust, and the offline-across-replay wording (R16). The next
+  release closes the compatibility window and raises the minimum client version once no legacy
+  grants remain.
+- *Packaging:* `scripts/build-linux.sh` builds the deb and the Arch package from one Gradle run and
+  proves they carry the same application jar. The deb's `Depends:` are translated to Arch names
+  (an unknown name stops the build), and both packages are detach-signed as armored `.asc` (never
+  `.sig`, which pacman would check against its own keyring). The signed update manifest gains an
+  additive `linuxArch` entry (`version`, `url`, `sha256`). `release-spec.sh`, `prestige-release.ps1`,
+  `signandvari.ps1`, `gh-release.sh` and `prune-artifacts.sh` carry it. Every existing manifest key
+  is unchanged. The web "your other devices" card gains an Arch Linux row.
 
 ## 0.27.0 (2026-09-14) — the third audit, closed on every platform · fleet 0.27.0, extension 0.27.0
 
