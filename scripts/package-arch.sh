@@ -9,7 +9,7 @@
 # yggdrasil scripts/). `diff` against the canonical copy before editing either side; the
 # `--self-test` below is the compatibility contract every copy must keep passing.
 #
-# WHY HAND-ROLLED, NOT makepkg: makepkg refuses to run as root (huginn builds as root), needs
+# WHY HAND-ROLLED, NOT makepkg: makepkg refuses to run as root (the reference build host builds as root), needs
 # fakeroot + a PKGBUILD + a source array, and all it would do for a binary repack is write
 # .PKGINFO/.MTREE and tar the tree — which is ~40 lines of bsdtar below, in makepkg's own
 # recipe (same .PKGINFO keys, same .MTREE options, same member order, zstd). pacman reads
@@ -209,7 +209,7 @@ bsdtar -xOf "$OUT/$PKGFILE" .PKGINFO | grep -qx "pkgver = $VERSION-$RELEASE" || 
 bsdtar -tf "$OUT/$PKGFILE" | grep -qx "opt/$NAME/bin/$NAME" || die "launcher missing from $PKGFILE"
 if command -v pacman >/dev/null 2>&1; then
   # A private, empty db: the build host's /var/lib/pacman may not exist or be writable
-  # (huginn's tmux namespace is read-only outside /root), and a file query needs no db anyway.
+  # (it can be a read-only mount namespace), and a file query needs no db anyway.
   mkdir -p "$WORK/pacdb" "$WORK/paccache" "$WORK/pacgpg"
   pacman -Qip --config /dev/null --dbpath "$WORK/pacdb" --cachedir "$WORK/paccache" --gpgdir "$WORK/pacgpg" \
     --logfile /dev/null "$OUT/$PKGFILE" > "$WORK/qip" 2>&1 || { cat "$WORK/qip" >&2; die "pacman -Qip rejected $PKGFILE"; }
