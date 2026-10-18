@@ -417,13 +417,25 @@ foreach ($rel in @('gradlew.bat', 'scripts\build-windows.ps1', 'app-desktop\buil
 }
 Write-Ok "repo $RepoRoot"
 
-# --- signing key: existence ONLY. Never read, never hash, never print its contents. --------------
+# --- signing key: existence + openability ONLY. Never read, never hash, never print its contents. -
 $KeyPath        = Join-Path $env:USERPROFILE '.andvari\update-signing.key'
 $KeyPathDisplay = '%USERPROFILE%\.andvari\update-signing.key'
 if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) {
     Die "update-signing key not found at $KeyPathDisplay - this ceremony can only run on the workstation that holds it"
 }
-Write-Ok "update-signing key present at $KeyPathDisplay"
+# Openable by THIS account: opened for read and closed at once, zero bytes read. Existence alone is
+# not enough - after a local-to-domain account migration (0.28.0, 2026-10-15) the key kept a protected
+# ACL naming only the old account's SID, Test-Path still passed, and the ceremony built and signed the
+# MSI before update-signer hit "Access is denied" at the manifest signature.
+try {
+    $probe = [System.IO.File]::Open($KeyPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $probe.Dispose()
+} catch {
+    Die ("update-signing key at $KeyPathDisplay exists but this account ($env:USERDOMAIN\$env:USERNAME) cannot open it: " +
+         $_.Exception.Message + " - if the account changed (e.g. a domain migration), in an elevated shell run " +
+         "'takeown /f <path>' then 'icacls <path> /grant <DOMAIN\user>:(R)', and re-run")
+}
+Write-Ok "update-signing key present and openable by this account at $KeyPathDisplay"
 
 # --- tools --------------------------------------------------------------------------------------
 $javaCmd = Get-Command java.exe -CommandType Application -ErrorAction SilentlyContinue
