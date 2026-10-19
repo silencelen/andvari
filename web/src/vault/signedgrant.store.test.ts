@@ -156,7 +156,7 @@ async function world(): Promise<World> {
 }
 
 const served = (e: Enrolled, name: string): UserLookupResponse => ({ userId: e.userId, displayName: name, identityPub: e.identityPub });
-const pinOf = (e: Enrolled, label: string): Contact => ({ userId: e.userId, identityPub: e.identityPub, label, verifiedAt: 1000, method: "typed" });
+const pinOf = (e: Enrolled, label: string): Contact => ({ userId: e.userId, identityPub: e.identityPub, label, verifiedAt: 1000, method: "typed", email: `${label.toLowerCase()}@example.com` }); // A11: the ceremony records the typed email
 const personalRow = (e: Enrolled): WireVault => ({ vaultId: e.personalVaultId, type: "personal", rev: 2, metaBlob: e.personalMeta, createdAt: 0 });
 const personalGrant = (e: Enrolled): WireGrant => ({ vaultId: e.personalVaultId, userId: e.userId, role: "owner", wrappedVk: e.personalWrappedVk, rev: 2, sealedVk: null });
 const sharedRow = (w: World, rev = 3): WireVault => ({ vaultId: w.vaultId, type: "shared", rev, metaBlob: w.metaBlob, createdAt: 0 });
@@ -405,16 +405,16 @@ describe("A6 — signed grants (VaultStore)", () => {
     await store.sync();
     // A6b: the owner's own evidence of ownership (seeded directly here; in the app: the creation record, a transfer
     // accept, or the password-reauthed "You own <vault>?").
-    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com" })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     await store.accountState.update((d) => withOwned(d, w.vaultId, 1));
-    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true })).rejects.toBeInstanceOf(MemberNotVerifiedError);
+    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com" })).rejects.toBeInstanceOf(MemberNotVerifiedError);
     expect(server.adds).toEqual([]);
 
     await store.accountState.pin(pinOf(w.member, "Member"));
     expect(store.memberPinState(w.member.userId, w.member.identityPub)).toBe("pinned");
     expect(store.memberPinState(w.member.userId, toB64(randomBytes(32)))).toBe("key-changed");
 
-    await store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true });
+    await store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com" });
     expect(server.adds).toHaveLength(1);
     const add = server.adds[0]!.body;
     const me = boxKeypairFromSeed(await seedOf(w.member));

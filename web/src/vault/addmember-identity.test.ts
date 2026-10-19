@@ -16,7 +16,7 @@ import { Account } from "./account";
 import { type Contact, AccountStateError, decodeAccountState, emptyAccountState, encodeAccountState, mergeAccountState } from "./accountstate";
 import { memoryClientState } from "./accountstatesync";
 import { addIdentityCheck, normalizeEmail, pinFromQr, pinFromTyped, composeIdentityQr } from "./contacts";
-import { LegacyPinConfirmRequiredError, MemberIdentityMismatchError, MemberNotVerifiedError, VaultStore } from "./store";
+import { LegacyPinReverifyRequiredError, MemberIdentityMismatchError, MemberNotVerifiedError, VaultStore } from "./store";
 
 /**
  * Security review 2026-10, branch A11 (q00, HIGH): the add-member confirm trusted the SERVER's display name for the
@@ -176,25 +176,32 @@ describe("A11 q00 — add-member confirms the identity the human verified, never
     expect(store.memberPinState(found.userId, found.identityPub), "the old gate passes: C is pinned").toBe("pinned");
     expect(store.addMemberIdentity(bea.email, found.userId).kind).toBe("mismatch");
     await expect(store.addVaultMember(vaultId, found.userId, "writer", { typedEmail: bea.email })).rejects.toBeInstanceOf(MemberIdentityMismatchError);
-    await expect(store.addVaultMember(vaultId, found.userId, "writer", { typedEmail: bea.email, legacyPinConfirmed: true }), "a confirmation cannot override a recorded mismatch").rejects.toBeInstanceOf(MemberIdentityMismatchError);
-    expect(server.adds).toEqual([]);
+        expect(server.adds).toEqual([]);
   });
 
-  it("legacy pin (no recorded email): the confirm shows C's verified label; without the human's confirmation it is refused", async () => {
+  it("legacy pin (no recorded email) → add REFUSED (no tick can override); re-verifying with the typed email → match → add works", async () => {
     const owner = await enroll("q00-owner");
     const bea = await enroll("q00-bea");
     const carl = await enroll("q00-carl");
     const { store, server, vaultId } = await ownerWithVault(owner);
-    await verifyTyped(store, carl, "Carl", null); // a pre-A11 pin
-    const found = { userId: carl.userId, displayName: "Bea", identityPub: carl.identityPub };
-    const check = store.addMemberIdentity(bea.email, found.userId);
-    expect(check.kind).toBe("legacy");
-    expect(check.kind === "legacy" && check.pin.label, "the screen names who the human verified, not the server's 'Bea'").toBe("Carl");
-    await expect(store.addVaultMember(vaultId, found.userId, "writer", { typedEmail: bea.email })).rejects.toBeInstanceOf(LegacyPinConfirmRequiredError);
+    await verifyTyped(store, bea, "Bea", null); // a pre-A11 pin: its label was the server's display name at pin time
+    await verifyTyped(store, carl, "Carl", null);
+    // The hostile answer for B's email: C's account under B's name. Legacy → refused, whatever is passed.
+    expect(store.addMemberIdentity(bea.email, carl.userId).kind).toBe("legacy");
+    await expect(store.addVaultMember(vaultId, carl.userId, "writer", { typedEmail: bea.email })).rejects.toBeInstanceOf(LegacyPinReverifyRequiredError);
+    await expect(
+      store.addVaultMember(vaultId, carl.userId, "writer", { typedEmail: bea.email, legacyPinConfirmed: true } as unknown as { typedEmail: string }),
+      "there is no confirm-tick override any more",
+    ).rejects.toBeInstanceOf(LegacyPinReverifyRequiredError);
+    // Genuine B, legacy pin: refused too, until the human runs the ceremony again for the typed email.
+    await expect(store.addVaultMember(vaultId, bea.userId, "writer", { typedEmail: bea.email })).rejects.toBeInstanceOf(LegacyPinReverifyRequiredError);
     expect(server.adds).toEqual([]);
-    // The human read "Carl" and confirmed anyway: that is the human's verified choice, and it is honoured.
-    await store.addVaultMember(vaultId, found.userId, "writer", { typedEmail: bea.email, legacyPinConfirmed: true });
-    expect(server.adds.map((a) => a.body.userId)).toEqual([carl.userId]);
+    await verifyTyped(store, bea, "Bea", bea.email); // the re-verification, typed email pre-filled
+    expect(store.addMemberIdentity(bea.email, bea.userId).kind).toBe("match");
+    await store.addVaultMember(vaultId, bea.userId, "writer", { typedEmail: bea.email });
+    expect(server.adds.map((x) => x.body.userId)).toEqual([bea.userId]);
+    // And the hostile answer for B's email is now a hard mismatch (B's pin claims the email).
+    expect(store.addMemberIdentity(bea.email, carl.userId).kind).toBe("mismatch");
   });
 
   it("genuine B (pinned with B's email): works; unpinned still refused", async () => {
@@ -241,6 +248,12 @@ describe("A11 q00 — the web add-member screen (source pins)", () => {
     expect(start).toBeGreaterThan(0);
     expect(body).not.toMatch(/You've verified \{found\.displayName\}/);
     expect(body, "the pinned branch shows the pin's own label").toMatch(/identity\.pin\.label/);
+  });
+  it("a legacy pin offers re-verification with the typed email, never a confirm tick (A11 review LOW-1)", () => {
+    expect(body).not.toMatch(/type="checkbox"/);
+    expect(body).not.toMatch(/legacyPinConfirmed/);
+    expect(body).toContain("You verified this person before andvari recorded their email. Verify them again to add them");
+    expect(body, "the stored label is named for what it is").toContain("the name shown when you verified them");
   });
   it("passes the typed email to the store and to the ceremony", () => {
     expect(body).toMatch(/addVaultMember\(vaultId, found\.userId, role, \{ typedEmail/);

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
 import type { UserLookupResponse, VaultMemberSummary } from "../api/types";
 import type { Account } from "../vault/account";
-import { type DeletedVaultInfo, type IncomingTransfer, LegacyPinConfirmRequiredError, type LegacyGrantRow, MemberIdentityMismatchError, MemberNotVerifiedError, OwnershipNotConfirmedError, type OwnershipClaim, OwnershipTransferAckRequiredError, ReauthFailedError, ReauthStaleSessionError, type VaultInfo, type VaultStore } from "../vault/store";
+import { type DeletedVaultInfo, type IncomingTransfer, LegacyPinReverifyRequiredError, type LegacyGrantRow, MemberIdentityMismatchError, MemberNotVerifiedError, OwnershipNotConfirmedError, type OwnershipClaim, OwnershipTransferAckRequiredError, ReauthFailedError, ReauthStaleSessionError, type VaultInfo, type VaultStore } from "../vault/store";
 import { VaultKeyNotVerifiedError } from "../vault/account";
 import { fromB64 } from "../crypto/bytes";
 import { groupedShort } from "../crypto/fingerprint";
@@ -723,13 +723,13 @@ function LegacyGrantsPanel({ store, vault, refreshKey }: { store: VaultStore; va
             {r.pinState === "pinned" && r.verifiedLabel !== null ? (
               confirming === r.userId ? (
                 <>
-                  Re-share “{vaultName(r)}” with {r.verifiedLabel}?{" "}
+                  Re-share “{vaultName(r)}” with the person you verified as “{r.verifiedLabel}” (the name shown when you verified them)?{" "}
                   <button type="button" className="primary" disabled={busy !== null} onClick={() => void reshare(r)}>{busy === r.userId ? "Re-sharing…" : "Re-share"}</button>{" "}
                   <button type="button" className="ghost" disabled={busy !== null} onClick={() => setConfirming(null)}>Cancel</button>
                 </>
               ) : (
                 <>
-                  {r.verifiedLabel} <span className="muted">(verified; the server calls them {r.displayName}, {r.email})</span>{" "}
+                  “{r.verifiedLabel}” <span className="muted">(verified; the name shown when you verified them. The server now calls them {r.displayName}, {r.email})</span>{" "}
                   {r.previouslySharedAt !== null ? <span className="muted">· you shared this vault with them on {fmtDay(r.previouslySharedAt)}{" "}</span> : null}
                   <button type="button" className="link" onClick={() => setConfirming(r.userId)}>Re-share “{vaultName(r)}”…</button>
                 </>
@@ -1155,8 +1155,9 @@ function RecentlyDeleted({ store, refreshKey, onChanged, onLoaded }: { store: Va
  *
  * A11 (q00, HIGH): the lookup's answer is the server's. The confirm names the recipient by the PIN's own label and
  * fingerprint (`store.addMemberIdentity`), never by `found.displayName`; the add is refused when the pin records
- * another email than the one typed here (or another pin records this one), and a pin from before A11 (no email
- * recorded) needs the owner to confirm "this is who you verified" first.
+ * another email than the one typed here (or another pin records this one), and a pin with no recorded email is
+ * refused until the owner verifies them again for the typed email (review LOW-1: its label was the server's name at
+ * pin time, so a tick on it is no identity check).
  */
 function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: string; account: Account; store: VaultStore; client: ApiClient; onAdded: () => Promise<void> }) {
   const [email, setEmail] = useState("");
@@ -1164,7 +1165,6 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
   const [found, setFound] = useState<(UserLookupResponse & { typedEmail: string }) | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [role, setRole] = useState("writer");
-  const [legacyConfirmed, setLegacyConfirmed] = useState(false);
   const [pinFp, setPinFp] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -1174,7 +1174,6 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
     setFound(null);
     setVerifying(false);
     setRole("writer");
-    setLegacyConfirmed(false);
   };
 
   const lookup = async (e: React.FormEvent) => {
@@ -1200,7 +1199,7 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
 
   const pinState = found ? store.memberPinState(found.userId, found.identityPub) : null;
   const identity = found && pinState === "pinned" ? store.addMemberIdentity(found.typedEmail, found.userId) : null;
-  const shownPin = identity && (identity.kind === "match" || identity.kind === "legacy") ? identity.pin : null;
+  const shownPin = identity && identity.kind === "match" ? identity.pin : null;
 
   useEffect(() => {
     let live = true;
@@ -1220,13 +1219,13 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
     setBusy(true);
     setErr("");
     try {
-      await store.addVaultMember(vaultId, found.userId, role, { typedEmail: found.typedEmail, legacyPinConfirmed: legacyConfirmed });
+      await store.addVaultMember(vaultId, found.userId, role, { typedEmail: found.typedEmail });
       setEmail("");
       reset();
       await onAdded();
     } catch (err) {
       setErr(
-        err instanceof MemberNotVerifiedError || err instanceof MemberIdentityMismatchError || err instanceof LegacyPinConfirmRequiredError
+        err instanceof MemberNotVerifiedError || err instanceof MemberIdentityMismatchError || err instanceof LegacyPinReverifyRequiredError
           ? err.message
           : friendlyError(err),
       );
@@ -1260,7 +1259,7 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
       {found && pinState === "key-changed" && (
         <Msg kind="err">
           The server now holds a different identity key for the account it gives for {found.typedEmail} than the one you verified
-          {store.accountState.currentPin(found.userId) ? ` as ${store.accountState.currentPin(found.userId)!.label}` : ""}. Don't add them:
+          {store.accountState.currentPin(found.userId) ? ` (the name shown when you verified them: ${store.accountState.currentPin(found.userId)!.label})` : ""}. Don't add them:
           check their code in person again (Settings, Household members), and tell your admin.
         </Msg>
       )}
@@ -1292,9 +1291,10 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
 
       {found && identity?.kind === "mismatch" && (
         <Msg kind="err">
-          The server answered {found.typedEmail} with an account you verified as{" "}
-          {identity.pin ? `${identity.pin.label}${identity.pin.email ? ` (${identity.pin.email})` : ""}` : "someone else"}
-          {identity.claimedBy ? `, but you verified ${identity.claimedBy.label} at that address` : ""}. Don't add them: the server may be
+          The server answered {found.typedEmail} with an account you verified
+          {identity.pin?.email ? ` at ${identity.pin.email}` : " under another address"} (the name shown when you verified them:{" "}
+          {identity.pin ? identity.pin.label : "unknown"})
+          {identity.claimedBy ? `, but you verified a different person at ${found.typedEmail} (the name shown when you verified them: ${identity.claimedBy.label})` : ""}. Don't add them: the server may be
           misbehaving. Tell your admin.
         </Msg>
       )}
@@ -1303,26 +1303,38 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
         <Msg kind="err">You haven't verified this person on this device. Verify them in Settings, Household members, first.</Msg>
       )}
 
-      {found && shownPin && identity && (identity.kind === "match" || identity.kind === "legacy") && (
+      {found && identity?.kind === "legacy" && (
+        verifying ? (
+          <VerifyMemberPanel
+            client={client}
+            account={account}
+            store={store}
+            presetServed={found}
+            verifiedEmail={found.typedEmail}
+            onDone={() => {
+              setVerifying(false);
+              setTick((t) => t + 1); // re-read: the new pin records the typed email → match
+            }}
+          />
+        ) : (
+          <div className="field">
+            <Msg kind="err">
+              You verified this person before andvari recorded their email. Verify them again to add them. (The name shown when you
+              verified them was “{identity.pin.label}”; that name came from the server, so it can't confirm who {found.typedEmail} is.)
+            </Msg>
+            <button type="button" className="primary" onClick={() => setVerifying(true)}>Verify them again</button>
+          </div>
+        )
+      )}
+
+      {found && shownPin && identity?.kind === "match" && (
         <>
           <div className="check-block" style={{ marginTop: 6 }}>
             <p style={{ marginTop: 0 }}>
-              <span className="tag">verified</span> This is who you verified: <strong>{identity.pin.label}</strong>
-              {identity.kind === "match" ? <> at {identity.pin.email}</> : null}, on {fmtDay(identity.pin.verifiedAt)}.
+              <span className="tag">verified</span> You verified the person at <strong>{identity.pin.email}</strong> on{" "}
+              {fmtDay(identity.pin.verifiedAt)}, by their identity code. The name shown when you verified them: {identity.pin.label}.
             </p>
             <div className="mono muted" style={{ whiteSpace: "pre-line" }} aria-label="Their verified identity code">{pinFp || "…"}</div>
-            {identity.kind === "legacy" && (
-              <>
-                <p className="muted">
-                  You verified them before andvari recorded the email you looked them up with, so it can't check that {found.typedEmail} is
-                  theirs. Only continue if {identity.pin.label} is the person you want to add.
-                </p>
-                <label>
-                  <input type="checkbox" checked={legacyConfirmed} onChange={(e) => setLegacyConfirmed(e.target.checked)} /> Yes,{" "}
-                  {identity.pin.label} is who I want to add
-                </label>
-              </>
-            )}
           </div>
           <Field label="Role">
             <select value={role} onChange={(e) => setRole(e.target.value)} style={{ width: "auto" }}>
@@ -1331,8 +1343,8 @@ function AddMember({ vaultId, account, store, client, onAdded }: { vaultId: stri
             </select>
           </Field>
           <div className="actions">
-            <button type="button" className="primary" disabled={busy || (identity.kind === "legacy" && !legacyConfirmed)} onClick={add}>
-              {busy ? "Sealing…" : `Add ${identity.pin.label} to vault`}
+            <button type="button" className="primary" disabled={busy} onClick={add}>
+              {busy ? "Sealing…" : `Add ${identity.pin.email} to vault`}
             </button>
           </div>
         </>

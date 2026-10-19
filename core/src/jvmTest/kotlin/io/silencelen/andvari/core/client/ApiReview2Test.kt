@@ -209,7 +209,7 @@ class ApiReview2Test {
         return AndvariApi("http://fake", HttpClient(engine), Tokens("access", "refresh"))
     }
 
-    private fun pinOf(e: Enrolled, label: String) = Contact(e.userId, e.reg.identityPub, label, 1_000, Contact.METHOD_TYPED)
+    private fun pinOf(e: Enrolled, label: String) = Contact(e.userId, e.reg.identityPub, label, 1_000, Contact.METHOD_TYPED, email = "${label.lowercase()}@example.com") // A11: the ceremony records the typed email
     private fun personalRow(e: Enrolled) = WireVault(e.personalId, "personal", 2, e.reg.personalVault.metaBlob, 0)
     private fun personalGrant(e: Enrolled) = WireGrant(e.personalId, e.userId, "owner", e.reg.personalVault.wrappedVk, 2, null)
     private fun summary(e: Enrolled, name: String, role: String, legacy: Boolean = false) =
@@ -482,7 +482,7 @@ class ApiReview2Test {
         val member = enroll("a9-member")
         val (engine, server, vaultId) = ownerWithCreatedVault(owner)
         engine.accountState.pin(pinOf(member, "Member"))
-        engine.addVaultMember(vaultId, member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
+        engine.addVaultMember(vaultId, member.userId, "writer", "member@example.com")
         val rec = assertNotNull(engine.accountState.issued(vaultId, member.userId))
 
         // The server lists the member as legacy (a key-format migration). Nothing is signed without a tap.
@@ -507,7 +507,7 @@ class ApiReview2Test {
         val dsA = MemoryDeviceState()
         val (a, server, vaultId) = ownerWithCreatedVault(owner, dsA)
         a.accountState.pin(pinOf(member, "Member"))
-        a.addVaultMember(vaultId, member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
+        a.addVaultMember(vaultId, member.userId, "writer", "member@example.com")
         val withRecord = server.accountState to server.accountSeq
         a.removeVaultMember(vaultId, member.userId)
         assertEquals(1, server.removals.size)

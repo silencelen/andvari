@@ -79,8 +79,9 @@ export async function pinFromQr(qrPayload: string, served: ServedIdentity, label
  *  - `mismatch`: the looked-up account's pin records a different email, or ANOTHER pin records the typed email: the
  *    server answered the owner's address with someone else's account. Refused, whatever the human confirms.
  *  - `match`: the looked-up account's pin records exactly the typed email.
- *  - `legacy`: the pin predates A11 (no email recorded): the add needs the human to confirm the PIN's own label and
- *    fingerprint ("this is who you verified").
+ *  - `legacy`: the pin has no recorded email (pre-A11, or made without a typed address): the add is REFUSED and the
+ *    human verifies them again for the typed email. The pin's label was the server's display name at pin time, so
+ *    confirming it is no identity check (A11 review LOW-1).
  *  - `unpinned`: no current pin; the ceremony first.
  */
 export type AddIdentity =

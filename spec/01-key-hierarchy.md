@@ -203,8 +203,9 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   (userId, identityPub) of the first passing unlock. An unlock whose server userId differs from the
   one bound to the typed email hard-fails with the same security-fault copy: a changed userId for the
   same email is a mismatch, never a fresh pin. A pre-A11 userId-keyed record is bound to the saved
-  session's email at startup and before every read; one whose session was already gone stays
-  userId-keyed only (residual). Consequence: an account deleted and re-registered under the same
+  session's email at startup and before every read; one whose session was already gone before the
+  upgrade gets its email binding trust-on-first-use from the next passing unlock (migration residual,
+  spec 05 R14(g)). Consequence: an account deleted and re-registered under the same
   email on the same origin is refused on a device that unlocked the old one, until that device's
   record is removed by hand.
 - **Out-of-band verification (sharing, P5):** before an owner seals a shared VK to a
@@ -328,7 +329,11 @@ key signs only through the flows that need it (today: escrow v2).
   genuine but superseded designation at an intermediate seq above the device's high-water mark (the
   account designated S at N+1 and repaired it to P at N+2; the server serves N+1 to a device at N),
   which no high-water mark can tell from the current one. Cost: one tap per established device after a
-  genuine re-designation elsewhere; recorded as an owner-review item (fail closed). (3) A second apply
+  genuine re-designation elsewhere; recorded as an owner-review item (fail closed). The asymmetry
+  is deliberate: CHANGED keeps the CACHED vault in force pending the human (the served wrap is the
+  new, unconfirmed claim, and the cache is what this device already confirmed), while a withheld or
+  unopenable wrap with a designation that does not name the cache puts NOTHING in force (the
+  account's own designation contradicts the cache, and there is no served claim to weigh). (3) A second apply
   while a proposal is pending keeps it a proposal; only the human resolves it. "Never switch
   silently" holds inside the account type too: a wrap applied while another is in force is a notice
   (or, unopenable, an anomaly), never a switch; only the human's confirmed designation replaces the
@@ -402,12 +407,17 @@ key signs only through the flows that need it (today: escrow v2).
     contact `email`; none for the enrolment link, a members-list one-tap or a pending invitation, whose
     addresses are server-reported); (2) the add is REFUSED when the looked-up account's pin records
     another email, or ANOTHER pin records the typed one, whatever the human then confirms; (3) a pin
-    with no recorded email may be used only after the owner confirms the PIN's own label and identity
-    short form ("This is who you verified: <label>"); (4) the confirm screen names the recipient by the
-    PIN's label and fingerprint short form, never by the lookup's `displayName`, and the client re-runs
-    the check when it signs (core `ContactPin.addIdentity` / `SyncEngine.addVaultMember(…, typedEmail,
-    legacyPinConfirmed)`, web `addIdentityCheck` / `VaultStore.addVaultMember(…, {typedEmail,
-    legacyPinConfirmed})`). Emails compare trimmed and lowercased.
+    with no recorded email is NOT enough to add (A11 review LOW-1, fail closed): its label was the
+    server's display name at pin time, so a confirmation of that label is no identity check. The add
+    is refused ("You verified this person before andvari recorded their email. Verify them again to
+    add them") and the client offers the verification ceremony again with the typed email pre-filled,
+    which records it; the add then resolves to a match; (4) the confirm screen names the recipient by
+    the email the PIN records and its fingerprint short form, never by the lookup's `displayName`; a
+    pin's label is shown, wherever it appears in a trust context, as "the name shown when you verified
+    them"; and the client re-runs the check when it signs (core `ContactPin.addIdentity` /
+    `SyncEngine.addVaultMember(…, typedEmail)`, `LegacyPinReverifyRequiredException`; web
+    `addIdentityCheck` / `VaultStore.addVaultMember(…, {typedEmail})`, `LegacyPinReverifyRequiredError`).
+    Emails compare trimmed and lowercased.
   - **Grant authority, sender side (NORMATIVE; security review 2026-10, root cause A, branch A6b;
     narrowed by branch A9).** A client never signs or seals a VK to a user unless a HUMAN on that
     device confirmed that (vault, user) pair now: the add-member action, or a per-row "Re-share

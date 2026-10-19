@@ -84,7 +84,9 @@ object ContactPin {
         /** The looked-up account's pin records exactly the typed email. */
         class Match(val pin: Contact) : AddIdentity()
 
-        /** A pre-A11 pin (no email recorded): the add needs the human to confirm the PIN's own label + fingerprint. */
+        /** A pin with no recorded email (pre-A11, or made without a typed address): the add is REFUSED; the human runs
+         *  the ceremony again for the typed email. Its label was the server's display name at pin time, so confirming
+         *  the label is not an identity check (A11 review LOW-1). */
         class Legacy(val pin: Contact) : AddIdentity()
 
         /** The looked-up account's pin records another email, or ANOTHER pin ([claimedBy]) records the typed one: the

@@ -176,7 +176,7 @@ class SignedGrantEngineTest {
     }
 
     private fun served(e: Enrolled, name: String) = UserLookupResponse(e.userId, name, e.reg.identityPub)
-    private fun pinOf(e: Enrolled, label: String) = Contact(e.userId, e.reg.identityPub, label, 1_000, Contact.METHOD_TYPED)
+    private fun pinOf(e: Enrolled, label: String) = Contact(e.userId, e.reg.identityPub, label, 1_000, Contact.METHOD_TYPED, email = "${label.lowercase()}@example.com") // A11: the ceremony records the typed email
     private fun personalRow(e: Enrolled) = WireVault(e.reg.personalVault.vaultId, "personal", 2, e.reg.personalVault.metaBlob, 0)
     private fun personalGrant(e: Enrolled) = WireGrant(e.reg.personalVault.vaultId, e.userId, "owner", e.reg.personalVault.wrappedVk, 2, null)
 
@@ -1014,9 +1014,9 @@ class SignedGrantEngineTest {
         engine.sync()
         // A6b: the owner's own evidence of ownership (here seeded directly; in the app it is the creation record,
         // a transfer accept, or the password-reauthed "You own <vault>?").
-        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com", legacyPinConfirmed = true) }
+        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com") }
         engine.accountState.update { AccountState.withOwned(it, w.vaultId, 1) }
-        assertFailsWith<MemberNotVerifiedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com", legacyPinConfirmed = true) }
+        assertFailsWith<MemberNotVerifiedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com") }
         assertTrue(server.adds.isEmpty())
 
         engine.accountState.pin(pinOf(w.member, "Member"))
@@ -1025,7 +1025,7 @@ class SignedGrantEngineTest {
         val substituted = UserLookupResponse(w.member.userId, "Member", Bytes.toB64(crypto.randomBytes(32)))
         assertEquals(SyncEngine.MemberPinState.KEY_CHANGED, engine.memberPinState(substituted))
 
-        engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
+        engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com")
         val (vaultId, add) = server.adds.single()
         assertEquals(w.vaultId, vaultId)
         val me = crypto.boxKeypairFromSeed(seedOf(w.member))
