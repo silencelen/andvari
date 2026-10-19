@@ -14,8 +14,9 @@ import java.nio.file.Files
  *
  * Security review 2026-10 (A12, row 81): the file is created owner-only (0600 inside a 0700
  * directory on POSIX; a best-effort owner ACL on Windows). There is no DPAPI helper in this
- * codebase yet, so on Windows the tokens are protected by the profile ACL alone. That is why a
- * declined at-rest store now keeps them off disk entirely. DPAPI wrapping is a documented follow-up.
+ * codebase yet, so on Windows the tokens are protected by the profile ACL alone. That is why they
+ * reach disk only after an explicit yes to at-rest storage from both the org and the user (an
+ * unanswered prompt keeps them in memory). DPAPI wrapping is a documented follow-up.
  */
 @Serializable
 data class DesktopSession(
@@ -366,10 +367,12 @@ class DesktopSessionStore(
 
     /**
      * Security review 2026-10 (A12, row 81): whether the access+refresh tokens may sit in
-     * session.json. DesktopState sets it from [tokensMayPersist] (org allowance AND the user's
-     * per-origin consent). Turning it OFF moves a persisted session into memory and deletes the
-     * file; turning it back ON writes the held session out. Default ON (the pre-A12 behavior for a
-     * store nobody has configured, e.g. a fresh install before its first policy probe).
+     * session.json. DesktopState sets it from [tokensMayPersist] (org allowance AND an explicit
+     * yes from the user's per-origin consent — unanswered is memory only). Turning it OFF moves a
+     * persisted session into memory and deletes the file; turning it back ON writes the held
+     * session out. The store's own default is ON only so a store nobody configured keeps the
+     * pre-A12 file behavior; DesktopState re-derives it before every session write and on every
+     * policy or consent change.
      */
     @Volatile
     var tokensAtRest: Boolean = true
@@ -551,12 +554,13 @@ private val posixSupported: Boolean = runCatching {
 // `internal` (was private): DesktopState.writeVerifiedAtomically creates its export/attachment
 // temp with the same create-time mode (audit G50) — one implementation, no second copy to drift.
 /**
- * Security review 2026-10 (A12, row 81): the access+refresh tokens may be written to session.json
- * only when NEITHER the org ([orgAllowed], its `offlineCacheAllowed`) NOR this device's user
- * ([consent] — false is an explicit decline; null is a prompt not yet answered, which is not a
- * decline) refused at-rest storage. Pure so both legs stay test-pinned.
+ * Security review 2026-10 (A12, row 81; review LOW-3): the access+refresh tokens may be written to
+ * session.json only when the org allows at-rest storage ([orgAllowed], its `offlineCacheAllowed`)
+ * AND this device's user said YES ([consent] == true). An unanswered prompt (null) is not consent:
+ * until it is answered the tokens stay in memory and a restart signs in again — the same default-
+ * OFF posture as the durable cache itself (§5.3). Pure so both legs stay test-pinned.
  */
-internal fun tokensMayPersist(orgAllowed: Boolean, consent: Boolean?): Boolean = orgAllowed && consent != false
+internal fun tokensMayPersist(orgAllowed: Boolean, consent: Boolean?): Boolean = orgAllowed && consent == true
 
 internal fun ownerOnly(spec: String): Array<java.nio.file.attribute.FileAttribute<*>> =
     if (posixSupported) {

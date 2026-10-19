@@ -1850,6 +1850,9 @@ class DesktopState(
      */
     fun recoverVerifySubmit(email: String, phrase: String) {
         if (busy) return
+        // A12 review LOW-1: the recovery authKey is password-equivalent proof — never posted to an
+        // origin the user has not verified (the [signInLockedOut] state-layer lockout).
+        if (signInLockedOut) { recoverError = RECOVERY_LOCKED_OUT; return }
         val secret = MemberRecovery.parseSecret(phrase)
         if (secret == null || secret.isEmpty()) {
             recoverError = "That doesn't look like a recovery phrase — check it and try again."
@@ -1890,6 +1893,10 @@ class DesktopState(
      */
     fun recoverCommitSubmit(newPassword: String) {
         if (busy) return
+        // A12 review LOW-1: the reset commit never goes to an unverified origin either. (Belt: a
+        // switch's teardown already drops the stash via clearSecondary, so only a future path
+        // could reach here with one — checked FIRST, before any other refusal.)
+        if (signInLockedOut) { recoverError = RECOVERY_LOCKED_OUT; return }
         val v = recoverVerify
         val secret = recoverSecret
         if (v == null || secret == null) {
@@ -3802,6 +3809,10 @@ class DesktopState(
         /** A12 (row 39): the state-layer sign-in refusal while the app dials an unverified origin. */
         const val SIGN_IN_LOCKED_OUT =
             "Finish or cancel joining the other server first — signing in here is paused until you do."
+        /** A12 review LOW-1: the state-layer refusal of recover verify / reset while the app dials
+         *  an unverified origin (the [SIGN_IN_LOCKED_OUT] twin). */
+        const val RECOVERY_LOCKED_OUT =
+            "Finish or cancel joining the other server first — account recovery here is paused until you do."
         /** Security review 2026-10 (A12, row 82): the hard ceiling on one rescue copy, however many
          *  items co-members put in the vault. Covers the largest byte budget
          *  ([attachmentTimeoutMs] at its 64 MiB ceiling, about 69 minutes) plus item headroom. */

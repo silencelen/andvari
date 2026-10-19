@@ -11,6 +11,8 @@ import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import io.silencelen.andvari.core.crypto.MemberRecovery
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -249,7 +251,8 @@ class OriginSessionHardeningTest {
     @Test
     fun tokenPersistenceFollowsBothLegs() {
         assertTrue(tokensMayPersist(orgAllowed = true, consent = true))
-        assertTrue(tokensMayPersist(orgAllowed = true, consent = null), "an unanswered prompt is not a decline")
+        // A12 review LOW-3: an unanswered prompt is NOT consent — memory only until it is answered.
+        assertFalse(tokensMayPersist(orgAllowed = true, consent = null), "an unanswered prompt does not allow at-rest storage")
         assertFalse(tokensMayPersist(orgAllowed = true, consent = false), "the user declined")
         assertFalse(tokensMayPersist(orgAllowed = false, consent = true), "the org declined")
         assertFalse(tokensMayPersist(orgAllowed = false, consent = null))
@@ -264,5 +267,98 @@ class OriginSessionHardeningTest {
         val hostile = DesktopState.rescueCopyTimeoutMs(bytes = Long.MAX_VALUE, itemCount = 5_000, perItemMs = 60_000)
         assertEquals(DesktopState.RESCUE_COPY_CEILING_MS, hostile, "5,000 co-member items cannot buy 83 hours")
         assertTrue(DesktopState.rescueCopyTimeoutMs(0, Int.MAX_VALUE, Long.MAX_VALUE) <= DesktopState.RESCUE_COPY_CEILING_MS, "no overflow past the ceiling")
+    }
+
+    // ---- A12 review LOW-1: the recovery path honours the pending-switch lockout ----
+
+    /** A hostile origin that answers its policy and COUNTS every recovery request it is sent. */
+    private fun countingHostile(hits: AtomicInteger): String {
+        val s = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        s.createContext("/api/v1/client-policy") { ex ->
+            val body = """{"recoveryFingerprint":"hostile-fp"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, body.size.toLong()); ex.responseBody.use { it.write(body) }
+        }
+        s.createContext("/api/v1/recovery") { ex -> hits.incrementAndGet(); ex.sendResponseHeaders(500, -1); ex.close() }
+        s.start(); servers += s
+        return "http://127.0.0.1:${s.address.port}"
+    }
+
+    /** Home answers its policy and a (structurally valid, cryptographically dummy) verify. */
+    private fun recoveryHome(): String {
+        val s = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        s.createContext("/api/v1/client-policy") { ex ->
+            val body = """{"recoveryFingerprint":"home-fp"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, body.size.toLong()); ex.responseBody.use { it.write(body) }
+        }
+        s.createContext("/api/v1/recovery/self/verify") { ex ->
+            val body = """{"userId":"u1","recoveryTicket":"t","recoveryWrappedUvk":"AA","encryptedIdentitySeed":"AA","identityPub":"AA"}""".toByteArray()
+            ex.responseHeaders.add("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, body.size.toLong()); ex.responseBody.use { it.write(body) }
+        }
+        s.start(); servers += s
+        return "http://127.0.0.1:${s.address.port}"
+    }
+
+    private val phrase = MemberRecovery.displayForm(ByteArray(32) { 7 })
+
+    @Test
+    fun recoverVerifyIsRefusedWhileTheAppDialsAnUnverifiedOrigin() {
+        val hits = AtomicInteger(0)
+        val hostile = countingHostile(hits)
+        val store = storeAt("https://home.example")
+        val state = DesktopState(liveScope, store)
+        state.beginEnrollSwitch(hostile, "m@x")
+        state.trustGateConnect()
+        awaitUntil("the hostile policy to land") { state.policy != null }
+
+        state.recoverVerifySubmit("m@x", phrase)
+        Thread.sleep(500)
+
+        assertEquals(DesktopState.RECOVERY_LOCKED_OUT, state.recoverError, "recover verify is refused with the lockout copy")
+        assertFalse(state.busy)
+        assertEquals(0, hits.get(), "no recovery authKey reaches the unverified origin")
+    }
+
+    @Test
+    fun recoverResetIsRefusedWhileTheAppDialsAnUnverifiedOrigin() {
+        val hits = AtomicInteger(0)
+        val home = recoveryHome()
+        val hostile = countingHostile(hits)
+        val store = storeAt(home)
+        val state = DesktopState(liveScope, store)
+        state.openRecover("m@x")
+        awaitUntil("home's policy") { state.policy != null && !state.busy }
+        state.recoverVerifySubmit("m@x", phrase)
+        awaitUntil("phase 1 to pass at home") { state.recoverVerified }
+
+        state.beginEnrollSwitch(hostile, "m@x") // a pasted invite while the reset is staged
+        state.trustGateConnect()
+        awaitUntil("the hostile policy to land") { state.policy?.recoveryFingerprint == "hostile-fp" }
+
+        state.recoverCommitSubmit("Tr0ub4dor&3-horse-Battery")
+        Thread.sleep(500)
+
+        assertEquals(DesktopState.RECOVERY_LOCKED_OUT, state.recoverError, "recover reset is refused with the lockout copy")
+        assertFalse(state.busy)
+        assertEquals(0, hits.get(), "no reset commit reaches the unverified origin")
+    }
+
+    // ---- A12 review LOW-3: an unanswered consent prompt keeps the tokens off disk ----
+
+    @Test
+    fun anUnansweredConsentPromptKeepsTokensOffDisk() {
+        val home = policyServer("home-fp", offlineCacheAllowed = true)
+        val store = storeAt(home)
+        // consent never answered (null), org allows
+        store.save(DesktopSession(home, "u1", "m@x", "access", "refresh"))
+        val state = DesktopState(liveScope, store)
+
+        state.start()
+        awaitUntil("start() to route") { state.screen !is DesktopScreen.Loading }
+
+        assertFalse(File(root, "session.json").exists(), "consent null: nothing in session.json")
+        assertEquals("access", store.load()?.accessToken, "the run keeps its session in memory")
     }
 }
