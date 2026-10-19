@@ -482,7 +482,7 @@ class ApiReview2Test {
         val member = enroll("a9-member")
         val (engine, server, vaultId) = ownerWithCreatedVault(owner)
         engine.accountState.pin(pinOf(member, "Member"))
-        engine.addVaultMember(vaultId, member.userId, "writer")
+        engine.addVaultMember(vaultId, member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
         val rec = assertNotNull(engine.accountState.issued(vaultId, member.userId))
 
         // The server lists the member as legacy (a key-format migration). Nothing is signed without a tap.
@@ -507,7 +507,7 @@ class ApiReview2Test {
         val dsA = MemoryDeviceState()
         val (a, server, vaultId) = ownerWithCreatedVault(owner, dsA)
         a.accountState.pin(pinOf(member, "Member"))
-        a.addVaultMember(vaultId, member.userId, "writer")
+        a.addVaultMember(vaultId, member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
         val withRecord = server.accountState to server.accountSeq
         a.removeVaultMember(vaultId, member.userId)
         assertEquals(1, server.removals.size)

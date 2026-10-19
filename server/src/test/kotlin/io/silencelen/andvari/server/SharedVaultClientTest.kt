@@ -83,10 +83,10 @@ class SharedVaultClientTest {
         val info = apiOwner.lookupUser("kid@fam.com")
         assertEquals(member.identityFingerprintShort(), io.silencelen.andvari.core.crypto.SharedGrant.shortFingerprint(crypto, Bytes.fromB64(info.identityPub)),
             "the fingerprint the owner verifies matches what the member's own client displays")
-        assertFailsWith<io.silencelen.andvari.core.client.MemberNotVerifiedException> { engineOwner.addVaultMember(nv.vaultId, member.userId, "writer") }
-        assertNotNull(engineOwner.verifyMemberTyped(info, member.identityFingerprintShort()))
+        assertFailsWith<io.silencelen.andvari.core.client.MemberNotVerifiedException> { engineOwner.addVaultMember(nv.vaultId, member.userId, "writer", "kid@fam.com") }
+        assertNotNull(engineOwner.verifyMemberTyped(info, member.identityFingerprintShort(), "kid@fam.com"))
         assertNotNull(engineMember.verifyMemberTyped(apiMember.lookupUser("own@fam.com"), owner.identityFingerprintShort()))
-        engineOwner.addVaultMember(nv.vaultId, member.userId, "writer")
+        engineOwner.addVaultMember(nv.vaultId, member.userId, "writer", "kid@fam.com")
 
         // Member syncs: the v2 grant verifies against the pinned owner, backfilled item decrypts, role is writer,
         // and the member's client posts its self-wrap (§3.2).
