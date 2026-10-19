@@ -845,6 +845,26 @@ internal fun resolvedDefaultOrigin(pending: PendingServer, enrollSucceeded: Bool
 internal fun pendingSwitchRestorePoint(existing: PendingServer?, currentDefault: String): String =
     existing?.previousOrigin ?: currentDefault
 
+/** A12 review LOW-1: the refusal copy for recover verify / reset while an invite switch is pending
+ *  (desktop's `RECOVERY_LOCKED_OUT` twin). */
+internal const val RECOVERY_LOCKED_OUT =
+    "Finish or cancel joining the other server first — account recovery here is paused until you do."
+
+/**
+ * A12 review LOW-1: the recovery authKey and the reset commit are password-equivalent material, so
+ * — like sign-in's sink guard — neither may be sent while an uncommitted invite switch points
+ * store.baseUrl at an origin the user has not verified. Returns the refusal copy, or null to go on.
+ */
+internal fun recoveryLockout(pending: PendingServer?): String? = if (pending != null) RECOVERY_LOCKED_OUT else null
+
+/**
+ * A12 review LOW-2: a policy fetched for an irreversible step is used only if [applied] — i.e. the
+ * probe fence still says it belongs to the origin the app dials now. Otherwise the step aborts (an
+ * IOException, so the surface maps it to "can't reach the server") — desktop enroll's twin.
+ */
+internal fun requireCurrentPolicy(p: ClientPolicy, applied: Boolean): ClientPolicy =
+    if (applied) p else throw java.io.InterruptedIOException("server changed during recovery")
+
 /** A12 (row 80): whole-call cap on an unauthenticated policy probe (OkHttp's 10 s defaults bound
  *  each read, not the call). */
 internal const val POLICY_PROBE_TIMEOUT_MS = 15_000L
@@ -2276,6 +2296,7 @@ class AndvariViewModel(
     fun recoverVerify(email: String, phrase: String) {
         if (_ui.value.busy) return
         val wizard = _ui.value.screen as? Screen.Recover ?: return // stale tap after a screen swap
+        recoveryLockout(store.pendingServer)?.let { _ui.value = _ui.value.copy(error = it); return } // A12 review LOW-1
         val secret = MemberRecovery.parseSecret(phrase)
         if (secret == null) {
             _ui.value = _ui.value.copy(error = "That doesn't look like a recovery phrase — check it and try again.")
@@ -2327,6 +2348,7 @@ class AndvariViewModel(
     fun recoverCommit(newPassword: String) {
         if (_ui.value.busy) return
         val wizard = _ui.value.screen as? Screen.Recover ?: return
+        recoveryLockout(store.pendingServer)?.let { _ui.value = _ui.value.copy(error = it); return } // A12 review LOW-1
         val secret = pendingRecoverSecret
         val verify = pendingRecoverVerify
         if (secret == null || verify == null) {
@@ -2359,7 +2381,7 @@ class AndvariViewModel(
                 // Phase 1 just proved the server reachable: re-probe lazily, exactly when phase 2
                 // needs the params (enrollOp's idiom). clientPolicy() runs the H1 KDF floor fence
                 // (spec 05 T1); a failed probe surfaces through recoverResetError below.
-                val policy = _ui.value.policy ?: a.clientPolicy().also { applyPolicy(it, policyTag) }
+                val policy = _ui.value.policy ?: a.clientPolicy().let { requireCurrentPolicy(it, applyPolicy(it, policyTag)) } // A12 review LOW-2
                 // §F.7 cancel fence (recoverVerify's twin), re-checked after EVERY await: system
                 // back isn't busy-gated, and once THIS wizard instance is gone the continuation
                 // must zero its alias and die without touching UI state. The pendingRecover*
@@ -4353,3 +4375,4 @@ internal fun importPushRetryable(t: Throwable): Boolean = when {
  *  and the UI drops the Retry button; a transient one keeps [IMPORT_INTERRUPTED]'s honest promise. */
 internal fun importPushError(t: Throwable): String =
     if (importPushRetryable(t)) IMPORT_INTERRUPTED else HouseholdCopy.forError(t)
+

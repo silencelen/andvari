@@ -1,6 +1,10 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.model.ClientPolicy
+import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -108,5 +112,45 @@ class A12ClockAndOriginTest {
         // After cancel, resolvedDefaultOrigin lands on the same restore point.
         val second = PendingServer(origin = "https://other.example", previousOrigin = pendingSwitchRestorePoint(first, "https://hostile.example"), email = null, ts = 2)
         assertEquals(home, resolvedDefaultOrigin(second, enrollSucceeded = false))
+    }
+
+    // ---- A12 review LOW-1: recover verify / reset honour the pending-switch lockout ----
+
+    private val vm = File("src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt").readText()
+
+    /** The body of `fun <name>(` up to the next top-level member, for source pins. */
+    private fun body(name: String): String = vm.substringAfter("    fun $name(").substringBefore("\n    fun ")
+
+    @Test
+    fun recoveryIsLockedOutWhileASwitchIsPending() {
+        val pending = PendingServer(origin = "https://hostile.example", previousOrigin = "https://home.example", email = null, ts = 1)
+        assertEquals(RECOVERY_LOCKED_OUT, recoveryLockout(pending))
+        assertNull(recoveryLockout(null), "no pending switch: recovery proceeds")
+    }
+
+    @Test
+    fun recoverVerifyAndResetCheckTheLockoutBeforeAnyRequest() {
+        for (fn in listOf("recoverVerify", "recoverCommit")) {
+            val b = body(fn)
+            val guard = b.indexOf("recoveryLockout(store.pendingServer)")
+            assertTrue(guard >= 0, "$fn must check the pending-switch lockout")
+            assertTrue(guard < b.indexOf("newApi()"), "$fn checks the lockout before building any client (nothing is sent)")
+        }
+    }
+
+    // ---- A12 review LOW-2: a reset whose origin moved mid-flow aborts ----
+
+    @Test
+    fun aStalePolicyAbortsTheReset() {
+        val p = ClientPolicy()
+        assertEquals(p, requireCurrentPolicy(p, applied = true))
+        assertFailsWith<java.io.InterruptedIOException> { requireCurrentPolicy(p, applied = false) }
+    }
+
+    @Test
+    fun theResetFallbackFetchIsFenced() {
+        val b = body("recoverCommit")
+        assertTrue(b.contains("requireCurrentPolicy(it, applyPolicy(it, policyTag))"), "the reset refuses a policy from an origin it has left")
+        assertFalse(b.contains("a.clientPolicy().also { applyPolicy(it, policyTag) }"), "an unchecked applyPolicy result is the LOW-2 regression")
     }
 }
