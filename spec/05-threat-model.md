@@ -259,12 +259,19 @@ pending is refused ("Choose a vault for this item."), never redirected. (f) **Wh
 third API review, q00, HIGH; spec 01 §6 "Add-member identity"):** the add-member confirm said "You've verified
 <displayName>", the server's string, while the pin gate and the grant used the server-returned userId, so a server and
 one pinned colluder could turn "add B" into "add C". A pin now records the email its human typed, an add whose typed
-email the pins contradict is refused, and the confirm names the PIN's label and fingerprint. Residuals accepted: a pin
-made without a typed email (every pin before A11, and the enrolment-link, members-list and invitation paths) cannot be
-checked against the email, so its add shows "This is who you verified: <pin label>" plus the short code and needs a
-tick; an owner who ticks it for the wrong person gives the key to the person they verified, never to an unverified key.
-The pin label itself was the server's display name at verification time, read while the person was in front of the
-owner. Native hosts have no add-member screen; the engine API carries the same check for any host that adds one.
+email the pins contradict is refused, and the confirm names the email the PIN records and its fingerprint. A pin made
+without a typed email (every pin before A11, and the enrolment-link, members-list and invitation paths) cannot be
+checked against the email, and its label was the server's display name at verification time, so it is NOT enough to
+add (A11 review LOW-1, fail closed): the owner verifies the person again for the typed email, once. Residual accepted:
+that one extra ceremony per pre-A11 pin, the first time it is used to add. Native hosts have no add-member screen; the
+engine API carries the same check for any host that adds one. (g) **Migration residuals of branch A11 (review LOW-2,
+LOW-3):** a device that jumps straight from pre-A10 to A11 holding a single-entry legacy PLAIN id set
+(`grant.member.granted`, `grant.declined`) whose one planted id is literally `["<uuid>"]` reads it as the JSON form, so
+that one entry decodes as the id inside the brackets instead of being dropped; a nuisance only (a server-planted id
+that is a well-formed UUID either way, and every trust rule still decides what it unlocks). A legacy userId-keyed
+self-identity pin (spec 01 §2.4) whose saved session was gone before the upgrade gets its email binding
+trust-on-first-use from the next passing unlock: a server that changes the userId exactly at that unlock is not caught
+by the binding (the old userId-keyed pin is still checked for its own userId), and every later unlock is.
 
 **R16 addendum (A10 review LOW-1).** An in-window v1 `remove` proof is verified only when its nonce is in the
 token grammar the consumed record stores (`[A-Za-z0-9_-]{1,128}`, which covers the UUIDs pre-A7 clients

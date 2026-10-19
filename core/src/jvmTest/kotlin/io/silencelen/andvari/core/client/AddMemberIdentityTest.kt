@@ -232,26 +232,26 @@ class AddMemberIdentityTest {
         assertEquals(SyncEngine.MemberPinState.PINNED, engine.memberPinState(carl.userId, carl.reg.identityPub), "the old gate passes")
         assertTrue(engine.addMemberIdentity(emailOf(bea), carl.userId) is ContactPin.AddIdentity.Mismatch)
         assertFailsWith<MemberIdentityMismatchException> { engine.addVaultMember(vaultId, carl.userId, "writer", emailOf(bea)) }
-        assertFailsWith<MemberIdentityMismatchException>("a confirmation cannot override a recorded mismatch") {
-            engine.addVaultMember(vaultId, carl.userId, "writer", emailOf(bea), legacyPinConfirmed = true)
-        }
         assertTrue(server.adds.isEmpty())
     }
 
     @Test
-    fun `legacy pin - the confirm names C's verified label, refused until the human confirms it`() = runBlocking {
+    fun `legacy pin - add REFUSED with no override, re-verify with the typed email then match and add works`() = runBlocking {
         val owner = enroll("q00-owner")
         val bea = enroll("q00-bea")
         val carl = enroll("q00-carl")
         val (engine, server, vaultId) = ownerWithCreatedVault(owner)
+        verify(engine, bea, "Bea", null) // pre-A11 pins: the label was the server's display name at pin time
         verify(engine, carl, "Carl", null)
-        val id = engine.addMemberIdentity(emailOf(bea), carl.userId)
-        assertTrue(id is ContactPin.AddIdentity.Legacy)
-        assertEquals("Carl", id.pin.label)
-        assertFailsWith<LegacyPinConfirmRequiredException> { engine.addVaultMember(vaultId, carl.userId, "writer", emailOf(bea)) }
+        assertTrue(engine.addMemberIdentity(emailOf(bea), carl.userId) is ContactPin.AddIdentity.Legacy)
+        assertFailsWith<LegacyPinReverifyRequiredException> { engine.addVaultMember(vaultId, carl.userId, "writer", emailOf(bea)) }
+        assertFailsWith<LegacyPinReverifyRequiredException> { engine.addVaultMember(vaultId, bea.userId, "writer", emailOf(bea)) }
         assertTrue(server.adds.isEmpty())
-        engine.addVaultMember(vaultId, carl.userId, "writer", emailOf(bea), legacyPinConfirmed = true)
-        assertEquals(listOf(carl.userId), server.adds.map { it.second.userId })
+        verify(engine, bea, "Bea", emailOf(bea)) // the re-verification records the typed email
+        assertTrue(engine.addMemberIdentity(emailOf(bea), bea.userId) is ContactPin.AddIdentity.Match)
+        engine.addVaultMember(vaultId, bea.userId, "writer", emailOf(bea))
+        assertEquals(listOf(bea.userId), server.adds.map { it.second.userId })
+        assertTrue(engine.addMemberIdentity(emailOf(bea), carl.userId) is ContactPin.AddIdentity.Mismatch, "B's pin now claims the email")
     }
 
     @Test

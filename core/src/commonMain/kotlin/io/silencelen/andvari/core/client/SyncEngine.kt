@@ -109,9 +109,11 @@ class MemberNotVerifiedException(val userId: String) :
 class MemberIdentityMismatchException(val userId: String) :
     Exception("the server answered that email with an account you verified as someone else: don't add them, check with your admin")
 
-/** A11 (q00): a pin made before the email was recorded; the add needs the human to confirm the pin's own label. */
-class LegacyPinConfirmRequiredException(val userId: String) :
-    Exception("confirm that the person you verified is the one you want to add")
+/** A11 (q00; review LOW-1, fail closed): a pin made before the email was recorded. Its label was the server's display
+ *  name at pin time, so no confirmation of it is an identity check: the add is refused until the human runs the
+ *  verification ceremony again for the typed email, which records it (the add then resolves to a match). */
+class LegacyPinReverifyRequiredException(val userId: String) :
+    Exception("you verified this person before andvari recorded their email: verify them again to add them")
 
 /** A6b: an owner-only signing action on a vault this account has no evidence of owning (the server's `role=owner`
  *  label is not evidence). The UI asks "You own <vault>?" ([SyncEngine.confirmOwnership]) first. */
@@ -1108,8 +1110,9 @@ class SyncEngine(
 
     /**
      * Who an add for [userId] (the lookup's answer to [typedEmail]) would reach, by this account's pins (security review
-     * 2026-10, branch A11, q00): Match (the pin records the typed email), Legacy (a pre-A11 pin: the confirm shows the
-     * PIN's label and fingerprint and the human confirms), Mismatch (refused), Unpinned (no pin current here). A host's
+     * 2026-10, branch A11, q00): Match (the pin records the typed email), Legacy (a pin with no recorded email: REFUSED,
+     * the host offers the verification ceremony again with the typed email, which records it; review LOW-1), Mismatch
+     * (refused), Unpinned (no pin current here). A host's
      * confirm screen renders from this, never from the lookup's `displayName`; [addVaultMember] re-checks it.
      */
     fun addMemberIdentity(typedEmail: String, userId: String): ContactPin.AddIdentity {
@@ -1261,14 +1264,15 @@ class SyncEngine(
      * member PINNED and current on this device ([MemberNotVerifiedException] otherwise); the v2 grant and, in the
      * compatibility window, the dual-sent v1 seal are both sealed to the PIN key. The pair is then recorded.
      */
-    suspend fun addVaultMember(vaultId: String, userId: String, role: String, typedEmail: String, legacyPinConfirmed: Boolean = false) {
+    suspend fun addVaultMember(vaultId: String, userId: String, role: String, typedEmail: String) {
         requireOwned(vaultId)
         // A11 (q00): the recipient is the person the human VERIFIED for the email they typed, never the lookup's answer.
         val identity = addMemberIdentity(typedEmail, userId)
         if (identity is ContactPin.AddIdentity.Mismatch) throw MemberIdentityMismatchException(userId)
         val pin = accountState.currentPin(userId)
         if (pin == null || identity is ContactPin.AddIdentity.Unpinned) throw MemberNotVerifiedException(userId)
-        if (identity is ContactPin.AddIdentity.Legacy && !legacyPinConfirmed) throw LegacyPinConfirmRequiredException(userId)
+        // A11 review LOW-1: a legacy pin is never enough, whatever the human ticks: verify again (records the email).
+        if (identity is ContactPin.AddIdentity.Legacy) throw LegacyPinReverifyRequiredException(userId)
         val signed = account.buildSignedGrant(vaultId, pin)
         val sealed = account.wrapVkForMember(Bytes.fromB64(pin.identityPub), vaultId)
         api.addVaultMember(vaultId, VaultMemberAdd(userId, role, sealed, signed))

@@ -157,7 +157,7 @@ async function world(ownerKdf: KdfParams = KDF, memberKdf: KdfParams = KDF): Pro
   return { owner, member, vaultId: shared.vaultId, metaBlob: shared.request.metaBlob, ownerWrap: shared.request.wrappedVk };
 }
 
-const pinOf = (e: Enrolled, label: string): Contact => ({ userId: e.userId, identityPub: e.identityPub, label, verifiedAt: 1000, method: "typed" });
+const pinOf = (e: Enrolled, label: string): Contact => ({ userId: e.userId, identityPub: e.identityPub, label, verifiedAt: 1000, method: "typed", email: `${label.toLowerCase()}@example.com` }); // A11: the ceremony records the typed email
 const personalRow = (e: Enrolled): WireVault => ({ vaultId: e.personalVaultId, type: "personal", rev: 2, metaBlob: e.personalMeta, createdAt: 0 });
 const personalGrant = (e: Enrolled): WireGrant => ({ vaultId: e.personalVaultId, userId: e.userId, role: "owner", wrappedVk: e.personalWrappedVk, rev: 2, sealedVk: null });
 const sharedRow = (w: World, rev = 3): WireVault => ({ vaultId: w.vaultId, type: "shared", rev, metaBlob: w.metaBlob, createdAt: 0 });
@@ -216,7 +216,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(server.reissues, "no automatic re-issue on a relabelled vault").toEqual([]);
     expect(store.ownsVault(w.vaultId), "the label is not evidence").toBe(false);
     expect(store.ownershipNeedsConfirmation(w.vaultId), "the owner UI asks 'You own <vault>?' first").toBe(true);
-    await expect(store.addVaultMember(w.vaultId, colluder.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+    await expect(store.addVaultMember(w.vaultId, colluder.userId, "writer", { typedEmail: "member@example.com" })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     await expect(store.offerTransfer(w.vaultId, colluder.userId)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     // The list may SHOW the row (the server listed it), but its confirmation refuses without ownership evidence.
     const rows = await store.loadLegacyGrants(w.vaultId);
@@ -287,7 +287,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     const member = await enroll("a6b-member");
     const { store, server, vaultId } = await ownerWithCreatedVault(owner);
     await store.accountState.pin(pinOf(member, "Member"));
-    await store.addVaultMember(vaultId, member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true });
+    await store.addVaultMember(vaultId, member.userId, "writer", { typedEmail: "member@example.com" });
     const rec = store.accountState.issued(vaultId, member.userId);
     expect(rec?.keyHash).toBe(toHexLower(sha256Sync(fromB64(member.identityPub))));
 
@@ -321,7 +321,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     const { store, server, vaultId, local } = await ownerWithCreatedVault(owner);
     const beforeAdd = server.accountStateBlob;
     await store.accountState.pin(pinOf(member, "Member"));
-    await store.addVaultMember(vaultId, member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true });
+    await store.addVaultMember(vaultId, member.userId, "writer", { typedEmail: "member@example.com" });
     expect(store.accountState.issued(vaultId, member.userId)).not.toBeNull();
 
     // Reload (the same browser storage), and the server replays the OLDER blob that lacks the record.
@@ -363,7 +363,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     await store.sync();
     await store.accountState.pin(pinOf(w.member, "Member"));
     expect(store.ownershipNeedsConfirmation(w.vaultId), "a vault created before A6b has no ownership record").toBe(true);
-    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com" })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
 
     const claim = await store.describeOwnership(w.vaultId);
     expect(claim.receivedAsMember, "a vault this account created needs only the single confirm").toBe(false);
@@ -377,7 +377,7 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     await store.confirmOwnership(claim, w.owner.password);
     expect(store.ownsVault(w.vaultId)).toBe(true);
     expect(store.ownershipNeedsConfirmation(w.vaultId), "asked once").toBe(false);
-    await store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true });
+    await store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com" });
     expect(server.adds).toHaveLength(1);
     expect(ownsVault((await unlock(w.owner)).openAccountState(server.accountStateBlob!), w.vaultId), "sealed in account state for every device").toBe(true);
   });

@@ -296,11 +296,9 @@ export interface LegacyGrantRow {
   previouslySharedAt: number | null;
 }
 
-/** What the add-member screen hands {@link VaultStore.addVaultMember} (A11, q00): the email the owner TYPED, and whether
- *  they confirmed a pre-A11 pin's own label and fingerprint ("this is who you verified"). */
+/** What the add-member screen hands {@link VaultStore.addVaultMember} (A11, q00): the email the owner TYPED. */
 export interface AddMemberIdentity {
   typedEmail: string;
-  legacyPinConfirmed?: boolean;
 }
 
 /** A11 (q00): the server answered the typed email with an account this browser verified under ANOTHER email (or another
@@ -312,11 +310,13 @@ export class MemberIdentityMismatchError extends Error {
   }
 }
 
-/** A11 (q00): a pin from before the email was recorded; the add needs the human to confirm the pin's own label. */
-export class LegacyPinConfirmRequiredError extends Error {
+/** A11 (q00; review LOW-1, fail closed): a pin with no recorded email. Its label was the server's display name at pin
+ *  time, so confirming it is no identity check: the add is refused until the human verifies them again for the typed
+ *  email (which records it; the add then resolves to `match`). */
+export class LegacyPinReverifyRequiredError extends Error {
   constructor(readonly userId: string) {
-    super("Confirm that the person you verified is the one you want to add.");
-    this.name = "LegacyPinConfirmRequiredError";
+    super("You verified this person before andvari recorded their email. Verify them again to add them.");
+    this.name = "LegacyPinReverifyRequiredError";
   }
 }
 
@@ -1405,8 +1405,8 @@ export class VaultStore {
 
   /**
    * Who an add for `userId` (the lookup's answer to `typedEmail`) would reach, by this account's pins (security review
-   * 2026-10, branch A11, q00): `match` (the pin records the typed email), `legacy` (a pre-A11 pin: the confirm must
-   * show the PIN's label and fingerprint and the human must confirm it), `mismatch` (refused: the pin, or another pin,
+   * 2026-10, branch A11, q00): `match` (the pin records the typed email), `legacy` (no recorded email: refused; the screen
+   * offers the ceremony again with the typed email, review LOW-1), `mismatch` (refused: the pin, or another pin,
    * says the typed email belongs to someone else), `unpinned` (no pin current here). The add-member screen renders from
    * this, never from the lookup's `displayName`; {@link addVaultMember} re-checks it.
    */
@@ -1427,7 +1427,7 @@ export class VaultStore {
     if (identity.kind === "mismatch") throw new MemberIdentityMismatchError(userId);
     const pin = this.accountState.currentPin(userId);
     if (!pin || identity.kind === "unpinned") throw new MemberNotVerifiedError(userId);
-    if (identity.kind === "legacy" && verified.legacyPinConfirmed !== true) throw new LegacyPinConfirmRequiredError(userId);
+    if (identity.kind === "legacy") throw new LegacyPinReverifyRequiredError(userId); // review LOW-1: never a tick
     const signedGrant = this.account.buildSignedGrant(vaultId, pin);
     const sealedVk = this.account.wrapVkForMember(fromB64(pin.identityPub), vaultId);
     await this.api.addVaultMember(vaultId, { userId, role, sealedVk, signedGrant });

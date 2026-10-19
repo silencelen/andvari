@@ -296,7 +296,8 @@ export function HouseholdCard({ client, account, store }: { client: ApiClient; a
         <ul className="plain-list">
           {contacts.map((c) => (
             <li key={c.userId} style={{ marginBottom: 6 }}>
-              <strong>{c.label}</strong> <span className="muted">· {METHOD_LABEL[c.method] ?? c.method} · {fmtDate(c.verifiedAt)}</span>
+              <strong>{c.email ?? c.label}</strong>{" "}
+              <span className="muted">· the name shown when you verified them: “{c.label}” · {METHOD_LABEL[c.method] ?? c.method} · {fmtDate(c.verifiedAt)}</span>
               {/* A5 review L-3 (A6): a pin this browser only read from the server-held list, before it had a copy of
                   its own, may be one you later removed elsewhere — it cannot stand in for a check until re-verified. */}
               {!store.accountState.isCurrent(c) && <span className="tag">verify again on this device</span>}

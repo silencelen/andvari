@@ -73,7 +73,7 @@ fun HouseholdCard(vm: AndvariViewModel) {
             if (contacts.isEmpty()) Text("Nobody yet.", style = MaterialTheme.typography.bodySmall)
             for (c in contacts) {
                 val here = if (vm.householdContactConfirmedHere(c)) "" else " · verify again on this device"
-                Text("${c.label} · ${methodLabel(c.method)}$here", style = MaterialTheme.typography.bodyMedium)
+                Text("${c.email ?: c.label} · the name shown when you verified them: “${c.label}” · ${methodLabel(c.method)}$here", style = MaterialTheme.typography.bodyMedium)
                 TextButton(onClick = {
                     scope.launch {
                         err = runCatching { vm.unpinHouseholdMember(c.userId) }.exceptionOrNull()?.let { "Couldn't remove it. Try again." }
