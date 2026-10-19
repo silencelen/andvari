@@ -13,10 +13,21 @@
  *         overwrite the wrong account (a duplicate is recoverable; a clobbered password is not).
  *  Fixes the dup-registration bug: a password-only re-login no longer mints a password-only twin. */
 export interface LoginLike {
+  /** The vault the item lives in (A11, q14); optional only so the pure tests can omit it. */
+  vaultId?: string;
   doc: { login?: { username?: string | null; password?: string | null } | null };
 }
 
-export function saveTargetFor<T extends LoginLike>(matches: readonly T[], username: string, password: string): T | undefined {
+/** Security review 2026-10, branch A11 (q14): matches in the in-force PERSONAL vault first (stable otherwise). The
+ *  match set spans every held vault, and an item's uris/username are authored by whoever can write its vault: a
+ *  co-member's decoy matching the user's own account must never outrank the user's personal item. */
+export function personalFirst<T extends LoginLike>(matches: readonly T[], personalVaultId: string | undefined): T[] {
+  if (!personalVaultId) return [...matches];
+  return [...matches.filter((i) => i.vaultId === personalVaultId), ...matches.filter((i) => i.vaultId !== personalVaultId)];
+}
+
+export function saveTargetFor<T extends LoginLike>(hostMatches: readonly T[], username: string, password: string, personalVaultId?: string): T | undefined {
+  const matches = personalFirst(hostMatches, personalVaultId);
   if (username !== "") return matches.find((i) => (i.doc.login?.username ?? "") === username);
   const byPassword = matches.find((i) => (i.doc.login?.password ?? "") === password);
   if (byPassword) return byPassword;
@@ -35,7 +46,8 @@ export type ResolveAction<T> =
  *  in order:
  *   1. `frozen` (the pending.updatesItemId item the user saw an Update banner for; undefined if it
  *      vanished or was never set) → update it;
- *   2. a NON-empty username with an exact (host∧username) match → update that account; a non-empty
+ *   2. a NON-empty username with an exact (host∧username) match → update that account (A11: personal-vault match
+ *      first; a match in ANOTHER vault that the banner never named → CREATE in the personal vault); a non-empty
  *      username with NO match → CREATE a new account — even if its password is reused from another
  *      host login (never suppress-on-shared-password: that would silently drop a real new account);
  *   3. a password-only submit whose password already belongs to a host login → a 2a re-login →
@@ -46,10 +58,14 @@ export function resolveSaveAction<T extends LoginLike>(
   hostMatches: readonly T[],
   username: string,
   password: string,
+  personalVaultId?: string,
 ): ResolveAction<T> {
   if (frozen) return { kind: "update", target: frozen };
   if (username !== "") {
-    const byUser = hostMatches.find((i) => (i.doc.login?.username ?? "") === username);
+    // A11 (q14): a personal-vault match first; and a match the banner never named (no frozen target) in ANOTHER vault
+    // is not updated silently: the user saw "Save" with the personal vault as the destination, so it lands there.
+    const byUser = personalFirst(hostMatches, personalVaultId).find((i) => (i.doc.login?.username ?? "") === username);
+    if (byUser && personalVaultId !== undefined && byUser.vaultId !== personalVaultId) return { kind: "create" };
     return byUser ? { kind: "update", target: byUser } : { kind: "create" };
   }
   if (hostMatches.some((i) => (i.doc.login?.password ?? "") === password)) return { kind: "suppress" };

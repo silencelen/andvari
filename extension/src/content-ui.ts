@@ -15,6 +15,7 @@
  * drawn as SVG geometry (sigilSpan), never a runic codepoint that tofus on font-poor hosts.
  */
 import type { MatchItem, PendingCardSave, PendingSave } from "./messages";
+import { saveOfferCopy } from "./saveoffer";
 import { createVisibilityGuard, type ActivationVerdict, type IoCtorLike, type VisibilityGuard } from "./visibilityguard";
 
 const UI_CSS = `
@@ -933,17 +934,14 @@ export function showSaveBanner(
   onSave: () => Promise<{ ok: boolean; text: string }>,
   onDismiss: () => void,
 ): void {
+  // Security review 2026-10, branch A11 (q14): the words come from saveOfferCopy, which names the destination vault
+  // and says explicitly when an Update lands in a vault other than the personal one.
+  const copy = saveOfferCopy(pending);
   offerBanner({
     buildMsg: (msg) => {
-      if (pending.updatesItemId) {
-        // Show the existing item's username too — auto-saved items are named after the host, so
-        // the name alone can't distinguish a password change from a wrong-account merge (2b guard).
-        msg.append("Update the password for ", span("hl", pending.updatesItemName ?? "this login"));
-        if (pending.updatesItemUsername) msg.append(" (", span("hl", pending.updatesItemUsername), ")");
-        msg.append("?");
-      } else msg.append("Save this login for ", span("hl", pending.host), " to andvari?");
+      for (const p of copy.parts) msg.append(p.hl ? span("hl", p.text) : p.text);
     },
-    primaryLabel: pending.updatesItemId ? "Update" : "Save",
+    primaryLabel: copy.primary,
     ghostLabel: "Not now",
     idleMs: 30_000,
     okMs: 4000,
