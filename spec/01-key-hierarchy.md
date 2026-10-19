@@ -198,6 +198,15 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   session revocation and offline-cache wipes (an admin recovery revokes every session first); it is
   written once from an unlock that passed and never overwritten from a server value. It stops a
   forged org recovery (which must change the identity seed) on every device that knew the real key.
+  **Bound to the typed email (branch A11):** the userId is the server's choice (the login response),
+  so the record is ALSO kept per (origin, the email the user typed, trimmed and lowercased) as the
+  (userId, identityPub) of the first passing unlock. An unlock whose server userId differs from the
+  one bound to the typed email hard-fails with the same security-fault copy: a changed userId for the
+  same email is a mismatch, never a fresh pin. A pre-A11 userId-keyed record is bound to the saved
+  session's email at startup and before every read; one whose session was already gone stays
+  userId-keyed only (residual). Consequence: an account deleted and re-registered under the same
+  email on the same origin is refused on a device that unlocked the old one, until that device's
+  record is removed by hand.
 - **Out-of-band verification (sharing, P5):** before an owner seals a shared VK to a
   member, the member reads their short fingerprint from their own client and the owner
   confirms it over an out-of-band channel (in person / phone). This closes the
@@ -308,7 +317,19 @@ key signs only through the flows that need it (today: escrow v2).
   a personal vault (no cached wrap) treats EVERY served wrap as a proposal, designation or not (A9
   review, LOW-4):** on such a device the account state is as replayable as the wrap, so a matching
   designation proves nothing; the human confirms once, and the device is established from then on.
-  The extension, which never reads account state, applies the same rule to its cache. "Never switch
+  The extension, which never reads account state, applies the same rule to its cache. **Branch A11
+  (security review 2026-10; c00, c01, c19):** (1) the cached wrap is judged against the designation
+  whatever the server served: with the wrap withheld or unopenable, a cached wrap for a vault the
+  designation does not name is a PROPOSAL too (nothing in force), exactly as when that wrap is served,
+  so withholding gains the server nothing; (2) a designation that moves AWAY from the cached vault
+  (the served wrap names the designated vault, the cache another) is a CHANGED notice for the human,
+  never a silent switch, on every device. The A9 text said a device that merged account state before
+  could follow such a designation because "a rollback there is detectable": that is FALSE for a
+  genuine but superseded designation at an intermediate seq above the device's high-water mark (the
+  account designated S at N+1 and repaired it to P at N+2; the server serves N+1 to a device at N),
+  which no high-water mark can tell from the current one. Cost: one tap per established device after a
+  genuine re-designation elsewhere; recorded as an owner-review item (fail closed). (3) A second apply
+  while a proposal is pending keeps it a proposal; only the human resolves it. "Never switch
   silently" holds inside the account type too: a wrap applied while another is in force is a notice
   (or, unopenable, an anomaly), never a switch; only the human's confirmed designation replaces the
   wrap in force. "No personal vault" means no default save/import destination and no usage ledger;
@@ -372,6 +393,21 @@ key signs only through the flows that need it (today: escrow v2).
     by serving older authentic blobs in ascending order.) A grant from a pinned, current contact is adopted with the notice
     "You were added to <vault> by <contact>" (owner decision Q5). Vectors:
     `spec/test-vectors/sharedgrant-v2.json`.
+  - **Add-member identity (NORMATIVE; security review 2026-10, branch A11, q00).** The lookup
+    (`POST /users/lookup`) is the server's answer: `userId`, `displayName` and `identityPub` are all
+    server strings, and a pinned key proves only that the PIN's person holds it, not that the server
+    mapped the typed email to that person. A server plus one pinned colluder C could answer a lookup
+    for B's email with C's account under B's name; the pin gate passed and the confirm said "B". So:
+    (1) a pin records the email the human TYPED to find the person when the ceremony ran (spec 03 §3
+    contact `email`; none for the enrolment link, a members-list one-tap or a pending invitation, whose
+    addresses are server-reported); (2) the add is REFUSED when the looked-up account's pin records
+    another email, or ANOTHER pin records the typed one, whatever the human then confirms; (3) a pin
+    with no recorded email may be used only after the owner confirms the PIN's own label and identity
+    short form ("This is who you verified: <label>"); (4) the confirm screen names the recipient by the
+    PIN's label and fingerprint short form, never by the lookup's `displayName`, and the client re-runs
+    the check when it signs (core `ContactPin.addIdentity` / `SyncEngine.addVaultMember(…, typedEmail,
+    legacyPinConfirmed)`, web `addIdentityCheck` / `VaultStore.addVaultMember(…, {typedEmail,
+    legacyPinConfirmed})`). Emails compare trimmed and lowercased.
   - **Grant authority, sender side (NORMATIVE; security review 2026-10, root cause A, branch A6b;
     narrowed by branch A9).** A client never signs or seals a VK to a user unless a HUMAN on that
     device confirmed that (vault, user) pair now: the add-member action, or a per-row "Re-share

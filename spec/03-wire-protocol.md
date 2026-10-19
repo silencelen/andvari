@@ -178,7 +178,11 @@ cache OFF.
 - `GET /account/state` → `{ sealedState: string | null, seq }`; `PUT /account/state { sealedState,
   baseSeq }` → `{ sealedState, seq }` or `409 stale_state` (root cause A §4.2). ONE opaque blob per
   user, `Envelope(UVK, JSON, "andvari/v1|account-state|{userId}")`, holding the verified contact
-  pins (pairwise, owner decision Q4), the verified org recovery fingerprint, consumed lifecycle
+  pins (pairwise, owner decision Q4; each `{userId, identityPub, label, verifiedAt, method}` plus,
+  since branch A11, an optional `email`: the address the HUMAN typed to find the person when the
+  ceremony ran, normalised trimmed + lowercase, one `@`, no whitespace or control characters, at most
+  320 chars, strictly decoded, omitted while absent, riding its pin whole through the merge; the
+  add-member identity check of spec 01 §6 reads it), the verified org recovery fingerprint, consumed lifecycle
   nonces (removal proofs v2, branch A7: each device's own durable consumed set merges in at the next
   flush, and a served copy never shrinks it), and (branch A6b, spec 01 §6 "Grant authority") the
   issued-grants record (`issuedGrants`, `issuedTombstones`) and the owned-vaults record
@@ -190,8 +194,10 @@ cache OFF.
   change, tombstone-free (the entry with the newest `at` wins the merge, tie: the smaller vaultId; a
   new designation is pushed past the one it replaces whatever the writing device's clock says) and
   omitted from the encoding while absent. A served `personalWrap` naming the designated vault is in
-  force on any device that confirmed a personal vault before (a cached wrap) and merged account state
-  before; on a device with no cached wrap every served wrap is a PROPOSAL the human confirms once
+  force on any device whose cached wrap names that vault too; one naming the designated vault where
+  the cache names another is a CHANGED notice for the human (branch A11, c01), and a cached wrap the
+  designation does not name is a PROPOSAL whether the wrap was served, withheld or unopenable (A11,
+  c00); on a device with no cached wrap every served wrap is a PROPOSAL the human confirms once
   (A9 review LOW-4), as is one naming a vault the designation does not (spec 01 §6; spec 05 R14). A
   document without these keys reads them as empty. Native
   clients keep the high-water seq and their sealed copy in the durable device state when the host has
