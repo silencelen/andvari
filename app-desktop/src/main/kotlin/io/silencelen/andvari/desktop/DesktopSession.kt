@@ -8,10 +8,14 @@ import java.io.File
 import java.nio.file.Files
 
 /**
- * Non-secret desktop session persisted to ~/.andvari-desktop/session.json. Tokens
- * are here (MVP); the vault KEY is NEVER stored — a relaunch re-prompts for the
- * master password (spec 01 §8). DPAPI+PIN quick-unlock is a documented Windows
- * follow-up.
+ * The desktop session: persisted to ~/.andvari-desktop/session.json ONLY while at-rest storage is
+ * allowed ([DesktopSessionStore.tokensAtRest]); otherwise held in memory for this run. The vault
+ * KEY is NEVER stored — a relaunch re-prompts for the master password (spec 01 §8).
+ *
+ * Security review 2026-10 (A12, row 81): the file is created owner-only (0600 inside a 0700
+ * directory on POSIX; a best-effort owner ACL on Windows). There is no DPAPI helper in this
+ * codebase yet, so on Windows the tokens are protected by the profile ACL alone. That is why a
+ * declined at-rest store now keeps them off disk entirely. DPAPI wrapping is a documented follow-up.
  */
 @Serializable
 data class DesktopSession(
@@ -355,10 +359,44 @@ class DesktopSessionStore(
     /** §4.2: per-origin — clearing keys for one origin never touches another's namespace. */
     fun clearAccountKeys(key: String, userId: String) { accountKeysFile(key, userId).delete() }
 
-    fun load(): DesktopSession? =
-        runCatching { json.decodeFromString(DesktopSession.serializer(), file.readText()) }.getOrNull()
+    // A12 (row 81): the session held for THIS run when at-rest storage is declined. Never written
+    // anywhere; dies with the process, so the next launch signs in again.
+    @Volatile
+    private var memorySession: DesktopSession? = null
+
+    /**
+     * Security review 2026-10 (A12, row 81): whether the access+refresh tokens may sit in
+     * session.json. DesktopState sets it from [tokensMayPersist] (org allowance AND the user's
+     * per-origin consent). Turning it OFF moves a persisted session into memory and deletes the
+     * file; turning it back ON writes the held session out. Default ON (the pre-A12 behavior for a
+     * store nobody has configured, e.g. a fresh install before its first policy probe).
+     */
+    @Volatile
+    var tokensAtRest: Boolean = true
+        set(v) {
+            if (field == v) return
+            val current = load()
+            field = v
+            if (v) {
+                memorySession = null
+                current?.let { save(it) }
+            } else {
+                memorySession = current
+                file.delete()
+            }
+        }
+
+    fun load(): DesktopSession? = memorySession
+        ?: runCatching { json.decodeFromString(DesktopSession.serializer(), file.readText()) }.getOrNull()
 
     fun save(s: DesktopSession) {
+        if (!tokensAtRest) {
+            // A12 (row 81): memory only — and make sure no older copy lingers on disk.
+            memorySession = s
+            file.delete()
+            return
+        }
+        memorySession = null
         // F35: the access+refresh tokens are CREATED 0600 inside a 0700 directory. The old shape
         // wrote at the umask and chmodded second, which leaves a window an open() can win, and the
         // comment here asserted "0600 on POSIX" as if the two steps were atomic. Windows keeps the
@@ -376,6 +414,7 @@ class DesktopSessionStore(
      *  namespace (the other origins' keys stay, bounded by their own purge paths). */
     fun clear() {
         load()?.let { s -> clearAccountKeys(originKey(baseUrl), s.userId) }
+        memorySession = null
         file.delete()
     }
 
@@ -385,7 +424,7 @@ class DesktopSessionStore(
      * namespaces must SURVIVE (B2-7: a switch is not a sign-out; a round trip A→B→A keeps A's cache
      * and account-keys). Unlike [clear], this deliberately touches NO account-keys namespace.
      */
-    fun clearSession() { file.delete() }
+    fun clearSession() { memorySession = null; file.delete() }
 
     // ---- §4.3 (B2-9) crash-window pending-server marker ----
 
@@ -511,6 +550,14 @@ private val posixSupported: Boolean = runCatching {
 
 // `internal` (was private): DesktopState.writeVerifiedAtomically creates its export/attachment
 // temp with the same create-time mode (audit G50) — one implementation, no second copy to drift.
+/**
+ * Security review 2026-10 (A12, row 81): the access+refresh tokens may be written to session.json
+ * only when NEITHER the org ([orgAllowed], its `offlineCacheAllowed`) NOR this device's user
+ * ([consent] — false is an explicit decline; null is a prompt not yet answered, which is not a
+ * decline) refused at-rest storage. Pure so both legs stay test-pinned.
+ */
+internal fun tokensMayPersist(orgAllowed: Boolean, consent: Boolean?): Boolean = orgAllowed && consent != false
+
 internal fun ownerOnly(spec: String): Array<java.nio.file.attribute.FileAttribute<*>> =
     if (posixSupported) {
         arrayOf(java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString(spec)))
