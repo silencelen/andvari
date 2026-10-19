@@ -36,8 +36,25 @@ data class Contact(
     val label: String,
     val verifiedAt: Long,
     val method: String,
+    /**
+     * Security review 2026-10, branch A11 (q00): the account email the HUMAN typed when they ran the ceremony for this
+     * pin (normalised: trimmed, lowercase; [ContactPin.normalizeEmail]). The add-member flow refuses an add whose typed
+     * email this contradicts ([ContactPin.addIdentity]), so a server that answers a lookup for B's email with a pinned
+     * C's account is caught. Null on a pin made before A11 and on pins made without a typed email (enrolment link,
+     * members-list one-tap, pending invitations); omitted from the encoding while null, so those documents stay
+     * byte-identical.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val email: String? = null,
 ) {
     companion object {
+        /** The grammar of a recorded pin email: already normalised (no surrounding space, no uppercase), one `@`, no
+         *  whitespace or control characters, at most 320 characters. Web twin `isContactEmail`. */
+        private val EMAIL_RE = Regex("^[^\\s@A-Z\\x00-\\x1f\\x7f]+@[^\\s@A-Z\\x00-\\x1f\\x7f]+$")
+
+        fun isEmail(e: String): Boolean = e.length <= 320 && EMAIL_RE.matches(e)
+
         const val METHOD_QR = "qr"
         const val METHOD_TYPED = "typed"
         const val METHOD_ENROL = "enrol"
@@ -183,6 +200,7 @@ object AccountState {
             if (key == null || key.size != 32) throw AccountStateException("contact key is not 32 bytes")
             if (c.method !in Contact.METHODS) throw AccountStateException("contact method is unknown")
             if (c.verifiedAt < 0) throw AccountStateException("contact verifiedAt is negative")
+            c.email?.let { if (!Contact.isEmail(it)) throw AccountStateException("contact email is malformed") }
         }
         if (doc.contacts.map { it.userId }.toSet().size != doc.contacts.size) throw AccountStateException("duplicate contact")
         doc.orgRecoveryFp?.let { if (!HEX64_RE.matches(it)) throw AccountStateException("orgRecoveryFp is not 64 hex") }

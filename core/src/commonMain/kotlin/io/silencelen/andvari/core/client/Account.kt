@@ -1332,6 +1332,10 @@ class Account private constructor(
             }
             return
         }
+        // A11 (c19): a PROPOSAL stays a proposal on a second apply (a keys refresh, a second pass): only the human
+        // resolves it ([acceptPersonalChange] after the co-holders were shown, or a reauthed re-designation). Before,
+        // nothing was in force while PROPOSED, so a second apply fell through and installed the wrap as CONFIRMED.
+        if (personalStatus == PersonalStatus.PROPOSED) return
         // A9 (M-2 review): "never switch silently" holds HERE, not only in the engine's call order. While a wrap is in
         // force on this device (served, cached or confirmed), a wrap for ANOTHER vault applied later (a keys refresh,
         // a second pass) is a notice (CHANGED), and one that does not open keeps the wrap in force (UNREADABLE_CACHED).
@@ -1409,8 +1413,28 @@ class Account private constructor(
      *  - UNREADABLE (junk served): success is [PersonalStatus.UNREADABLE_CACHED], the cached wrap in force;
      *    a cached blob that does not open changes nothing.
      * The migration question and every server label stay out of it.
+     *
+     * A11 (c00): when the account's designation ([designation], account state) names ANOTHER vault than the cached
+     * wrap, the cached wrap is held as a PROPOSAL ([PersonalStatus.PROPOSED]: nothing in force, [pendingPersonalChange]
+     * = the cached wrap, [proposedAgainstDesignation] = the designation), exactly like a served wrap the designation
+     * does not name. Otherwise withholding or junk would put the cached wrap in force where serving it would not.
      */
-    fun applyCachedPersonalWrap(wrap: PersonalWrap) {
+    fun applyCachedPersonalWrap(wrap: PersonalWrap, designation: String? = null) {
+        if ((personalStatus == PersonalStatus.ABSENT || personalStatus == PersonalStatus.UNREADABLE) && designation != null && designation != wrap.vaultId) {
+            val vk = openPersonalWrap(wrap)
+            if (vk == null) {
+                personalStatus = PersonalStatus.UNREADABLE
+                personalVaultId = ""
+                return
+            }
+            holdKeyFromPersonalWrap(wrap.vaultId, vk) // our own key (it opened under our UVK), held for reading only
+            personalWrap = null
+            personalVaultId = ""
+            pendingPersonalChange = wrap
+            proposedAgainstDesignation = designation
+            personalStatus = PersonalStatus.PROPOSED
+            return
+        }
         when (personalStatus) {
             PersonalStatus.ABSENT ->
                 if (openAndInstallPersonalWrap(wrap)) personalStatus = PersonalStatus.WITHHELD
@@ -1735,9 +1759,15 @@ class Account private constructor(
     /** The full vault-meta plaintext object (spec 02 §4) — `name`, the monotonic `metaV`
      *  counter, and any unknown fields a future client wrote. Throws if the VK is missing
      *  or the blob doesn't open. Callers that only need the name use [decryptVaultName]. */
+    /**
+     * The vault meta document. Security review 2026-10, branch A11 (q55): any holder of the VK authors this plaintext,
+     * so anything but a JSON object (null, a string, an array, a number, not JSON at all) is refused with
+     * [MalformedVaultMetaException]; a blob that does not open still throws as before.
+     */
     fun decryptVaultMeta(vaultId: String, metaBlob: String): JsonObject {
         val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
-        return Json.parseToJsonElement(plain).jsonObject
+        return runCatching { Json.parseToJsonElement(plain) }.getOrNull() as? JsonObject
+            ?: throw MalformedVaultMetaException(vaultId)
     }
 
     /**
@@ -1750,7 +1780,13 @@ class Account private constructor(
         // INV-WRITE-KEY "whatever the path" (A9 LOW): a name is sealed under the VK like an item, so a legacy-read-only
         // key or one that contradicts this device's vouch is refused here too, through the same [canSealUnder].
         if (!canSealUnder(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
-        val meta = decryptVaultMeta(vaultId, metaBlob)
+        // A11 (q55): a co-member-authored non-object meta is replaced by a clean one (the new name, the counter
+        // restarted from 0 like any junk metaV), never a crash.
+        val meta = try {
+            decryptVaultMeta(vaultId, metaBlob)
+        } catch (_: MalformedVaultMetaException) {
+            JsonObject(emptyMap())
+        }
         // spec 02 §4: metaV via the SINGLE [parseMetaV] rule SyncEngine.metaV also applies, so
         // write and apply agree on every client (a string primitive is not a counter → 0).
         val metaV = (meta["metaV"] as? kotlinx.serialization.json.JsonPrimitive)

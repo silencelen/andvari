@@ -5,7 +5,8 @@
     "rejectDecode: plaintexts that open fine but are NOT a v1 document for userId; every engine MUST refuse them.",
     "merge(local, served, highWater) → {doc, rollback}: contacts union by userId, newest verifiedAt wins (tie: smaller identityPub string); tombstones union max, a tombstone >= verifiedAt removes the pin; orgRecoveryFp from the higher seq (local on tie/rollback); nonces union per vault keeping the max issuedAt, newest 256 by (issuedAt desc, nonce asc); seq = max(local, served, highWater, 0). rollback = served below highWater, or served withheld once highWater > 0. Contacts compared sorted by userId; maps compared as sets of entries.",
     "A6b (security review 2026-10, branch A6b): issuedGrants union by (vaultId, userId), newest `at` wins (tie: the smaller keyHash), and an issuedTombstones entry (key \"<vaultId>|<userId>\") not older than the entry removes it; ownedVaults union (max), an ownedTombstones entry not older removes it. Like contacts, a rollback or a withheld blob never shrinks either: both copies are UVK-authenticated and the local one is kept. Documents without these keys decode with them empty.",
-    "A9 (security review 2026-10, branch A9): `personal` = {vaultId, at} is the account's own personal-vault designation (written on register, on the migration choice, on a re-designation and on an accepted change). Tombstone-free: the entry with the newest `at` wins on merge (tie: the smaller vaultId), a rollback or a withheld blob never revives an older one, and a document without the key reads it as absent (null). vaultId MUST be a uuid, at MUST be a non-negative integer, no other keys."
+    "A9 (security review 2026-10, branch A9): `personal` = {vaultId, at} is the account's own personal-vault designation (written on register, on the migration choice, on a re-designation and on an accepted change). Tombstone-free: the entry with the newest `at` wins on merge (tie: the smaller vaultId), a rollback or a withheld blob never revives an older one, and a document without the key reads it as absent (null). vaultId MUST be a uuid, at MUST be a non-negative integer, no other keys.",
+    "A11 (security review 2026-10, q00): a contact MAY carry `email`, the address the human typed when running the ceremony, already normalised (trimmed, lowercase, one '@', no whitespace or control characters, at most 320 chars); a malformed one is refused (rejectDecode contact-email-*). It rides its pin whole through the merge (the newer pin wins, with or without an email) and is omitted while absent, so a pre-A11 document is byte-identical."
   ],
   "userId": "33333333-3333-4333-8333-333333333333",
   "uvkB64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
@@ -117,6 +118,22 @@
     {
       "name": "a9-personal-unknown-key",
       "plaintext": "{\"v\": 1, \"userId\": \"33333333-3333-4333-8333-333333333333\", \"seq\": 1, \"personal\": {\"vaultId\": \"11111111-1111-4111-8111-111111111111\", \"at\": 1, \"label\": \"x\"}}"
+    },
+    {
+      "name": "contact-email-uppercase",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"member\",\"verifiedAt\":100,\"method\":\"typed\",\"email\":\"Member@example.com\"}],\"contactTombstones\":{},\"orgRecoveryFp\":null,\"consumedNonces\":{}}"
+    },
+    {
+      "name": "contact-email-padded",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"member\",\"verifiedAt\":100,\"method\":\"typed\",\"email\":\" member@example.com\"}],\"contactTombstones\":{},\"orgRecoveryFp\":null,\"consumedNonces\":{}}"
+    },
+    {
+      "name": "contact-email-no-at",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"member\",\"verifiedAt\":100,\"method\":\"typed\",\"email\":\"member\"}],\"contactTombstones\":{},\"orgRecoveryFp\":null,\"consumedNonces\":{}}"
+    },
+    {
+      "name": "contact-email-not-string",
+      "plaintext": "{\"v\":1,\"userId\":\"33333333-3333-4333-8333-333333333333\",\"seq\":5,\"contacts\":[{\"userId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"identityPub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"label\":\"member\",\"verifiedAt\":100,\"method\":\"typed\",\"email\":7}],\"contactTombstones\":{},\"orgRecoveryFp\":null,\"consumedNonces\":{}}"
     }
   ],
   "merge": [
@@ -1936,6 +1953,125 @@
             "vaultId": "11111111-1111-4111-8111-111111111111",
             "at": 100
           }
+        }
+      }
+    },
+    {
+      "name": "contact-email-rides-the-newer-pin",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 100,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 200,
+            "method": "typed",
+            "email": "member@example.com"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 200,
+              "method": "typed",
+              "email": "member@example.com"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "contact-legacy-newer-pin-drops-email",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 300,
+            "method": "typed"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [
+          {
+            "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "label": "member",
+            "verifiedAt": 200,
+            "method": "typed",
+            "email": "member@example.com"
+          }
+        ],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {}
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [
+            {
+              "userId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "identityPub": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "label": "member",
+              "verifiedAt": 300,
+              "method": "typed"
+            }
+          ],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {}
         }
       }
     }

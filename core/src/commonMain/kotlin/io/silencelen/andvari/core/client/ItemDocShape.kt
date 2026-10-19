@@ -14,6 +14,10 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 class MalformedItemException(message: String) : Exception(message)
 
+/** A vault meta document that opened under the VK but is not a JSON object (security review 2026-10, branch A11, q55;
+ *  web MalformedVaultMetaError twin): its author, a holder of the vault key, is what is wrong. */
+class MalformedVaultMetaException(vaultId: String) : Exception("the meta document of vault $vaultId is not a JSON object")
+
 /**
  * The shape check every client applies to a decrypted document BEFORE using it (spec 02 §3.2,
  * security review 2026-10). A document that opens under a vault key was still WRITTEN by whoever

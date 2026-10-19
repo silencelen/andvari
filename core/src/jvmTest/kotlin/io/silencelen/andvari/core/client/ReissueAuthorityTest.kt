@@ -237,7 +237,7 @@ class ReissueAuthorityTest {
         assertTrue(server.reissues.isEmpty(), "no automatic re-issue on a relabelled vault")
         assertFalse(engine.ownsVault(w.vaultId), "the label is not evidence")
         assertTrue(engine.ownershipNeedsConfirmation(w.vaultId), "the owner UI asks 'You own <vault>?' first")
-        assertFailsWith<OwnershipNotConfirmedException>("add member refused") { engine.addVaultMember(w.vaultId, colluder.userId, "writer") }
+        assertFailsWith<OwnershipNotConfirmedException>("add member refused") { engine.addVaultMember(w.vaultId, colluder.userId, "writer", "member@example.com", legacyPinConfirmed = true) }
         assertFailsWith<OwnershipNotConfirmedException>("transfer offer refused") { engine.offerTransfer(w.vaultId, colluder.userId) }
         // The list may SHOW the row (the server listed it), but its confirmation refuses without ownership evidence.
         val row = engine.loadLegacyGrants(w.vaultId).single()
@@ -316,7 +316,7 @@ class ReissueAuthorityTest {
         val member = enroll("a6b-member")
         val (engine, server, vaultId) = ownerWithCreatedVault(owner)
         engine.accountState.pin(pinOf(member, "Member"))
-        engine.addVaultMember(vaultId, member.userId, "writer")
+        engine.addVaultMember(vaultId, member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
         val rec = assertNotNull(engine.accountState.issued(vaultId, member.userId), "an add records the pair")
         assertEquals(Bytes.toHexLower(crypto.sha256(Bytes.fromB64(member.reg.identityPub))), rec.keyHash)
 
@@ -356,7 +356,7 @@ class ReissueAuthorityTest {
         val (engine, server, vaultId) = ownerWithCreatedVault(owner, deviceState)
         val beforeAdd = server.accountState to server.accountSeq
         engine.accountState.pin(pinOf(member, "Member"))
-        engine.addVaultMember(vaultId, member.userId, "writer")
+        engine.addVaultMember(vaultId, member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
         assertNotNull(engine.accountState.issued(vaultId, member.userId))
 
         // Restart on a memory-only cache (wiped), and the server replays the OLDER blob that lacks the record.
@@ -401,7 +401,7 @@ class ReissueAuthorityTest {
         engine.sync()
         engine.accountState.pin(pinOf(w.member, "Member"))
         assertTrue(engine.ownershipNeedsConfirmation(w.vaultId), "a vault created before A6b has no ownership record")
-        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer") }
+        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com", legacyPinConfirmed = true) }
 
         val claim = engine.describeOwnership(w.vaultId)
         assertFalse(claim.receivedAsMember, "a vault this account created needs only the single confirm")
@@ -416,7 +416,7 @@ class ReissueAuthorityTest {
         engine.confirmOwnership(claim, password)
         assertTrue(engine.ownsVault(w.vaultId))
         assertFalse(engine.ownershipNeedsConfirmation(w.vaultId), "asked once")
-        engine.addVaultMember(w.vaultId, w.member.userId, "writer")
+        engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com", legacyPinConfirmed = true)
         assertEquals(1, server.adds.size)
         // The confirmation is UVK-authenticated account state: it reached the server sealed, for every device.
         assertTrue(unlock(w.owner).openAccountState(server.accountState!!).owns(w.vaultId))

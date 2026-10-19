@@ -104,6 +104,15 @@ data class LegacyVaultReview(val vaultId: String, val name: String?, val itemCou
 class MemberNotVerifiedException(val userId: String) :
     Exception("verify this member before sharing with them (their identity code is not confirmed on this device)")
 
+/** A11 (q00): the server answered the typed email with an account this device verified under ANOTHER email (or another
+ *  pin records the typed email). Never added, whatever the human confirms. */
+class MemberIdentityMismatchException(val userId: String) :
+    Exception("the server answered that email with an account you verified as someone else: don't add them, check with your admin")
+
+/** A11 (q00): a pin made before the email was recorded; the add needs the human to confirm the pin's own label. */
+class LegacyPinConfirmRequiredException(val userId: String) :
+    Exception("confirm that the person you verified is the one you want to add")
+
 /** A6b: an owner-only signing action on a vault this account has no evidence of owning (the server's `role=owner`
  *  label is not evidence). The UI asks "You own <vault>?" ([SyncEngine.confirmOwnership]) first. */
 class OwnershipNotConfirmedException(val vaultId: String) :
@@ -380,6 +389,14 @@ class SyncEngine(
     /** H71: vaults an "added" notice already fired for — once per engine lifetime, so an
      *  idempotent re-delivery of the same grant never re-announces (web `addedNoticed`). */
     private val addedNoticed = mutableSetOf<String>()
+
+    /** A11 (q56): this vault's key is one this account sealed for itself (its own UVK wrap) and did not receive as a
+     *  member: no signed grant, no legacy seal, not member-granted. Provenance only; no server label is read. */
+    private fun isOwnCreatedKey(vaultId: String): Boolean {
+        val src = account.keySource(vaultId)
+        return account.keyFromOwnUvkWrap(vaultId) && !account.keyArrivedByMemberGrant(vaultId) &&
+            src != Account.KeySource.SIGNED_GRANT && src != Account.KeySource.LEGACY_SEAL
+    }
     /** H71: "added" notices minted INSIDE the pull tx, emitted only after it commits. */
     private val pendingAddedNotices = mutableListOf<LifecycleNotice>()
 
@@ -740,7 +757,7 @@ class SyncEngine(
      * for another vault) is a PROPOSAL ([Account.PersonalStatus.PROPOSED]) until the human confirms it or re-designates.
      * The registering device designates the wrap it minted at its first decision.
      */
-    private fun decidePersonalLocally(mergedStateBefore: Boolean = accountState.hasHighWater()) {
+    private fun decidePersonalLocally() {
         val cached = cachedPersonalWrap()
         val designation = accountState.doc.personal?.vaultId
         when (account.personalStatus) {
@@ -761,12 +778,15 @@ class SyncEngine(
                     cached == null -> account.holdPersonalProposal(designation)
                     // The cached wrap and the served one agree, and the designation (if any) does too: unchanged.
                     cached.vaultId == served.vaultId && (designation == null || designation == served.vaultId) -> rememberPersonalWrap(served)
-                    // A confirmed re-designation elsewhere (the account's own designation, UVK-sealed, newest wins) on a
-                    // device that merged account state BEFORE this sync, so a rolled-back blob would have been detected.
-                    designation == served.vaultId && mergedStateBefore -> rememberPersonalWrap(served)
                     // A5b: the cached wrap stays in force; the served one waits for the human (also a replayed older wrap).
-                    cached.vaultId != served.vaultId && (designation == null || designation == cached.vaultId) ->
-                        account.holdPersonalChange(cached)
+                    // A11 (c01, fail closed): a designation that moves AWAY from the cached vault to the served one is a
+                    // notice too, never a silent switch, merged state or not. A high-water mark only detects a blob BELOW
+                    // it: a genuine but superseded designation at an intermediate seq above it (re-designated to S, then
+                    // repaired to P, and the server serves the S state and wrap) is not detectable as a rollback. Cost:
+                    // one tap per device after a genuine re-designation elsewhere. A cached blob that no longer opens
+                    // vouches for nothing: the served wrap is then a proposal, not adopted.
+                    cached.vaultId != served.vaultId && (designation == null || designation == cached.vaultId || designation == served.vaultId) ->
+                        if (!account.holdPersonalChange(cached)) account.holdPersonalProposal(designation)
                     // A9 (M-2): nothing on this device vouches for the served wrap (a designation for a third vault, or
                     // one this device has not merged state for): a proposal, never a silent adoption. Nothing is in force.
                     else -> account.holdPersonalProposal(designation)
@@ -777,14 +797,18 @@ class SyncEngine(
             Account.PersonalStatus.PROPOSED -> personalVaultChoices = null
             Account.PersonalStatus.WITHHELD, Account.PersonalStatus.CHANGED, Account.PersonalStatus.UNREADABLE_CACHED ->
                 personalVaultChoices = null
+            // A11 (c00): the cached wrap is checked against the designation here too: withholding the wrap, or serving
+            // junk, must not put in force what serving the cached wrap itself would only propose.
             Account.PersonalStatus.UNREADABLE -> {
-                if (cached != null) account.applyCachedPersonalWrap(cached)
-                personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.UNREADABLE_CACHED) null else emptyList()
+                if (cached != null) account.applyCachedPersonalWrap(cached, designation)
+                personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.UNREADABLE_CACHED ||
+                    account.personalStatus == Account.PersonalStatus.PROPOSED) null else emptyList()
             }
             Account.PersonalStatus.ABSENT -> {
                 if (cached != null) {
-                    account.applyCachedPersonalWrap(cached)
-                    personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.WITHHELD) null else emptyList()
+                    account.applyCachedPersonalWrap(cached, designation)
+                    personalVaultChoices = if (account.personalStatus == Account.PersonalStatus.WITHHELD ||
+                        account.personalStatus == Account.PersonalStatus.PROPOSED) null else emptyList()
                     return
                 }
                 personalVaultChoices = PersonalVaultMigration.choices(personalCandidates(), personalGet(lastPersonalKey))
@@ -1082,6 +1106,21 @@ class SyncEngine(
 
     fun memberPinState(served: UserLookupResponse): MemberPinState = memberPinState(served.userId, served.identityPub)
 
+    /**
+     * Who an add for [userId] (the lookup's answer to [typedEmail]) would reach, by this account's pins (security review
+     * 2026-10, branch A11, q00): Match (the pin records the typed email), Legacy (a pre-A11 pin: the confirm shows the
+     * PIN's label and fingerprint and the human confirms), Mismatch (refused), Unpinned (no pin current here). A host's
+     * confirm screen renders from this, never from the lookup's `displayName`; [addVaultMember] re-checks it.
+     */
+    fun addMemberIdentity(typedEmail: String, userId: String): ContactPin.AddIdentity {
+        val c = ContactPin.addIdentity(userId, typedEmail, accountState.contacts())
+        return when (c) {
+            is ContactPin.AddIdentity.Match -> if (accountState.isCurrent(c.pin)) c else ContactPin.AddIdentity.Unpinned
+            is ContactPin.AddIdentity.Legacy -> if (accountState.isCurrent(c.pin)) c else ContactPin.AddIdentity.Unpinned
+            else -> c
+        }
+    }
+
     fun memberPinState(userId: String, servedIdentityPub: String): MemberPinState {
         val pin = accountState.currentPin(userId) ?: return MemberPinState.NEEDS_VERIFICATION
         return when (ContactPin.pinState(accountState.doc, ServedIdentity(userId, servedIdentityPub))) {
@@ -1222,9 +1261,14 @@ class SyncEngine(
      * member PINNED and current on this device ([MemberNotVerifiedException] otherwise); the v2 grant and, in the
      * compatibility window, the dual-sent v1 seal are both sealed to the PIN key. The pair is then recorded.
      */
-    suspend fun addVaultMember(vaultId: String, userId: String, role: String) {
+    suspend fun addVaultMember(vaultId: String, userId: String, role: String, typedEmail: String, legacyPinConfirmed: Boolean = false) {
         requireOwned(vaultId)
-        val pin = accountState.currentPin(userId) ?: throw MemberNotVerifiedException(userId)
+        // A11 (q00): the recipient is the person the human VERIFIED for the email they typed, never the lookup's answer.
+        val identity = addMemberIdentity(typedEmail, userId)
+        if (identity is ContactPin.AddIdentity.Mismatch) throw MemberIdentityMismatchException(userId)
+        val pin = accountState.currentPin(userId)
+        if (pin == null || identity is ContactPin.AddIdentity.Unpinned) throw MemberNotVerifiedException(userId)
+        if (identity is ContactPin.AddIdentity.Legacy && !legacyPinConfirmed) throw LegacyPinConfirmRequiredException(userId)
         val signed = account.buildSignedGrant(vaultId, pin)
         val sealed = account.wrapVkForMember(Bytes.fromB64(pin.identityPub), vaultId)
         api.addVaultMember(vaultId, VaultMemberAdd(userId, role, sealed, signed))
@@ -1343,15 +1387,16 @@ class SyncEngine(
      * Pin [served] iff the human-typed [typed] (their 32 hex, read from THEIR screen) matches SHA-256 of the
      * key the server serves for them. Null (nothing pinned) on a mismatch.
      */
-    suspend fun verifyMemberTyped(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String): Contact? {
-        val c = ContactPin.fromTyped(account.cryptoProvider(), typed, ServedIdentity(served.userId, served.identityPub), served.displayName, nowMs()) ?: return null
+    suspend fun verifyMemberTyped(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String, verifiedEmail: String? = null): Contact? {
+        // A11 (q00): [verifiedEmail] is the address the human typed to find them (recorded on the pin), never a served one.
+        val c = ContactPin.fromTyped(account.cryptoProvider(), typed, ServedIdentity(served.userId, served.identityPub), served.displayName, nowMs(), verifiedEmail) ?: return null
         accountState.pin(c)
         return c
     }
 
     /** Pin [served] iff a scanned identity QR matches the served key at FULL length. */
-    suspend fun verifyMemberQr(served: io.silencelen.andvari.core.model.UserLookupResponse, qrPayload: String): Contact? {
-        val c = ContactPin.fromQr(account.cryptoProvider(), qrPayload, ServedIdentity(served.userId, served.identityPub), served.displayName, nowMs()) ?: return null
+    suspend fun verifyMemberQr(served: io.silencelen.andvari.core.model.UserLookupResponse, qrPayload: String, verifiedEmail: String? = null): Contact? {
+        val c = ContactPin.fromQr(account.cryptoProvider(), qrPayload, ServedIdentity(served.userId, served.identityPub), served.displayName, nowMs(), verifiedEmail) ?: return null
         accountState.pin(c)
         return c
     }
@@ -1395,9 +1440,10 @@ class SyncEngine(
         // §4.2: best effort, never fails the sync. Then root cause A §4.3 (A5 review H-1): local, never mints — and since
         // A9 (M-2) it reads the account's designation, so the refresh comes FIRST; a designation this device recorded
         // (register, an accepted change) is written back by one more refresh.
-        val mergedStateBefore = accountState.hasHighWater() // A9 review LOW-4: before THIS sync's refresh could set it
+        // A11 (c01): the decision no longer reads whether this device merged account state before the refresh; a
+        // designation moving away from the cached vault is always the human's call.
         runCatching { accountState.refresh() }
-        decidePersonalLocally(mergedStateBefore)
+        decidePersonalLocally()
         if (designationDirty) {
             designationDirty = false
             runCatching { accountState.refresh() }
@@ -1707,7 +1753,10 @@ class SyncEngine(
                 if (vaultId in reinstatedIds || vaultId in addedNoticed) continue
                 val v = cache.vaults().find { it.vaultId == vaultId } ?: continue
                 if (vaultId == account.personalVaultId || !account.hasVault(vaultId)) continue
-                if (account.roleFor(vaultId) == "owner") continue
+                // Security review 2026-10, branch A11 (q56; web store.ts twin): decided by KEY PROVENANCE, never the
+                // served row's `role` label (the server chooses it, and "owner" used to make a verified adoption
+                // silent): quiet only when the key opened from our own UVK wrap and did not arrive by a member grant.
+                if (isOwnCreatedKey(vaultId)) continue
                 addedNoticed.add(vaultId)
                 val name = account.decryptVaultName(vaultId, v.metaBlob) ?: VAULT_NAME_FALLBACK
                 // §1.6: a verified grant names the PINNED contact who signed it; a legacy add names no one.
@@ -2406,15 +2455,18 @@ class SyncEngine(
      * reuses the same ids and converges on server dedup instead of double-writing.
      */
     suspend fun copyAllToPersonal(vaultId: String, onProgress: ((done: Int, total: Int) -> Unit)? = null): Int {
+        // A11 (c04): with no personal vault in force there is no "Personal" to copy into: refuse with the §4.3 copy
+        // ("Choose a vault for this item.") instead of sealing under vault "" (which surfaced as a crypto error).
+        val personal = personalVaultOrRefuse()
         val items = cache.allItems().filter { it.vaultId == vaultId }
         var copied = 0
         for (it in items) {
-            val gKey = "$vaultId|${it.itemId}|${account.personalVaultId}"
+            val gKey = "$vaultId|${it.itemId}|$personal"
             var g = bulkGestures[gKey]
             if (g == null || g.sourceRev != it.rev) {
                 // New gesture only for a first attempt or when the source content changed
                 // since the memoized attempt (a different rev IS different content).
-                g = newMoveGesture(it.itemId, account.personalVaultId, del = false)
+                g = newMoveGesture(it.itemId, personal, del = false)
                 bulkGestures[gKey] = g
             }
             runGesture(g, onProgress = null, finalSync = false)
