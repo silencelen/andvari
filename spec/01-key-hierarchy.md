@@ -756,9 +756,15 @@ MUST require the master password (the blob is retained; a successful full unlock
 re-stamps the window).
 
 **Clock-tamper safety (normative).** The window MUST NOT be evaluated on a clock the
-device holder can set. A stamp in the future fails closed (stale). Within one boot the
-monotonic clock (`elapsedRealtime`) is authoritative and its delta MUST also be under the
-window. **Across a reboot** the client MUST evaluate the window against a *server-attested*
+device holder can set. A stamp in the future fails closed (stale), with no skew allowance.
+Within one boot the monotonic clock (`elapsedRealtime`) is authoritative and its delta MUST
+also be under the window. "One boot" MUST be decided from a boot identity the holder cannot
+set (Android: `Settings.Global.BOOT_COUNT`, recorded with the stamp), never from
+`wall − elapsedRealtime`: stepping the wall clock would otherwise make a same-boot device look
+rebooted and skip the monotonic check exactly when the clock is the problem. Independently of
+boot identity, an `elapsedRealtime` that has advanced a full window past the stamp's MUST fail
+closed (sound in every case: within one boot it is the real duration, across a reboot this
+boot alone has run that long since the stamp). (Security review 2026-10.) **Across a reboot** the client MUST evaluate the window against a *server-attested*
 time anchor recorded after the stamp (`ClientPolicy.serverTime`, persisted monotonically);
 with no such anchor the elapsed duration is unknowable and the client MUST fail closed and
 require the master password. A device-clock high-water mark MAY be kept as an additional

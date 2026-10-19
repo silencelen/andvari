@@ -2,6 +2,7 @@ package io.silencelen.andvari.app
 
 import android.content.Context
 import android.os.SystemClock
+import android.provider.Settings
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.model.AccountKeys
 import kotlinx.serialization.Serializable
@@ -67,6 +68,8 @@ data class PendingServer(
  */
 class SessionStore(context: Context) {
     private val prefs = context.getSharedPreferences("andvari", Context.MODE_PRIVATE)
+    // A12 (row 74): read-only use — the boot count for quick-unlock freshness.
+    private val appContext: Context = context.applicationContext ?: context
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /** Memo for [currentOriginKey] (SHA-256 is cheap, but some readers sit on 1 s ticks) — a
@@ -260,6 +263,16 @@ class SessionStore(context: Context) {
     fun stampBootRefMs(userId: String): Long =
         prefs.getLong(ns(currentOriginKey(), "qu_stampBoot_$userId"), 0L)
 
+    /** A12 (row 74): `Settings.Global.BOOT_COUNT` at the last stamp (-1 = unknown / pre-A12). */
+    fun stampBootCount(userId: String): Int =
+        prefs.getInt(ns(currentOriginKey(), "qu_stampBootCount_$userId"), -1)
+
+    /** A12 (row 74): the device's boot count — the boot identity the wall clock cannot fake. -1 when
+     *  the platform does not expose it (freshness then falls back to the clock-derived reference
+     *  behind the always-on monotonic belt). */
+    fun bootCountNow(): Int =
+        runCatching { Settings.Global.getInt(appContext.contentResolver, Settings.Global.BOOT_COUNT, -1) }.getOrDefault(-1)
+
     /**
      * Record a genuine full-password unlock (A1) against the CURRENT origin: the wall time plus
      * the A2 monotonic anchors, and bump the high-water mark. Call from EVERY full-password
@@ -275,6 +288,7 @@ class SessionStore(context: Context) {
             .putLong(ns(ok, "qu_stampWall_$userId"), now)
             .putLong(ns(ok, "qu_stampElapsed_$userId"), elapsed)
             .putLong(ns(ok, "qu_stampBoot_$userId"), now - elapsed)
+            .putInt(ns(ok, "qu_stampBootCount_$userId"), bootCountNow())
             .apply()
     }
 
@@ -287,6 +301,7 @@ class SessionStore(context: Context) {
             .remove(ns(originKey, "qu_stampWall_$userId"))
             .remove(ns(originKey, "qu_stampElapsed_$userId"))
             .remove(ns(originKey, "qu_stampBoot_$userId"))
+            .remove(ns(originKey, "qu_stampBootCount_$userId"))
             .apply()
     }
 
