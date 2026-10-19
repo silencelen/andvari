@@ -49,8 +49,8 @@ object QuickUnlock {
      *  monotonic high-water wall clock (A2), not raw wall time. */
     internal const val WINDOW_MS = 30L * 24 * 60 * 60 * 1000
 
-    /** A2: a stamp more than this far in the FUTURE is a clock rollback → fail closed (stale). */
-    internal const val CLOCK_SKEW_MS = 5L * 60 * 1000
+    // (A2's CLOCK_SKEW_MS allowance is gone — security review 2026-10, A12 row 74: a wall clock
+    // earlier than the stamp at all is a rollback and fails closed; see [isFreshPure].)
 
     /** A2: tolerance on the derived boot reference (wall − elapsedRealtime) drift for deciding
      *  "same boot, clock steady" so the extra monotonic-delta guard applies. */
@@ -158,6 +158,8 @@ object QuickUnlock {
                 stampBootRefMs = store.stampBootRefMs(userId),
                 highWaterWallMs = highWater,
                 serverFloorMs = store.serverTimeFloorMs,
+                bootCountNow = store.bootCountNow(),
+                stampBootCount = store.stampBootCount(userId),
             ),
         )
     }
@@ -173,6 +175,11 @@ object QuickUnlock {
         val highWaterWallMs: Long,
         /** Last SERVER-attested wall time (monotonic). The only clock the device holder can't set. */
         val serverFloorMs: Long,
+        /** A12 (row 74): `Settings.Global.BOOT_COUNT` now, and at the stamp; -1 = unknown (a stamp
+         *  written before A12, or a ROM that does not expose it). Boot identity comes from HERE,
+         *  never from the settable wall clock. */
+        val bootCountNow: Int = -1,
+        val stampBootCount: Int = -1,
     )
 
     /**
@@ -198,13 +205,31 @@ object QuickUnlock {
      */
     fun isFreshPure(i: FreshnessInputs): Boolean {
         if (i.stampWallMs <= 0L) return false
-        if (i.nowMs < i.stampWallMs - CLOCK_SKEW_MS) return false // clock rolled back past the stamp
+        // A12 (row 74): a wall clock earlier than the stamp is a rollback — fail closed, no allowance.
+        if (i.nowMs < i.stampWallMs) return false
         // `nowMs` is attacker-settable; the floor is not. Never let a rollback shrink the window.
         val effectiveNow = max(max(i.nowMs, i.highWaterWallMs), i.serverFloorMs)
         if (effectiveNow - i.stampWallMs >= WINDOW_MS) return false
 
-        val currentBootRef = i.nowMs - i.elapsedNowMs
-        val sameBoot = abs(currentBootRef - i.stampBootRefMs) <= BOOT_SKEW_MS
+        // Security review 2026-10 (A12, row 74): the monotonic check used to be skipped exactly when
+        // the wall clock was the problem — "same boot" was derived from `wall − elapsedRealtime`, so
+        // stepping the clock back made a same-boot device look rebooted, and the cross-boot branch
+        // then accepted any server anchor taken shortly after the stamp, however long ago that was.
+        //
+        // (1) A belt that holds in EVERY case: if elapsedRealtime has advanced 30 days past the
+        //     stamp's, the stamp is at least 30 days old. Same boot, that is the real duration; after
+        //     a reboot it means this boot alone has run 30 days, all of it after the stamp. Either way
+        //     stale, whatever the wall clock claims.
+        if (i.elapsedNowMs >= i.stampElapsedMs && i.elapsedNowMs - i.stampElapsedMs >= WINDOW_MS) return false
+        // (2) Boot identity from the boot COUNT when both sides know it; the clock-derived reference
+        //     is only the fallback for stamps written before A12.
+        val bootKnown = i.bootCountNow >= 0 && i.stampBootCount >= 0
+        val sameBoot = if (bootKnown) {
+            i.bootCountNow == i.stampBootCount
+        } else {
+            val currentBootRef = i.nowMs - i.elapsedNowMs
+            abs(currentBootRef - i.stampBootRefMs) <= BOOT_SKEW_MS
+        }
         if (sameBoot) {
             // Same boot, wall clock not stepped: the monotonic clock is authoritative and cheap.
             if (i.elapsedNowMs < i.stampElapsedMs) return false // monotonic went backwards → distrust
