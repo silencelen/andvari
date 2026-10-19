@@ -66,7 +66,9 @@ test("G21 — buildVaultKeys records each opened grant's role beside its key", (
 
 test("G21 — writableItem is the one gate, and it reads the recorded role", () => {
   const fn = spanOf(bg, "function writableItem(it: DecryptedItem): boolean {", "\n}");
-  assert.ok(fn.includes('return session?.vaultRoles.get(it.vaultId) !== "reader";'), "reader ⇒ not writable; a missing role fails OPEN to the pre-fix behaviour (the server still refuses)");
+  assert.ok(fn.includes("const role = session.vaultRoles.get(it.vaultId);") && fn.includes('return role !== "reader";'), "reader ⇒ not writable");
+  // Security review 2026-10, branch A11 (q13): a missing role now fails CLOSED (only the in-force personal vault needs none).
+  assert.ok(fn.includes("if (role === undefined) return session.personalVaultId !== \"\" && it.vaultId === session.personalVaultId;"), "a missing role fails closed");
 });
 
 test("G21 — the capture banner never offers Update against a reader-vault match", () => {

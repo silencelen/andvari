@@ -179,6 +179,11 @@ export interface PendingSave {
   /** the existing item's username, shown in the Update banner so a user can tell a password
    *  change from a wrong-account merge (auto-saved items are named after the host). */
   updatesItemUsername: string | null;
+  /** Security review 2026-10, branch A11 (q14): the DESTINATION vault's name (decrypted under a held key; null when
+   *  it does not decrypt), and whether that vault is not the in-force personal vault. Optional: a pending persisted
+   *  by an older worker lacks them (the banner then names no vault and treats an update as shared). */
+  vaultName?: string | null;
+  vaultShared?: boolean;
 }
 
 /** Unlock outcome code — set by background.ts's unlock mapper, rendered as canonical copy by the
@@ -196,6 +201,7 @@ export type UnlockCode =
   | "identity_mismatch"
   | "keys_damaged" // H67: the account's stored wrappedUvk isn't a readable envelope — terminal, not credentials
   | "kdf_policy"
+  | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
   | "server_error"
   | "network"
   | "unknown";
