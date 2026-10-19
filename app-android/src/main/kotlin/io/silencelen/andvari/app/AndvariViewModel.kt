@@ -77,7 +77,9 @@ import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
+import io.silencelen.andvari.core.client.OriginProbeFence
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -833,6 +835,20 @@ internal fun trustGateBody(enrollment: Boolean): List<String> =
 internal fun resolvedDefaultOrigin(pending: PendingServer, enrollSucceeded: Boolean): String =
     if (enrollSucceeded) pending.origin else pending.previousOrigin
 
+/**
+ * Security review 2026-10 (A12, q06 — the twin of desktop row 39): the origin a pending invite
+ * switch restores on cancel/failure. Captured ONCE: while a switch is already pending,
+ * `store.baseUrl` points at that switch's UNVERIFIED target, so a second re-point must inherit the
+ * existing marker's restore point rather than record the first unverified origin as "previous".
+ * Pure so the rule is test-pinned.
+ */
+internal fun pendingSwitchRestorePoint(existing: PendingServer?, currentDefault: String): String =
+    existing?.previousOrigin ?: currentDefault
+
+/** A12 (row 80): whole-call cap on an unauthenticated policy probe (OkHttp's 10 s defaults bound
+ *  each read, not the call). */
+internal const val POLICY_PROBE_TIMEOUT_MS = 15_000L
+
 /** What the Trust Gate's Connect commits to (design §4.3/§4.4). */
 sealed interface TrustGateAction {
     /** Manual ServerField switch — Connect commits immediately (the gate IS the gesture, §4.1 rule 3). */
@@ -1128,7 +1144,26 @@ class AndvariViewModel(
      * never under whatever happens to be current. The timer window is CLAMPED (§2.3/B1-1)
      * before it is persisted or armed — a hostile server cannot disable or stretch auto-lock.
      */
-    private fun applyPolicy(p: ClientPolicy, originKey: String) {
+    // Security review 2026-10 (A12, row 80 — the desktop shape exists here too): every policy reply
+    // must belong to the origin the app dials NOW and to the visit it was started in. A late reply
+    // from an abandoned origin used to land in the single in-memory policy and the process-wide
+    // auto-lock. [probeFence] tags each probe at launch; [setBaseUrl] advances it and cancels
+    // [probeJob].
+    private val probeFence = OriginProbeFence()
+    private var probeJob: Job? = null
+
+    /** A12 (row 80): one policy fetch under a whole-call bound (a timeout reads as unreachable). */
+    private suspend fun boundedPolicy(probe: AndvariApi): ClientPolicy =
+        withTimeoutOrNull(POLICY_PROBE_TIMEOUT_MS) { probe.clientPolicy() }
+            ?: throw java.io.InterruptedIOException("policy probe timed out")
+
+    /** A12 (row 80): the probe tagged at launch is still the current origin's current visit. */
+    private fun probeIsCurrent(tag: OriginProbeFence.Tag): Boolean = probeFence.isCurrent(tag, store.currentOriginKey())
+
+    /** Returns false (and writes NOTHING) when [tag] is stale — A12 (row 80). */
+    private fun applyPolicy(p: ClientPolicy, tag: OriginProbeFence.Tag): Boolean {
+        if (!probeIsCurrent(tag)) return false
+        val originKey = tag.originKey
         _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
         store.setCacheAllowed(originKey, p.offlineCacheAllowed)
         val autoLock = clampAutoLockSeconds(p.autoLockSeconds) // B1-1: [floor, AUTO_LOCK_MAX_SECONDS]
@@ -1136,6 +1171,7 @@ class AndvariViewModel(
         store.setPolicyFetchedAt(originKey, System.currentTimeMillis()) // A4: quick-unlock eligibility freshness
         store.bumpServerTimeFloor(originKey, p.serverTime) // A2 (review [2]): the one clock the holder cannot set — per-origin
         VaultSession.setAutoLockSeconds(autoLock)
+        return true
     }
 
     // Unlocked state (api/account/engine) now lives in the process-wide VaultSession, shared
@@ -1257,11 +1293,13 @@ class AndvariViewModel(
             // baseUrl) — the async verdict below purges/persists under THIS key, so a racing
             // setBaseUrl can never redirect it onto another origin's namespace.
             val originKey = store.currentOriginKey()
+            val tag = probeFence.tag(originKey) // A12 (row 80): this visit's probe, tagged before the await
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { probe.clientPolicy() }
+                runCatching { boundedPolicy(probe) }
                     .onSuccess { p ->
-                        applyPolicy(p, originKey) // UI state + persisted fallbacks + auto-lock gate
+                        // UI state + persisted fallbacks + auto-lock gate — only if still current.
+                        if (!applyPolicy(p, tag)) return@onSuccess
                         // Policy may forbid the durable cache; honor it the moment we learn it,
                         // deleting any existing file (spec 02 §8) — but only when no live engine holds
                         // it (when bound, a later lock/rebind enforces the purge safely). Scoped to
@@ -1270,7 +1308,7 @@ class AndvariViewModel(
                     }
                     // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
                     // honestly (the policy itself stays last-known for the offline gates).
-                    .onFailure { _ui.value = _ui.value.copy(policyFetchFailed = true) }
+                    .onFailure { if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policyFetchFailed = true) }
             } finally {
                 probe.close()
             }
@@ -1324,12 +1362,17 @@ class AndvariViewModel(
         // synchronously with the baseUrl write, so a second setBaseUrl racing this in-flight
         // probe still lands the verdict on the origin that produced it.
         val originKey = store.currentOriginKey()
-        viewModelScope.launch {
+        // A12 (row 80): every earlier probe — above all one still in flight against the origin
+        // just left — is stale from here on, and the in-flight one is cancelled.
+        probeFence.advance()
+        probeJob?.cancel()
+        val tag = probeFence.tag(originKey)
+        probeJob = viewModelScope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { probe.clientPolicy() }
+                runCatching { boundedPolicy(probe) }
                     .onSuccess { p ->
-                        applyPolicy(p, originKey)
+                        if (!applyPolicy(p, tag)) return@onSuccess
                         // Same policy enforcement as start(): a forbidding server purges ITS OWN
                         // namespace for the stored session's user — never another origin's.
                         if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
@@ -1337,7 +1380,10 @@ class AndvariViewModel(
                     // A deliberate URL change invalidates the old server's policy (null stays
                     // right) — and the probe against the NEW one failed, so say so (N2 §3);
                     // Welcome must never claim the new server has no recovery key.
-                    .onFailure { _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true) }
+                    .onFailure {
+                        if (it is kotlinx.coroutines.CancellationException) throw it
+                        if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
+                    }
             } finally {
                 probe.close()
             }
@@ -1459,7 +1505,8 @@ class AndvariViewModel(
      * fingerprint. Welcome then hides sign-in + the ServerField (driven by [UiState.pendingSwitch]).
      */
     private fun beginPendingSwitch(origin: String, email: String) {
-        val previous = store.baseUrl
+        // A12 (q06): captured ONCE — a second re-point keeps the first switch's restore point.
+        val previous = pendingSwitchRestorePoint(store.pendingServer, store.baseUrl)
         store.pendingServer = PendingServer(origin = origin, previousOrigin = previous, email = email.ifBlank { null }, ts = System.currentTimeMillis())
         _ui.value = _ui.value.copy(trustGate = null, pendingSwitch = PendingSwitchUi(origin, previous))
         setBaseUrl(origin)
@@ -1501,15 +1548,16 @@ class AndvariViewModel(
         if (_ui.value.busy) return
         _ui.value = _ui.value.copy(busy = true)
         val originKey = store.currentOriginKey() // §4.2: captured beside the probe it scopes
+        val tag = probeFence.tag(originKey) // A12 (row 80)
         viewModelScope.launch {
             val probe = newApi()
             try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { probe.clientPolicy() }
+                runCatching { boundedPolicy(probe) }
                     .onSuccess { p ->
-                        applyPolicy(p, originKey)
+                        if (!applyPolicy(p, tag)) return@onSuccess
                         if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
                     }
-                    .onFailure { _ui.value = _ui.value.copy(policyFetchFailed = true) }
+                    .onFailure { if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policyFetchFailed = true) }
             } finally {
                 probe.close()
                 _ui.value = _ui.value.copy(busy = false)
@@ -2295,6 +2343,7 @@ class AndvariViewModel(
         // enroll); there is no breach check on a master password anywhere (security review 2026-10).
         _ui.value = _ui.value.copy(busy = true, error = null)
         val originKey = store.currentOriginKey() // §4.2: newApi() below dials this same origin
+        val policyTag = probeFence.tag(originKey) // A12 (row 80): tagged before any await
         viewModelScope.launch {
             val a = newApi() // unauthenticated — closed in finally (F74)
             try {
@@ -2310,7 +2359,7 @@ class AndvariViewModel(
                 // Phase 1 just proved the server reachable: re-probe lazily, exactly when phase 2
                 // needs the params (enrollOp's idiom). clientPolicy() runs the H1 KDF floor fence
                 // (spec 05 T1); a failed probe surfaces through recoverResetError below.
-                val policy = _ui.value.policy ?: a.clientPolicy().also { applyPolicy(it, originKey) }
+                val policy = _ui.value.policy ?: a.clientPolicy().also { applyPolicy(it, policyTag) }
                 // §F.7 cancel fence (recoverVerify's twin), re-checked after EVERY await: system
                 // back isn't busy-gated, and once THIS wizard instance is gone the continuation
                 // must zero its alias and die without touching UI state. The pendingRecover*
@@ -2785,11 +2834,12 @@ class AndvariViewModel(
         // was unlocked against — unchanged for the session's lifetime today (the ServerField
         // only renders signed-out; wave 3's switch flow tears the session down first).
         val originKey = store.currentOriginKey()
+        val tag = probeFence.tag(originKey) // A12 (row 80): tagged before the await
         viewModelScope.launch {
             // N2 §3/B4: deliberately NO onFailure — the poll must never flip policyFetchFailed
             // (that flag belongs to the enroll-feeding fetches; the last-known policy stays
             // live here for the offline gates). Success still clears it via applyPolicy.
-            runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it, originKey) }
+            runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it, tag) }
             try {
                 syncNow(current.engine)
                 if (VaultSession.get() !== current) { // locked/rebound mid-sync — publish nothing stale
