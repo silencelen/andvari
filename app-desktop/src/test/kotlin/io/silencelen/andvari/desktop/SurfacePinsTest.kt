@@ -154,7 +154,9 @@ class SurfacePinsTest {
         assertTrue(state.contains("withTimeoutOrNull(uploadsTimeoutMs(uploads))"), "save-with-uploads")
         assertTrue(state.contains("withTimeoutOrNull(attachmentTimeoutMs(current.doc.attachments.sumOf { it.size }))"), "the move/copy gesture, sized from the SOURCE item's attachments")
         assertTrue(state.contains("withTimeoutOrNull(importTimeoutMs(plan.items.size))"), "the CSV import push")
-        assertTrue(state.contains("e.copyAllToPersonal(vaultId)") && state.contains("InterruptedIOException(\"rescue copy timed out\")"), "the bulk rescue copy")
+        // A12 (row 82): the rescue copy's bound is the ceiling-clamped total, and hitting it is a clean stop.
+        assertTrue(state.contains("withTimeoutOrNull(rescueCopyTimeoutMs(bytes, count, opTimeoutMs)) {") && state.contains("e.copyAllToPersonal(vaultId)") && state.contains("error = rescueCopyStoppedCopy(done, total)"), "the bulk rescue copy")
+        assertFalse(state.contains("attachmentTimeoutMs(bytes) + count * opTimeoutMs"), "an item-count-scaled rescue bound is the row-82 regression")
         // …and G10's own download keeps its inner bound (the outer op bound sits one window above it).
         assertTrue(state.contains("withTimeoutOrNull(attachmentTimeoutMs(ref.size)) { engine!!.downloadAttachment(ref) }"))
         // R13: the backup build's per-attachment fetch — the last busy-holding leg, which this

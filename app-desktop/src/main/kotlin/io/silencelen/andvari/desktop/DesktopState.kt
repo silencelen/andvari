@@ -65,7 +65,9 @@ import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
 import io.silencelen.andvari.core.model.VaultMemberSummary
 import io.silencelen.andvari.core.client.UsageRecorderCore
+import io.silencelen.andvari.core.client.OriginProbeFence
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -370,6 +372,9 @@ class DesktopState(
     // Audit H12, injectable for tests only: the CR-02 idle cap on the self-recovery reset step
     // (production: [RECOVER_IDLE_TIMEOUT_MS], web's REVEAL_TIMEOUT_S).
     private val recoverIdleTimeoutMs: Long = RECOVER_IDLE_TIMEOUT_MS,
+    // Security review 2026-10 (A12, row 80), injectable for tests only: the whole-request bound on
+    // an unauthenticated policy probe (production: [POLICY_PROBE_TIMEOUT_MS]).
+    private val policyProbeTimeoutMs: Long = POLICY_PROBE_TIMEOUT_MS,
 ) {
 
     init {
@@ -848,26 +853,81 @@ class DesktopState(
     private fun newApi(tokens: Tokens? = null) =
         AndvariApi(baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
 
+    /**
+     * Security review 2026-10 (A12, row 80): the tokenless client a POLICY PROBE rides. Unlike the
+     * shared client ([newHttpClient] is connect-only on purpose, for attachment transfers), a probe
+     * carries a few hundred bytes of JSON, so it gets a whole-request bound: an origin that accepts
+     * and never answers can no longer hold a probe open until it chooses to reply.
+     */
+    private fun newProbeApi() = AndvariApi(
+        baseUrl,
+        HttpClient(Java) {
+            install(HttpTimeout) {
+                connectTimeoutMillis = minOf(CONNECT_TIMEOUT_MS, policyProbeTimeoutMs)
+                requestTimeoutMillis = policyProbeTimeoutMs
+                socketTimeoutMillis = policyProbeTimeoutMs
+            }
+        },
+        null,
+        platform = desktopPlatform(),
+    )
+
+    // A12 (row 80): every policy reply must belong to the origin the app dials NOW and to the
+    // visit it was started in. [probeFence] tags each probe at launch; [originChanged] advances it
+    // and cancels the in-flight probe, so a late reply from an abandoned origin is never applied.
+    private val probeFence = OriginProbeFence()
+    private var probeJob: Job? = null
+
+    /** A12 (row 80): the app is about to dial a different origin (or return to one). Every
+     *  outstanding probe is stale from here on, and the one in flight is cancelled. */
+    private fun originChanged() {
+        probeFence.advance()
+        probeJob?.cancel()
+        probeJob = null
+    }
+
+    /** A12 (row 80): one bounded policy probe of the CURRENT origin, tagged before any await. The
+     *  verdict ([onApplied]) runs only when the reply is still current; [onFailed] only when the
+     *  probe is still current too (a cancelled, abandoned probe reports nothing). */
+    private suspend fun runPolicyProbe(onApplied: (ClientPolicy, String) -> Unit, onFailed: () -> Unit) {
+        val tag = probeFence.tag(originKey(baseUrl))
+        val probe = newProbeApi()
+        try { // F74: close() in finally — no throw path may leak the transient probe
+            val result = try {
+                val p = withTimeoutOrNull(policyProbeTimeoutMs) { probe.clientPolicy() }
+                if (p == null) Result.failure(java.io.InterruptedIOException("policy probe timed out")) else Result.success(p)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
+            if (!probeFence.isCurrent(tag, originKey(baseUrl))) return // abandoned origin: drop it
+            result.onSuccess { p -> if (applyPolicy(p, tag)) onApplied(p, tag.originKey) }.onFailure { onFailed() }
+        } finally {
+            probe.close()
+        }
+    }
+
     fun start() {
         scope.launch {
             // §4.3 (B2-9): reconcile a crash-window pending marker BEFORE trusting the stored
             // session or probing — an uncommitted invite switch must offer Finish/Discard, never
             // silently boot the unverified origin (store.baseUrl, the prior default, is intact).
             reconcilePendingMarker()
-            // §4.2: pin the PROBED origin's key before any await — a policy verdict may only
-            // ever touch the declaring origin's own namespace, even if baseUrl moves mid-probe.
-            val probedKey = originKey(baseUrl)
-            val probe = newApi()
-            runCatching { probe.clientPolicy() }.onSuccess { p ->
-                policyFetchFailed = false
-                applyPolicy(p, probedKey) // UI state + persisted offline fallbacks (auto-lock included)
-                // Policy may forbid the durable cache; purge any existing file the moment
-                // we learn it (spec 02 §8), even before unlock — mirrors the Android client.
-                // §4.2 (B2-3): scoped to the DECLARING origin's namespace — a forbidding server
-                // can no longer destroy another (home) server's offline data on a mere probe.
-                if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
-            }.onFailure { policyFetchFailed = true } // §3: never render the no-key lie off a failed probe
-            probe.close()
+            // §4.2: the PROBED origin's key is pinned before any await (runPolicyProbe tags it) — a
+            // policy verdict may only ever touch the declaring origin's own namespace, and (A12,
+            // row 80) only while that origin is still the one the app dials.
+            runPolicyProbe(
+                onApplied = { p, probedKey ->
+                    policyFetchFailed = false
+                    // Policy may forbid the durable cache; purge any existing file the moment
+                    // we learn it (spec 02 §8), even before unlock — mirrors the Android client.
+                    // §4.2 (B2-3): scoped to the DECLARING origin's namespace — a forbidding server
+                    // can no longer destroy another (home) server's offline data on a mere probe.
+                    if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
+                },
+                onFailed = { policyFetchFailed = true }, // §3: never render the no-key lie off a failed probe
+            )
             // UI-audit #24: checkForUpdate is a BLOCKING java.net.http call — it ran directly on
             // this Compose-scope coroutine and froze the whole window for up to ~8 s at startup.
             // Now Dispatchers.IO AND a sibling coroutine: the auth screen must never wait on the
@@ -1002,6 +1062,10 @@ class DesktopState(
         val clean = url.trim().removeSuffix("/")
         // §4.1 rule 1: token isolation FIRST, before any request to the new origin.
         clearSessionForSwitch()
+        originChanged() // A12 (row 80): the old origin's in-flight probe can no longer land
+        // A12 (row 39): a deliberate, gated repoint supersedes any pending invite switch, so no
+        // stale restore point can outlive the persisted default it was captured from.
+        if (pendingServer != null) { store.clearPendingServer(); pendingServer = null; pendingConnected = false; pendingReturnOrigin = null }
         store.baseUrl = clean // manual repoint commits the persisted default at the gate
         baseUrl = clean
         // B5: a deliberate URL change must re-probe — the OLD server's policy (recovery
@@ -1009,30 +1073,26 @@ class DesktopState(
         // policy first (renders the neutral probe-in-flight state, never the no-key text).
         policy = null
         policyFetchFailed = false
-        // §4.2: the key of the origin THIS probe interrogates (baseUrl was just committed above).
-        probePolicy(originKey(baseUrl))
+        probePolicy()
     }
 
     /**
      * The enroll-feeding policy probe (start / updateServer / trust-gate Connect / Retry all run
      * it) — fetch the CURRENT origin's [ClientPolicy], apply it under the §2.3 clamps, and purge a
-     * forbidding origin's OWN namespace (§4.2, B2-3: never another origin's). [probedKey] is pinned
-     * by the caller BEFORE any await so a fast follow-up switch can't re-aim the purge.
+     * forbidding origin's OWN namespace (§4.2, B2-3: never another origin's). The probed key is
+     * pinned by [runPolicyProbe] BEFORE any await so a fast follow-up switch can't re-aim the purge,
+     * and (A12, row 80) the job is held in [probeJob] so the next origin change cancels it.
      */
-    private fun probePolicy(probedKey: String) {
-        scope.launch {
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { probe.clientPolicy() }
-                    .onSuccess { p ->
-                        policyFetchFailed = false
-                        applyPolicy(p, probedKey)
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
-                    }
-                    .onFailure { policyFetchFailed = true }
-            } finally {
-                probe.close()
-            }
+    private fun probePolicy() {
+        probeJob?.cancel()
+        probeJob = scope.launch {
+            runPolicyProbe(
+                onApplied = { p, probedKey ->
+                    policyFetchFailed = false
+                    if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
+                },
+                onFailed = { policyFetchFailed = true },
+            )
         }
     }
 
@@ -1067,10 +1127,32 @@ class DesktopState(
     fun beginEnrollSwitch(origin: String, email: String?) {
         val clean = origin.trim().removeSuffix("/")
         if (clean.isBlank()) return
-        pendingReturnOrigin = store.baseUrl // the persisted default we revert to on Cancel/failure
+        // Security review 2026-10 (A12, row 39): the restore point is captured ONCE, from the
+        // verified home origin (the persisted default, which no pending switch ever moves), and a
+        // second re-point while one is pending replaces only the TARGET. It used to be re-read on
+        // every paste, while the runtime origin was left dialing the first, unverified target with
+        // pendingConnected cleared — so Cancel skipped its restore and lifted the sign-in lockout
+        // against that origin.
+        val restore = pendingReturnOrigin ?: store.baseUrl
+        if (clean == restore) { revertPendingSwitch(); error = null; return } // a link back home: just go home
+        // A connected earlier target stops being dialed BEFORE the new gate goes up: behind the
+        // second gate nothing has switched yet, exactly like behind the first.
+        if (baseUrl != restore) dialRestorePoint(restore)
+        pendingReturnOrigin = restore
         pendingServer = PendingServer(clean, email?.trim()?.ifBlank { null }, System.currentTimeMillis())
         pendingConnected = false
         error = null
+    }
+
+    /** A12 (row 39): drop everything scoped to the abandoned, unverified origin and dial the
+     *  restore point again — tokens dropped first (§4.1 rule 1), the abandoned probe fenced off
+     *  (row 80), and the restore point's policy re-probed. */
+    private fun dialRestorePoint(restore: String) {
+        clearSessionForSwitch()
+        originChanged()
+        baseUrl = restore
+        policy = null; policyFetchFailed = false
+        probePolicy()
     }
 
     /**
@@ -1083,11 +1165,12 @@ class DesktopState(
         val pend = pendingServer ?: return
         if (pendingConnected) return
         clearSessionForSwitch() // §4.1 rule 1: token isolation before the first request to the new origin
+        originChanged() // A12 (row 80): nothing the previous origin answers late may land on this one
         baseUrl = pend.origin // dial the pending origin — RUNTIME only; store.baseUrl unchanged (uncommitted)
         pendingConnected = true
         policy = null
         policyFetchFailed = false
-        probePolicy(originKey(pend.origin))
+        probePolicy()
     }
 
     /**
@@ -1099,14 +1182,12 @@ class DesktopState(
      */
     private fun revertPendingSwitch() {
         store.clearPendingServer()
-        val hadDialed = pendingConnected && baseUrl != store.baseUrl
+        // A12 (row 39): restore to the captured restore point whenever the runtime origin is
+        // anywhere else — keyed on WHERE the app dials, never on the pendingConnected flag (which a
+        // second paste used to clear while the app still dialed the first unverified origin).
+        val restore = pendingReturnOrigin ?: store.baseUrl
         pendingServer = null; pendingConnected = false; pendingReturnOrigin = null
-        if (hadDialed) {
-            clearSessionForSwitch() // drop anything scoped to the abandoned origin before re-dialing
-            baseUrl = store.baseUrl
-            policy = null; policyFetchFailed = false
-            probePolicy(originKey(baseUrl))
-        }
+        if (baseUrl != restore) dialRestorePoint(restore)
     }
 
     /** §4.4 Desktop: the user's "Cancel and return to <prior origin>" affordance (Trust Gate Cancel
@@ -1191,22 +1272,20 @@ class DesktopState(
     fun retryPolicy() {
         if (busy) return
         busy = true
-        val probedKey = originKey(baseUrl) // §4.2: see start()/updateServer
-        scope.launch {
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { probe.clientPolicy() }
-                    .onSuccess { p ->
+        probeJob?.cancel()
+        probeJob = scope.launch {
+            try {
+                runPolicyProbe( // §4.2 + A12 (row 80): tagged at launch, see start()/updateServer
+                    onApplied = { p, probedKey ->
                         policyFetchFailed = false
-                        applyPolicy(p, probedKey)
                         // Same policy enforcement as start(): a forbidding server purges the cache
                         // (its own origin's namespace only — §4.2).
                         if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(probedKey, it.userId) }
-                    }
-                    .onFailure { policyFetchFailed = true }
+                    },
+                    onFailed = { policyFetchFailed = true },
+                )
             } finally {
                 busy = false
-                probe.close()
             }
         }
     }
@@ -1226,6 +1305,7 @@ class DesktopState(
         if (busy) return // S2 re-assert: never race an in-flight op with an engine rebind
         cacheConsentPrompt = false
         store.setCacheConsent(originKey(baseUrl), granted)
+        syncTokenPersistence() // A12 (row 81): a decline takes the session tokens off disk too
         if (!granted) return
         val a = api ?: return
         val acct = account ?: return
@@ -1259,7 +1339,24 @@ class DesktopState(
     // password — widened to "…or one-time code" when a code was tried — H1 → the sign-in-context
     // block sentence, `public_login_requires_totp` → the curated break-glass line), never the
     // server's raw message.
-    fun signIn(email: String, password: String, totp: String? = null) = op(map = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
+    /**
+     * Security review 2026-10 (A12, row 39): the sign-in lockout, at the STATE layer. A password-
+     * derived authKey may only ever be posted to the origin the user verified — the persisted
+     * default — never to a pending invite origin (which only enrollment, behind the fingerprint
+     * ceremony, may talk to). The Welcome UI hides Sign in while a switch is pending; this is what
+     * holds when a stale frame or a future caller does not.
+     */
+    val signInLockedOut: Boolean get() = pendingServer != null || baseUrl != store.baseUrl
+
+    fun signIn(email: String, password: String, totp: String? = null) {
+        if (signInLockedOut) {
+            error = SIGN_IN_LOCKED_OUT
+            return
+        }
+        signInOp(email, password, totp)
+    }
+
+    private fun signInOp(email: String, password: String, totp: String?) = op(map = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
         val a = newApi()
         try {
             val pre = a.prelogin(email)
@@ -1280,6 +1377,7 @@ class DesktopState(
                 Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPubFor(originKey(baseUrl), email, s.userId))
             }
             store.recordSelfIdentityPub(originKey(baseUrl), s.userId, email, acct)
+            syncTokenPersistence() // A12 (row 81): memory-only when at-rest storage was declined
             store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
@@ -1390,12 +1488,18 @@ class DesktopState(
         // and still throws, so op() surfaces the error as before.
         val pol = policy ?: run {
             // Close the throwaway probe client whether the (now KDF-fenced) policy fetch succeeds or throws.
-            val probe = newApi()
+            val tag = probeFence.tag(originKey(baseUrl)) // A12 (row 80): tagged before the await
+            val probe = newProbeApi()
             try {
                 // B1-1: route through applyPolicy — the ONE policy write path — so this fallback
                 // can't seed state with unclamped timers (the raw object is still returned for
                 // the enroll's kdfParams/fingerprint reads, which the clamps don't touch).
-                probe.clientPolicy().also { applyPolicy(it); policyFetchFailed = false }
+                val p = probe.clientPolicy()
+                // A12 (row 80): an origin change mid-fetch means this enroll no longer targets the
+                // origin that answered — refuse rather than seal to it.
+                if (!applyPolicy(p, tag)) throw java.io.InterruptedIOException("server changed during enrollment")
+                policyFetchFailed = false
+                p
             } catch (t: Throwable) {
                 policyFetchFailed = true; throw t
             } finally {
@@ -1449,6 +1553,7 @@ class DesktopState(
             // (see reconcilePendingMarker) and a pending invite switch commits ONLY here, never on
             // Connect. A same-origin enroll's commit is a no-op (baseUrl already == store.baseUrl).
             commitPendingSwitch()
+            syncTokenPersistence() // A12 (row 81): memory-only when at-rest storage was declined
             store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
             store.recordSelfIdentityPub(originKey(baseUrl), s.userId, email, acct)
@@ -1745,6 +1850,9 @@ class DesktopState(
      */
     fun recoverVerifySubmit(email: String, phrase: String) {
         if (busy) return
+        // A12 review LOW-1: the recovery authKey is password-equivalent proof — never posted to an
+        // origin the user has not verified (the [signInLockedOut] state-layer lockout).
+        if (signInLockedOut) { recoverError = RECOVERY_LOCKED_OUT; return }
         val secret = MemberRecovery.parseSecret(phrase)
         if (secret == null || secret.isEmpty()) {
             recoverError = "That doesn't look like a recovery phrase — check it and try again."
@@ -1785,6 +1893,10 @@ class DesktopState(
      */
     fun recoverCommitSubmit(newPassword: String) {
         if (busy) return
+        // A12 review LOW-1: the reset commit never goes to an unverified origin either. (Belt: a
+        // switch's teardown already drops the stash via clearSecondary, so only a future path
+        // could reach here with one — checked FIRST, before any other refusal.)
+        if (signInLockedOut) { recoverError = RECOVERY_LOCKED_OUT; return }
         val v = recoverVerify
         val secret = recoverSecret
         if (v == null || secret == null) {
@@ -2261,9 +2373,19 @@ class DesktopState(
                 // re-run converge on the same ids rather than duplicate.
                 val bytes = e.items().filter { it.vaultId == vaultId }.sumOf { i -> i.doc.attachments.sumOf { it.size } }
                 val count = e.items().count { it.vaultId == vaultId }
-                val copied = withTimeoutOrNull(attachmentTimeoutMs(bytes) + count * opTimeoutMs) {
+                // Security review 2026-10 (A12, row 82): the item count is co-member controlled, so
+                // the per-item windows are summed under a HARD total ceiling. A copy that hits it
+                // stops cleanly (cancellation, nothing half-sealed) and says how far it got; the
+                // memoized gestures make a re-run continue without duplicating.
+                val copied = withTimeoutOrNull(rescueCopyTimeoutMs(bytes, count, opTimeoutMs)) {
                     e.copyAllToPersonal(vaultId) { done, total -> copyProgress = done to total }
-                } ?: throw java.io.InterruptedIOException("rescue copy timed out")
+                } ?: run {
+                    val (done, total) = copyProgress ?: (0 to count)
+                    copyProgress = null; copyVaultId = null
+                    items = e.items() // the copies that did land are real — show them
+                    error = rescueCopyStoppedCopy(done, total)
+                    return@launch
+                }
                 // A4: copyVaultId stays — the surviving note is named through it.
                 copyProgress = null
                 items = e.items()
@@ -2432,7 +2554,9 @@ class DesktopState(
         scope.launch {
             try {
                 val completed = withTimeoutOrNull(SYNC_TIMEOUT_MS) {
-                    runCatching { api?.clientPolicy() }.getOrNull()?.let { applyPolicy(it) }
+                    // A12 (row 80): tagged before the await like every other policy fetch.
+                    val tag = probeFence.tag(originKey(baseUrl))
+                    runCatching { api?.clientPolicy() }.getOrNull()?.let { applyPolicy(it, tag) }
                     syncNow(e)
                 }
                 // Timed out = the server is reachable-but-unresponsive — same posture as offline
@@ -3393,16 +3517,32 @@ class DesktopState(
      * write path into [policy] — §2.3 (B1-1): the device-exposure timers are CLAMPED here, so
      * every downstream consumer (maybeIdleLock, the Ui.kt clipboard copy sites) reads
      * structurally-bounded values and no server can disable the auto-lock or pin the clipboard.
-     * [key] names the PROBED origin (§4.2) — async callers capture it before awaiting the fetch
-     * so a mid-flight switch can't cross-write another origin's fallbacks.
+     * [tag] names the PROBED origin (§4.2) and the visit it was started in — every caller takes it
+     * before awaiting the fetch. A12 (row 80): a reply whose origin or generation is no longer the
+     * current one is DROPPED whole (returns false) — neither the in-memory policy the next bind
+     * reads nor any persisted fallback is touched by an origin the app has left.
      */
-    private fun applyPolicy(p: ClientPolicy, key: String = originKey(baseUrl)) {
+    private fun applyPolicy(p: ClientPolicy, tag: OriginProbeFence.Tag): Boolean {
+        if (!probeFence.isCurrent(tag, originKey(baseUrl))) return false
+        val key = tag.originKey
         policy = p.copy(
             autoLockSeconds = clampAutoLockSeconds(p.autoLockSeconds),
             clipboardClearSeconds = clampClipboardClearSeconds(p.clipboardClearSeconds),
         )
         store.setOrgCacheAllowed(key, p.offlineCacheAllowed)
         store.setOriginAutoLockSeconds(key, clampAutoLockSeconds(p.autoLockSeconds))
+        syncTokenPersistence() // A12 (row 81): an org forbid takes the tokens off disk at once
+        return true
+    }
+
+    /**
+     * Security review 2026-10 (A12, row 81): may the CURRENT origin's access+refresh tokens sit in
+     * session.json? Only when neither the org nor this device's user declined at-rest storage.
+     * Otherwise the store holds them in memory only, and the next launch signs in again. Called
+     * wherever either leg can change (a policy landing, a consent answer, a sign-in or enroll).
+     */
+    private fun syncTokenPersistence() {
+        store.tokensAtRest = tokensMayPersist(orgCacheAllowed(), store.cacheConsent(originKey(baseUrl)))
     }
 
     /** Persist accountKeys for offline unlock ONLY when the org allows AND this device consented
@@ -3663,6 +3803,31 @@ class DesktopState(
         // Cut O (v2 #17) timeout tiers — see newHttpClient()/runSync() for the full rationale:
         /** TCP/TLS connect cap on EVERY desktop client (java.net.http ships with none). */
         const val CONNECT_TIMEOUT_MS = 10_000L
+        /** Security review 2026-10 (A12, row 80): whole-request cap on an unauthenticated policy
+         *  probe (a few hundred bytes of JSON). */
+        const val POLICY_PROBE_TIMEOUT_MS = 15_000L
+        /** A12 (row 39): the state-layer sign-in refusal while the app dials an unverified origin. */
+        const val SIGN_IN_LOCKED_OUT =
+            "Finish or cancel joining the other server first — signing in here is paused until you do."
+        /** A12 review LOW-1: the state-layer refusal of recover verify / reset while the app dials
+         *  an unverified origin (the [SIGN_IN_LOCKED_OUT] twin). */
+        const val RECOVERY_LOCKED_OUT =
+            "Finish or cancel joining the other server first — account recovery here is paused until you do."
+        /** Security review 2026-10 (A12, row 82): the hard ceiling on one rescue copy, however many
+         *  items co-members put in the vault. Covers the largest byte budget
+         *  ([attachmentTimeoutMs] at its 64 MiB ceiling, about 69 minutes) plus item headroom. */
+        const val RESCUE_COPY_CEILING_MS = 90L * 60 * 1000
+        /** A12 (row 82): the rescue copy's whole bound — the byte budget plus one [perItemMs]
+         *  window per item, never above [RESCUE_COPY_CEILING_MS] (and overflow-safe). */
+        fun rescueCopyTimeoutMs(bytes: Long, itemCount: Int, perItemMs: Long): Long {
+            val perItems = if (itemCount <= 0 || perItemMs <= 0) 0L
+                else if (perItemMs > RESCUE_COPY_CEILING_MS / itemCount) RESCUE_COPY_CEILING_MS
+                else itemCount * perItemMs
+            return minOf(RESCUE_COPY_CEILING_MS, attachmentTimeoutMs(bytes) + perItems)
+        }
+        /** A12 (row 82): the clean-stop line when the ceiling ends a copy. Counts only. */
+        fun rescueCopyStoppedCopy(done: Int, total: Int): String =
+            "The copy stopped after $done of $total items to stay within its time limit. Run it again to copy the rest — items already copied won't be duplicated."
         /** Whole-cycle cap on the sync path (poll/focus/Refresh) — it never carries attachment
          *  bytes, so 60 s is generous for a policy probe + queued envelope pushes + a delta pull. */
         const val SYNC_TIMEOUT_MS = 60_000L
