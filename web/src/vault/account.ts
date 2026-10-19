@@ -216,6 +216,15 @@ export class MalformedItemError extends Error {
   }
 }
 
+/** A vault meta document that opened under the VK but is not a JSON object (security review 2026-10, branch A11, q55;
+ *  core MalformedVaultMetaException twin): its author, a holder of the vault key, is what is wrong. */
+export class MalformedVaultMetaError extends Error {
+  constructor(vaultId: string) {
+    super(`the meta document of vault ${vaultId} is not a JSON object`);
+    this.name = "MalformedVaultMetaError";
+  }
+}
+
 function uuidv4(): string {
   return crypto.randomUUID();
 }
@@ -1247,6 +1256,10 @@ export class Account {
       }
       return;
     }
+    // A11 (c19): a PROPOSAL stays a proposal on a second apply (a keys refresh, a second pass): only the human resolves it
+    // (acceptPersonalChange after the co-holders were shown, or a reauthed re-designation). Before, nothing was in force
+    // while proposed, so a second apply fell through to the bottom and installed the wrap as "confirmed".
+    if (this.personalStatusValue === "proposed") return;
     // A9 (M-2 review): "never switch silently" holds HERE, not only in the store's call order. While a wrap is in force
     // on this device (served, cached or confirmed), a wrap for ANOTHER vault applied later (a keys refresh, a second
     // pass) is a notice ("changed"), and one that does not open keeps the wrap in force ("unreadable-cached").
@@ -1321,8 +1334,27 @@ export class Account {
    * was judged (A5 review H-1; A5b L-1). Core twin: `applyCachedPersonalWrap`.
    *  - "absent" (none served): success → "withheld"; a cached blob that does not open → "unreadable";
    *  - "unreadable" (junk served): success → "unreadable-cached", the cached wrap in force; else no change.
+   *  - A11 (c00): when the account's designation (`designation`, account state) names ANOTHER vault than the cached
+   *    wrap, the cached wrap is held as a PROPOSAL ("proposed", nothing in force, `pendingPersonalChange` = the cached
+   *    wrap, `proposedAgainstDesignation` = the designation), exactly like a served wrap the designation does not name.
+   *    Otherwise withholding or junk would put the cached wrap in force where serving it would not.
    */
-  applyCachedPersonalWrap(wrap: PersonalWrap) {
+  applyCachedPersonalWrap(wrap: PersonalWrap, designation: string | null = null) {
+    if ((this.personalStatusValue === "absent" || this.personalStatusValue === "unreadable") && designation !== null && designation !== wrap.vaultId) {
+      const vk = this.openPersonalWrap(wrap);
+      if (!vk) {
+        if (this.personalStatusValue === "absent") this.personalVaultIdValue = "";
+        this.personalStatusValue = "unreadable";
+        return;
+      }
+      this.holdKeyFromPersonalWrap(wrap.vaultId, vk); // our own key (it opened under our UVK), held for reading only
+      this.personalWrapValue = null;
+      this.personalVaultIdValue = "";
+      this.pendingPersonalChangeValue = wrap;
+      this.proposedAgainstDesignationValue = designation;
+      this.personalStatusValue = "proposed";
+      return;
+    }
     if (this.personalStatusValue === "absent") {
       if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "withheld";
       else {
@@ -1581,9 +1613,19 @@ export class Account {
   /** The full vault-meta plaintext object (spec 02 §4) — `name`, the monotonic `metaV`
    *  counter, and any unknown fields a future client wrote. Throws if the VK is missing or
    *  the blob doesn't open. Callers that only need the name use decryptVaultName. */
+  /** The vault meta document. Security review 2026-10, branch A11 (q55): any holder of the VK authors this plaintext,
+   *  so anything but a JSON object (null, a string, an array, a number, not JSON at all) is refused with
+   *  {@link MalformedVaultMetaError} instead of being cast; a blob that does not open still throws as before. */
   decryptVaultMeta(vaultId: string, metaBlob: string): Record<string, unknown> {
     const plain = open(this.vk(vaultId), fromB64(metaBlob), adVaultMeta(vaultId));
-    return JSON.parse(fromUtf8(plain)) as Record<string, unknown>;
+    let meta: unknown;
+    try {
+      meta = JSON.parse(fromUtf8(plain));
+    } catch {
+      throw new MalformedVaultMetaError(vaultId);
+    }
+    if (meta === null || typeof meta !== "object" || Array.isArray(meta)) throw new MalformedVaultMetaError(vaultId);
+    return meta as Record<string, unknown>;
   }
 
   // ---- vault lifecycle (spec 03 §11) ----
@@ -1640,7 +1682,15 @@ export class Account {
     // INV-WRITE-KEY "whatever the path" (A9 LOW): a name is sealed under the VK like an item, so a legacy-read-only key
     // or one that contradicts this device's vouch is refused here too, through the same {@link canSealUnder}.
     if (!this.canSealUnder(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
-    const meta = this.decryptVaultMeta(vaultId, metaBlob);
+    // A11 (q55): a co-member-authored non-object meta is replaced by a clean one (the new name, the counter restarted
+    // from 0 like any junk metaV), never spread into the new document and never a crash.
+    let meta: Record<string, unknown>;
+    try {
+      meta = this.decryptVaultMeta(vaultId, metaBlob);
+    } catch (e) {
+      if (!(e instanceof MalformedVaultMetaError)) throw e;
+      meta = {};
+    }
     // spec 02 §4: metaV counts ONLY as a non-negative integer ≤ 2^53 (Number.MAX_SAFE_INTEGER),
     // else 0 — the SAME rule store.ts metaVOf applies, so write and apply agree on every client
     // (the safe-integer cap makes a >2^63 literal read 0 here AND on Kotlin's core parseMetaV).

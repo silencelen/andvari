@@ -1,5 +1,6 @@
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
+import { sanitizeSync } from "../api/wireids";
 import type {
   AttachmentRef,
   ItemDoc,
@@ -45,7 +46,7 @@ import {
   serverItemDecision,
   WrongVaultTally,
 } from "./itemhome";
-import { pinFromQr, pinFromTyped, pinState } from "./contacts";
+import { type AddIdentity, addIdentityCheck, pinFromQr, pinFromTyped, pinState } from "./contacts";
 import { AccountStateSync, type ClientStateStore, localClientState } from "./accountstatesync";
 import {
   decodeHeldKeys,
@@ -293,6 +294,30 @@ export interface LegacyGrantRow {
    *  signing is the owner's tap. Null when there is no record, or when THIS browser removed the member (its own durable
    *  tombstone outranks a record a rolled-back account state brought back). */
   previouslySharedAt: number | null;
+}
+
+/** What the add-member screen hands {@link VaultStore.addVaultMember} (A11, q00): the email the owner TYPED, and whether
+ *  they confirmed a pre-A11 pin's own label and fingerprint ("this is who you verified"). */
+export interface AddMemberIdentity {
+  typedEmail: string;
+  legacyPinConfirmed?: boolean;
+}
+
+/** A11 (q00): the server answered the typed email with an account this browser verified under ANOTHER email (or another
+ *  pin records the typed email). Never added, whatever the human confirms. */
+export class MemberIdentityMismatchError extends Error {
+  constructor(readonly userId: string) {
+    super("The server answered that email with an account you verified as someone else. Don't add them: check with your admin.");
+    this.name = "MemberIdentityMismatchError";
+  }
+}
+
+/** A11 (q00): a pin from before the email was recorded; the add needs the human to confirm the pin's own label. */
+export class LegacyPinConfirmRequiredError extends Error {
+  constructor(readonly userId: string) {
+    super("Confirm that the person you verified is the one you want to add.");
+    this.name = "LegacyPinConfirmRequiredError";
+  }
 }
 
 export class MemberNotVerifiedError extends Error {
@@ -736,7 +761,7 @@ export class VaultStore {
    * "withheld"; absent + nothing cached → ask; unreadable + a cached wrap that opens → "unreadable-cached"
    * (L-1); unreadable otherwise → only a re-designation.
    */
-  private decidePersonalLocally(mergedStateBefore: boolean = this.accountState.hasHighWater()): void {
+  private decidePersonalLocally(): void {
     const cached = this.cachedPersonalWrap();
     const designation = this.accountState.doc.personal?.vaultId ?? null;
     switch (this.account.personalStatus) {
@@ -757,13 +782,15 @@ export class VaultStore {
         } else if (cached.vaultId === served.vaultId && (designation === null || designation === served.vaultId)) {
           // The cached wrap and the served one agree, and the designation (if any) does too: unchanged.
           this.rememberPersonalWrap(served);
-        } else if (designation === served.vaultId && mergedStateBefore) {
-          // A confirmed re-designation elsewhere (the account's own designation, UVK-sealed, newest wins) on a browser
-          // that merged account state BEFORE this sync, so a rolled-back blob would have been detected.
-          this.rememberPersonalWrap(served);
-        } else if (cached.vaultId !== served.vaultId && (designation === null || designation === cached.vaultId)) {
+        } else if (cached.vaultId !== served.vaultId && (designation === null || designation === cached.vaultId || designation === served.vaultId)) {
           // A5b: the cached wrap stays in force; the served one waits for the human (also a replayed older wrap).
-          this.account.holdPersonalChange(cached);
+          // A11 (c01, fail closed): a designation that moves AWAY from the cached vault to the served one is a notice
+          // too, never a silent switch, merged state or not. A high-water mark only detects a blob BELOW it: a genuine
+          // but superseded designation at an intermediate seq above it (re-designated to S, then repaired to P, and
+          // the server serves the S state and wrap) is not detectable as a rollback. Cost: one tap per device after
+          // a genuine re-designation elsewhere.
+          // A cached blob that no longer opens vouches for nothing: the served wrap is then a proposal, not adopted.
+          if (!this.account.holdPersonalChange(cached)) this.account.holdPersonalProposal(designation);
         } else {
           // A9 (M-2): nothing on this browser vouches for the served wrap (a designation for a third vault, or one this
           // browser has not merged state for): a proposal, never a silent adoption. Nothing is in force.
@@ -781,14 +808,19 @@ export class VaultStore {
       case "unreadable-cached":
         this.personalVaultChoices = null;
         return;
-      case "unreadable":
-        if (cached) this.account.applyCachedPersonalWrap(cached);
-        this.personalVaultChoices = (this.account.personalStatus as string) === "unreadable-cached" ? null : [];
+      // A11 (c00): the cached wrap is checked against the designation here too: withholding the wrap, or serving junk,
+      // must not put in force what serving the cached wrap itself would only propose.
+      case "unreadable": {
+        if (cached) this.account.applyCachedPersonalWrap(cached, designation);
+        const st = this.account.personalStatus as string;
+        this.personalVaultChoices = st === "unreadable-cached" || st === "proposed" ? null : [];
         return;
+      }
       case "absent": {
         if (cached) {
-          this.account.applyCachedPersonalWrap(cached);
-          this.personalVaultChoices = (this.account.personalStatus as string) === "withheld" ? null : [];
+          this.account.applyCachedPersonalWrap(cached, designation);
+          const st = this.account.personalStatus as string;
+          this.personalVaultChoices = st === "withheld" || st === "proposed" ? null : [];
           return;
         }
         this.personalVaultChoices = personalVaultChoices(this.personalCandidates(), this.clientState.get("personal.last"));
@@ -1130,16 +1162,16 @@ export class VaultStore {
 
   /** Pin `served` iff the human-typed code (THEIR 32 hex, read from THEIR screen) matches SHA-256 of the served
    *  key. Null (nothing pinned) on a mismatch. */
-  async verifyMemberTyped(served: UserLookupResponse, typed: string): Promise<Contact | null> {
-    const c = await pinFromTyped(typed, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
+  async verifyMemberTyped(served: UserLookupResponse, typed: string, verifiedEmail?: string | null): Promise<Contact | null> {
+    const c = await pinFromTyped(typed, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now(), verifiedEmail);
     if (!c) return null;
     await this.accountState.pin(c);
     return c;
   }
 
   /** Pin `served` iff a scanned identity QR matches the served key at FULL length. */
-  async verifyMemberQr(served: UserLookupResponse, qrPayload: string): Promise<Contact | null> {
-    const c = await pinFromQr(qrPayload, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
+  async verifyMemberQr(served: UserLookupResponse, qrPayload: string, verifiedEmail?: string | null): Promise<Contact | null> {
+    const c = await pinFromQr(qrPayload, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now(), verifiedEmail);
     if (!c) return null;
     await this.accountState.pin(c);
     return c;
@@ -1214,6 +1246,14 @@ export class VaultStore {
   }
 
   // ---- owner side (§1.5, §8.2 step 4) ----
+
+  /** A11 (q56): this vault's key is one this account sealed for itself (its own UVK wrap) and did not receive as a
+   *  member: no signed grant, no legacy seal, not member-granted. Provenance only; no server label is read. */
+  private isOwnCreatedKey(vaultId: string): boolean {
+    const src = this.account.keySource(vaultId);
+    return this.account.keyFromOwnUvkWrap(vaultId) && !this.account.keyArrivedByMemberGrant(vaultId) &&
+      src !== "signed-grant" && src !== "legacy-seal";
+  }
 
   memberPinState(userId: string, servedIdentityPub: string): MemberPinState {
     if (!this.accountState.currentPin(userId)) return "needs-verification";
@@ -1363,14 +1403,31 @@ export class VaultStore {
     await this.accountState.update((d) => withIssued(d, vaultId, pin.userId, VaultStore.keyHash(pin.identityPub), Date.now())).catch(() => {});
   }
 
+  /**
+   * Who an add for `userId` (the lookup's answer to `typedEmail`) would reach, by this account's pins (security review
+   * 2026-10, branch A11, q00): `match` (the pin records the typed email), `legacy` (a pre-A11 pin: the confirm must
+   * show the PIN's label and fingerprint and the human must confirm it), `mismatch` (refused: the pin, or another pin,
+   * says the typed email belongs to someone else), `unpinned` (no pin current here). The add-member screen renders from
+   * this, never from the lookup's `displayName`; {@link addVaultMember} re-checks it.
+   */
+  addMemberIdentity(typedEmail: string, userId: string): AddIdentity {
+    const c = addIdentityCheck(userId, typedEmail, this.accountState.contacts());
+    if (c.kind === "mismatch" || c.kind === "unpinned") return c;
+    return this.accountState.isCurrent(c.pin) ? c : { kind: "unpinned" };
+  }
+
   /** Add `userId` to `vaultId` (owner, §1.5). A human picked this vault and member on the add form (rule a). Only a
    *  vault this account OWNS by its own evidence ({@link OwnershipNotConfirmedError}) and a member PINNED and current
    *  here ({@link MemberNotVerifiedError}); the v2 grant and the dual-sent v1 seal are both sealed to the PIN key, and
    *  the pair is recorded. */
-  async addVaultMember(vaultId: string, userId: string, role: string): Promise<void> {
+  async addVaultMember(vaultId: string, userId: string, role: string, verified: AddMemberIdentity): Promise<void> {
     this.requireOwned(vaultId);
+    // A11 (q00): the recipient is the person the human VERIFIED for the email they typed, never the lookup's answer.
+    const identity = this.addMemberIdentity(verified.typedEmail, userId);
+    if (identity.kind === "mismatch") throw new MemberIdentityMismatchError(userId);
     const pin = this.accountState.currentPin(userId);
-    if (!pin) throw new MemberNotVerifiedError(userId);
+    if (!pin || identity.kind === "unpinned") throw new MemberNotVerifiedError(userId);
+    if (identity.kind === "legacy" && verified.legacyPinConfirmed !== true) throw new LegacyPinConfirmRequiredError(userId);
     const signedGrant = this.account.buildSignedGrant(vaultId, pin);
     const sealedVk = this.account.wrapVkForMember(fromB64(pin.identityPub), vaultId);
     await this.api.addVaultMember(vaultId, { userId, role, sealedVk, signedGrant });
@@ -1628,9 +1685,10 @@ export class VaultStore {
     // §4.2: best effort, never fails the sync. Then root cause A §4.3 (A5 review H-1): local, never mints — and since A9
     // (M-2) it reads the account's designation, so the refresh comes FIRST; a designation this browser recorded
     // (register, an accepted change) is written back by one more refresh.
-    const mergedStateBefore = this.accountState.hasHighWater(); // A9 review LOW-4: before THIS sync's refresh could set it
+    // A11 (c01): the decision no longer reads whether this browser merged account state before the refresh; a
+    // designation moving away from the cached vault is always the human's call.
     await this.accountState.refresh().catch(() => {});
-    this.decidePersonalLocally(mergedStateBefore);
+    this.decidePersonalLocally();
     if (this.designationDirty) {
       this.designationDirty = false;
       await this.accountState.refresh().catch(() => {});
@@ -1858,7 +1916,10 @@ export class VaultStore {
       // a vault THIS account just created as a brand-new grant. "You were added to X" would be a
       // lie there. Ownership handed TO us arrives on a vault we already held (promotion), so it is
       // already excluded by heldBefore — and it emits its own transfer-complete notice regardless.
-      if (this.account.roleFor(vaultId) === "owner") continue;
+      // Security review 2026-10, branch A11 (q56): decided by KEY PROVENANCE, never the served row's `role` label
+      // (the server chooses it, and "owner" used to make a verified adoption silent): quiet only when the key opened
+      // from our own UVK wrap and did not arrive by a member grant (no signed grant, no seal).
+      if (this.isOwnCreatedKey(vaultId)) continue;
       this.addedNoticed.add(vaultId);
       // §1.6: a verified grant names the PINNED contact who signed it; a legacy add names no one.
       const sender = this.account.signedGrantSender(vaultId);
@@ -2357,9 +2418,33 @@ export class VaultStore {
    * reload, and the cursor (§D.6: the F31 rollback guards now protect ACROSS restarts)
    * plus the "vault as of last sync <t>" stamp restore.
    */
+  /** A11 (c12): remove the cached rows the wire grammar refused (everything NOT in `kept`). A vault id that is not an
+   *  id drops its whole cached vault (grant, row, items); an item row with a bad id is deleted on its own. */
+  private async purgeMalformedCachedRows(kept: { vaults: WireVault[]; grants: WireGrant[]; items: WireItem[] }): Promise<void> {
+    const keptVaults = new Set(kept.vaults.map((v) => v.vaultId));
+    const keptGrants = new Set(kept.grants.map((g) => `${g.vaultId}\u0000${g.userId}`));
+    const keptItems = new Set(kept.items.map((i) => `${i.itemId}\u0000${i.vaultId}`));
+    const badVaults = new Set<string>();
+    for (const v of await this.cache.vaults()) if (!keptVaults.has(v.vaultId)) badVaults.add(v.vaultId);
+    for (const g of await this.cache.grants()) if (!keptGrants.has(`${g.vaultId}\u0000${g.userId}`)) badVaults.add(g.vaultId);
+    for (const id of badVaults) await this.cache.dropVault(id);
+    for (const i of await this.cache.envelopes()) if (!keptItems.has(`${i.itemId}\u0000${i.vaultId}`)) await this.cache.deleteItem(i.itemId);
+  }
+
   async hydrate(): Promise<void> {
+    // Security review 2026-10, branch A11 (c12): the cached rows run the SAME wire id grammar a live /sync answer does
+    // (api/wireids.ts). A row a pre-A10 server planted with a malformed id would otherwise reach the throwing
+    // trust-record encoders and abort this hydrate and every later sync until sign-out. Such a row is dropped here,
+    // removed from the cache (best effort), and reported once as the `bad-id` notice; nothing aborts.
+    const cachedRows = sanitizeSync({
+      rev: 0, full: true, vaults: await this.cache.vaults(), grants: await this.cache.grants(), items: await this.cache.envelopes(), removedGrants: [],
+    });
+    if (cachedRows.refused.length > 0) {
+      this.pushNotice({ id: this.account.newItemId(), vaultId: "", vaultName: "", kind: "bad-id", parkedCount: cachedRows.refused.length, reason: "cache" });
+      await this.purgeMalformedCachedRows(cachedRows.value).catch(() => {});
+    }
     // Grants first: keys must open before vault names or items can decrypt.
-    for (const grant of await this.cache.grants()) {
+    for (const grant of cachedRows.value.grants) {
       try {
         this.account.addGrant(grant);
         this.grantWireByVault.set(grant.vaultId, grant);
@@ -2371,7 +2456,7 @@ export class VaultStore {
         if (!this.account.keyUnreadable(grant.vaultId)) this.undecryptableGrants.add(grant.vaultId);
       }
     }
-    for (const vault of await this.cache.vaults()) {
+    for (const vault of cachedRows.value.vaults) {
       this.vaultsById.set(vault.vaultId, vault);
     }
     // Root cause A §4.3: the personal vault came from the personal wrap at unlock; only without one does
@@ -2381,7 +2466,7 @@ export class VaultStore {
     // its homes here, persisted by the next pull); a cached row contradicting a home is quarantined, never applied.
     for (const h of await this.cache.itemHomes()) this.homes.set(h.itemId, h.vaultId);
     for (const q of await this.cache.quarantined()) this.quarantinedRows.set(q.itemId, q);
-    for (const item of await this.cache.envelopes()) {
+    for (const item of cachedRows.value.items) {
       if (this.admitHome(item)) this.applyWireItem(item);
     }
     await this.freezeOnce();
@@ -4253,15 +4338,18 @@ export class VaultStore {
   private bulkGestures = new Map<string, MoveGesture>();
 
   async copyAllToPersonal(vaultId: string, onProgress?: (done: number, total: number) => void): Promise<{ copied: number }> {
+    // A11 (c08): with no personal vault in force there is no "Personal" to copy into: refuse with the §4.3 copy
+    // ("Choose a vault for this item.") instead of sealing under vault "" (which surfaced as a crypto error).
+    const personal = this.personalVaultOrRefuse();
     const items = [...this.itemsById.values()].filter((it) => it.vaultId === vaultId);
     let copied = 0;
     for (const it of items) {
-      const gKey = `${vaultId}|${it.itemId}|${this.account.personalVaultId}`;
+      const gKey = `${vaultId}|${it.itemId}|${personal}`;
       let g = this.bulkGestures.get(gKey);
       if (!g || g.sourceRev !== it.rev) {
         // New gesture only for a first attempt or when the source content changed since the
         // memoized attempt (a different rev IS different content — copy that instead).
-        g = this.newMoveGesture(it.itemId, this.account.personalVaultId, false);
+        g = this.newMoveGesture(it.itemId, personal, false);
         this.bulkGestures.set(gKey, g);
       }
       await this.runGesture(g, undefined, false);

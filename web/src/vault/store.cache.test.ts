@@ -369,7 +369,8 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     const fv3Id = s.owner.account.newItemId();
     const fv3: WireItem = { ...s.item, itemId: fv3Id, rev: 6, formatVersion: 3 }; // held key, fails closed pre-open
     const foreignId = s.owner.account.newItemId();
-    const foreign: WireItem = { ...s.item, itemId: foreignId, vaultId: "vault-with-no-key", rev: 6 };
+    // A UUID (A11 c12): hydrate runs the wire id grammar over cached rows, so a non-UUID vault id is dropped there.
+    const foreign: WireItem = { ...s.item, itemId: foreignId, vaultId: "00000000-0000-4000-8000-00000000f0f0", rev: 6 };
     const pull: SyncResponse = {
       rev: 7,
       full: true,

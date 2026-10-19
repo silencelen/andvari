@@ -59,7 +59,7 @@ export type UnlockResult =
 
 export async function unlockExistingSession(
   client: ApiClient,
-  session: Pick<Session, "userId" | "isAdmin">,
+  session: Pick<Session, "userId" | "isAdmin"> & { email?: string },
   password: string,
   /** Injected for tests; defaults to the §F.1/§E.3.3 gated factory (durable on a private origin,
    *  NullCache on the public break-glass origin / opted-out / unsupported — {@link gatedOpenCache}). */
@@ -140,8 +140,9 @@ export async function unlockExistingSession(
     // the (offline: cached) identityPub. IdentityMismatch is tampering, never "wrong password".
     let account: Account;
     try {
-      account = await Account.unlock(userId, password, keys, loadSelfIdentityPub(userId));
-      recordSelfIdentityPub(userId, account);
+      // A11 (q08): the §2.4 pin is also found by the session's typed email, not only the server's userId.
+      account = await Account.unlock(userId, password, keys, loadSelfIdentityPub(userId, session.email));
+      recordSelfIdentityPub(userId, account, session.email);
     } catch (e) {
       // R41: the eviction must happen BEFORE close() — a closed handle no-ops every write (§D.2a),
       // which would have made the clear silently do nothing.

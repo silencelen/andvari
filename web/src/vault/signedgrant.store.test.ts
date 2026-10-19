@@ -405,16 +405,16 @@ describe("A6 — signed grants (VaultStore)", () => {
     await store.sync();
     // A6b: the owner's own evidence of ownership (seeded directly here; in the app: the creation record, a transfer
     // accept, or the password-reauthed "You own <vault>?").
-    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer")).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true })).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
     await store.accountState.update((d) => withOwned(d, w.vaultId, 1));
-    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer")).rejects.toBeInstanceOf(MemberNotVerifiedError);
+    await expect(store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true })).rejects.toBeInstanceOf(MemberNotVerifiedError);
     expect(server.adds).toEqual([]);
 
     await store.accountState.pin(pinOf(w.member, "Member"));
     expect(store.memberPinState(w.member.userId, w.member.identityPub)).toBe("pinned");
     expect(store.memberPinState(w.member.userId, toB64(randomBytes(32)))).toBe("key-changed");
 
-    await store.addVaultMember(w.vaultId, w.member.userId, "writer");
+    await store.addVaultMember(w.vaultId, w.member.userId, "writer", { typedEmail: "member@example.com", legacyPinConfirmed: true });
     expect(server.adds).toHaveLength(1);
     const add = server.adds[0]!.body;
     const me = boxKeypairFromSeed(await seedOf(w.member));
@@ -1273,3 +1273,93 @@ describe("A10: structured trust records and the wire-boundary id check (store le
 
 // keep imports used even where only types matter
 void seal;
+
+// Security review 2026-10, branch A11 (q56, LOW): the §1.6 "You were added to <vault>" notice was skipped whenever the
+// served grant row said role=owner, a plaintext label the server chooses, so a verified adoption could be made silent.
+// The exemption (a vault this account created, seen by its second device) is now decided by KEY PROVENANCE: the key
+// opened from our own UVK wrap and did not arrive by a member grant. The label decides nothing.
+describe("A11 q56 — the 'added' notice is decided by key provenance, not the role label", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  it("a verified grant adopted on a row LABELLED owner still announces itself", async () => {
+    const w = await world();
+    const server = new FakeServer(feed(w, 5, null));
+    const device = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), device, undefined, memoryClientState());
+    await store.sync();
+    expect(await store.verifyMemberTyped(served(w.owner, "Owner"), await w.owner.account.identityFingerprintShort())).not.toBeNull();
+    server.feed = feed(w, 9, { ...memberRow(w, 9, v1Seal(w), ownerSigned(w)), role: "owner" });
+    await store.sync();
+    expect(device.keySource(w.vaultId)).toBe("signed-grant");
+    expect(store.notices().filter((n) => n.vaultId === w.vaultId).map((n) => n.kind)).toEqual(["added"]);
+  });
+
+  it("this account's own vault on its second device stays quiet, whatever the row's label says", async () => {
+    for (const role of ["owner", "writer"]) {
+      const w = await world();
+      const o = w.owner;
+      const base = (rev: number, withShared: boolean): SyncResponse => ({
+        rev, full: true,
+        vaults: withShared ? [personalRow(o), sharedRow(w)] : [personalRow(o)],
+        grants: withShared
+          ? [personalGrant(o), { vaultId: w.vaultId, userId: o.userId, role, wrappedVk: w.ownerWrap, rev, sealedVk: null }]
+          : [personalGrant(o)],
+        items: [], removedGrants: [],
+      });
+      const server = new FakeServer(base(5, false));
+      const device = await unlock(o);
+      const store = new VaultStore(server.asClient(), device, undefined, memoryClientState());
+      await store.sync();
+      server.feed = base(9, true);
+      await store.sync();
+      expect(device.hasVault(w.vaultId), role).toBe(true);
+      expect(store.notices().filter((n) => n.vaultId === w.vaultId && n.kind === "added"), role).toEqual([]);
+    }
+  });
+});
+
+// Security review 2026-10, branch A11 (c12, LOW): cached IndexedDB rows skipped the A10 id grammar (it runs only on the
+// live /sync answer). A non-UUID vaultId stored before A10 reached the throwing trust-record encoders, so hydrate() and
+// every sync() aborted until sign-out. Hydrate now runs the same wire grammar over the cached rows: a malformed row is
+// dropped (and removed from the cache) with one `bad-id` notice, and nothing aborts.
+describe("A11 c12 — cached rows run the wire id grammar on hydrate", () => {
+  beforeAll(async () => {
+    await initSodium();
+  });
+  beforeEach(() => {
+    g.indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+  });
+
+  it("a pre-A10 cached grant/vault/item with a malformed id is dropped with a bad-id notice; hydrate and sync complete", async () => {
+    const w = await world();
+    const bad = "legacy-vault-1"; // what a pre-A10 server could have planted
+    const badSeal = toB64(sealSharedGrant(fromB64(w.member.identityPub), bad, w.vk));
+    const oldCache = (await openVaultCache(w.member.userId)) as IdbVaultCache;
+    await oldCache.applyPull((b) => {
+      b.upsertGrant(personalGrant(w.member));
+      b.upsertVault(personalRow(w.member));
+      b.upsertGrant({ vaultId: bad, userId: w.member.userId, role: "writer", wrappedVk: "", rev: 4, sealedVk: badSeal });
+      b.upsertVault({ vaultId: bad, type: "shared", rev: 4, metaBlob: w.metaBlob, createdAt: 0 });
+      b.upsertItem({ itemId: "not|an-id", vaultId: w.member.personalVaultId, rev: 4, createdAt: 1, updatedAt: 1, deleted: false, conflict: false, formatVersion: 1, attachmentIds: [], blob: "b" });
+      b.setCursor(4);
+    });
+    const server = new FakeServer(feed(w, 9, null));
+    const device = await unlock(w.member);
+    const store = new VaultStore(server.asClient(), device, (await openVaultCache(w.member.userId)) as IdbVaultCache, memoryClientState());
+    await expect(store.hydrate()).resolves.toBeUndefined();
+    expect(device.hasVault(bad)).toBe(false);
+    const badId = store.notices().filter((n) => n.kind === "bad-id");
+    expect(badId).toHaveLength(1);
+    expect(badId[0]!.reason).toBe("cache");
+    await expect(store.sync()).resolves.not.toThrow();
+    const after = (await openVaultCache(w.member.userId)) as IdbVaultCache;
+    expect((await after.grants()).map((x) => x.vaultId)).not.toContain(bad);
+    expect((await after.vaults()).map((x) => x.vaultId)).not.toContain(bad);
+    expect((await after.envelopes()).map((x) => x.itemId)).not.toContain("not|an-id");
+  });
+});
