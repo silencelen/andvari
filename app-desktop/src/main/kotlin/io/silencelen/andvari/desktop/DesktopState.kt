@@ -381,6 +381,9 @@ class DesktopState(
         // migrateDefaultOnce also carries an already-adopted legacy namespace to the public key as §6.2
         // defense-in-depth (see DesktopSessionStore.carryLegacyNamespaceToPublic).
         store.adoptNamespacesOnce()
+        // A11 (q08): bind a pre-A11 self-identity pin to the saved session's email while the session still exists
+        // (a revocation would otherwise clear the session before the next unlock could bind it).
+        runCatching { store.bindLegacySelfIdentity() }
         // Inactivity auto-lock watcher (spec 01 §8, 1 s resolution) + the spec 03 §6 poll
         // (every 5 min while unlocked). Both live on the window's scope: they die with it.
         scope.launch {
@@ -1273,9 +1276,10 @@ class DesktopState(
                 }
             }
             val acct = withContext(Dispatchers.Default) {
-                Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.loadSelfIdentityPub(originKey(baseUrl), s.userId))
+                // A11 (q08): the pin is found by the email the user TYPED, not only the server's userId.
+                Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPubFor(originKey(baseUrl), email, s.userId))
             }
-            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, acct)
+            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, email, acct)
             store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
@@ -1330,9 +1334,9 @@ class DesktopState(
         }
         // KDF off the UI thread (argon2id 64 MiB — the unlock spinner must animate).
         val acct = withContext(Dispatchers.Default) {
-            Account.unlock(session.userId, password, keys, selfIdentityPub = store.loadSelfIdentityPub(nsKey, session.userId))
+            Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPubFor(nsKey, session.email, session.userId))
         }
-        store.recordSelfIdentityPub(nsKey, session.userId, acct)
+        store.recordSelfIdentityPub(nsKey, session.userId, session.email, acct)
         bind(a, acct)
         escrowStale = keys.escrowStale; escrowFingerprint = keys.escrowFingerprint; escrowNeedsV2 = keys.escrowNeedsV2
         runCatching { syncNow(engine!!) }.onFailure {
@@ -1447,7 +1451,7 @@ class DesktopState(
             commitPendingSwitch()
             store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.userId, s.accountKeys)
-            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, acct)
+            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, email, acct)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
@@ -2656,9 +2660,10 @@ class DesktopState(
     suspend fun lookupHouseholdMember(email: String): io.silencelen.andvari.core.model.UserLookupResponse =
         requireNotNull(engine) { "locked" }.lookupMember(email)
 
-    /** Pins ONLY when the typed 32 hex match the served key; null = mismatch, nothing pinned. */
-    suspend fun verifyHouseholdMember(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String): io.silencelen.andvari.core.client.Contact? =
-        requireNotNull(engine) { "locked" }.verifyMemberTyped(served, typed)
+    /** Pins ONLY when the typed 32 hex match the served key; null = mismatch, nothing pinned. [lookedUpEmail] (A11, q00)
+     *  is the address the human typed to find them, recorded on the pin for the add-member identity check. */
+    suspend fun verifyHouseholdMember(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String, lookedUpEmail: String? = null): io.silencelen.andvari.core.client.Contact? =
+        requireNotNull(engine) { "locked" }.verifyMemberTyped(served, typed, lookedUpEmail)
 
     suspend fun unpinHouseholdMember(userId: String) {
         requireNotNull(engine) { "locked" }.unpinMember(userId)

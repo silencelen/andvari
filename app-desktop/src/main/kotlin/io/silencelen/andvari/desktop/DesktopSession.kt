@@ -287,10 +287,56 @@ class DesktopSessionStore(
     fun loadSelfIdentityPub(key: String, userId: String): ByteArray? =
         io.silencelen.andvari.core.client.SelfIdentityPin.decode(runCatching { selfIdentityFile(key, userId).readText() }.getOrNull())
 
-    /** Record the pin once, from an unlock that passed; never overwritten afterwards. */
-    fun recordSelfIdentityPub(key: String, userId: String, account: io.silencelen.andvari.core.client.Account) {
+    /** Record the pin once, from an unlock that passed; never overwritten afterwards. Also binds the email the user
+     *  TYPED (A11, q08) to this (userId, identityPub), once. */
+    fun recordSelfIdentityPub(key: String, userId: String, email: String, account: io.silencelen.andvari.core.client.Account) {
         val f = selfIdentityFile(key, userId)
         if (!f.exists()) f.writeTextOwnerOnly(io.silencelen.andvari.core.client.SelfIdentityPin.encode(account))
+        writeBindingOnce(key, email) { io.silencelen.andvari.core.client.SelfIdentityPin.encodeBinding(userId, account) }
+    }
+
+    // ---- A11 (q08): the self-identity pin bound to the email the user typed ----
+    //
+    // Security review 2026-10, branch A11: [selfIdentityFile] is keyed by the server-chosen login userId, so a server
+    // that answers the same email with a new userId met a pin miss and its identity became the new pin. The binding
+    // lives in `ns/<originKey>/self-identity-by-email/<sha256(normalised email)>` (a userId dir is a UUID, so the name
+    // cannot collide), holds `<userId>\n<identityPub>` and, like the pin, survives sign-out, revocation and purges.
+
+    private fun bindingFile(key: String, email: String): File {
+        val norm = io.silencelen.andvari.core.client.SelfIdentityPin.normalizeEmail(email)
+        val h = java.security.MessageDigest.getInstance("SHA-256").digest(norm.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        return File(File(File(File(dir, "ns"), pathSafe(key)), "self-identity-by-email"), h)
+    }
+
+    private fun writeBindingOnce(key: String, email: String, record: () -> String) {
+        if (email.isBlank()) return
+        val f = bindingFile(key, email)
+        if (f.exists()) return
+        f.parentFile.mkdirsOwnerOnly()
+        f.writeTextOwnerOnly(record())
+    }
+
+    /**
+     * The §2.4 pin for an unlock of [userId] (server-supplied) that the user reached by typing [email] on origin
+     * [key]. Throws the security-fault CryptoException when this device already bound [email] to another userId
+     * (or its two records disagree). Binds a pre-A11 pin of the saved session first ([bindLegacySelfIdentity]).
+     */
+    fun selfIdentityPubFor(key: String, email: String, userId: String): ByteArray? {
+        bindLegacySelfIdentity()
+        val binding = if (email.isBlank()) null else io.silencelen.andvari.core.client.SelfIdentityPin.decodeBinding(
+            runCatching { bindingFile(key, email).readText() }.getOrNull(),
+        )
+        return io.silencelen.andvari.core.client.SelfIdentityPin.resolve(binding, userId, loadSelfIdentityPub(key, userId))
+    }
+
+    /** Migration (A11): bind the saved session's pre-A11 userId-keyed pin to the session's email, once. Called at
+     *  startup and before every pin read, so a pin carries over while its session still exists. Idempotent. */
+    fun bindLegacySelfIdentity() {
+        val s = load() ?: return
+        if (!io.silencelen.andvari.core.model.WireIds.isUuid(s.userId)) return
+        val key = originKey(s.baseUrl)
+        val pub = loadSelfIdentityPub(key, s.userId) ?: return
+        writeBindingOnce(key, s.email) { s.userId + "\n" + io.silencelen.andvari.core.crypto.Bytes.toB64(pub) }
     }
 
     /**
