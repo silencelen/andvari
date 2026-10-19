@@ -73,7 +73,7 @@ fun HouseholdCard(vm: AndvariViewModel) {
             if (contacts.isEmpty()) Text("Nobody yet.", style = MaterialTheme.typography.bodySmall)
             for (c in contacts) {
                 val here = if (vm.householdContactConfirmedHere(c)) "" else " · verify again on this device"
-                Text("${c.label} · ${methodLabel(c.method)}$here", style = MaterialTheme.typography.bodyMedium)
+                Text("${c.email ?: c.label} · the name shown when you verified them: “${c.label}” · ${methodLabel(c.method)}$here", style = MaterialTheme.typography.bodyMedium)
                 TextButton(onClick = {
                     scope.launch {
                         err = runCatching { vm.unpinHouseholdMember(c.userId) }.exceptionOrNull()?.let { "Couldn't remove it. Try again." }
@@ -99,6 +99,8 @@ private fun VerifyMemberDialog(vm: AndvariViewModel, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     var email by remember { mutableStateOf("") }
     var served by remember { mutableStateOf<UserLookupResponse?>(null) }
+    /** A11 (q00): the address the human typed for [served], recorded on the pin (never a server-reported one). */
+    var lookedUpEmail by remember { mutableStateOf<String?>(null) }
     var typed by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var err by remember { mutableStateOf<String?>(null) }
@@ -135,11 +137,12 @@ private fun VerifyMemberDialog(vm: AndvariViewModel, onDone: () -> Unit) {
                     err = null
                     val s = served
                     if (s == null) {
-                        runCatching { vm.lookupHouseholdMember(email.trim()) }
-                            .onSuccess { r -> served = r }
+                        val typedEmail = email.trim()
+                        runCatching { vm.lookupHouseholdMember(typedEmail) }
+                            .onSuccess { r -> served = r; lookedUpEmail = typedEmail }
                             .onFailure { err = "No active account has that email, or the server is unreachable." }
                     } else {
-                        val c = runCatching { vm.verifyHouseholdMember(s, typed) }.getOrNull()
+                        val c = runCatching { vm.verifyHouseholdMember(s, typed, lookedUpEmail) }.getOrNull()
                         if (c != null) onDone()
                         else err = "That code doesn't match the key this server holds for them. If they read it correctly from their own screen, STOP: do not share with this account until your admin checks it."
                     }

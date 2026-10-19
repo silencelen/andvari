@@ -176,7 +176,7 @@ class FakeServer {
   }
 }
 
-const pinOf = (e: Enrolled, label: string): Contact => ({ userId: e.userId, identityPub: e.identityPub, label, verifiedAt: 1000, method: "typed" });
+const pinOf = (e: Enrolled, label: string): Contact => ({ userId: e.userId, identityPub: e.identityPub, label, verifiedAt: 1000, method: "typed", email: `${label.toLowerCase()}@example.com` }); // A11: the ceremony records the typed email
 const personalRow = (e: Enrolled): WireVault => ({ vaultId: e.personalVaultId, type: "personal", rev: 2, metaBlob: e.personalMeta, createdAt: 0 });
 const personalGrant = (e: Enrolled): WireGrant => ({ vaultId: e.personalVaultId, userId: e.userId, role: "owner", wrappedVk: e.personalWrappedVk, rev: 2, sealedVk: null });
 const summary = (e: Enrolled, name: string, role: string, legacy = false): VaultMemberSummary =>
@@ -479,7 +479,7 @@ describe("A9 — second API-review round (VaultStore / Account)", () => {
     const member = await enroll("a9-member");
     const { s, server, vaultId } = await ownerWithCreatedVault(owner);
     await s.accountState.pin(pinOf(member, "Member"));
-    await s.addVaultMember(vaultId, member.userId, "writer");
+    await s.addVaultMember(vaultId, member.userId, "writer", { typedEmail: "member@example.com" });
     const rec = s.accountState.issued(vaultId, member.userId)!;
     expect(rec).not.toBeNull();
     server.members[vaultId] = [summary(owner, "Owner", "owner"), summary(member, "Member", "writer", true)];
@@ -501,7 +501,7 @@ describe("A9 — second API-review round (VaultStore / Account)", () => {
     const localA = memoryClientState();
     const { s: a, server, vaultId } = await ownerWithCreatedVault(owner, localA);
     await a.accountState.pin(pinOf(member, "Member"));
-    await a.addVaultMember(vaultId, member.userId, "writer");
+    await a.addVaultMember(vaultId, member.userId, "writer", { typedEmail: "member@example.com" });
     const withRecord = server.accountStateBlob;
     await a.removeVaultMember(vaultId, member.userId);
     expect(server.removals).toHaveLength(1);

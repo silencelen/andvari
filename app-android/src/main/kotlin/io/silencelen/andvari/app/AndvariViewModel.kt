@@ -1093,8 +1093,8 @@ class AndvariViewModel(
                 throw e
             } catch (t: Throwable) { a.close(); throw t }
             val acct = try {
-                withContext(Dispatchers.Default) { Account.unlockWithUvk(userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(userId)) }
-                    .also { store.recordSelfIdentityPub(userId, it) }
+                withContext(Dispatchers.Default) { Account.unlockWithUvk(userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(session.email, userId)) }
+                    .also { store.recordSelfIdentityPub(userId, session.email, it) }
             } catch (t: Throwable) {
                 a.close()
                 // §5: seed won't open under the recovered UVK → wipe (stale/foreign); an identityPub
@@ -1636,8 +1636,9 @@ class AndvariViewModel(
                     else -> throw e
                 }
             }
-            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPub(s.userId)) }
-            store.recordSelfIdentityPub(s.userId, acct)
+            // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
+            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPub(email, s.userId)) }
+            store.recordSelfIdentityPub(s.userId, email, acct)
             store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             bind(a, acct)
@@ -1706,8 +1707,8 @@ class AndvariViewModel(
             }
             val acct = try {
                 // KDF off the Main thread (argon2id 64 MiB — the unlock spinner must animate).
-                withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.userId)) }
-                    .also { store.recordSelfIdentityPub(session.userId, it) }
+                withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.email, session.userId)) }
+                    .also { store.recordSelfIdentityPub(session.userId, session.email, it) }
             } catch (t: Throwable) { a.close(); throw t }
             // F74 (review [1]): bind() itself can throw — sqliteVaultCache open + SyncEngine
             // hydrate() do raw cache reads, and a corrupt vault-<userId>.db throws there. The
@@ -1880,7 +1881,7 @@ class AndvariViewModel(
             recoveryPieceId = s.recoveryPieceId
             store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
-            store.recordSelfIdentityPub(s.userId, acct)
+            store.recordSelfIdentityPub(s.userId, email, acct)
             bind(a, acct)
             // §4.1 rule 3 (B2-6): enrollment SUCCEEDED — COMMIT the pending invite switch. Clearing
             // the uncommitted marker is the commit (baseUrl already points here), and it leaves the
@@ -3032,9 +3033,10 @@ class AndvariViewModel(
     suspend fun lookupHouseholdMember(email: String): io.silencelen.andvari.core.model.UserLookupResponse =
         requireNotNull(engine) { "locked" }.lookupMember(email)
 
-    /** Pins ONLY when the typed 32 hex match the served key; null = mismatch, nothing pinned. */
-    suspend fun verifyHouseholdMember(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String): io.silencelen.andvari.core.client.Contact? =
-        requireNotNull(engine) { "locked" }.verifyMemberTyped(served, typed)
+    /** Pins ONLY when the typed 32 hex match the served key; null = mismatch, nothing pinned. [lookedUpEmail] (A11, q00)
+     *  is the address the human typed to find them, recorded on the pin for the add-member identity check. */
+    suspend fun verifyHouseholdMember(served: io.silencelen.andvari.core.model.UserLookupResponse, typed: String, lookedUpEmail: String? = null): io.silencelen.andvari.core.client.Contact? =
+        requireNotNull(engine) { "locked" }.verifyMemberTyped(served, typed, lookedUpEmail)
 
     suspend fun unpinHouseholdMember(userId: String) {
         requireNotNull(engine) { "locked" }.unpinMember(userId)

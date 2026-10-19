@@ -61,14 +61,23 @@ const str = (o: Record<string, unknown>, k: string): string | null => (typeof o[
 const num = (o: Record<string, unknown>, k: string): number | null => (typeof o[k] === "number" && Number.isSafeInteger(o[k]) ? (o[k] as number) : null);
 const int = (s: string): number | null => (/^-?\d{1,16}$/.test(s) && Number.isSafeInteger(Number(s)) ? Number(s) : null);
 
-function parseArray(raw: string): unknown[] | null {
-  if (!raw.startsWith("[")) return null;
+/**
+ * The stored value as JSON: an array, `"wrong-shape"` for a value that PARSES as a JSON object (refused whole), or
+ * null when it does not parse as a JSON array or object, which makes it a legacy line record. Security review 2026-10, branch
+ * A11 (c11/c16): the A10 migration decided "JSON" from the first character, so a legacy record whose first line began
+ * with `[` or `{` (a server-planted id that sorted first) was refused whole and every well-formed line was lost.
+ */
+function parseJson(raw: string): unknown[] | "wrong-shape" | null {
+  let v: unknown;
   try {
-    const v: unknown = JSON.parse(raw);
-    return Array.isArray(v) ? v : null;
+    v = JSON.parse(raw);
   } catch {
     return null;
   }
+  if (Array.isArray(v)) return v;
+  // A JSON object is a record of another shape: refused. A bare scalar (`5`, `null`, a lone all-digit token) cannot
+  // be a record either, but it can be a one-line legacy set; the line grammar below decides it, row by row.
+  return v !== null && typeof v === "object" ? "wrong-shape" : null;
 }
 
 function sameKeys(o: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -78,12 +87,14 @@ function sameKeys(o: Record<string, unknown>, keys: readonly string[]): boolean 
 
 /**
  * Strict JSON first (exactly `keys` per object, every row through `fromJson`); otherwise the legacy line record
- * through `fromLine` over each line's `|` parts. A record that is neither (e.g. a JSON object, or an array a row
- * of which was refused) comes back without the refused rows and flagged for rewrite.
+ * through `fromLine` over each line's `|` parts (any value that does not parse as JSON, A11). A value that parses as
+ * JSON of another shape (an object, a number) is refused whole; an array a row of which was refused comes back
+ * without the refused rows. Both are flagged for rewrite.
  */
 function decode<T>(raw: string | null | undefined, keys: readonly string[], fromJson: (o: Record<string, unknown>) => T | null, fromLine: (p: string[]) => T | null): Decoded<T> {
   if (!raw) return { rows: [], rewrite: false };
-  const arr = parseArray(raw);
+  const arr = parseJson(raw);
+  if (arr === "wrong-shape") return { rows: [], rewrite: true }; // JSON of an unknown shape: refused
   if (arr) {
     const rows: T[] = [];
     let dropped = false;
@@ -95,7 +106,6 @@ function decode<T>(raw: string | null | undefined, keys: readonly string[], from
     }
     return { rows, rewrite: dropped };
   }
-  if (raw.startsWith("[") || raw.startsWith("{")) return { rows: [], rewrite: true }; // JSON of an unknown shape: refused
   const rows: T[] = [];
   for (const line of raw.split("\n")) {
     if (!line) continue;
@@ -114,7 +124,8 @@ function malformed(what: string, row: unknown): never {
 
 function decodeStrings(raw: string | null | undefined, accept: (s: string) => boolean): Decoded<string> {
   if (!raw) return { rows: [], rewrite: false };
-  const arr = parseArray(raw);
+  const arr = parseJson(raw);
+  if (arr === "wrong-shape") return { rows: [], rewrite: true };
   if (arr) {
     const rows: string[] = [];
     let dropped = false;
@@ -124,7 +135,6 @@ function decodeStrings(raw: string | null | undefined, accept: (s: string) => bo
     }
     return { rows: [...new Set(rows)], rewrite: dropped };
   }
-  if (raw.startsWith("[") || raw.startsWith("{")) return { rows: [], rewrite: true };
   return { rows: [...new Set(raw.split("\n").filter((l) => l.length > 0 && accept(l)))], rewrite: true };
 }
 

@@ -19,11 +19,11 @@ const w = v.wrap;
 const uvk = fromB64(w.uvkB64);
 const bg = readFileSync(fileURLToPath(new URL("./background.ts", import.meta.url)), "utf-8");
 
-test("fresh profile: a served wrap that opens is a proposal (no vault id), its key installed for reading", () => {
+test("fresh profile: a served wrap that opens is a proposal (no vault id), its key NOT installed (A11 q13)", () => {
   const keys = new Map<string, Uint8Array>();
   const p = pickPersonal({ vaultId: w.vaultId, wrappedVk: w.personalWrapB64 }, uvk, w.userId, keys);
   assert.deepEqual(p, { vaultId: "", source: "proposed", served: { vaultId: w.vaultId, wrappedVk: w.personalWrapB64 } });
-  assert.equal(toB64(keys.get(w.vaultId)!), w.vkB64, "items in that vault still decrypt; nothing seals under it by default");
+  assert.equal(keys.has(w.vaultId), false, "a proposal is used for nothing until accepted (personalwrap.inforce.test.ts)");
   // The cached path is unchanged: the same wrap, cached here before, is simply the personal wrap.
   assert.deepEqual(pickPersonal({ vaultId: w.vaultId, wrappedVk: w.personalWrapB64 }, uvk, w.userId, new Map(), { cached: { vaultId: w.vaultId, wrappedVk: w.personalWrapB64 } }), { vaultId: w.vaultId, source: "wrap" });
   // A superseded wrap for another vault, replayed to a fresh profile: a proposal too, never adopted.

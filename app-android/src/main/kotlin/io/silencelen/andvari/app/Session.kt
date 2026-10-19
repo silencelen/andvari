@@ -96,6 +96,9 @@ class SessionStore(context: Context) {
         // the constructor is the one choke point all of them share.
         migrateDefaultOnce(context.noBackupFilesDir)
         adoptNamespacesOnce(context.noBackupFilesDir)
+        // A11 (q08): bind a pre-A11 self-identity pin to the saved session's email (after the adoption, so it
+        // lands in the namespace the app will read).
+        runCatching { bindLegacySelfIdentity() }
     }
 
     var baseUrl: String
@@ -416,14 +419,33 @@ class SessionStore(context: Context) {
      * deliberately NOT removed by [clear] / [clearAccountKeys] / a revocation purge: an admin recovery
      * revokes every session first, and a pin wiped with the session would protect nothing.
      */
-    fun selfIdentityPub(userId: String): ByteArray? =
-        io.silencelen.andvari.core.client.SelfIdentityPin.decode(prefs.getString(ns(currentOriginKey(), "selfIdentityPub.$userId"), null))
-
-    /** Record the pin once, from an unlock that passed; never overwritten afterwards. */
-    fun recordSelfIdentityPub(userId: String, account: io.silencelen.andvari.core.client.Account) {
-        val k = ns(currentOriginKey(), "selfIdentityPub.$userId")
-        if (prefs.getString(k, null) == null) prefs.edit().putString(k, io.silencelen.andvari.core.client.SelfIdentityPin.encode(account)).apply()
+    fun selfIdentityPub(email: String, userId: String): ByteArray? {
+        bindLegacySelfIdentity()
+        return selfIdentityStore(currentOriginKey()).pinFor(email, userId)
     }
+
+    /** Record the pin once, from an unlock that passed; never overwritten afterwards. Also binds the email the
+     *  user TYPED (security review 2026-10, branch A11, q08) to this (userId, identityPub), once. */
+    fun recordSelfIdentityPub(userId: String, email: String, account: io.silencelen.andvari.core.client.Account) =
+        selfIdentityStore(currentOriginKey()).record(userId, email, account)
+
+    /**
+     * A11 (q08): the pre-A11 pin was keyed by the server-chosen login userId alone, so a server answering the same
+     * email with a new userId met a pin miss and its identity became the new pin. [selfIdentityPub] now also checks
+     * the email binding ([io.silencelen.andvari.core.client.SelfIdentityPin.KeyValueStore]); this migration binds
+     * the saved session's existing pin to its email while the session still exists (idempotent; called from init
+     * and before every read). Prefs writes are `commit()`ed so a binding cannot be lost to a crash.
+     */
+    fun bindLegacySelfIdentity() {
+        val userId = prefs.getString("userId", null) ?: return
+        val email = prefs.getString("email", null) ?: return
+        selfIdentityStore(currentOriginKey()).bindLegacy(userId, email)
+    }
+
+    private fun selfIdentityStore(originKey: String) = io.silencelen.andvari.core.client.SelfIdentityPin.KeyValueStore(
+        get = { prefs.getString(ns(originKey, it), null) },
+        put = { k, v -> prefs.edit().putString(ns(originKey, k), v).commit() },
+    )
 
     /** Drop the CURRENT origin's cached accountKeys. */
     fun clearAccountKeys() = clearAccountKeys(currentOriginKey())

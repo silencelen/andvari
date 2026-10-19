@@ -118,6 +118,27 @@ describe("trust records (A10)", () => {
     expect(decodeConsumedNonces(encodeConsumedNonces(nonces.rows)).rows).toEqual(nonces.rows);
   });
 
+  it("A11 (c11/c16): a legacy record whose first line starts with [ or { keeps its well-formed lines", () => {
+    // A server-planted id beginning with "[" that sorted first used to make the whole record look like JSON of an
+    // unknown shape, and the migration wiped every vouch, held key, grant tag and confirmed pin. Only a value that
+    // PARSES as JSON of the wrong shape is refused; anything that fails to parse is a legacy line record.
+    const vouches = decodeVouches([`[planted|${tagA}|confirmed`, `${v1}|${tagA}|frozen`, `${v2}|${tagB}|confirmed`].join("\n"));
+    expect(vouches.rewrite).toBe(true);
+    expect(vouches.rows).toEqual([{ vaultId: v1, tag: tagA, kind: "frozen" }, { vaultId: v2, tag: tagB, kind: "confirmed" }]);
+    expect(decodeHeldKeys(`{x|${tagA}\n${v1}|${tagA}`).rows).toEqual([{ vaultId: v1, tag: tagA }]);
+    expect(decodeIdSet(`[planted\n${v1}`).rows).toEqual([v1]);
+    expect(decodeTokenSet(`{bad\nAAAAAAAAAAAAAAAAAAAAAA`).rows).toEqual(["AAAAAAAAAAAAAAAAAAAAAA"]);
+    expect(decodeTokenSet("1234567890").rows).toEqual(["1234567890"]); // a one-line legacy set that happens to parse as a number
+    expect(decodeConfirmedPins(`[x|${tagA}\n${u1}|${tagA}`).rows).toEqual([{ userId: u1, keyTag: tagA }]);
+    expect(decodeTombstones(`[x|${u1}|5\n${v1}|${u1}|5`).rows).toEqual([{ vaultId: v1, userId: u1, at: 5 }]);
+    expect(decodeConsumedNonces(`[x|AAAAAAAAAAAAAAAAAAAAAA|7\n${v1}|AAAAAAAAAAAAAAAAAAAAAA|7`).rows).toEqual([{ vaultId: v1, nonce: "AAAAAAAAAAAAAAAAAAAAAA", issuedAt: 7 }]);
+    // JSON that parses as an object is still refused whole; a bare scalar goes through the line grammar, which refuses it.
+    for (const bad of [`{"vaultId":"${v1}"}`, `{"a":1}`, "5", `"${v1}"`, "null"]) {
+      expect(decodeVouches(bad).rows, bad).toEqual([]);
+      expect(decodeIdSet(bad).rows, bad).toEqual([]);
+    }
+  });
+
   it("loadRecord re-persists a legacy record once, as JSON", () => {
     const store = new Map<string, string>([["k", `${v1}|${tagA}|confirmed\nbad`]]);
     const get = (k: string) => store.get(k) ?? null;

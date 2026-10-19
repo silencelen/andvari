@@ -308,10 +308,10 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(await accountC2.identityFingerprintShort()).toBe(await shortIdentityFingerprint(fromB64(lookedUp.identityPub)));
     // Root cause A (A6): each side verifies the other ONCE (the household ceremony: typed 32-hex code from the
     // other person's screen), then the owner's store signs a v2 grant to the PINNED key and dual-sends the v1 seal.
-    expect(await storeA.verifyMemberTyped(lookedUp, await accountC2.identityFingerprintShort()), "owner pins the invitee").not.toBeNull();
+    expect(await storeA.verifyMemberTyped(lookedUp, await accountC2.identityFingerprintShort(), inviteEmail), "owner pins the invitee").not.toBeNull();
     const ownerServed = await clientC2.userIdentity(account.userId);
     expect(await storeC2.verifyMemberTyped(ownerServed, await account.identityFingerprintShort()), "invitee pins the owner").not.toBeNull();
-    await storeA.addVaultMember(share.vaultId, sessionC.userId, "writer");
+    await storeA.addVaultMember(share.vaultId, sessionC.userId, "writer", { typedEmail: inviteEmail }); // A11: the pin records the typed email
 
     let shareBell = 0;
     let cOpen = false;

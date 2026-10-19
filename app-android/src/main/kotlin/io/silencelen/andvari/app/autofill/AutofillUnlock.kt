@@ -58,8 +58,8 @@ object AutofillUnlock {
             VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return@withLock it }
             val appContext = context.applicationContext
             val r = unlockLocked(appContext, store, session, VaultSession.UnlockProvenance.PASSWORD) { keys ->
-                Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.userId))
-                    .also { store.recordSelfIdentityPub(session.userId, it) }
+                Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.email, session.userId))
+                    .also { store.recordSelfIdentityPub(session.userId, session.email, it) }
             }
             // A1: a real master password was verified — stamp the 30-day window (even offline).
             store.stampFullPasswordUnlock(session.userId)
@@ -87,8 +87,8 @@ object AutofillUnlock {
         VaultSession.unlockMutex.withLock {
             VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return@withLock it }
             unlockLocked(context.applicationContext, store, session, VaultSession.UnlockProvenance.QUICK) { keys ->
-                Account.unlockWithUvk(session.userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(session.userId))
-                    .also { store.recordSelfIdentityPub(session.userId, it) }
+                Account.unlockWithUvk(session.userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(session.email, session.userId))
+                    .also { store.recordSelfIdentityPub(session.userId, session.email, it) }
             }.unlocked.also { AutofillHardLock.arm() }
         }
 

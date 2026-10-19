@@ -176,7 +176,7 @@ class SignedGrantEngineTest {
     }
 
     private fun served(e: Enrolled, name: String) = UserLookupResponse(e.userId, name, e.reg.identityPub)
-    private fun pinOf(e: Enrolled, label: String) = Contact(e.userId, e.reg.identityPub, label, 1_000, Contact.METHOD_TYPED)
+    private fun pinOf(e: Enrolled, label: String) = Contact(e.userId, e.reg.identityPub, label, 1_000, Contact.METHOD_TYPED, email = "${label.lowercase()}@example.com") // A11: the ceremony records the typed email
     private fun personalRow(e: Enrolled) = WireVault(e.reg.personalVault.vaultId, "personal", 2, e.reg.personalVault.metaBlob, 0)
     private fun personalGrant(e: Enrolled) = WireGrant(e.reg.personalVault.vaultId, e.userId, "owner", e.reg.personalVault.wrappedVk, 2, null)
 
@@ -1014,9 +1014,9 @@ class SignedGrantEngineTest {
         engine.sync()
         // A6b: the owner's own evidence of ownership (here seeded directly; in the app it is the creation record,
         // a transfer accept, or the password-reauthed "You own <vault>?").
-        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer") }
+        assertFailsWith<OwnershipNotConfirmedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com") }
         engine.accountState.update { AccountState.withOwned(it, w.vaultId, 1) }
-        assertFailsWith<MemberNotVerifiedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer") }
+        assertFailsWith<MemberNotVerifiedException> { engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com") }
         assertTrue(server.adds.isEmpty())
 
         engine.accountState.pin(pinOf(w.member, "Member"))
@@ -1025,7 +1025,7 @@ class SignedGrantEngineTest {
         val substituted = UserLookupResponse(w.member.userId, "Member", Bytes.toB64(crypto.randomBytes(32)))
         assertEquals(SyncEngine.MemberPinState.KEY_CHANGED, engine.memberPinState(substituted))
 
-        engine.addVaultMember(w.vaultId, w.member.userId, "writer")
+        engine.addVaultMember(w.vaultId, w.member.userId, "writer", "member@example.com")
         val (vaultId, add) = server.adds.single()
         assertEquals(w.vaultId, vaultId)
         val me = crypto.boxKeypairFromSeed(seedOf(w.member))
@@ -1302,6 +1302,44 @@ class SignedGrantEngineTest {
         engine.acceptLegacyVault(targetId)
         assertEquals(listOf(TrustRecords.Vouch(targetId, tag(targetVk), "confirmed")), TrustRecords.decodeVouches(cache.clientState(SyncEngine.LEGACY_AUTHORIZED_KEY)).rows)
         assertEquals(listOf(targetId), server.selfWraps.map { it.first })
+    }
+
+    // ---- security review 2026-10, branch A11 (q56): the "added" notice is decided by key provenance, not the label ----
+
+    @Test
+    fun a11_aVerifiedGrantOnARowLabelledOwner_stillAnnouncesItself() = runBlocking<Unit> {
+        val w = world()
+        val server = FakeServer(feed(w, 5, null))
+        val device = unlock(w.member)
+        val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+        engine.sync()
+        assertNotNull(engine.verifyMemberTyped(served(w.owner, "Owner"), w.owner.account.identityFingerprintShort()))
+        server.feed = feed(w, 9, memberRow(w, 9, v1Seal(w), ownerSignedGrant(w)).copy(role = "owner"))
+        engine.sync()
+        assertEquals(Account.KeySource.SIGNED_GRANT, device.keySource(w.vaultId))
+        assertEquals(listOf("added"), engine.notices().filter { it.vaultId == w.vaultId }.map { it.kind })
+    }
+
+    @Test
+    fun a11_thisAccountsOwnVaultOnItsSecondDevice_staysQuiet_whateverTheLabel() = runBlocking<Unit> {
+        for (role in listOf("owner", "writer")) {
+            val owner = enroll("a11-owner-$role")
+            val shared = owner.account.buildCreateSharedVault("Mine")
+            fun feedOf(rev: Long, withShared: Boolean) = SyncResponse(
+                rev = rev, full = true,
+                vaults = listOfNotNull(personalRow(owner), if (withShared) WireVault(shared.vaultId, "shared", 3, shared.request.metaBlob, 0) else null),
+                grants = listOfNotNull(personalGrant(owner), if (withShared) WireGrant(shared.vaultId, owner.userId, role, shared.request.wrappedVk, rev, null) else null),
+                items = emptyList(), removedGrants = emptyList(),
+            )
+            val server = FakeServer(feedOf(5, false))
+            val device = unlock(owner)
+            val engine = SyncEngine(api(server), device, InMemoryVaultCache())
+            engine.sync()
+            server.feed = feedOf(9, true)
+            engine.sync()
+            assertTrue(device.hasVault(shared.vaultId), role)
+            assertEquals(emptyList(), engine.notices().filter { it.vaultId == shared.vaultId && it.kind == "added" }, role)
+        }
     }
 }
 

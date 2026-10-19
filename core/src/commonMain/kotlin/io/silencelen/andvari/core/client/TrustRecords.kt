@@ -151,30 +151,48 @@ object TrustRecords {
     private fun str(o: JsonObject, key: String): String? = (o[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
     private fun num(o: JsonObject, key: String): Long? = (o[key] as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
 
-    private fun parseArray(raw: String): JsonArray? {
-        if (!raw.startsWith("[")) return null
-        return runCatching { json.parseToJsonElement(raw) as? JsonArray }.getOrNull()
+    /** The stored value as JSON (see [parseJson]). */
+    private sealed interface Parsed {
+        class Rows(val rows: JsonArray) : Parsed
+        object WrongShape : Parsed
+        object Legacy : Parsed
     }
 
     /**
+     * The stored value as JSON: an array, [Parsed.WrongShape] for a value that PARSES as a JSON object (refused whole),
+     * or [Parsed.Legacy] when it does not parse as a JSON array or object, which makes it a legacy line record (a bare
+     * scalar, such as a lone all-digit token, goes to the line grammar, which decides it row by row). Security review
+     * 2026-10, branch A11 (c11/c16): the A10 migration decided "JSON" from the first character, so a legacy record whose
+     * first line began with `[` or `{` (a server-planted id that sorted first) was refused whole and every well-formed
+     * line was lost.
+     */
+    private fun parseJson(raw: String): Parsed =
+        when (val e = runCatching { json.parseToJsonElement(raw) }.getOrNull()) {
+            is JsonArray -> Parsed.Rows(e)
+            is JsonObject -> Parsed.WrongShape
+            else -> Parsed.Legacy
+        }
+
+    /**
      * Strict JSON first (exactly [keys] per object, every row through [fromJson]); otherwise the legacy line record
-     * through [fromLine] over each line's `|` parts. A record that is neither (e.g. a JSON object, or an array a
-     * row of which was refused) comes back without the refused rows and flagged for rewrite.
+     * through [fromLine] over each line's `|` parts (any value that does not parse as a JSON array or object, A11). A
+     * JSON object is refused whole; an array a row of which was refused comes back without the refused rows. Both are
+     * flagged for rewrite.
      */
     private fun <T> decode(raw: String?, keys: Set<String>, fromJson: (JsonObject) -> T?, fromLine: (List<String>) -> T?): Decoded<T> {
         if (raw.isNullOrEmpty()) return Decoded(emptyList(), false)
-        val arr = parseArray(raw)
-        if (arr != null) {
+        val parsed = parseJson(raw)
+        if (parsed is Parsed.WrongShape) return Decoded(emptyList(), true) // JSON of an unknown shape: refused
+        if (parsed is Parsed.Rows) {
             val rows = ArrayList<T>()
             var dropped = false
-            for (e in arr) {
+            for (e in parsed.rows) {
                 val o = e as? JsonObject
                 val row = if (o != null && o.keys == keys) fromJson(o) else null
                 if (row == null) dropped = true else rows += row
             }
             return Decoded(rows, dropped)
         }
-        if (raw.startsWith("[") || raw.startsWith("{")) return Decoded(emptyList(), true) // JSON of an unknown shape: refused
         val rows = raw.split('\n').filter { it.isNotEmpty() }.mapNotNull { line -> fromLine(line.split('|')) }
         return Decoded(rows, true)
     }
@@ -184,17 +202,17 @@ object TrustRecords {
 
     private fun decodeStrings(raw: String?, accept: (String) -> String?): Decoded<String> {
         if (raw.isNullOrEmpty()) return Decoded(emptyList(), false)
-        val arr = parseArray(raw)
-        if (arr != null) {
+        val parsed = parseJson(raw)
+        if (parsed is Parsed.WrongShape) return Decoded(emptyList(), true)
+        if (parsed is Parsed.Rows) {
             val rows = ArrayList<String>()
             var dropped = false
-            for (e in arr) {
+            for (e in parsed.rows) {
                 val s = (e as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(accept)
                 if (s == null) dropped = true else rows += s
             }
             return Decoded(rows.distinct(), dropped)
         }
-        if (raw.startsWith("[") || raw.startsWith("{")) return Decoded(emptyList(), true)
         return Decoded(raw.split('\n').filter { it.isNotEmpty() }.mapNotNull(accept).distinct(), true)
     }
 
