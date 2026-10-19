@@ -268,6 +268,9 @@ interface Session {
    *  no key to read, so there is no reason to make a mid-session demotion wait for a full unlock. */
   vaultRoles: Map<string, string>;
   personalVaultId: string;
+  /** Security review 2026-10, branch A11 (q14): vaultId → the vault's meta CIPHERTEXT from the last full sync, so the
+   *  save banner can name the destination vault (decrypted on demand under a HELD key, never a server label). */
+  vaultMeta?: Map<string, string>;
   /** Rescue-issued temporary password in effect (E1-6) — surfaced in `status` for the popup nudge. */
   mustChangePassword: boolean;
   /** UVK custody, MEMORY-ONLY (breaker B1) — retained for the unlocked lifetime so quick-unlock enroll
@@ -317,6 +320,8 @@ interface SessionSnapshot {
   /** A1b: the item homes (ids only, no key material); absent in an older snapshot = reloaded from storage.local. */
   homes?: Record<string, string>;
   wrongVault?: number;
+  /** A11 (q14): vault meta ciphertext (no key material); absent in an older snapshot = names refill at the next sync. */
+  vaultMeta?: Record<string, string>;
   items: DecryptedItem[];
 }
 
@@ -346,7 +351,7 @@ interface TabState {
    *  locked re-offers to one per REOFFER_MIN_GAP_MS (knownlogins.ts reofferDecision owns the
    *  ordering). All three are cleared when the unlock re-offer hands the pending to a live
    *  session, and none ride publicPending. */
-  pending?: (PendingSave & { password: string; frameId: number; uri?: string; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
+  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
    *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
    *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
@@ -1219,6 +1224,7 @@ function ensureLoaded(): Promise<void> {
         // is reloaded then (A9: an empty map here would have been taken as authoritative and overwritten it).
         homes: snap.homes ? new Map(Object.entries(snap.homes)) : await loadHomes(snap.userId),
         wrongVault: typeof snap.wrongVault === "number" ? snap.wrongVault : 0,
+        vaultMeta: new Map(Object.entries(snap.vaultMeta ?? {}).filter(([, b]) => typeof b === "string")),
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         // spec 02 §3.2: a snapshot persisted by a pre-check build may hold a malformed doc — the
@@ -1275,6 +1281,7 @@ function persistSession(): Promise<void> {
     waitingGrants: session.waitingGrants ?? 0,
     homes: Object.fromEntries(session.homes),
     wrongVault: session.wrongVault ?? 0,
+    vaultMeta: Object.fromEntries(session.vaultMeta ?? []),
     items: session.items,
   };
   // The known-logins digest tracks the items it is derived from: every persist of the session
@@ -1524,6 +1531,7 @@ async function resync(): Promise<void> {
     if (writesInFlight > 0 || !session) return;
     session.items = homed.items;
     session.wrongVault = homed.wrongVault;
+    session.vaultMeta = vaultMetaOf(sync.vaults); // A11 (q14)
     // H70 (2026-09-13 audit): refresh the G21 reader gate's input as well as the item projection.
     // A grant's `role` needs no key to read and the server re-delivers the grant row on every role
     // change (spec 03 §4), but this pull only ever rebuilt the items — so an owner demoting a
@@ -2159,11 +2167,16 @@ async function personalChangeText(s: Session): Promise<string | null> {
   const c = await readPersonalChange(s.userId);
   if (!c) return null;
   const currentId = c.currentVaultId ?? s.personalVaultId;
+  // A11 (q13): the served wrap's key is no longer in the session map while the change pends, so its NAME decrypts under
+  // a key re-opened (UVK, vk-personal AD) for this one read and dropped; nothing is installed. No UVK (an evicted SW's
+  // restored session) or a wrap that does not open: a key the grant table holds, else the neutral fallback.
+  const reopened = reopenStagedPersonalWrap(c, s.uvk, s.userId);
+  const servedVk = reopened.ok ? reopened.vk : s.vaultKeys.get(c.vaultId);
   // A9 review MEDIUM-1: no current vault = a proposal on a browser that never confirmed one.
-  if (!currentId) return personalProposalNotice(vaultNameFromMeta(s.vaultKeys.get(c.vaultId), c.vaultId, c.servedMetaBlob));
+  if (!currentId) return personalProposalNotice(vaultNameFromMeta(servedVk, c.vaultId, c.servedMetaBlob));
   return personalChangeNotice(
     vaultNameFromMeta(s.vaultKeys.get(currentId), currentId, c.currentMetaBlob),
-    vaultNameFromMeta(s.vaultKeys.get(c.vaultId), c.vaultId, c.servedMetaBlob),
+    vaultNameFromMeta(servedVk, c.vaultId, c.servedMetaBlob),
   );
 }
 
@@ -2284,8 +2297,9 @@ function reofferPendingSaves(): void {
     // 2026-08-18: the unlock is the first moment matchesFor can answer for a locked capture — an
     // unchanged re-login (2a) is dropped with NO banner ever shown (this is where a quiet pending's
     // loop closes; capture-time ran this same check against an empty vault and couldn't). A changed
-    // password falls through to the offer, which resolveSaveAction will land as an Update.
-    const target = saveTargetFor(matchesFor(st.pending.host), st.pending.username, st.pending.password);
+    // password falls through to the offer, which resolveSaveAction will land as an Update (A11: only of a
+    // personal-vault item; a match the "Save" banner never named in another vault becomes a new personal item).
+    const target = saveTargetFor(matchesFor(st.pending.host), st.pending.username, st.pending.password, session?.personalVaultId);
     if (target && (target.doc.login?.password ?? "") === st.pending.password) {
       st.pending = undefined;
       persistTabs();
@@ -2296,6 +2310,11 @@ function reofferPendingSaves(): void {
     st.pending.lockedAt = undefined;
     st.pending.quiet = undefined;
     st.pending.offeredAt = undefined;
+    // A11 (q14): a locked capture named no vault; the offer it becomes names the personal vault it would land in.
+    if (!st.pending.updatesItemId) {
+      st.pending.vaultName = destinationOf(session?.personalVaultId ?? "").vaultName;
+      st.pending.vaultShared = false;
+    }
     persistTabs();
     const m: TabMsg = { type: "offerPendingSave", pending: publicPending(st.pending) };
     // Frame 0 only — same rule as the onUpdated re-offer: the metadata never rides into sub-frames.
@@ -2434,6 +2453,7 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
       waitingGrants: waiting.size,
       homes: homed.homes,
       wrongVault: homed.wrongVault,
+      vaultMeta: vaultMetaOf(sync.vaults),
       provenance: "PASSWORD",
       lastFullUnlockAt: Date.now(),
     };
@@ -2516,6 +2536,7 @@ function mapUnlockError(e: unknown): UnlockCode {
   if (e instanceof IdentityMismatchError) return "identity_mismatch";
   if (e instanceof VaultKeyDamagedError) return "keys_damaged"; // H67: damaged/foreign key blob — terminal, never wrong-password
   if (e instanceof ApiError) {
+    if (e.code === "bad_wire_id") return "bad_wire_id"; // A11 (c18): tampering class, never the "try again" fold
     if (e.code === "upgrade_required") return "upgrade_required"; // 426 min-version pin (any status)
     // Restricted session (server §2.6 row 4): a totpRequired instance let an un-enrolled user's
     // login succeed, then every authed route 403s until they enroll in the web vault. Route there
@@ -2686,6 +2707,7 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
             waitingGrants: waiting.size,
             homes: homed.homes,
             wrongVault: homed.wrongVault,
+            vaultMeta: vaultMetaOf(sync.vaults),
             provenance: "QUICK",
             lastFullUnlockAt: begin.blob.lastFullUnlockAt,
           };
@@ -3742,7 +3764,27 @@ function hostOfUrl(url: string): string | null {
 
 /** The password (and the owning frameId) NEVER ride a pending-save answer — metadata only. */
 function publicPending(p: PendingSave & { password: string }): PendingSave {
-  return { host: p.host, username: p.username, updatesItemId: p.updatesItemId, updatesItemName: p.updatesItemName, updatesItemUsername: p.updatesItemUsername };
+  return {
+    host: p.host, username: p.username, updatesItemId: p.updatesItemId, updatesItemName: p.updatesItemName, updatesItemUsername: p.updatesItemUsername,
+    vaultName: p.vaultName ?? null, vaultShared: p.vaultShared ?? (p.updatesItemId !== null),
+  };
+}
+
+/** A11 (q14): vaultId → meta ciphertext from a full sync's vault rows (only string blobs kept). */
+function vaultMetaOf(vaults: readonly { vaultId: string; metaBlob?: string }[] | undefined): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const v of vaults ?? []) if (typeof v.metaBlob === "string" && v.metaBlob) m.set(v.vaultId, v.metaBlob);
+  return m;
+}
+
+/** A11 (q14): the destination vault as the banner names it — its name decrypted under a key this session HOLDS (null
+ *  otherwise; never a server label), and whether it is anything but the in-force personal vault. */
+function destinationOf(vaultId: string): { vaultName: string | null; vaultShared: boolean } {
+  if (!session || !vaultId) return { vaultName: null, vaultShared: true };
+  return {
+    vaultName: vaultNameFromMeta(session.vaultKeys.get(vaultId), vaultId, session.vaultMeta?.get(vaultId)),
+    vaultShared: vaultId !== session.personalVaultId,
+  };
 }
 
 /** [X2-A7] the MASKED public shape — the raw PAN (and expiry/frameId) never leave the SW. The
@@ -3806,7 +3848,8 @@ async function capturedCredential(
   // password-only submit (username "") falls back to a password-equal item (2a — a re-login) or a
   // lone host login (2b — a password change), else a new item (2c). Locked ⇒ matchesFor() is empty
   // ⇒ records save-new; resolve re-checks post-unlock with a STRICTER rule (no silent 2b clobber).
-  const existing = saveTargetFor(matchesFor(host), username, msg.password);
+  // A11 (q14): a personal-vault match outranks a co-member's matching item in another vault.
+  const existing = saveTargetFor(matchesFor(host), username, msg.password, session?.personalVaultId);
   if (existing && (existing.doc.login?.password ?? "") === msg.password) {
     // Unchanged password (a re-login of a known item — 2a) — every successful re-login would banner otherwise.
     if (st.pending) {
@@ -3821,12 +3864,18 @@ async function capturedCredential(
   // nothing to save), but it can never be the UPDATE target — the server denies a reader's push —
   // so the banner offers Save-new (a fresh personal item) instead of a doomed Update.
   const updatable = existing !== undefined && writableItem(existing) ? existing : undefined;
-  const pending: PendingSave & { password: string; frameId: number; uri: string; lockedAt?: number; quiet?: boolean; offeredAt?: number } = {
+  // A11 (q14): the banner names the DESTINATION vault (the update target's, else the personal vault; locked = none
+  // known yet), and the vault the user saw named is kept SW-side so the resolve step can hold it to that.
+  const dest = destinationOf(updatable?.vaultId ?? session?.personalVaultId ?? "");
+  const pending: PendingSave & { password: string; frameId: number; uri: string; updatesVaultId?: string | null; lockedAt?: number; quiet?: boolean; offeredAt?: number } = {
     host,
     username,
     updatesItemId: updatable?.itemId ?? null,
     updatesItemName: updatable?.doc.name ?? null,
     updatesItemUsername: updatable?.doc.login?.username ?? null,
+    updatesVaultId: updatable?.vaultId ?? null,
+    vaultName: dest.vaultName,
+    vaultShared: updatable ? dest.vaultShared : false,
     password: msg.password,
     frameId,
     // H124: the uri a NEW item will store — `http://…` when the origin is plain http (loopback /
@@ -3921,7 +3970,7 @@ async function resolvePendingSave(
 async function commitPendingSave(
   tabId: number,
   st: TabState,
-  pending: PendingSave & { password: string; frameId: number; uri?: string; approvedAt?: number },
+  pending: PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number },
 ): Promise<{ res: Res<"resolvePendingSave">; wrote: boolean }> {
   if (!session) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
   if (!session.personalVaultId) return { res: { ok: false, code: "no_personal_vault", error: "no personal vault" }, wrote: false }; // A9 review MEDIUM-1
@@ -3931,11 +3980,18 @@ async function commitPendingSave(
   // locked-at-capture password-only submit for a DIFFERENT account would otherwise clobber the
   // host's single login — data loss), and it suppresses ONLY a password-only re-login (never drops
   // a username-present new account that reuses a password).
+  // A11 (q14): the frozen target counts only while it is still in the vault the banner NAMED (a pending recorded by
+  // an older worker named none: only the personal vault then). Anything else is re-decided, personal vault first, and
+  // a match in another vault that the banner never named lands as a NEW personal item, never a silent update.
+  const frozen = pending.updatesItemId ? session.items.find((i) => i.itemId === pending.updatesItemId) : undefined;
+  const namedVault = pending.updatesVaultId ?? session.personalVaultId;
+  const frozenTarget = frozen && frozen.vaultId === namedVault ? frozen : undefined;
   let decision = resolveSaveAction(
-    pending.updatesItemId ? session.items.find((i) => i.itemId === pending.updatesItemId) : undefined,
+    frozenTarget,
     matchesFor(pending.host),
     pending.username,
     pending.password,
+    session.personalVaultId,
   );
   // G21: a reader-vault target (a frozen pre-fix pending, or the host∧username match) can't take
   // the put — the server denies a reader's push — so land the save as a NEW personal item instead.
@@ -4074,10 +4130,16 @@ async function resolvePendingCardSave(
 /** G21 (2026-08-30 audit): can this item take a put? A "reader" grant is view-only — the server
  *  denies its push (Service.kt: role=="reader" ⇒ Forbidden) — so the save/link/TOTP-add paths must
  *  never OFFER a write against a reader-vault item (the denial used to render as the lying
- *  "Could not save — try again."). A missing role (pre-G21 snapshot) fails OPEN to the pre-fix
- *  behavior: the server still refuses, nothing new is exposed. Web twin: store.ts roleFor()==="reader". */
+ *  "Could not save — try again."). Web twin: store.ts roleFor()==="reader".
+ *  Security review 2026-10, branch A11 (q13): a vault with NO role entry fails CLOSED. Roles come from this account's
+ *  own grant rows, so a key without one is a key the grant table does not account for (a pre-A11 personal-wrap
+ *  install, a pre-G21 snapshot until the next sync refills the roles); it is never an update/TOTP-add target. The one
+ *  exception is the IN-FORCE personal vault, which the UVK-authenticated wrap decides on its own (§4.3). */
 function writableItem(it: DecryptedItem): boolean {
-  return session?.vaultRoles.get(it.vaultId) !== "reader";
+  if (!session) return false;
+  const role = session.vaultRoles.get(it.vaultId);
+  if (role === undefined) return session.personalVaultId !== "" && it.vaultId === session.personalVaultId;
+  return role !== "reader";
 }
 
 /** Seal + push one put over the existing envelope path; answers the per-mutation result.

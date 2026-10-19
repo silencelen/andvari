@@ -179,7 +179,7 @@ internal fun LegacyGrantsCard(vm: DesktopState, v: VaultInfo) {
                     r.pinState == SyncEngine.MemberPinState.PINNED && r.verifiedLabel != null ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(
-                                "${r.verifiedLabel} (verified; the server calls them ${r.displayName}, ${r.email})" +
+                                "“${r.verifiedLabel}” (verified; the name shown when you verified them. The server now calls them ${r.displayName}, ${r.email})" +
                                     (r.previouslySharedAt?.let { " · you shared this vault with them on ${sharedOn(it)}" } ?: ""),
                                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                             )
@@ -203,10 +203,10 @@ internal fun LegacyGrantsCard(vm: DesktopState, v: VaultInfo) {
     confirming?.let { r ->
         AlertDialog(
             onDismissRequest = { confirming = null },
-            title = { Text("Re-share “${nameOf(r)}” with ${r.verifiedLabel}?") },
+            title = { Text("Re-share “${nameOf(r)}” with the person you verified as “${r.verifiedLabel}”?") },
             text = {
                 Text(
-                    "${r.verifiedLabel} gets a new-format key to “${nameOf(r)}”, signed by you. Only confirm if you shared this " +
+                    "The person you verified as “${r.verifiedLabel}” (the name shown when you verified them) gets a new-format key to “${nameOf(r)}”, signed by you. Only confirm if you shared this " +
                         "vault with them: the list itself comes from the server.",
                 )
             },

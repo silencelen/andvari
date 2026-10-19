@@ -120,4 +120,26 @@ class TrustRecordsTest {
         assertEquals(listOf(TrustRecords.ConsumedNonce(v1, "AAAAAAAAAAAAAAAAAAAAAA", 7L)), nonces.rows)
         assertEquals(nonces.rows, TrustRecords.decodeConsumedNonces(TrustRecords.encodeConsumedNonces(nonces.rows)).rows)
     }
+
+    /** Security review 2026-10, branch A11 (c11/c16): only a value that PARSES as a JSON object is refused whole. */
+    @Test
+    fun aLegacyRecordWhoseFirstLineStartsWithABracket_keepsItsWellFormedLines() {
+        val vouches = TrustRecords.decodeVouches(listOf("[planted|$tagA|confirmed", "$v1|$tagA|frozen", "$v2|$tagB|confirmed").joinToString("\n"))
+        assertTrue(vouches.rewrite)
+        assertEquals(listOf(v1, v2), vouches.rows.map { it.vaultId })
+        assertEquals(listOf(TrustRecords.HeldKey(v1, tagA)), TrustRecords.decodeHeldKeys("{x|$tagA\n$v1|$tagA").rows)
+        assertEquals(listOf(v1), TrustRecords.decodeIdSet("[planted\n$v1").rows)
+        assertEquals(listOf("AAAAAAAAAAAAAAAAAAAAAA"), TrustRecords.decodeTokenSet("{bad\nAAAAAAAAAAAAAAAAAAAAAA").rows)
+        assertEquals(listOf("1234567890"), TrustRecords.decodeTokenSet("1234567890").rows)
+        assertEquals(listOf(TrustRecords.ConfirmedPin(u1, tagA)), TrustRecords.decodeConfirmedPins("[x|$tagA\n$u1|$tagA").rows)
+        assertEquals(listOf(TrustRecords.Tombstone(v1, u1, 5L)), TrustRecords.decodeTombstones("[x|$u1|5\n$v1|$u1|5").rows)
+        assertEquals(
+            listOf(TrustRecords.ConsumedNonce(v1, "AAAAAAAAAAAAAAAAAAAAAA", 7L)),
+            TrustRecords.decodeConsumedNonces("[x|AAAAAAAAAAAAAAAAAAAAAA|7\n$v1|AAAAAAAAAAAAAAAAAAAAAA|7").rows,
+        )
+        for (bad in listOf("""{"vaultId":"$v1"}""", """{"a":1}""", "5", "\"$v1\"", "null")) {
+            assertTrue(TrustRecords.decodeVouches(bad).rows.isEmpty(), bad)
+            assertTrue(TrustRecords.decodeIdSet(bad).rows.isEmpty(), bad)
+        }
+    }
 }

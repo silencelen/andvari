@@ -125,6 +125,7 @@ export function VerifyMemberPanel({
   onDone,
   initialEmail,
   presetServed,
+  verifiedEmail,
 }: {
   client: ApiClient;
   account: Account;
@@ -134,9 +135,15 @@ export function VerifyMemberPanel({
   /** A6 (members-list one-tap pin, pending invitations): the account is already known — skip the email lookup and
    *  compare against THIS served key (still untrusted until the human's comparison matches). */
   presetServed?: UserLookupResponse;
+  /** A11 (q00): the email the HUMAN typed to find `presetServed` (the add-member form), recorded on the pin. A preset
+   *  from a members list or an invitation has none: nothing is recorded, and the add-member screen then asks the owner
+   *  to confirm the pin's own label. */
+  verifiedEmail?: string;
 }) {
   const [email, setEmail] = useState(initialEmail ?? "");
   const [served, setServed] = useState<UserLookupResponse | null>(presetServed ?? null);
+  /** The address the human typed for `served` (A11): this panel's own lookup, or the add-member form's. */
+  const [lookedUpEmail, setLookedUpEmail] = useState<string | null>(presetServed ? (verifiedEmail ?? null) : null);
   const [typed, setTyped] = useState("");
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -146,8 +153,10 @@ export function VerifyMemberPanel({
     setBusy(true);
     setErr("");
     try {
-      const r = await client.lookupUser(email.trim());
+      const typedEmail = email.trim();
+      const r = await client.lookupUser(typedEmail);
       if (r.userId === account.userId) return setErr("That's you. Verify someone else.");
+      setLookedUpEmail(typedEmail);
       setServed(r);
     } catch (e) {
       setErr(e instanceof ApiError && e.code === "no_such_user" ? "No active account has that email." : e instanceof ApiError ? "Lookup failed." : UNREACHABLE);
@@ -173,7 +182,7 @@ export function VerifyMemberPanel({
     if (!served) return;
     setErr("");
     await pin(
-      await pinFromTyped(typed, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now()),
+      await pinFromTyped(typed, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now(), lookedUpEmail),
       "That code doesn't match the key this server holds for them. If they read it correctly from their own screen, STOP: do not share with this account until your admin checks it.",
     );
   };
@@ -185,7 +194,7 @@ export function VerifyMemberPanel({
     if (!qr) return setErr("That isn't an andvari identity code.");
     if (qr.userId !== served.userId) return setErr("That QR belongs to a different account than the one you looked up.");
     await pin(
-      await pinFromQr(text, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now()),
+      await pinFromQr(text, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now(), lookedUpEmail),
       "Their QR doesn't match the key this server holds for them. STOP: do not share with this account until your admin checks it.",
     );
   };
@@ -287,7 +296,8 @@ export function HouseholdCard({ client, account, store }: { client: ApiClient; a
         <ul className="plain-list">
           {contacts.map((c) => (
             <li key={c.userId} style={{ marginBottom: 6 }}>
-              <strong>{c.label}</strong> <span className="muted">· {METHOD_LABEL[c.method] ?? c.method} · {fmtDate(c.verifiedAt)}</span>
+              <strong>{c.email ?? c.label}</strong>{" "}
+              <span className="muted">· the name shown when you verified them: “{c.label}” · {METHOD_LABEL[c.method] ?? c.method} · {fmtDate(c.verifiedAt)}</span>
               {/* A5 review L-3 (A6): a pin this browser only read from the server-held list, before it had a copy of
                   its own, may be one you later removed elsewhere — it cannot stand in for a check until re-verified. */}
               {!store.accountState.isCurrent(c) && <span className="tag">verify again on this device</span>}

@@ -499,8 +499,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           installId: installId(),
         }),
       );
-      const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId));
-      recordSelfIdentityPub(s.userId, account);
+      // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
+      const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId, email));
+      recordSelfIdentityPub(s.userId, account, email);
       // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
       // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1 dark-ship
       // gate, consent-keyed (design 2026-07-15 §5.4.1): durable only with this user's per-device
@@ -843,7 +844,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         installId: installId(), // F28: same stable id as sign-in
       });
       const s = await net(client.register(request));
-      recordSelfIdentityPub(s.userId, account); // design §2.4: this browser now knows the real identity key
+      recordSelfIdentityPub(s.userId, account, email); // design §2.4: this browser now knows the real identity key
       // register() succeeded → the invite is CONSUMED. Stash the secret bytes for the ONE-TIME reveal
       // BEFORE anything can bounce us back to the form (a resubmit could only yield "invite used").
       secretRef.current = recoverySecret;

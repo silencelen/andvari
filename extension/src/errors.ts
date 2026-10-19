@@ -22,6 +22,7 @@ type UnlockCode =
   | "identity_mismatch"
   | "keys_damaged"
   | "kdf_policy"
+  | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
   | "server_error"
   | "network"
   | "unknown";
@@ -110,6 +111,10 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
       // H1 (spec 05 T1): the server sent weakened master-password security settings — a hard block,
       // never softened into wrong-password.
       return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "bad_wire_id":
+      // Security review 2026-10, branch A11 (c18): the login answer carried a malformed user/device id (A10 wire
+      // grammar). A tampering-class refusal: never softened into "try again", like identity_mismatch above.
+      return "The server sent a malformed account record, so sign-in was stopped. Tell your admin — the server may be misbehaving.";
     case "server_error":
       return "The server had a problem answering — your details may be fine. Try again in a moment.";
     case "network":

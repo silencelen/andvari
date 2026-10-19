@@ -3,7 +3,7 @@ import { matchesFull, matchesShort } from "../crypto/fingerprint";
 import { identityFingerprint } from "../crypto/sharedgrant";
 import { enrolInPerson, type InPersonEvidence } from "../enroll/enrollcheck";
 import type { EnrollPayload } from "../enroll/enrolllink";
-import type { AccountStateDoc, Contact } from "./accountstate";
+import { type AccountStateDoc, type Contact, isContactEmail } from "./accountstate";
 
 /**
  * Identity QR + the ONLY ways a contact gets pinned (security review 2026-10, root cause A §4.2, §7.2) —
@@ -44,20 +44,60 @@ async function servedFingerprint(served: ServedIdentity): Promise<string | null>
   return identityFingerprint(key);
 }
 
-/** The member TYPED the other person's 32-hex short form from THEIR screen (A2 human-only prefix rule). */
-export async function pinFromTyped(typedEntry: string, served: ServedIdentity, label: string, now: number): Promise<Contact | null> {
+/** The one email normalisation every add-member comparison uses (A11): trimmed, lowercase. */
+export const normalizeEmail = (e: string): string => e.trim().toLowerCase();
+
+/** The `email` field a ceremony records (A11, q00): the address the HUMAN typed to find the person, normalised, or
+ *  nothing when no address was typed (or it is not one) — a server-reported address is never recorded. */
+function recordedEmail(verifiedEmail: string | null | undefined): { email?: string } {
+  if (verifiedEmail === null || verifiedEmail === undefined) return {};
+  const e = normalizeEmail(verifiedEmail);
+  return isContactEmail(e) ? { email: e } : {};
+}
+
+/** The member TYPED the other person's 32-hex short form from THEIR screen (A2 human-only prefix rule).
+ *  `verifiedEmail` (A11) is the address the human typed to look them up, when there was one. */
+export async function pinFromTyped(typedEntry: string, served: ServedIdentity, label: string, now: number, verifiedEmail?: string | null): Promise<Contact | null> {
   const fp = await servedFingerprint(served);
   if (fp === null || !matchesShort(typedEntry, fp)) return null;
-  return { userId: served.userId, identityPub: served.identityPub, label, verifiedAt: now, method: "typed" };
+  return { userId: served.userId, identityPub: served.identityPub, label, verifiedAt: now, method: "typed", ...recordedEmail(verifiedEmail) };
 }
 
 /** A camera scan of the other person's identity QR, compared at FULL length. */
-export async function pinFromQr(qrPayload: string, served: ServedIdentity, label: string, now: number): Promise<Contact | null> {
+export async function pinFromQr(qrPayload: string, served: ServedIdentity, label: string, now: number, verifiedEmail?: string | null): Promise<Contact | null> {
   const qr = parseIdentityQr(qrPayload);
   if (!qr || qr.userId !== served.userId) return null;
   const fp = await servedFingerprint(served);
   if (fp === null || !matchesFull(qr.fingerprint, fp)) return null;
-  return { userId: served.userId, identityPub: served.identityPub, label, verifiedAt: now, method: "qr" };
+  return { userId: served.userId, identityPub: served.identityPub, label, verifiedAt: now, method: "qr", ...recordedEmail(verifiedEmail) };
+}
+
+/**
+ * Who an add-member request names, against the pins (security review 2026-10, branch A11, q00; core
+ * `ContactPin.addIdentity` twin). The owner TYPED `typedEmail`; the server answered with `lookedUpUserId`. `pins` are
+ * this account's CURRENT pins. The server's display name is not an input.
+ *  - `mismatch`: the looked-up account's pin records a different email, or ANOTHER pin records the typed email: the
+ *    server answered the owner's address with someone else's account. Refused, whatever the human confirms.
+ *  - `match`: the looked-up account's pin records exactly the typed email.
+ *  - `legacy`: the pin has no recorded email (pre-A11, or made without a typed address): the add is REFUSED and the
+ *    human verifies them again for the typed email. The pin's label was the server's display name at pin time, so
+ *    confirming it is no identity check (A11 review LOW-1).
+ *  - `unpinned`: no current pin; the ceremony first.
+ */
+export type AddIdentity =
+  | { kind: "match"; pin: Contact }
+  | { kind: "legacy"; pin: Contact }
+  | { kind: "mismatch"; pin: Contact | null; claimedBy: Contact | null }
+  | { kind: "unpinned" };
+
+export function addIdentityCheck(lookedUpUserId: string, typedEmail: string, pins: readonly Contact[]): AddIdentity {
+  const typed = normalizeEmail(typedEmail);
+  const pin = pins.find((c) => c.userId === lookedUpUserId) ?? null;
+  const claimedBy = pins.find((c) => c.userId !== lookedUpUserId && c.email !== undefined && c.email === typed) ?? null;
+  if (claimedBy) return { kind: "mismatch", pin, claimedBy };
+  if (!pin) return { kind: "unpinned" };
+  if (pin.email === undefined) return { kind: "legacy", pin };
+  return pin.email === typed ? { kind: "match", pin } : { kind: "mismatch", pin, claimedBy: null };
 }
 
 /**

@@ -53,18 +53,61 @@ object ContactPin {
         return SharedGrant.fingerprint(crypto, key)
     }
 
-    fun fromTyped(crypto: CryptoProvider, typedEntry: String, served: ServedIdentity, label: String, now: Long): Contact? {
+    /** The one email normalisation every add-member comparison uses (A11): trimmed, lowercase. */
+    fun normalizeEmail(e: String): String = e.trim().lowercase()
+
+    /** The email a ceremony records (A11, q00): the address the HUMAN typed to find the person, normalised, or null
+     *  when none was typed (or it is not one). A server-reported address is never recorded. */
+    private fun recordedEmail(verifiedEmail: String?): String? = verifiedEmail?.let(::normalizeEmail)?.takeIf(Contact::isEmail)
+
+    /** [verifiedEmail] (A11): the address the human typed to look them up, when there was one. */
+    fun fromTyped(crypto: CryptoProvider, typedEntry: String, served: ServedIdentity, label: String, now: Long, verifiedEmail: String? = null): Contact? {
         val fp = servedFingerprint(crypto, served) ?: return null
         if (!Fingerprint.matchesShort(typedEntry, fp)) return null
-        return Contact(served.userId, served.identityPub, label, now, Contact.METHOD_TYPED)
+        return Contact(served.userId, served.identityPub, label, now, Contact.METHOD_TYPED, recordedEmail(verifiedEmail))
     }
 
-    fun fromQr(crypto: CryptoProvider, qrPayload: String, served: ServedIdentity, label: String, now: Long): Contact? {
+    fun fromQr(crypto: CryptoProvider, qrPayload: String, served: ServedIdentity, label: String, now: Long, verifiedEmail: String? = null): Contact? {
         val qr = IdentityQr.parse(qrPayload) ?: return null
         if (qr.userId != served.userId) return null
         val fp = servedFingerprint(crypto, served) ?: return null
         if (!Fingerprint.matchesFull(qr.fingerprint, fp)) return null
-        return Contact(served.userId, served.identityPub, label, now, Contact.METHOD_QR)
+        return Contact(served.userId, served.identityPub, label, now, Contact.METHOD_QR, recordedEmail(verifiedEmail))
+    }
+
+    /**
+     * Who an add-member request names, against the pins (security review 2026-10, branch A11, q00; web
+     * `addIdentityCheck` twin). The owner TYPED [typedEmail]; the server answered with [lookedUpUserId]; [pins] are
+     * this account's pins. The server's display name is not an input.
+     */
+    sealed class AddIdentity {
+        /** The looked-up account's pin records exactly the typed email. */
+        class Match(val pin: Contact) : AddIdentity()
+
+        /** A pin with no recorded email (pre-A11, or made without a typed address): the add is REFUSED; the human runs
+         *  the ceremony again for the typed email. Its label was the server's display name at pin time, so confirming
+         *  the label is not an identity check (A11 review LOW-1). */
+        class Legacy(val pin: Contact) : AddIdentity()
+
+        /** The looked-up account's pin records another email, or ANOTHER pin ([claimedBy]) records the typed one: the
+         *  server answered the owner's address with someone else's account. Refused, whatever the human confirms. */
+        class Mismatch(val pin: Contact?, val claimedBy: Contact?) : AddIdentity()
+
+        /** No (current) pin: the ceremony first. */
+        object Unpinned : AddIdentity()
+    }
+
+    fun addIdentity(lookedUpUserId: String, typedEmail: String, pins: List<Contact>): AddIdentity {
+        val typed = normalizeEmail(typedEmail)
+        val pin = pins.firstOrNull { it.userId == lookedUpUserId }
+        val claimedBy = pins.firstOrNull { it.userId != lookedUpUserId && it.email != null && it.email == typed }
+        return when {
+            claimedBy != null -> AddIdentity.Mismatch(pin, claimedBy)
+            pin == null -> AddIdentity.Unpinned
+            pin.email == null -> AddIdentity.Legacy(pin)
+            pin.email == typed -> AddIdentity.Match(pin)
+            else -> AddIdentity.Mismatch(pin, null)
+        }
     }
 
     /**

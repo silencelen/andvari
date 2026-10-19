@@ -161,15 +161,32 @@ export class ApiClient {
    * and reported here as `(endpoint, refusals)`. The store surfaces it as a `bad-id` anomaly notice. A session or
    * identity row with a malformed id is refused outright (`bad_wire_id`).
    */
-  onRefusedIds?: (endpoint: string, refused: Refusal[]) => void;
+  get onRefusedIds(): ((endpoint: string, refused: Refusal[]) => void) | undefined {
+    return this.refusedHandler;
+  }
+
+  /** Security review 2026-10, branch A11 (c21): the store installs its handler only once it exists, AFTER login or
+   *  register; refusals reported before then are kept (a few, ids only) and handed to the first handler installed. */
+  set onRefusedIds(fn: ((endpoint: string, refused: Refusal[]) => void) | undefined) {
+    this.refusedHandler = fn;
+    if (fn) for (const [endpoint, refused] of this.earlyRefusals.splice(0)) fn(endpoint, refused);
+  }
+
+  private refusedHandler?: (endpoint: string, refused: Refusal[]) => void;
+  private readonly earlyRefusals: [string, Refusal[]][] = [];
+
+  private emitRefused(endpoint: string, refused: Refusal[]): void {
+    if (this.refusedHandler) this.refusedHandler(endpoint, refused);
+    else if (this.earlyRefusals.length < 8) this.earlyRefusals.push([endpoint, refused]);
+  }
 
   private reported<T>(endpoint: string, s: Sanitized<T>): T {
-    if (s.refused.length > 0) this.onRefusedIds?.(endpoint, s.refused);
+    if (s.refused.length > 0) this.emitRefused(endpoint, s.refused);
     return s.value;
   }
 
   private refuseWire(endpoint: string, r: Refusal): never {
-    this.onRefusedIds?.(endpoint, [r]);
+    this.emitRefused(endpoint, [r]);
     throw new ApiError(0, "bad_wire_id", `the server sent a malformed ${r.field} on ${endpoint}`);
   }
 

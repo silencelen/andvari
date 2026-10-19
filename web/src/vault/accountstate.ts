@@ -18,7 +18,18 @@ export interface Contact {
   label: string;
   verifiedAt: number;
   method: ContactMethod;
+  /** Security review 2026-10, branch A11 (q00): the account email the HUMAN typed when they ran the ceremony for this
+   *  pin (normalised: trimmed, lowercase). The add-member flow refuses an add whose typed email is not this one, so a
+   *  server that answers a lookup for B's email with a pinned C's account is caught. Absent on a pin made before A11
+   *  and on pins made without a typed email (enrolment link, members-list one-tap, pending invitations); omitted from
+   *  the encoding while absent, so those documents stay byte-identical. */
+  email?: string;
 }
+
+/** The grammar of a recorded pin email (A11): already normalised (no surrounding space, no uppercase), one `@`, no
+ *  whitespace or control characters, at most 320 characters. */
+const CONTACT_EMAIL_RE = /^[^\s@A-Z\x00-\x1f\x7f]+@[^\s@A-Z\x00-\x1f\x7f]+$/;
+export const isContactEmail = (e: unknown): e is string => typeof e === "string" && e.length <= 320 && CONTACT_EMAIL_RE.test(e);
 
 /** One consumed lifecycle nonce, wire form `["<nonce>", <issuedAt>]`. */
 export type ConsumedNonce = [string, number];
@@ -81,7 +92,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones", "memberReceived", "personal"];
 const PERSONAL_KEYS = ["vaultId", "at"];
-const CONTACT_KEYS = ["userId", "identityPub", "label", "verifiedAt", "method"];
+const CONTACT_KEYS = ["userId", "identityPub", "label", "verifiedAt", "method", "email"];
 const ISSUED_KEYS = ["vaultId", "userId", "keyHash", "at"];
 
 export function emptyAccountState(userId: string): AccountStateDoc {
@@ -124,7 +135,7 @@ export function encodeAccountState(doc: AccountStateDoc): string {
     seq: doc.seq,
     contacts: [...doc.contacts]
       .sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0))
-      .map((c) => ({ userId: c.userId, identityPub: c.identityPub, label: c.label, verifiedAt: c.verifiedAt, method: c.method })),
+      .map((c) => ({ userId: c.userId, identityPub: c.identityPub, label: c.label, verifiedAt: c.verifiedAt, method: c.method, ...(c.email !== undefined ? { email: c.email } : {}) })),
     contactTombstones: sortedRecord(doc.contactTombstones),
     orgRecoveryFp: doc.orgRecoveryFp,
     consumedNonces: sortedRecord(doc.consumedNonces),
@@ -184,7 +195,11 @@ export function decodeAccountState(userId: string, plaintext: string): AccountSt
     if (typeof r.label !== "string") throw new AccountStateError("contact label is not a string");
     if (!isInt(r.verifiedAt) || r.verifiedAt < 0) throw new AccountStateError("contact verifiedAt is invalid");
     if (typeof r.method !== "string" || !CONTACT_METHODS.includes(r.method as ContactMethod)) throw new AccountStateError("contact method is unknown");
-    contacts.push({ userId: r.userId, identityPub: r.identityPub as string, label: r.label, verifiedAt: r.verifiedAt, method: r.method as ContactMethod });
+    if (r.email !== undefined && !isContactEmail(r.email)) throw new AccountStateError("contact email is malformed");
+    contacts.push({
+      userId: r.userId, identityPub: r.identityPub as string, label: r.label, verifiedAt: r.verifiedAt, method: r.method as ContactMethod,
+      ...(r.email !== undefined ? { email: r.email as string } : {}),
+    });
   }
   if (new Set(contacts.map((c) => c.userId)).size !== contacts.length) throw new AccountStateError("duplicate contact");
   const tombstones: Record<string, number> = {};

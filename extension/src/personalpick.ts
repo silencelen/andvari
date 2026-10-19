@@ -16,7 +16,9 @@ import { adVkPersonal, fromB64, open } from "./crypto.ts";
  *  - No wrap anywhere: NO personal vault. The extension never picks by a server label or role and never
  *    mints a wrap; a full client asks the human.
  *  - A served wrap that opens on a browser with NO cached wrap (A9 review MEDIUM-1): a "proposed" vault, not a
- *    default. Its key is installed for reading; nothing is captured into it until the human confirms it once.
+ *    default. Nothing is captured into it until the human confirms it once.
+ *  - A11 (q13): a served wrap's key is installed only once that wrap is IN FORCE ("wrap"). In "proposed" and
+ *    "changed" it is used for nothing (not decrypt-for-match, not an update target); accept installs it.
  */
 
 export interface PersonalWrapWire {
@@ -49,7 +51,9 @@ export function pickPersonal(
   if (wrap) {
     const vk = openWrap(wrap, uvk, userId);
     if (vk) {
-      vaultKeys.set(wrap.vaultId, vk); // our own key either way (it opened under our UVK)
+      // A11 (q13): the served key is installed ONLY on the in-force branch below. While proposed or changed it is
+      // used for nothing (no decrypt-for-match, no update target): the server picks which of the account's wraps to
+      // serve, and a superseded one names a vault the user may have left. The popup's accept re-opens and installs it.
       // A9 review MEDIUM-1: with NOTHING cached (a fresh profile, cleared storage) the served wrap is a PROPOSAL, not a
       // default: the server keeps every wrap the account ever minted and chooses which to serve, so a superseded one
       // for a co-held vault would otherwise become the capture destination silently. No personal vault until the human
@@ -62,6 +66,7 @@ export function pickPersonal(
           return { vaultId: cached.vaultId, source: "changed", served: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } };
         }
       }
+      vaultKeys.set(wrap.vaultId, vk); // in force: our own key (it opened under our UVK), precedence rule 1
       return { vaultId: wrap.vaultId, source: "wrap" };
     }
     const cvk = cachedVk();

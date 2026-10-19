@@ -245,12 +245,33 @@ MEDIUM-1): the fresh-device replay is CLOSED by a one-time confirmation.** On a 
 personal vault (no cached wrap) a served wrap is a proposal even when the account's designation names it: on such a
 device the account state is as replayable as the wrap (no high-water mark can tell an older authentic blob from the
 current one), so a matching designation proves nothing, and the human confirms once (co-holders shown). A device that
-merged account state before and holds a cached wrap follows the designation (a rollback there is detectable). The
+merged account state before and holds a cached wrap no longer follows a designation away from that wrap (branch A11,
+c01): the A9 text said "a rollback there is detectable", which is false for a genuine but superseded designation at an
+intermediate seq ABOVE the device's high-water mark (designated S at N+1, repaired to P at N+2, N+1 served to a device
+at N), so such a move is a CHANGED notice the human confirms, never a silent switch (fail closed; owner-review item).
+Likewise (A11, c00) a cached wrap the designation does not name is a proposal even when the server withholds the wrap or
+serves junk, so withholding cannot keep a device on a vault the account re-designated away from. The
 extension holds the same line without reading account state: a served wrap on a browser with no cached wrap is a
 proposal, it has no capture destination until the popup's describe/accept confirms it (captures and TOTP adds answer
 "Open andvari to confirm your personal vault."), and the cached-wrap path is unchanged. Cost: every fresh device of
 an account asks exactly once; the registering device never does. What remains: a default save while a proposal is
-pending is refused ("Choose a vault for this item."), never redirected.
+pending is refused ("Choose a vault for this item."), never redirected. (f) **Whom a lookup names (branch A11, the
+third API review, q00, HIGH; spec 01 §6 "Add-member identity"):** the add-member confirm said "You've verified
+<displayName>", the server's string, while the pin gate and the grant used the server-returned userId, so a server and
+one pinned colluder could turn "add B" into "add C". A pin now records the email its human typed, an add whose typed
+email the pins contradict is refused, and the confirm names the email the PIN records and its fingerprint. A pin made
+without a typed email (every pin before A11, and the enrolment-link, members-list and invitation paths) cannot be
+checked against the email, and its label was the server's display name at verification time, so it is NOT enough to
+add (A11 review LOW-1, fail closed): the owner verifies the person again for the typed email, once. Residual accepted:
+that one extra ceremony per pre-A11 pin, the first time it is used to add. Native hosts have no add-member screen; the
+engine API carries the same check for any host that adds one. (g) **Migration residuals of branch A11 (review LOW-2,
+LOW-3):** a device that jumps straight from pre-A10 to A11 holding a single-entry legacy PLAIN id set
+(`grant.member.granted`, `grant.declined`) whose one planted id is literally `["<uuid>"]` reads it as the JSON form, so
+that one entry decodes as the id inside the brackets instead of being dropped; a nuisance only (a server-planted id
+that is a well-formed UUID either way, and every trust rule still decides what it unlocks). A legacy userId-keyed
+self-identity pin (spec 01 §2.4) whose saved session was gone before the upgrade gets its email binding
+trust-on-first-use from the next passing unlock: a server that changes the userId exactly at that unlock is not caught
+by the binding (the old userId-keyed pin is still checked for its own userId), and every later unlock is.
 
 **R16 addendum (A10 review LOW-1).** An in-window v1 `remove` proof is verified only when its nonce is in the
 token grammar the consumed record stores (`[A-Za-z0-9_-]{1,128}`, which covers the UUIDs pre-A7 clients
