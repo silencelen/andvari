@@ -163,6 +163,9 @@ export interface RemovalDecision {
  * (5) the nonce not in THIS device's consumed set, else "replay_denied"; (6) liveSince − 10 min ≤ issuedAt ≤
  * now + 10 min, liveSince being THIS device's own first sight (missing → fail closed); (6′, A7 review MEDIUM-2) a
  * nonce found only in the account-state set is "already_recorded" (another of my devices consumed it; calm).
+ * (6″, A13 c10) a v1 proof has no issuedAt, so for a v1 nonce found only in account state the time that record was
+ * consumed (`consumedAccountAt`) gets the same window: outside it, or with no time or no liveSince, "anomaly" at step
+ * "window" (a replay after a re-add, as on v2); inside it "already_recorded", consumed at the RECORDED time.
  */
 export async function decideRemoval(input: {
   lifecycleKey: Uint8Array;
@@ -175,6 +178,8 @@ export async function decideRemoval(input: {
   issuedAt?: number | null;
   consumed: ReadonlySet<string>;
   consumedAccount: ReadonlySet<string>;
+  /** A13 (c10): when each `consumedAccount` nonce was consumed (account-state `[nonce, at]`). Only the v1 path reads it. */
+  consumedAccountAt?: ReadonlyMap<string, number>;
   liveSince: number | null | undefined;
   now: number;
 }): Promise<RemovalDecision> {
@@ -197,7 +202,12 @@ export async function decideRemoval(input: {
     }
     if (!verifyProof(expected, proof)) return { verdict: "anomaly", step: "mac" };
     if (consumed.has(nonce)) return { verdict: "replay_denied", step: "nonce" };
-    if (consumedAccount.has(nonce)) return { verdict: "already_recorded", step: "recorded", consume: [nonce, now] };
+    if (consumedAccount.has(nonce)) {
+      // Step 6″ (A13, c10): the account-state record's time is the only time a v1 removal has.
+      const at = input.consumedAccountAt?.get(nonce);
+      if (liveSince == null || at === undefined || at < liveSince - REMOVAL_SKEW_MS || at > now + REMOVAL_SKEW_MS) return { verdict: "anomaly", step: "window" };
+      return { verdict: "already_recorded", step: "recorded", consume: [nonce, at] };
+    }
     return { verdict: "valid_legacy", step: "legacy", consume: [nonce, now] };
   }
   if (!proof || nonce == null || issuedAt == null || !Number.isSafeInteger(issuedAt) || !isV2Nonce(nonce)) return { verdict: "anomaly", step: "fields" };
