@@ -303,6 +303,43 @@ minted and the vectors' base64url); any other nonce is the `fields` anomaly befo
 nonce the record could not represent was verified, never consumed, and so replayed on that device. The
 record encoders now throw on a malformed row rather than drop it, so no caller can repeat that shape.
 
+**R16 addendum (A13, c10).** A v1 `remove` proof whose nonce is only in the ACCOUNT-STATE set is no longer
+calm unconditionally: the time that account-state record was consumed (the consuming device's clock) stands in
+for the `issuedAt` a v1 proof lacks and must be inside this device's window, else the anomaly, exactly as a v2
+replay after a re-add is. Residual accepted: that time is another of the user's devices' wall clock, so a device
+whose clock was far ahead when it consumed the nonce can make a later replay look in-window here (wording only;
+the data handling is the same either way), and an N−1 device's v1 record is as good as its clock.
+
+**A13 (security review 2026-10, third API review: release scripts and the remaining LOWs).** (a) **The signing
+workstation pins the release commit** (c03): `signandvari <ver> -Commit <sha>` refuses a tag that does not resolve
+to the pin before anything is checked out, never force-fetches tags (a moved remote tag stops the run, naming both
+commits), re-checks HEAD after the checkout and before the ceremony, and `prestige-release.ps1` records the pin in
+`bundle.json`. Residual accepted: the pinned tree still runs its own scripts and gradle on the account that can open
+`update-signing.key`, so the pin narrows the exposure to "the tree the build host said it cut", read out of band by
+the operator; keeping the build off that account is the longer-term fix and is not built. (b) **Build-host scripts**
+(c02, c06, c07, q22, q50, q21): root-owned Arch packages from any builder, a whole-image same-build proof,
+SHA256SUMS signed by the pinned release key with every uploaded `.asc` verified against it, the Web Store token off
+argv, a live release's signatures kept by the downloads prune, and a recovery drill that fails when it ran nothing.
+Release-script hygiene; none of it is a client trust decision. (c) **The extension save/update banner's height**
+(q36) is NOT fixed in A13 and stays a residual: its painted height still varies with the verdict (Save vs Update)
+and with the vault-derived name lengths, so a page that drives a capture and hit-tests the banner learns whether
+andvari holds a login for this host and username, and whether the vault is unlocked. It is not a small, contained
+change: since A11 (q14) the Update sentence names the destination vault and warns that every holder can read it, up
+to about five lines, and a fixed box must either clip that warning (refused) or reserve that height in every state,
+a visible design change that needs the owner's review. (d) **The popup login-fill grant** (q39) is bound to the
+tab's top origin at mint and voided by a top-level navigation; a SAME-origin navigation keeps it, by design (the
+grant's origin is the one the user picked the login for). (e) **Android editor secrets** (q27) live in the
+ViewModel's editor session rather than in saved-instance state, so they survive rotation but not process death;
+after process death the vault relocks anyway and the editor reopens from the stored item. (f) **Closed without a
+new residual:** a kept row applied when its key arrives (native `reevaluateGrants`, the invitation path) now homes
+the item as R17 states (c05); a contact unpin or re-pin wins the account-state merge under clock skew (q01/q23,
+spec 01, the contact-pin merge); the desktop update manifest and signature are size-capped while read (q19); a malformed served
+`encryptedIdentitySeed` on the extension's quick-unlock redeem is the terminal `keys_damaged` refusal with the
+enrolled blob kept (q38); vault purge also blanks the v14 `signedGrant` (q43); backup-cli's never-overwrite guard
+folds names as a case-insensitive filesystem does (q45); a seal refusal after web's offline-put fold restores the
+folded rows (q54); and the Android Autofill-status screen, which clears FLAG_SECURE, no longer composes the
+attention area (q30).
+
 **R18 (server-supplied ids and the device-local trust records — security review 2026-10, plugin scan F1/F2;
 branch A10).** Every id a server supplies (vaultId, userId, itemId, deviceId, the user ids riding a transfer)
 is checked against the lowercase UUID grammar at the wire boundary on all three engines, in the API client,

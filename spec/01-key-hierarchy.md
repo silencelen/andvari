@@ -392,7 +392,10 @@ key signs only through the flows that need it (today: escrow v2).
     on that device by `grantId`. A pin is CURRENT on a device only when a human made it or
     re-confirmed it (the verification ceremony) ON THAT DEVICE: the device keeps a durable local
     record of `userId` + SHA-256 of the confirmed identity key, so a confirmation of another key does
-    not count, and a tombstone in the merged account state still removes the pin. A pin that only
+    not count, and a tombstone in the merged account state still removes the pin. An unpin's
+    tombstone is pushed to the removed pin's `verifiedAt`, and a pin that replaces a different pin
+    or a tombstone is pushed past it, so the newest human act wins the merge whatever the devices'
+    clocks say (A13, q01; the same rule the issued-grant and ownership records follow). A pin that only
     arrived by sync is not current there (its grants go pending and the add-member check runs)
     until re-confirmed. (A high-water rule was rejected: a server can step a fresh device's mark up
     by serving older authentic blobs in ascending order.) A grant from a pinned, current contact is adopted with the notice
@@ -568,7 +571,11 @@ key signs only through the flows that need it (today: escrow v2).
   `liveSince − 10 min <= issuedAt <= now + 10 min`; then (A7 review, a refinement of design §6.3
   step 5) a nonce found only in the account state's consumed set (`/account/state`, spec 03 §3) was
   consumed by another of the user's devices for the same genuine removal: the calm "already recorded
-  on another of your devices" notice, and it is consumed here too. A "valid (legacy)" v1 verdict is
+  on another of your devices" notice, and it is consumed here too. A v1 proof carries no `issuedAt`,
+  so for a v1 nonce found only in account state the time that record was consumed stands in for it
+  and gets the same window (A13, security review 2026-10, c10): outside `liveSince − 10 min ..= now +
+  10 min`, or with no recorded time or no `liveSince`, it is an anomaly (a replay after a re-add, as on
+  v2); inside it is "already recorded", consumed here at the recorded time. A "valid (legacy)" v1 verdict is
   shown qualified: "(sent by an older app version)". `liveSince` is the device-local wall-clock time this device last saw the vault go from
   not-live (absent, held, removed) to live; it is persisted with the device's cache and never comes
   from the server, so a re-add the device saw moves it past every earlier proof. A valid verdict
