@@ -25,6 +25,10 @@
 #      published channel to read — and they are deliberately anchored on the *decisions* (Die on
 #      mismatch, Die on overtaken seq, Die on timeout) rather than on wording.
 #
+#   3. Assert the release-commit pin (security review 2026-10): signandvari.ps1 never force-fetches
+#      tags, both scripts take -Commit, and scripts/ci/signandvari-pin.test.sh drives signandvari
+#      against a scratch repo (wrong pin, moved tag, missing pin).
+#
 # Skips (green, loudly) when pwsh is absent, because a contributor without PowerShell must still
 # be able to run the release gate; CI and the maintainer's box have it.
 set -euo pipefail
@@ -83,3 +87,19 @@ grep -q '\[switch\]\$SkipReadBack' "$S" || fail "$S lost the -SkipReadBack switc
 grep -q 'if (\$SkipReadBack)' "$S"      || fail "$S no longer branches on -SkipReadBack."
 
 echo "    signandvari.ps1 post-publish read-back present (seq + version + digest, three hard failures)"
+
+# --- the release-commit pin (security review 2026-10, c03) -------------------------------------
+# The workstation runs the tag's tree beside the signing key, so the tag is verified against an
+# out-of-band -Commit pin before checkout, and a moved remote tag is refused rather than adopted.
+# The behaviour is tested against a scratch repo below; these greps keep the two load-bearing
+# decisions from being edited out of either script.
+grep -qE "'fetch', '--tags', '--force'|fetch.*--tags.*--force" "$S" \
+  && fail "$S force-fetches tags again — a moved remote tag would silently replace the local one."
+for f in "$S" scripts/prestige-release.ps1; do
+  grep -q '\[string\]\$Commit' "$f" || fail "$f lost its -Commit pin parameter."
+done
+grep -q "'-Commit', \$Commit" "$S" || fail "$S no longer hands the -Commit pin to prestige-release.ps1."
+grep -q 'commit    = \$CommitPin' scripts/prestige-release.ps1 \
+  || fail "prestige-release.ps1 no longer records the pinned commit in bundle.json."
+bash scripts/ci/signandvari-pin.test.sh || fail "the signandvari tag-pin scratch-repo test failed."
+echo "    signandvari.ps1 + prestige-release.ps1 verify the tag against -Commit; no forced tag fetch"

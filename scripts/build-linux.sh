@@ -15,9 +15,13 @@
 # artifacts that must describe the same build need ONE place that builds them, which is this script:
 #
 #   1. gradle `:app-desktop:packageDeb :app-desktop:createDistributable` in ONE invocation, so the
-#      deb and the app-image are the same build. That is then PROVEN, not assumed: the content-hashed
-#      `app-desktop-<hash>.jar` inside the deb must be the one in the app-image, or the script stops
-#      (a stale `createDistributable` output from a previous version is exactly what this catches).
+#      deb and the app-image are the same build. That is then PROVEN, not assumed: a manifest of the
+#      WHOLE image — every jar by its entries' CRCs, every other file by sha256, every symlink by
+#      target — must be identical between the deb's /opt/andvari and the app-image, or the script
+#      stops. (Comparing only the app-desktop jar once let a stale image with a different core jar
+#      through — security review 2026-10.) Under --skip-gradle the image must also declare this
+#      version in its jpackage state file, so a leftover image of another release is refused even
+#      before the manifest comparison.
 #   2. scripts/package-arch.sh turns the app-image into andvari-<ver>-<rel>-x86_64.pkg.tar.zst with
 #      the deb's /opt/andvari layout, /usr/bin/andvari, the .desktop entry and the GPL-3.0 licence
 #      file — the deb's metadata (description, maintainer, licence) is REUSED, never retyped, and
@@ -188,16 +192,62 @@ fi
 
 # --- the app-image, and the proof it is the deb's build ---------------------------------
 [ -x "$IMG_DIR/bin/$PKG_NAME" ] || die "app-image $IMG_DIR has no bin/$PKG_NAME — run without --skip-gradle (createDistributable)"
+command -v unzip >/dev/null 2>&1 || die "unzip is required for the same-build proof (apt install unzip)"
 
-# Compose names the application jar by content hash (app-desktop-<md5>.jar). The deb and the
-# app-image carrying the same name is therefore an exact same-build proof, and it is cheap.
-# (grep consumes the whole listing — an early-exit `-m1`/`head` would SIGPIPE dpkg-deb's tar.)
-DEB_APPJAR="$(dpkg-deb -c "$DEB_LOCAL" | grep -oE 'app-desktop-[0-9a-f]+\.jar' | sort -u | head -1 || true)"
-IMG_APPJAR="$(find "$IMG_DIR/lib/app" -maxdepth 1 -name 'app-desktop-*.jar' -printf '%f\n' | head -1)"
-[ -n "$DEB_APPJAR" ] && [ -n "$IMG_APPJAR" ] || die "could not find the app-desktop jar in the deb ($DEB_APPJAR) / app-image ($IMG_APPJAR)"
-[ "$DEB_APPJAR" = "$IMG_APPJAR" ] \
-  || die "the deb ($DEB_APPJAR) and the app-image ($IMG_APPJAR) are DIFFERENT builds — the app-image is stale. Run without --skip-gradle so both come from one gradle invocation."
-note "deb and app-image carry the same application jar ($DEB_APPJAR) — one build"
+# --skip-gradle reuses whatever image is on disk, so it must at least be THIS release's image.
+# jpackage records the app version in lib/app/.jpackage.xml.
+if [ "$SKIP_GRADLE" = 1 ]; then
+  IMG_VER="$(grep -oE '<app-version>[^<]*</app-version>' "$IMG_DIR/lib/app/.jpackage.xml" 2>/dev/null | sed -E 's#</?app-version>##g' || true)"
+  [ "$IMG_VER" = "$VERSION" ] \
+    || die "--skip-gradle with a stale app-image: $IMG_DIR declares version '${IMG_VER:-<none>}', this release is $VERSION. Run without --skip-gradle."
+  DEB_VER="$(dpkg-deb -f "$DEB_LOCAL" Version)"
+  [ "${DEB_VER%%-*}" = "$VERSION" ] || die "--skip-gradle: the deb is version $DEB_VER, this release is $VERSION"
+fi
+
+# image_manifest <root> — one line per file of an app-image tree, sorted, comparable across the
+# deb's copy and the createDistributable copy:
+#   * a jar is identified by its ENTRIES (name, CRC-32, size), not its bytes or its file name.
+#     packageDeb and createDistributable each re-pack some jars (the skiko runtime stub) with fresh
+#     zip timestamps, so two copies of one build differ in bytes and in the content-hashed name
+#     while carrying identical contents. The `-<hash>.jar` suffix is dropped from the path for the
+#     same reason;
+#   * the launcher config is compared with those jar hashes stripped (it lists the same names);
+#   * every other file by sha256, every symlink by its target;
+#   * packaging metadata only one side carries is excluded: the deb's .desktop copy under lib/ and
+#     share/doc/copyright, and the app-image's lib/app/.jpackage.xml.
+image_manifest() {
+  local root="$1" rel f key
+  ( cd "$root" && find . \( -type f -o -type l \) -printf '%P\n' | LC_ALL=C sort ) | while IFS= read -r rel; do
+    case "$rel" in
+      "lib/$PKG_NAME-$PKG_NAME.desktop"|share/doc/copyright|lib/app/.jpackage.xml) continue ;;
+    esac
+    f="$root/$rel"
+    key="$(printf '%s' "$rel" | sed -E 's/-[0-9a-f]{16,40}\.jar$/.jar/')"
+    if [ -L "$f" ]; then
+      printf '%s link %s\n' "$key" "$(readlink "$f")"
+    elif [[ "$rel" == *.jar ]]; then
+      # `unzip -lv` columns: Length Method Size Cmpr Date Time CRC-32 Name — keep name, CRC, length.
+      printf '%s jar %s\n' "$key" "$(unzip -lv "$f" | awk '$7 ~ /^[0-9a-f]{8}$/ && NF >= 8 { name = $8; for (i = 9; i <= NF; i++) name = name " " $i; print name, $7, $1 }' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
+    elif [[ "$rel" == lib/app/*.cfg ]]; then
+      printf '%s cfg %s\n' "$key" "$(sed -E 's/-[0-9a-f]{16,40}\.jar/.jar/g' "$f" | sha256sum | cut -d' ' -f1)"
+    else
+      printf '%s file %s\n' "$key" "$(sha256sum "$f" | cut -d' ' -f1)"
+    fi
+  done
+}
+
+DEB_X="$(mktemp -d)"; trap 'rm -rf "$DEB_X"' EXIT
+dpkg-deb -x "$DEB_LOCAL" "$DEB_X/root" || die "could not unpack $DEB_LOCAL for the same-build proof"
+[ -d "$DEB_X/root/opt/$PKG_NAME" ] || die "the deb has no /opt/$PKG_NAME — not the layout package-arch.sh repacks"
+image_manifest "$DEB_X/root/opt/$PKG_NAME" > "$DEB_X/manifest-deb"
+image_manifest "$IMG_DIR"                  > "$DEB_X/manifest-img"
+grep -q '^lib/app/app-desktop\.jar jar ' "$DEB_X/manifest-deb" \
+  || die "could not find the app-desktop jar in the deb — the same-build proof has nothing to anchor on"
+if ! cmp -s "$DEB_X/manifest-deb" "$DEB_X/manifest-img"; then
+  diff "$DEB_X/manifest-deb" "$DEB_X/manifest-img" | sed 's/^/    /' | head -40 >&2 || true
+  die "the deb and the app-image are DIFFERENT builds (lines above: < deb, > app-image) — the app-image is stale. Run without --skip-gradle so both come from one gradle invocation."
+fi
+note "deb and app-image carry the same image, file for file ($(wc -l < "$DEB_X/manifest-deb") entries, jars by content) — one build"
 
 MAINTAINER="$(dpkg-deb -f "$DEB_LOCAL" Maintainer)"
 DESC="$(dpkg-deb -f "$DEB_LOCAL" Description | head -1)"

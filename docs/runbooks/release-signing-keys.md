@@ -13,10 +13,21 @@ runs as **`scripts/signandvari.ps1`**, installed *outside* the repo (`%USERPROFI
 script underneath its own execution.
 
 ```powershell
-signandvari 0.25.0 -DryRun     # preflight, seq arithmetic and manifest preview; signs nothing
-signandvari 0.25.0             # checkout + preflight -> ceremony -> ordered drop
-signandvari 0.25.0 -SkipDrop   # produce the bundle, deliver it by hand
+signandvari 0.25.0 -Commit <sha> -DryRun     # preflight, seq arithmetic and manifest preview; signs nothing
+signandvari 0.25.0 -Commit <sha>             # verify tag -> checkout -> ceremony -> ordered drop
+signandvari 0.25.0 -Commit <sha> -SkipDrop   # produce the bundle, deliver it by hand
 ```
+
+**`-Commit <sha>` is required** (security review 2026-10): the full 40-hex commit the release tag
+was cut at, copied from the handover line the build host prints
+(`scripts/gh-release.sh` ends with `signandvari <ver> -Commit <sha>`). The signing box runs the
+tag's tree — its scripts and its gradle build — with the update-signing key openable by the same
+account, and a tag is a mutable ref on a remote the build host can write to. So before anything is
+checked out, the tag must resolve to exactly that commit; HEAD must equal it after the checkout and
+again right before `prestige-release.ps1` starts (which takes the same `-Commit` and records it as
+`bundle.json.commit`). Tags are fetched **without `--force`**: a remote tag that differs from the
+local one stops the run and names both commits, instead of silently replacing it. A mismatch is a
+reason to ask the build host what happened, never to re-run with the tag's commit.
 
 Configuration is **environment-only**, so nothing instance-specific lives in this public repo:
 `ANDVARI_REPO` (the checkout), `ANDVARI_RELEASE_DROP` (`user@host:/path/`), optionally
@@ -103,7 +114,9 @@ So the provenance chain is deliberately made of things that *are* checkable:
    proceeds.
 
 Which is why `-Ref v<version>` in the ceremony (§Signing-box preflight item 2) is not a
-convenience: it is now the difference between a publish and a quarantine.
+convenience: it is now the difference between a publish and a quarantine. `-Commit <sha>` is the
+other half: the watcher checks the bundle against the tag, and the pin checks the tag against the
+commit the build host says it cut, before the signing box runs a line of the tree.
 
 ## 1. Update-manifest signing — Ed25519 (H2 §F / core `UpdateVerify.PINNED`)
 - **Public key (base64url):** `e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI`
@@ -356,7 +369,8 @@ state, so they recur on a fresh box or after a long gap.
    The script preflights for it and stops early rather than failing after the MSI build.
 2. **Check out the TAG, not `main`.** `main` moves on after a release; an MSI built from it would
    carry dependencies no other artifact of that version has, so Windows would silently diverge from
-   the deb, APK and extension already in users' hands. `-Ref v<version>` pins it.
+   the deb, APK and extension already in users' hands. `-Ref v<version>` names it and
+   `-Commit <sha>` pins it (signandvari passes both).
 3. **A stale clone is fine to update, but only if it postdates 2026-07-16.** Anything older predates
    the `git-filter-repo` rewrite and the repo recreation, and will not reconcile — take a fresh
    clone instead. A clean `git fetch --all --tags` succeeding is the signal that yours is fine.
