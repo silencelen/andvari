@@ -322,6 +322,38 @@ class SignedGrantEngineTest {
         assertEquals(1, server.selfWraps.size)
     }
 
+    /**
+     * Security review 2026-10 (A13, c05): a row kept as ciphertext while the vault's key was pending is HOMED when
+     * accepting the invitation decrypts it. Without the home, the next pull serving the same itemId under another
+     * held vault took NEW_HOME and quarantined the genuine row.
+     */
+    @Test
+    fun acceptingAnInvitationHomesTheKeptRowsItDecrypts() = runBlocking<Unit> {
+        val w = world()
+        val x = w.owner.account.newItemId()
+        val genuine = w.owner.account.encryptItem(w.vaultId, x, doc).let { WireItem(x, w.vaultId, 4, 1, 1, false, false, it.formatVersion, it.attachmentIds, it.blob) }
+        val server = FakeServer(feed(w, 9, memberRow(w, 9, null, ownerSignedGrant(w)), listOf(genuine)))
+        server.identities[w.owner.userId] = served(w.owner, "Owner (server)")
+        val device = unlock(w.member)
+        val cache = InMemoryVaultCache()
+        val engine = SyncEngine(api(server), device, cache)
+        engine.sync()
+        assertNull(cache.itemHome(x), "kept as ciphertext while the key is pending: no home yet")
+        assertTrue(engine.acceptInvitation(engine.pendingInvitations().single(), w.owner.account.identityFingerprintShort()))
+        assertEquals(doc, engine.items().single { it.itemId == x }.doc, "accepting decrypts the kept row")
+        assertEquals(w.vaultId, cache.itemHome(x), "the row accepting applied is the item's home")
+
+        // The next pull serves the same itemId under the member's OWN personal vault (held, so it would decrypt).
+        val personal = w.member.reg.personalVault.vaultId
+        val bait = w.member.account.encryptItem(personal, x, ItemDoc(type = "login", name = "bait", login = LoginData(username = "x", password = "y")))
+            .let { WireItem(x, personal, 10, 2, 2, false, false, it.formatVersion, it.attachmentIds, it.blob) }
+        server.feed = feed(w, 11, memberRow(w, 9, null, ownerSignedGrant(w)), listOf(bait))
+        engine.sync()
+        assertEquals(w.vaultId, cache.itemHome(x), "the home holds")
+        assertEquals(doc, engine.items().single { it.itemId == x }.doc, "the genuine row stays in the working set")
+        assertEquals(listOf(personal), engine.quarantinedItems().map { it.vaultId }, "the other-vault row is quarantined")
+    }
+
     @Test
     fun aDeclinedInvitationStaysHiddenAcrossARestart() = runBlocking<Unit> {
         val w = world()

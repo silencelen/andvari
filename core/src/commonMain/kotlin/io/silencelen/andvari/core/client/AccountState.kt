@@ -409,14 +409,30 @@ object AccountState {
         a != null && b != null && a.copy(seq = 0) == b.copy(seq = 0)
 
     /** A new pin, replacing any older one for the same user and clearing an older tombstone. */
-    fun withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc = doc.copy(
-        contacts = (doc.contacts.filter { it.userId != c.userId } + c).sortedBy { it.userId },
-        contactTombstones = doc.contactTombstones.filterKeys { it != c.userId }.toSortedMap(),
-    )
+    fun withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
+        // A13 (q01): the newest HUMAN act wins the merge whatever this device's clock says. A pin replacing a different
+        // pin, or a tombstone, is pushed past it (the withPersonal / withIssued rule); the same pin re-saved keeps its time.
+        val prev = doc.contacts.firstOrNull { it.userId == c.userId }
+        var at = c.verifiedAt
+        doc.contactTombstones[c.userId]?.let { at = maxOf(at, it + 1) }
+        if (prev != null) at = if (prev == c.copy(verifiedAt = prev.verifiedAt)) maxOf(at, prev.verifiedAt) else maxOf(at, prev.verifiedAt + 1)
+        return doc.copy(
+            contacts = (doc.contacts.filter { it.userId != c.userId } + c.copy(verifiedAt = at)).sortedBy { it.userId },
+            contactTombstones = doc.contactTombstones.filterKeys { it != c.userId }.toSortedMap(),
+        )
+    }
 
-    /** Remove a pin by tombstone, so the removal survives a merge with an older copy that still has it. */
-    fun withoutContact(doc: AccountStateDoc, userId: String, at: Long): AccountStateDoc = doc.copy(
-        contacts = doc.contacts.filter { it.userId != userId },
-        contactTombstones = (doc.contactTombstones + (userId to maxOf(at, doc.contactTombstones[userId] ?: at))).toSortedMap(),
-    )
+    /**
+     * Remove a pin by tombstone, so the removal survives a merge with an older copy that still has it. A13 (q01): the
+     * tombstone is pushed to the removed pin's `verifiedAt` (a tie removes), so an unpin on a device whose clock is
+     * behind the pinning device's still wins.
+     */
+    fun withoutContact(doc: AccountStateDoc, userId: String, at: Long): AccountStateDoc {
+        val pinnedAt = doc.contacts.firstOrNull { it.userId == userId }?.verifiedAt ?: Long.MIN_VALUE
+        val t = maxOf(at, pinnedAt, doc.contactTombstones[userId] ?: Long.MIN_VALUE)
+        return doc.copy(
+            contacts = doc.contacts.filter { it.userId != userId },
+            contactTombstones = (doc.contactTombstones + (userId to t)).toSortedMap(),
+        )
+    }
 }
