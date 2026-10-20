@@ -228,6 +228,7 @@ export type PinUnlockCode =
   | "not_armed"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
@@ -251,6 +252,7 @@ export type BioUnlockCode =
   | "expired"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
