@@ -87,11 +87,21 @@ CURLCFG
   ) || true
   [ -n "$tok" ] || { echo "[chrome] ERROR: OAuth token exchange failed — check CWS_* creds" >&2; return 1; }
 
+  # The minted access token is as much a credential as the refresh token it came from (it can
+  # upload and submit for CWS_ITEM_ID for its lifetime), so it travels the same way: an
+  # Authorization `header` line in a config block on stdin, never `-H` on argv (security review
+  # 2026-10; H63 closed the same channel for the long-lived secrets). The package itself is still
+  # named by path (`upload-file`) — stdin is taken by the config, and the path is no secret.
   echo "[chrome] uploading package…"
   local up state
-  up=$(curl -s -X PUT -T "$CHROME_ZIP" \
-        -H "Authorization: Bearer $tok" -H "x-goog-api-version: 2" \
-        "https://www.googleapis.com/upload/chromewebstore/v1.1/items/$CWS_ITEM_ID") || true
+  up=$(curl -s --config - <<CURLCFG
+url = "https://www.googleapis.com/upload/chromewebstore/v1.1/items/$CWS_ITEM_ID"
+request = "PUT"
+upload-file = "$CHROME_ZIP"
+header = "Authorization: Bearer $tok"
+header = "x-goog-api-version: 2"
+CURLCFG
+  ) || true
   state=$(echo "$up" | jq -r '.uploadState // "?"' 2>/dev/null || echo "?")
   if [ "$state" != "SUCCESS" ]; then
     # Store busy (a prior version still in review) → QUEUE this version for the auto-push
@@ -108,8 +118,14 @@ CURLCFG
 
   echo "[chrome] publishing (submit for review)…"
   local pub
-  pub=$(curl -s -X POST -H "Authorization: Bearer $tok" -H "x-goog-api-version: 2" -H "Content-Length: 0" \
-        "https://www.googleapis.com/chromewebstore/v1.1/items/$CWS_ITEM_ID/publish") || true
+  pub=$(curl -s --config - <<CURLCFG
+url = "https://www.googleapis.com/chromewebstore/v1.1/items/$CWS_ITEM_ID/publish"
+request = "POST"
+header = "Authorization: Bearer $tok"
+header = "x-goog-api-version: 2"
+header = "Content-Length: 0"
+CURLCFG
+  ) || true
   if echo "$pub" | jq -e '.error' >/dev/null 2>&1; then
     echo "[chrome] PUBLISH BLOCKED: $(echo "$pub" | jq -r '.error.message')" >&2
     echo "[chrome] NOTE: the $VERSION package IS uploaded as the draft — fix the above in the dashboard, then re-run '--chrome' to publish (no re-upload needed)." >&2

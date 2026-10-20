@@ -1,7 +1,10 @@
 # andvari - the PRESTIGE-side release ceremony, as one script.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0
-#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0 -DryRun
+#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0 -Commit <40-hex sha>
+#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0 -Commit <40-hex sha> -DryRun
+#
+# Normally driven by signandvari.ps1, which verifies the tag against the same -Commit pin before
+# it checks anything out.
 #
 # WHY THIS EXISTS. The update-manifest signing key lives ONLY on this machine - deliberately, so a
 # build-host compromise cannot forge a signed update to every armed client. That means the last mile
@@ -53,6 +56,14 @@ param(
     # signing whatever happened to be checked out is how an unreviewed change ships.
     [Parameter(Mandatory = $true)]
     [string]$Ref,
+
+    # The full 40-hex commit -Ref must resolve to (security review 2026-10). -Ref alone is a name
+    # whose target can be moved on the remote; this pin is supplied out of band by the operator,
+    # so HEAD == -Ref == -Commit is a check against something the tree being built cannot choose.
+    # It is what bundle.json records as `commit`.
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$Commit,
 
     # Public download origin. Same value the clients pin as the default origin.
     [string]$BaseUrl = 'https://andvari.monahanhosting.com',
@@ -402,7 +413,7 @@ function Get-JsonFromUrl {
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Step 'Preflight'
-Write-Host "   version $Version   ref $Ref   dry-run $([bool]$DryRun)"
+Write-Host "   version $Version   ref $Ref   commit $Commit   dry-run $([bool]$DryRun)"
 
 # --- platform -----------------------------------------------------------------------------------
 if ($env:OS -ne 'Windows_NT' -or [System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
@@ -470,6 +481,8 @@ $wantRes = Invoke-Native -Exe 'git' -Arguments @('-C', $RepoRoot, 'rev-parse', '
 if ($wantRes.ExitCode -ne 0) { Die "ref '$Ref' does not resolve in this checkout (fetch tags first: git fetch --tags)" }
 $want = $wantRes.Output.Trim()
 if ($head -ne $want) { Die "HEAD is $head but -Ref $Ref is $want - check out the release ref first" }
+$CommitPin = $Commit.ToLowerInvariant()
+if ($want.ToLowerInvariant() -ne $CommitPin) { Die "-Ref $Ref resolves to $want, but -Commit is $CommitPin - the ref is not the pinned release commit" }
 Write-Ok "clean tree at $Ref ($($head.Substring(0, 12)))"
 
 # --- the version in the build file drives the MSI filename; a skew here breaks step 2 ------------
@@ -994,13 +1007,17 @@ Write-Ok 'release-spec.json (exact consumed bytes) written into the bundle'
 $sigSha  = Get-Sha256Lower -Path $BundleSigTmp
 $sigSize = (Get-Item -LiteralPath $BundleSigTmp).Length
 
+# The tree must not have moved under the build (a gradle task, a hook): HEAD is still the pin.
+$headEnd = (Invoke-Native -Exe 'git' -Arguments @('-C', $RepoRoot, 'rev-parse', 'HEAD') -What 'git rev-parse HEAD' -Capture).Output.Trim()
+if ($headEnd.ToLowerInvariant() -ne $CommitPin) { Die "HEAD moved to $headEnd during the ceremony; -Commit is $CommitPin - refusing to write the bundle" }
+
 # bundle.json is metadata for the receiving watcher, not signed material - ConvertTo-Json is fine
 # here (unlike the manifest, whose exact bytes are load-bearing).
 $meta = [pscustomobject][ordered]@{
     version   = $Version
     seq       = $newSeq
     ref       = $Ref
-    commit    = $head
+    commit    = $CommitPin
     createdAt = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [cultureinfo]::InvariantCulture)
     files     = @(
         [pscustomobject][ordered]@{ name = $MsiName;             sha256 = $msiSha;      size = $msiSize }

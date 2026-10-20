@@ -1,9 +1,12 @@
 # andvari - the whole PRESTIGE release ceremony as one command.
 #
-#   signandvari 0.24.0            # build + sign + assemble + ordered drop
-#   signandvari 0.24.0 -DryRun    # preflight, seq arithmetic and manifest preview only
-#   signandvari 0.24.0 -SkipDrop  # produce the bundle, deliver it by hand
-#   signandvari 0.24.0 -SkipReadBack  # ... and do not assert the channel afterwards (rare)
+#   signandvari 0.24.0 -Commit <sha>            # build + sign + assemble + ordered drop
+#   signandvari 0.24.0 -Commit <sha> -DryRun    # preflight, seq arithmetic and manifest preview only
+#   signandvari 0.24.0 -Commit <sha> -SkipDrop  # produce the bundle, deliver it by hand
+#   signandvari 0.24.0 -Commit <sha> -SkipReadBack  # ... and do not assert the channel afterwards (rare)
+#
+# -Commit is REQUIRED: the full 40-hex commit the build host cut the tag at, copied from the
+# handover line the build host prints. See "THE TAG IS NOT TRUSTED" below.
 #
 # WHY THIS EXISTS. scripts\prestige-release.ps1 already does the signing correctly. What it does
 # NOT do is the handling around it: fetching tags, checking out the ref it then asserts you are on,
@@ -23,6 +26,17 @@
 # leaked into it before, so the checkout path and the drop destination are read from the
 # environment and appear in this file only as variable names.
 #
+# THE TAG IS NOT TRUSTED (security review 2026-10). This box runs the tag's tree - its scripts and
+# its gradle build - with the update-signing key openable by the same account. A tag is a mutable
+# ref on a remote the build host can write to, so "whatever v<Version> points at today" is not a
+# fact this machine can rely on. Two rules close that:
+#   * the fetch never force-updates a tag. A remote tag that disagrees with the local one is a
+#     hard stop that names both commits, never a silent replacement;
+#   * the operator passes -Commit <sha>, the commit the release was cut at, out of band. The tag
+#     must resolve to exactly that commit BEFORE anything is checked out, HEAD must equal it after
+#     the checkout, and again immediately before prestige-release.ps1 starts - which is handed the
+#     same pin and records it in bundle.json.
+#
 # THE KEYS ARE NEVER TOUCHED. The update-signing key and the Authenticode cert live on this machine
 # and only on this machine. This tool never reads, prints, copies, exports or relocates either, and
 # deliberately offers no flag that could. prestige-release.ps1 hands the signer a PATH and the
@@ -34,6 +48,13 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version,
+
+    # The full 40-hex commit the release tag must resolve to. REQUIRED, and deliberately not
+    # derivable from anything this script fetches: it comes from the build host's handover line
+    # (`signandvari <ver> -Commit <sha>`), so a tag moved on the remote cannot also move the pin.
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$Commit,
 
     # Preflight, fetch, seq arithmetic and a manifest preview. No build, no signing, no drop.
     [switch]$DryRun,
@@ -50,6 +71,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Tag = "v$Version"
+$Commit = $Commit.ToLowerInvariant()
 
 # The public download origin - the same value clients pin and prestige-release.ps1 defaults to.
 # Public by design, but still overridable so nothing here is welded to one deployment.
@@ -118,7 +140,8 @@ if (-not $DropPath.EndsWith('/')) { $DropPath += '/' }
 
 Write-Ok "repo $Repo"
 Write-Ok "drop $DropTarget"
-Write-Info "version $Version   tag $Tag   dry-run $([bool]$DryRun)   skip-drop $([bool]$SkipDrop)"
+Write-Info "version $Version   tag $Tag   commit $Commit"
+Write-Info "dry-run $([bool]$DryRun)   skip-drop $([bool]$SkipDrop)"
 
 # ============================================================ 2. TAG, TREE, LEFTOVERS ===========
 
@@ -135,13 +158,51 @@ function Invoke-Git {
     [pscustomobject]@{ ExitCode = $code; Output = ($out | Out-String) }
 }
 
-Invoke-Git -Arguments @('fetch', '--tags', '--force') | Out-Null
-Write-Ok 'git fetch --tags'
+# What the LOCAL tag points at before the fetch (empty when this box has never seen the tag).
+function Get-LocalTagCommit {
+    $r = Invoke-Git -Arguments @('rev-parse', '-q', '--verify', "refs/tags/$Tag^{commit}") -AllowFailure
+    if ($r.ExitCode -ne 0) { return '' }
+    return $r.Output.Trim().ToLowerInvariant()
+}
+$LocalBefore = Get-LocalTagCommit
+
+# NO --force. git refuses to replace an existing local tag with a different remote one ("would
+# clobber existing tag") and exits non-zero; with --force it would adopt the moved tag silently,
+# and everything after this line would then build and sign the remote's choice of tree.
+$fetch = Invoke-Git -Arguments @('fetch', '--tags') -AllowFailure
+if ($fetch.ExitCode -ne 0) {
+    Write-Host $fetch.Output
+    # Name both commits, so the operator can tell a moved tag from a network failure.
+    $remoteLine = (Invoke-Git -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$Tag", "refs/tags/$Tag^{}") -AllowFailure).Output
+    $remoteCommit = ''
+    foreach ($line in ($remoteLine -split "`n")) {
+        $parts = $line.Trim() -split '\s+'
+        if ($parts.Count -ge 2) {
+            # The peeled ^{} line (an annotated tag's commit) wins over the tag-object line.
+            if ($parts[1] -eq "refs/tags/$Tag^{}" -or -not $remoteCommit) { $remoteCommit = $parts[0].ToLowerInvariant() }
+        }
+    }
+    if ($LocalBefore -and $remoteCommit -and $remoteCommit -ne $LocalBefore) {
+        Die "the remote's $Tag ($remoteCommit) DIFFERS from this machine's $Tag ($LocalBefore). A tag that moved is never adopted here. Find out why it moved before signing anything; -Commit is $Commit."
+    }
+    Die "git fetch --tags failed (exit $($fetch.ExitCode)) - nothing was checked out."
+}
+Write-Ok 'git fetch --tags (no force: a moved tag is refused, never adopted)'
 
 $tagRes = Invoke-Git -Arguments @('rev-parse', '--verify', "$Tag^{commit}") -AllowFailure
 if ($tagRes.ExitCode -ne 0) { Die "tag $Tag does not exist (after fetching tags) - nothing to sign." }
-$TagCommit = $tagRes.Output.Trim()
-Write-Ok "$Tag -> $($TagCommit.Substring(0, 12))"
+$TagCommit = $tagRes.Output.Trim().ToLowerInvariant()
+if ($LocalBefore -and $TagCommit -ne $LocalBefore) {
+    # Belt and braces: a git that DID move the tag despite the missing --force.
+    Die "the fetch moved $Tag from $LocalBefore to $TagCommit - refusing."
+}
+
+# THE PIN. Checked before anything is checked out: a tag that resolves anywhere but the commit the
+# operator was handed never gets its tree onto this disk.
+if ($TagCommit -ne $Commit) {
+    Die "$Tag resolves to $TagCommit, but -Commit is $Commit. The tag is not the release you were handed - nothing was checked out. Do not re-run with the tag's commit unless the build host confirms it."
+}
+Write-Ok "$Tag -> $TagCommit (matches -Commit)"
 
 # The known ceremony leftovers. Older hand-runs assembled the manifest in the repo root; the files
 # survive in the working tree and the next run then dies on "working tree is not clean". They are
@@ -170,14 +231,16 @@ Write-Step "Checkout $Tag"
 
 # prestige-release.ps1 ASSERTS HEAD == -Ref and dies otherwise; it does not check out for you.
 # Detached HEAD at the tag is the expected state for the rest of this run.
-$head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim()
-if ($head -eq $TagCommit) {
+$head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
+if ($head -eq $Commit) {
     Write-Ok "already at $Tag ($($head.Substring(0, 12)))"
 }
 else {
-    Invoke-Git -Arguments @('checkout', '--detach', $Tag) | Out-Null
-    $head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim()
-    if ($head -ne $TagCommit) { Die "checkout of $Tag left HEAD at $head - aborting." }
+    # Check out the PINNED COMMIT, not the tag name: the two are proven equal above, and naming the
+    # commit leaves nothing for a ref to change between that proof and this line.
+    Invoke-Git -Arguments @('checkout', '--detach', $Commit) | Out-Null
+    $head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
+    if ($head -ne $Commit) { Die "checkout of $Commit left HEAD at $head - aborting." }
     Write-Ok "detached HEAD at $Tag ($($head.Substring(0, 12)))"
 }
 
@@ -257,11 +320,12 @@ $ceremonyArgs = @(
     '-File', $Ceremony,
     '-Version', $Version,
     '-Ref', $Tag,
+    '-Commit', $Commit,
     '-SignToolPath', $SignTool
 )
 if ($DryRun) { $ceremonyArgs += '-DryRun' }
 
-Write-Info "scripts\prestige-release.ps1 -Version $Version -Ref $Tag -SignToolPath <resolved>$(if ($DryRun) { ' -DryRun' })"
+Write-Info "scripts\prestige-release.ps1 -Version $Version -Ref $Tag -Commit $Commit -SignToolPath <resolved>$(if ($DryRun) { ' -DryRun' })"
 Write-Host ''
 
 # Streamed, not captured: this is a long build and the operator should see it happen. The ceremony
@@ -278,6 +342,15 @@ Write-Host ''
 # handles directly and reads nothing here; WaitForExit() waits on the child alone, not on its
 # descendants. (`Start-Process -PassThru` is also wrong: it does not keep the process handle open,
 # so .ExitCode reads back EMPTY once the child is gone and a good ceremony is reported as failed.)
+# LAST CHECK before the tree's own code runs: HEAD and the tag are still the pinned commit. Steps 4
+# and 5 ran nothing from the tree, but they took time, and this is the line after which the tree
+# is executing beside the key.
+$headNow = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
+$tagNow  = (Invoke-Git -Arguments @('rev-parse', '--verify', "$Tag^{commit}")).Output.Trim().ToLowerInvariant()
+if ($headNow -ne $Commit -or $tagNow -ne $Commit) {
+    Die "before the ceremony: HEAD is $headNow and $Tag is $tagNow, but -Commit is $Commit - refusing to run the tree."
+}
+
 $quotedArgs = $ceremonyArgs | ForEach-Object {
     if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
 }
@@ -328,6 +401,12 @@ $MsiSize = (Get-Item -LiteralPath $MsiPath).Length
 
 $bundleMeta = Get-Content -LiteralPath (Join-Path $BundleDir 'bundle.json') -Raw | ConvertFrom-Json
 $NewSeq     = [int]$bundleMeta.seq
+
+# The bundle must record the pinned commit: it is what the build-host watcher compares to the tag
+# (H103), and a bundle from any other tree is not this release.
+if (([string]$bundleMeta.commit).ToLowerInvariant() -ne $Commit) {
+    Die "bundle.json records commit '$($bundleMeta.commit)', not the pinned $Commit - nothing was dropped."
+}
 
 # signedAt straight out of the raw manifest bytes - never through ConvertFrom-Json, which would
 # turn it into a [DateTime] and lose the exact string that was signed.
@@ -532,7 +611,7 @@ else {
 Write-Step 'Done'
 
 Write-Host ''
-Write-Host "   andvari $Version - seq $NewSeq" -ForegroundColor Green
+Write-Host "   andvari $Version - seq $NewSeq - commit $Commit" -ForegroundColor Green
 Write-Host ''
 Write-Host ("     MSI        {0}" -f $MsiName)
 Write-Host ("     sha256     {0}" -f $MsiSha)

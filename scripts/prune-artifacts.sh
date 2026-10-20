@@ -254,6 +254,23 @@ EOM
   DL_FLEET_KEEP="$(dl_keepset ${DL_FLEET_VERS+"${DL_FLEET_VERS[@]}"} || true)"
   DL_EXT_KEEP="$(dl_keepset ${DL_EXT_VERS+"${DL_EXT_VERS[@]}"} || true)"
 
+  # A LIVE release is kept whole too, whatever its rank on disk (security review 2026-10, q50).
+  # Rule 1 only protects the names the live documents spell out, and they never name a detached
+  # signature: with two newer releases uploaded ahead of the manifest ceremony (or a re-cut), the
+  # live deb/pkg survived rule 1 while their .asc files fell through rule 2 and were deleted, so
+  # the fielded installer lost its published signature. Every version a live document references
+  # joins its track's keep-set, which keeps its .asc files (and the rest of that release) with it.
+  DL_LIVE_FLEET="" DL_LIVE_EXT=""
+  while IFS= read -r ref; do
+    if [[ "$ref" =~ ^andvari-extension-(chrome|firefox)-([0-9]+\.[0-9]+\.[0-9]+)\.(zip|xpi)$ ]]; then
+      DL_LIVE_EXT+="${BASH_REMATCH[2]}"$'\n'
+    elif [[ "$ref" =~ ^andvari-([0-9]+\.[0-9]+\.[0-9]+)(\.(deb|msi|apk)|-x86_64\.pkg\.tar\.zst)(\.asc)?$ ]]; then
+      DL_LIVE_FLEET+="${BASH_REMATCH[1]}"$'\n'
+    fi
+  done <<< "$DL_REFERENCED"
+  DL_FLEET_KEEP="$(printf '%s\n%s' "$DL_FLEET_KEEP" "$DL_LIVE_FLEET" | grep -v '^$' | sort -Vur -u || true)"
+  DL_EXT_KEEP="$(printf '%s\n%s' "$DL_EXT_KEEP" "$DL_LIVE_EXT" | grep -v '^$' | sort -Vur -u || true)"
+
   # Pass 2 — decide, now that the keep-sets exist.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
