@@ -38,6 +38,7 @@ type PinUnlockCode =
   | "not_armed"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
@@ -53,6 +54,7 @@ type BioUnlockCode =
   | "expired"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
@@ -263,6 +265,9 @@ export function pinUnlockErrorCopy(code: PinUnlockCode | undefined, attemptsRema
     case "corrupt":
     case "stale_uvk":
       return "Quick unlock needs to be set up again — unlock with your master password.";
+    case "keys_damaged":
+      // A13 (q38): the full unlock's H67 sentence, byte-identical — the same damaged row, the same verdict.
+      return unlockErrorCopy("keys_damaged");
     case "revoked":
       return "Your session ended — sign in again with your master password.";
     case "identity_mismatch":
@@ -318,6 +323,8 @@ export function bioUnlockErrorCopy(code: BioUnlockCode | undefined): string {
     case "corrupt":
     case "stale_uvk":
       return "Quick unlock needs to be set up again — unlock with your master password.";
+    case "keys_damaged":
+      return unlockErrorCopy("keys_damaged"); // A13 (q38): the H67 sentence, byte-identical
     case "revoked":
       return "Your session ended — sign in again with your master password.";
     case "identity_mismatch":

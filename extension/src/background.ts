@@ -371,8 +371,12 @@ let tabs = new Map<number, TabState>();
 /** One-shot popup fill grants, tabId → item+expiry. In-memory only: minted and consumed within
  *  one message exchange, so a SW death in between simply voids the grant (fill re-clicks). The
  *  grant is consumed ONLY by the tab's TOP frame (fillFromPopup targets frameId 0) — a
- *  broadcast-to-all-frames grant would let a hostile cross-origin sub-frame claim the secret. */
-const grants = new Map<number, { itemId: string; expiresMs: number }>();
+ *  broadcast-to-all-frames grant would let a hostile cross-origin sub-frame claim the secret.
+ *  Security review 2026-10 (A13, q39), the card grant's rule: the grant also records the tab's
+ *  top-level ORIGIN at mint, redemption requires the browser-set `sender.origin` to equal it, and a
+ *  top-level navigation (status "loading") voids it — so a document that replaced the one the user
+ *  picked the login for can never redeem it. */
+const grants = new Map<number, { itemId: string; origin: string; expiresMs: number }>();
 /** S3 CARD fill grants — a store SEPARATE from login `grants` ([A5]). `grants` is single-slot per
  *  tab, so sharing it would let a card grant clobber a live login grant (and let one path's
  *  redemption consume the other's). A card grant carries the two extra bindings the contract needs
@@ -1127,6 +1131,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // [T4] rescanCardForms sig reset is what restores the offer.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "loading") return;
+  grants.delete(tabId); // q39: a navigation voids the login grant too — it was minted for the OLD document
   cardGrants.delete(tabId);
   // C1 [S2]: the topOrigin erase below is ASYNC (it must await ensureLoaded), so mark the tab
   // stale SYNCHRONOUSLY — right here, before the first await — or the chip gate would spend that
@@ -2608,7 +2613,7 @@ function unlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
   return pinUnlockInFlight;
 }
 
-type RedeemDanceResult = { ok: true } | { ok: false; code: "aborted" | "revoked" | "network" | "identity_mismatch" | "kdf_policy" | "server_error" | "stale_uvk" };
+type RedeemDanceResult = { ok: true } | { ok: false; code: "aborted" | "revoked" | "network" | "identity_mismatch" | "kdf_policy" | "server_error" | "stale_uvk" | "keys_damaged" };
 
 function unlockWithBio(): Promise<Res<"unlockWithBio">> {
   bioUnlockInFlight ??= doUnlockWithBio().finally(() => {
@@ -2679,9 +2684,21 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
 
           const keys = await api.getAccountKeys();
           assertServerKdfParams(keys.kdfParams); // breaker B6: re-assert the H1 master-KDF floor on redeem
+          // A13 (q38): the served seed blob gets the SAME structure-first gate as the full unlock (R38) before it is
+          // opened. A blob that is not base64url or not a readable envelope is a damaged/foreign account row — the
+          // server's doing, never the device's key — so it is the terminal keys_damaged refusal with the enrolled blob
+          // KEPT, not a wipe blamed on a stale UVK.
+          let seedEnvelope: Uint8Array;
+          try {
+            seedEnvelope = fromB64(keys.encryptedIdentitySeed);
+          } catch {
+            throw new VaultKeyDamagedError("encryptedIdentitySeed is not valid base64url");
+          }
+          const seedRefusal = envelopeStructuralRefusal(seedEnvelope);
+          if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
           // The seed open throwing = stale/foreign UVK (→ wipe); the compare failing = IdentityMismatchError
           // (→ HARD FAIL, blob KEPT). Same strictness as the full unlock (verifyServerIdentity).
-          const identity = boxKeypairFromSeed(open(begin.uvk, fromB64(keys.encryptedIdentitySeed), adIdkey(begin.userId)));
+          const identity = boxKeypairFromSeed(open(begin.uvk, seedEnvelope, adIdkey(begin.userId)));
           verifyServerIdentity(identity.publicKey, keys.identityPub);
 
           const sync = await api.sync(0);
@@ -2726,6 +2743,7 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           return { ok: true };
         } catch (e) {
           if (e instanceof IdentityMismatchError) return { ok: false, code: "identity_mismatch" }; // blob KEPT (evidence)
+          if (e instanceof VaultKeyDamagedError) return { ok: false, code: "keys_damaged" }; // q38: blob KEPT, terminal
           if (e instanceof KdfPolicyError) {
             await doSignOut(); // the server tried to weaken the master KDF on redeem — wipe, force full sign-in
             return { ok: false, code: "kdf_policy" };
@@ -3175,7 +3193,8 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
   const isTopFrame = sender.frameId === undefined || sender.frameId === 0;
   if (!allowed && tabId !== undefined && isTopFrame) {
     const g = grants.get(tabId);
-    if (g && g.itemId === msg.itemId && g.expiresMs > Date.now()) {
+    // q39: the redeeming document must be the origin the grant was minted for (fail closed on an undefined origin).
+    if (g && g.itemId === msg.itemId && g.expiresMs > Date.now() && typeof sender.origin === "string" && sender.origin === g.origin) {
       grants.delete(tabId); // one-shot
       allowed = true;
     }
@@ -3260,7 +3279,11 @@ async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSende
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return { ok: false, code: "unreachable", error: "no active tab" };
-  grants.set(tab.id, { itemId, expiresMs: Date.now() + GRANT_TTL_MS });
+  // q39: bind the grant to the top-level origin the user is looking at NOW (readable under the popup-open activeTab
+  // window); an opaque or unreadable top is never eligible, the card grant's [A1] rule.
+  const top = await topOrigin(tab.id);
+  if (top === null) return { ok: false, code: "not_allowed", error: "this page cannot be filled" };
+  grants.set(tab.id, { itemId, origin: top, expiresMs: Date.now() + GRANT_TTL_MS });
   const msg: TabMsg = { type: "fillItem", itemId };
   let raw: unknown;
   try {
