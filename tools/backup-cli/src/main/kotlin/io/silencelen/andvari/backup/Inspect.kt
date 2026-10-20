@@ -111,7 +111,10 @@ object BackupInspect {
      * (names sanitized — path separators and control chars become `_`, so nothing can
      * escape [outDir]). Targets are PRE-FLIGHTED before any byte is written: an existing
      * file or two entries mapping to the same name refuses the whole extract — this tool
-     * never overwrites anything.
+     * never overwrites anything. "The same name" is judged as a case-insensitive filesystem
+     * would (macOS by default, Windows): case-folded, NFC-normalised, trailing dots/spaces
+     * dropped (security review 2026-10, q45) — and each file is created with CREATE_NEW, so a
+     * name that appears between the pre-flight and the write is refused, not replaced.
      */
     fun extract(opened: Backup.OpenedBackup, outDir: File): List<ExtractedFile> {
         val entries = opened.payload.attachments
@@ -121,14 +124,16 @@ object BackupInspect {
         }
 
         // Pre-flight every target so a refusal happens before ANY write.
-        val seen = HashSet<String>()
+        val existing = outDir.list().orEmpty().mapTo(HashSet()) { foldName(it) }
+        val seen = HashMap<String, String>()
         val planned = entries.map { entry ->
             val name = sanitizeFileName("${itemName(opened.payload, entry.itemId)}-${entry.name}")
-            if (!seen.add(name)) {
-                throw IllegalStateException("two attachments map to the same output name '$name' — extract to an empty directory per run")
+            val folded = foldName(name)
+            seen.put(folded, name)?.let { prev ->
+                throw IllegalStateException("two attachments map to the same output name '$name' (and '$prev' — one file on a case-insensitive filesystem) — extract to an empty directory per run")
             }
             val target = File(outDir, name)
-            if (target.exists()) {
+            if (target.exists() || folded in existing) {
                 throw IllegalStateException("refusing to overwrite existing file $target")
             }
             // Belt-and-braces: sanitized names contain no separators, so this cannot fire.
@@ -139,13 +144,21 @@ object BackupInspect {
         return planned.map { (entry, target) ->
             val plain = opened.readAttachment(entry) // BackupException (spec code) propagates
             try {
-                target.writeBytes(plain)
+                // CREATE_NEW: fails (FileAlreadyExistsException) instead of truncating whatever is there now.
+                java.nio.file.Files.newOutputStream(target.toPath(), java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
+                    .use { it.write(plain) }
+            } catch (e: java.nio.file.FileAlreadyExistsException) {
+                throw IllegalStateException("refusing to overwrite existing file $target", e)
             } finally {
                 plain.fill(0)
             }
             ExtractedFile(target, entry.size)
         }
     }
+
+    /** How a case-insensitive filesystem compares names: NFC, trailing dots/spaces dropped (Windows), case-folded. */
+    internal fun foldName(name: String): String =
+        java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC).trimEnd('.', ' ').lowercase(java.util.Locale.ROOT)
 
     /** `/`, `\` and control chars → `_`; blank or dots-only results get a safe stand-in.
      *  Everything else (spaces, unicode, leading dots within a composite name) is kept —
