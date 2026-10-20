@@ -179,4 +179,40 @@ class AccountStateTest {
         second.pin(contact("cccccccc-cccc-4ccc-8ccc-cccccccccccc", 200))
         assertEquals(setOf("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cccccccc-cccc-4ccc-8ccc-cccccccccccc"), a.openAccountState(server.sealed!!).contacts.map { it.userId }.toSet())
     }
+
+    // ---- A13 (security review 2026-10, q01): a human unpin / re-pin wins the merge under cross-device clock skew ----
+
+    private val u = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    private val me = "33333333-3333-4333-8333-333333333333"
+
+    @Test
+    fun anUnpinOnASlowClockStillRemovesThePinAnotherDeviceRecordedLater() {
+        // Device A (clock ahead) pinned at 5000; device B (clock behind) unpins at 1000.
+        val pinned = AccountState.withContact(AccountState.empty(me).copy(seq = 1), contact(u, 5_000))
+        val unpinned = AccountState.withoutContact(pinned, u, 1_000)
+        assertTrue((unpinned.contactTombstones[u] ?: -1) >= 5_000, "the tombstone is pushed to the pin it removes")
+        // The next refresh merges B's copy with A's (still pinned): the human's unpin holds.
+        val merged = AccountState.merge(me, unpinned, pinned, 0).doc
+        assertTrue(merged.contacts.none { it.userId == u }, "a merge must not revive an unpinned contact")
+        assertTrue(AccountState.merge(me, pinned, unpinned, 0).doc.contacts.none { it.userId == u }, "order-independent")
+    }
+
+    @Test
+    fun aRePinOnASlowClockSurvivesTheTombstoneItReplaces() {
+        val tomb = AccountState.withoutContact(AccountState.withContact(AccountState.empty(me).copy(seq = 1), contact(u, 100)), u, 5_000)
+        val repinned = AccountState.withContact(tomb, contact(u, 1_000))
+        val merged = AccountState.merge(me, repinned, tomb, 0).doc
+        assertEquals(listOf(u), merged.contacts.map { it.userId }, "the re-pin outranks the older-in-intent tombstone")
+    }
+
+    @Test
+    fun aReVerificationWithAChangedKeyOnASlowClockWinsTheMerge() {
+        val oldPin = AccountState.withContact(AccountState.empty(me).copy(seq = 1), contact(u, 5_000))
+        val newKey = Contact(u, Bytes.toB64(ByteArray(32) { 9 }), "Bea", 1_000, Contact.METHOD_TYPED)
+        val reverified = AccountState.withContact(oldPin, newKey)
+        val merged = AccountState.merge(me, reverified, oldPin, 0).doc
+        assertEquals(newKey.identityPub, merged.contact(u)?.identityPub, "the newer human act wins, not the faster clock")
+        // The same pin re-saved does not churn its time.
+        assertEquals(5_000, AccountState.withContact(oldPin, contact(u, 1_000)).contact(u)?.verifiedAt)
+    }
 }

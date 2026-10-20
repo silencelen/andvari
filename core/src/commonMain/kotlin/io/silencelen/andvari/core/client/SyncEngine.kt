@@ -680,6 +680,10 @@ class SyncEngine(
     /** A7 review MEDIUM-2: the account state's consumed nonces for [vaultId] (other devices of this user). */
     private fun accountConsumedFor(vaultId: String): Set<String> = accountState.doc.consumedNonces[vaultId].orEmpty().mapTo(HashSet()) { it.nonce }
 
+    /** A13 (c10): when each of those was consumed (v2: its issuedAt; v1: the consuming device's clock). */
+    private fun accountConsumedAtFor(vaultId: String): Map<String, Long> =
+        accountState.doc.consumedNonces[vaultId].orEmpty().associate { it.nonce to it.issuedAt }
+
     /** Called after a personal wrap is stored server-side, so a native host can update its cached
      *  `AccountKeys` (an offline cold start then knows the personal vault without the network). */
     var onPersonalWrapStored: ((io.silencelen.andvari.core.model.PersonalWrap) -> Unit)? = null
@@ -987,7 +991,17 @@ class SyncEngine(
         if (newlyHeld.isEmpty()) return
         for (w in cache.envelopes()) {
             if (w.deleted || w.vaultId !in newlyHeld) continue
-            runCatching { cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w))) }
+            // INV-HOME (A13, c05; the hydrate twin): a kept row is admitted against home(itemId) and HOMES the item once
+            // it is applied here. Without the home, the next row for this itemId under another held vault took NEW_HOME
+            // and quarantined this genuine one.
+            if (!admitHome(w)) {
+                cache.deleteItem(w.itemId)
+                continue
+            }
+            runCatching {
+                cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
+                homeApplied(w)
+            }
         }
     }
 
@@ -1959,6 +1973,7 @@ class SyncEngine(
                 issuedAt = info?.issuedAt,
                 consumed = consumedFor(vaultId),
                 consumedAccount = accountConsumedFor(vaultId),
+                consumedAccountAt = accountConsumedAtFor(vaultId),
                 liveSince = cache.liveSince(vaultId),
                 now = nowMs(),
             )

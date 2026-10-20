@@ -23,6 +23,11 @@ package io.silencelen.andvari.core.crypto
  *     this device's window, was consumed by another of this user's devices for the same genuine removal:
  *     [Verdict.ALREADY_RECORDED], calm, and consumed here too. The window is checked first, so a proof replayed
  *     after a re-add this device saw is still an anomaly.
+ *  6″. (A13, c10) a v1 proof has no issuedAt, so for a v1 nonce found only in the ACCOUNT-STATE set the time that
+ *     record was consumed (`consumedAccountAt`) stands in for it and gets the same window: outside
+ *     `liveSince − 10 min ..= now + 10 min` (or with no recorded time, or no `liveSince`) it is [Verdict.ANOMALY]
+ *     at step `window`, exactly as a v2 replay after a re-add is. Inside it is [Verdict.ALREADY_RECORDED], consumed
+ *     here at the RECORDED time, so a calm verdict never moves the account-state record forward.
  *  7. valid: the caller consumes `(vaultId, nonce, issuedAt)` in the same transaction that moves the vault to the
  *     holding area.
  *
@@ -70,10 +75,12 @@ object RemovalProof {
         consumedAccount: Set<String>,
         liveSince: Long?,
         now: Long,
+        /** A13 (c10): when each [consumedAccount] nonce was consumed (account-state `[nonce, at]`). Only the v1 path reads it. */
+        consumedAccountAt: Map<String, Long> = emptyMap(),
     ): Decision {
         if (reason != "removed" && reason != "left") return Decision(Verdict.ANOMALY, "reason")
         // Step 3: a complete v2 proof, else the in-window legacy rows.
-        if (proofV != 2) return legacy(crypto, lifecycleKey, vaultId, myUserId, reason, proofV, proof, nonce, consumed, consumedAccount, now)
+        if (proofV != 2) return legacy(crypto, lifecycleKey, vaultId, myUserId, reason, proofV, proof, nonce, consumed, consumedAccount, consumedAccountAt, liveSince, now)
         if (proof.isNullOrEmpty() || nonce == null || issuedAt == null || !LifecycleProof.isV2Nonce(nonce)) {
             return Decision(Verdict.ANOMALY, "fields")
         }
@@ -104,6 +111,8 @@ object RemovalProof {
         nonce: String?,
         consumed: Set<String>,
         consumedAccount: Set<String>,
+        consumedAccountAt: Map<String, Long>,
+        liveSince: Long?,
         now: Long,
     ): Decision {
         if (proofV != null && proofV != 1) return Decision(Verdict.ANOMALY, "fields") // an unknown proof version
@@ -118,7 +127,12 @@ object RemovalProof {
             ?: return Decision(Verdict.ANOMALY, "mac")
         if (!LifecycleProof.verify(expected, proof)) return Decision(Verdict.ANOMALY, "mac")
         if (nonce in consumed) return Decision(Verdict.REPLAY_DENIED, "nonce")
-        if (nonce in consumedAccount) return Decision(Verdict.ALREADY_RECORDED, "recorded", nonce, now)
+        if (nonce in consumedAccount) {
+            // Step 6″ (A13, c10): the account-state record's time is the only time a v1 removal has.
+            val at = consumedAccountAt[nonce]
+            if (liveSince == null || at == null || at < liveSince - SKEW_MS || at > now + SKEW_MS) return Decision(Verdict.ANOMALY, "window")
+            return Decision(Verdict.ALREADY_RECORDED, "recorded", nonce, at)
+        }
         return Decision(Verdict.VALID_LEGACY, "legacy", nonce, now)
     }
 }
