@@ -4,6 +4,83 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.28.1 (2026-10-19) — who you add is who you verified · fleet 0.28.1, extension 0.28.1
+
+*A follow-up pass of security review 2026-10 went over the 0.28.0 fixes, again assuming the vault
+server is hostile. It found no way for the server to read your passwords. It found a few places
+where the server could still steer a decision you make: whom you add to a vault, which vault the
+browser extension saves into, and which server the desktop and Android apps go back to after an
+invite link. All of it is fixed. The changes you will see are listed first.*
+
+**What you will notice**
+- **Adding someone to a vault confirms them by the email you typed when you verified them.** It
+  never uses the name the server shows. If the account the server finds does not match the person
+  you verified, the add is refused, and no confirmation can override it.
+- **A person you verified before 0.28.1 must be verified again, once, before you can add them.**
+  Older verifications did not record the email you typed, so the app asks you to verify that person
+  again, with the email already filled in. After that, adding works as before. Lists of members now
+  show the stored label as "the name shown when you verified them".
+- **The browser extension names the vault it will save or update into.** Before updating a login in
+  a shared vault, it warns that everyone who holds that vault can read the change. It never saves
+  into a personal vault you have not confirmed on this browser profile.
+- **Desktop: after a restart you sign in again until you answer the storage prompt with yes.** The
+  app keeps your sign-in only in memory until then. If you or your organisation declined, it always
+  stays in memory and you sign in after each restart.
+- **Cancelling a pasted invite link always returns to the server you last signed in to,** on desktop
+  and Android, even when you pasted a second link before cancelling. Sign-in and account recovery are
+  refused while the app is pointed at a server you have not confirmed yet.
+- **Android: quick unlock asks for your password if the device clock moves backwards.**
+
+**Also fixed**
+- Your app now ties its own identity to your account's email. If an account is deleted and a new one
+  is registered with the same email on the same server, a device that unlocked the old account
+  refuses the new one instead of treating it as you.
+- When the server withholds your personal vault's key, or sends one that does not open, the app no
+  longer puts its cached copy in force on its own. A change of personal vault made on another device
+  is always shown to you for one tap.
+- Upgrading old device-local trust records no longer wipes them when the old text happens to look
+  like JSON.
+- Desktop and Android ignore a security-policy reply that arrives after you switched servers, and a
+  policy check that hangs gives up after 15 seconds.
+- Copying everything to your personal vault (the vault-delete rescue) refuses cleanly when no
+  personal vault is in force, and a very large copy stops with "run it again" instead of running
+  without limit. Progress is kept.
+- The browser extension shows a refused, malformed id at sign-in as a tampering warning, not as
+  "try again". The web app recovers from a malformed cached row instead of stopping every sync.
+
+**For self-hosters**
+- Nothing new beyond the 0.28.0 notes. The server is unchanged in this release, the schema stays at
+  v15 and the minimum client version is not raised: the compatibility window stays open.
+
+**Under the hood, for readers**
+- *Add-member identity (spec 01 §6, spec 05 R14):* a contact pin records `email`, the normalised
+  address the person typed to look the contact up when the ceremony ran. It is never taken from a
+  server value, so enrol-link, members-list and invitation pins carry none, and pre-0.28.1 account
+  state stays byte-identical. `addIdentity` returns `match`, `mismatch` (the looked-up account's pin
+  records another email, or another pin records the typed one), `legacy` (a pin with no email:
+  refused, re-verify) or `unpinned`, and the check is repeated at signing on both engines. The
+  self-identity pin is bound to the account email too.
+- *Personal designation (spec 05 R14(e)):* an absent or unreadable served wrap, with a cached wrap that
+  differs from the designation, is PROPOSED with nothing in force. The silent "designation equals
+  served" arm is gone, and applying a wrap preserves PROPOSED. A 17-row decision table in
+  `personalwrap.json` runs on core, web and the extension. A rollback to an intermediate state above
+  the high-water mark is not detectable, and the spec now says so.
+- *Extension:* a served personal wrap's key is installed only on the in-force branch; a write with no
+  role entry fails closed; the save banner's named vault is the only one a commit honours, and it is
+  kept in the worker.
+- *Origin and session (spec 05 T3, R10):* the restore point of an invite-link switch is captured
+  once; a new core `OriginProbeFence` tags every policy reply with its origin and a generation; desktop
+  tokens persist only when `orgAllowed && consent == true`. No DPAPI-backed store exists yet; spec 05
+  T3 records it.
+- *Android quick unlock (spec 01 §8.1):* freshness is decided by `BOOT_COUNT` when both sides know it,
+  the 5-minute clock-skew allowance is removed, and a belt fails closed after 30 days of uptime past
+  the stamp. Two residuals are recorded in spec 05: a stamp without a boot count falls back to the
+  clock-derived reference, and a long power-off with the clock stepped back before boot is not caught.
+- *Trust records:* a JSON array is decoded strictly, a JSON object is refused whole, and anything else
+  falls back to the legacy line parser. Malformed vault meta is refused and a rename writes a clean one.
+- *Release tooling:* the signing workstation's preflight now proves the update-signing key is openable
+  by the account that runs the ceremony.
+
 ## 0.28.0 (2026-10-15) — the server is no longer trusted with your keys · fleet 0.28.0, extension 0.28.0
 
 *Security review 2026-10 checked every platform again, this time assuming the vault server itself
