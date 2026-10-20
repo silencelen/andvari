@@ -1,6 +1,7 @@
 package io.silencelen.andvari.app
 
 import android.content.Context
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -206,6 +207,18 @@ sealed interface Screen {
     // from the stored session, exactly like [Unlock].
     data class Recover(val email: String) : Screen
 }
+
+/**
+ * FLAG_SECURE (MainActivity.onCreate) is cleared for the WHOLE window on the Autofill Status screen, so the owner's
+ * debugging protocol can screenshot it. Security review 2026-10 (q30): that is safe only while nothing else in the
+ * window shows vault values, so [showsAttentionArea] is false on every exempt screen. Pure, and pinned together.
+ */
+internal fun flagSecureExempt(screen: Screen): Boolean = screen is Screen.AutofillStatus
+
+/** The attention area (vault names, co-holders, invitations, transfers) is composed above the screen switch on every
+ *  screen except the two recovery gates (§F.9) and any FLAG_SECURE-exempt screen (q30). */
+internal fun showsAttentionArea(screen: Screen): Boolean =
+    screen !is Screen.RecoverySetup && screen !is Screen.RecoveryCapture && !flagSecureExempt(screen)
 
 data class UiState(
     val screen: Screen = Screen.Loading,
@@ -1207,6 +1220,17 @@ class AndvariViewModel(
     // [closeEditor] clears it (plaintext must not outlive the editor session).
     val editorPendingUploads = mutableListOf<PendingUpload>()
 
+    // The open editor's SECRET fields (password, TOTP seed, card number, security code) — held
+    // here for the same reason as the picks: they must survive rotation/fold recreation, and they
+    // must never enter SavedState (system_server keeps that Bundle outside the app's lock and
+    // zeroization; security review 2026-10, q27). Seeded from the item on first read, cleared by
+    // [openEditor] and [closeEditor] (so also on lock).
+    private val editorSecrets = HashMap<String, MutableState<String>>()
+
+    /** The editor session's state for secret [field], seeded by [seed] the first time it is read in this session. */
+    fun editorSecretState(field: String, seed: () -> String): MutableState<String> =
+        editorSecrets.getOrPut(field) { mutableStateOf(seed()) }
+
     // The OPEN editor session (open flag + target itemId) also lives HERE, not in the
     // composition: a save completing across an Activity recreation must close the editor
     // the user is actually looking at — a composition-captured close callback died with
@@ -1241,7 +1265,7 @@ class AndvariViewModel(
      * Part of the editor SESSION, exactly like [editorItemId]/[editorNewType]: cleared by
      * [openEditor] on every fresh session (so an ordinary edit never inherits it) and by
      * [closeEditor]. Deliberately NOT rememberSaveable-equivalent — after an Activity
-     * recreation the password has already been generated into the editor's own saved state, and
+     * recreation the password has already been generated into the editor session's state, and
      * re-firing would roll a SECOND password over the one the user is reading.
      */
     var editorGenerateOnOpen by mutableStateOf(false)
@@ -1257,6 +1281,7 @@ class AndvariViewModel(
 
     fun openEditor(itemId: String?, newType: String = "login", generate: Boolean = false) {
         editorPendingUploads.clear() // a fresh editor session never inherits stale picks
+        editorSecrets.clear() // …nor another item's secrets
         draftItemId = null // …nor a previous session's draft id (reusing one would OVERWRITE that item)
         editorItemId = itemId
         editorVaultId = itemId?.let { engine?.item(it)?.vaultId }
@@ -1270,6 +1295,7 @@ class AndvariViewModel(
         editorItemId = null
         editorVaultId = null
         editorPendingUploads.clear()
+        editorSecrets.clear() // the secrets die with the editor session (and so with a lock)
         editorGenerateOnOpen = false
         draftItemId = null // cancel or success: the next editor session starts a fresh draft
     }
