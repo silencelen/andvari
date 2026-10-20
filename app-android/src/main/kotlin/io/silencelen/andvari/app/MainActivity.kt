@@ -137,10 +137,13 @@ class MainActivity : FragmentActivity() {
         // Block Recents thumbnails / screen recording / casting from capturing revealed
         // secrets (set AFTER the crash-screen early-return above — crash traces must stay
         // screenshot-able). The Autofill Status screen is exempted below: the owner's Fold
-        // debugging protocol depends on screenshotting it, and it renders no vault values.
+        // debugging protocol depends on screenshotting it, and it renders no vault values — which
+        // holds for the WHOLE window only because the attention area (vault names, co-holders,
+        // invitations, transfers) is not composed on that screen ([showsAttentionArea]; security
+        // review 2026-10, q30).
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         lifecycleScope.launch {
-            vm.ui.map { it.screen is Screen.AutofillStatus }.distinctUntilChanged().collect { exempt ->
+            vm.ui.map { flagSecureExempt(it.screen) }.distinctUntilChanged().collect { exempt ->
                 if (exempt) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 else window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
             }
@@ -307,7 +310,8 @@ fun AndvariApp(vm: AndvariViewModel) {
             // shown-once reveal must not compete with re-seal/transfer cards (a migration account
             // entering the capture gate can carry several), and every card keeps working after
             // the gate lands the vault.
-            if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) AttentionArea(vm, ui)
+            // q30: nor the FLAG_SECURE-exempt Autofill Status screen ([showsAttentionArea]).
+            if (showsAttentionArea(ui.screen)) AttentionArea(vm, ui)
             // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
             if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm, ui.quickUnlockReoffered)
             // Cut L (v2 #20): autofill — the product's core daily value — was never offered;
@@ -2307,21 +2311,25 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     val noPersonalVault = itemId == null && vm.personalVaultId().isEmpty()
     var targetVaultId by rememberSaveable(itemId) { mutableStateOf(if (noPersonalVault) null else vaultChoices.firstOrNull()?.vaultId) }
     var vaultError by remember(itemId) { mutableStateOf<String?>(null) }
-    // rememberSaveable: every typed field survives Activity recreation (rotation / fold
-    // posture change) — plain `remember` silently wiped them all.
+    // rememberSaveable: every typed NON-secret field survives Activity recreation (rotation / fold
+    // posture change) — plain `remember` silently wiped them all. The SECRET fields (password,
+    // TOTP seed, card number, security code) survive it from the ViewModel instead
+    // ([AndvariViewModel.editorSecretState]): app memory, dropped with the editor session and on
+    // lock, and never written into the saved-instance Bundle that system_server holds outside the
+    // app's lock (security review 2026-10, q27; the §F.7 idiom).
     var name by rememberSaveable { mutableStateOf(initial.name) }
     var username by rememberSaveable { mutableStateOf(initial.login?.username ?: "") }
-    var password by rememberSaveable { mutableStateOf(initial.login?.password ?: "") }
+    var password by remember { vm.editorSecretState("password") { initial.login?.password ?: "" } }
     var website by rememberSaveable { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
-    var totp by rememberSaveable { mutableStateOf(initial.login?.totp ?: "") }
+    var totp by remember { vm.editorSecretState("totp") { initial.login?.totp ?: "" } }
     // Card fields load VERBATIM (no normalization): merely opening the editor on an old card
     // must never change what a later Save writes back — normalization happens once, inside
     // builtDoc (the TOTP idiom).
     var cardholder by rememberSaveable { mutableStateOf(initial.card?.cardholderName ?: "") }
-    var cardNumber by rememberSaveable { mutableStateOf(initial.card?.number ?: "") }
+    var cardNumber by remember { vm.editorSecretState("cardNumber") { initial.card?.number ?: "" } }
     var cardExpMonth by rememberSaveable { mutableStateOf(initial.card?.expMonth ?: "") }
     var cardExpYear by rememberSaveable { mutableStateOf(initial.card?.expYear ?: "") }
-    var cardSecurityCode by rememberSaveable { mutableStateOf(initial.card?.securityCode ?: "") }
+    var cardSecurityCode by remember { vm.editorSecretState("cardSecurityCode") { initial.card?.securityCode ?: "" } }
     var cardPostal by rememberSaveable { mutableStateOf(initial.card?.postalCode ?: "") }
     var notes by rememberSaveable { mutableStateOf(initial.notes ?: "") }
     var attachments by rememberSaveable(stateSaver = attachmentListSaver) { mutableStateOf(initial.attachments) }

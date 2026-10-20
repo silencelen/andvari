@@ -215,19 +215,16 @@ fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
     // so a T1 server can't steer it below the compile-time floor with a validly-signed-but-older manifest.
     val floorSeq = maxOf(lastAcceptedSeq, UpdateVerify.MIN_SEQ)
     val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build()
+    // q19 (security review 2026-10): both bodies are UNVERIFIED server bytes, so they are size-capped while they are
+    // read — never buffered whole first. An oversized answer is the same quiet Unverified as any other failure.
     val raw: ByteArray = try {
-        val req = HttpRequest.newBuilder(URI.create("$baseUrl/downloads/manifest.json")).timeout(Duration.ofSeconds(4)).GET().build()
-        val resp = client.send(req, HttpResponse.BodyHandlers.ofByteArray())
-        if (resp.statusCode() != 200) return UpdateCheck.Unverified
-        resp.body()
+        fetchBounded(client, "$baseUrl/downloads/manifest.json", UPDATE_MANIFEST_MAX_BYTES) ?: return UpdateCheck.Unverified
     } catch (_: Exception) {
         return UpdateCheck.Unverified
     }
     val sig: ByteArray = try {
-        val req = HttpRequest.newBuilder(URI.create("$baseUrl/downloads/manifest.json.sig")).timeout(Duration.ofSeconds(4)).GET().build()
-        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
-        if (resp.statusCode() != 200) return UpdateCheck.Unverified
-        Bytes.fromB64(resp.body().trim())
+        val text = fetchBounded(client, "$baseUrl/downloads/manifest.json.sig", UPDATE_SIG_MAX_BYTES) ?: return UpdateCheck.Unverified
+        Bytes.fromB64(text.decodeToString().trim())
     } catch (_: Exception) {
         return UpdateCheck.Unverified
     }
@@ -251,6 +248,28 @@ fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
         available != null && compareVersions(available, DESKTOP_VERSION) > 0 -> UpdateCheck.Available(available, manifest.seq)
         updateChannelStale(manifest.signedAt) -> UpdateCheck.Stale(manifest.seq)
         else -> UpdateCheck.UpToDate(manifest.seq)
+    }
+}
+
+/** q19: the signed downloads manifest is a few KiB; 256 KiB leaves room for growth and still cannot exhaust a heap. */
+internal const val UPDATE_MANIFEST_MAX_BYTES = 256 * 1024
+
+/** q19: the detached signature is 64 bytes, i.e. 86 base64url characters plus a newline. */
+internal const val UPDATE_SIG_MAX_BYTES = 1024
+
+/**
+ * q19: GET [url] and return its body only when the status is 200 and the body is at most [limit] bytes; null
+ * otherwise. A declared Content-Length over the limit is refused before reading; an undeclared (chunked) body is read
+ * through [readBounded], which stops at the limit. The request timeout bounds the wait for headers.
+ */
+internal fun fetchBounded(client: HttpClient, url: String, limit: Int): ByteArray? {
+    val req = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(4)).GET().build()
+    val resp = client.send(req, HttpResponse.BodyHandlers.ofInputStream())
+    resp.body().use { body ->
+        if (resp.statusCode() != 200) return null
+        val declared = resp.headers().firstValueAsLong("Content-Length")
+        if (declared.isPresent && declared.asLong > limit) return null
+        return readBounded(body, limit)
     }
 }
 
