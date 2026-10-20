@@ -235,6 +235,47 @@ class BackupCliTest {
         }
     }
 
+    /**
+     * Security review 2026-10 (A13, q45): "never overwrites" holds on a case-insensitive filesystem (macOS APFS by
+     * default, Windows) too. Names that differ only by case, or by a trailing dot/space Windows drops, are ONE file
+     * there, so they are refused up front like an exact collision; so is an existing file under another case.
+     */
+    @Test
+    fun extract_refusesNamesThatCollideOnACaseInsensitiveFilesystem() {
+        for ((names, atts) in listOf(
+            ("Same" to "same") to ("a.bin" to "A.BIN"),
+            ("Same" to "Same") to ("a.bin" to "a.bin. "),
+        )) {
+            val sample = TestBackups.buildSample(
+                "extract fold phrase",
+                itemNames = mapOf(TestBackups.GITHUB_ITEM to names.first, TestBackups.WIFI_ITEM to names.second),
+                attachmentNames = atts,
+            )
+            val opened = Backup.open(crypto, sample.passphrase, sample.file)
+            val outDir = createTempDirectory("backup-cli-fold").toFile()
+            try {
+                val e = assertFailsWith<IllegalStateException>("$names/$atts") { BackupInspect.extract(opened, outDir) }
+                assertTrue("same output name" in (e.message ?: ""), e.message ?: "")
+                assertEquals(0, outDir.listFiles()!!.size, "refusal must happen before any write")
+            } finally {
+                outDir.deleteRecursively()
+            }
+        }
+        // An existing file that differs only by case is the same file there: refused, and left untouched.
+        val sample = TestBackups.buildSample("extract fold existing phrase")
+        val opened = Backup.open(crypto, sample.passphrase, sample.file)
+        val outDir = createTempDirectory("backup-cli-fold-existing").toFile()
+        try {
+            val existing = java.io.File(outDir, "GITHUB-ROUTER-CONFIG.TXT").apply { writeText("mine") }
+            val e = assertFailsWith<IllegalStateException> { BackupInspect.extract(opened, outDir) }
+            assertTrue("refusing to overwrite" in (e.message ?: ""), e.message ?: "")
+            assertEquals("mine", existing.readText())
+            assertEquals(1, outDir.listFiles()!!.size)
+        } finally {
+            outDir.deleteRecursively()
+        }
+    }
+
     // ---- offline guarantee ----
 
     @Test
