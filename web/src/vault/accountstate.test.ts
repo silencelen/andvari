@@ -11,7 +11,7 @@ import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
-import { type AccountStateDoc, AccountStateError, type Contact, decodeAccountState, emptyAccountState, encodeAccountState, mergeAccountState, withContact } from "./accountstate";
+import { type AccountStateDoc, AccountStateError, type Contact, decodeAccountState, emptyAccountState, encodeAccountState, mergeAccountState, withContact, withoutContact } from "./accountstate";
 import { AccountStateSync, memoryClientState } from "./accountstatesync";
 
 /**
@@ -139,3 +139,32 @@ describe("AccountStateSync — rollback and injection", () => {
     expect(a.openAccountState(server.sealed!).contacts.map((c) => c.userId).sort()).toEqual(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cccccccc-cccc-4ccc-8ccc-cccccccccccc"]);
   });
 });
+
+describe("A13 (security review 2026-10, q23): a human unpin / re-pin wins the merge under clock skew", () => {
+  const u = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const me = "33333333-3333-4333-8333-333333333333";
+  const merge = (a: AccountStateDoc, b: AccountStateDoc) => mergeAccountState(me, a, b, 0).doc;
+
+  it("an unpin on a slow clock still removes the pin another device recorded later", () => {
+    const pinned = withContact({ ...emptyAccountState(me), seq: 1 }, contact(u, 5_000));
+    const unpinned = withoutContact(pinned, u, 1_000);
+    expect(unpinned.contactTombstones[u]).toBeGreaterThanOrEqual(5_000);
+    expect(merge(unpinned, pinned).contacts.some((c) => c.userId === u)).toBe(false);
+    expect(merge(pinned, unpinned).contacts.some((c) => c.userId === u)).toBe(false);
+  });
+
+  it("a re-pin on a slow clock survives the tombstone it replaces", () => {
+    const tomb = withoutContact(withContact({ ...emptyAccountState(me), seq: 1 }, contact(u, 100)), u, 5_000);
+    const repinned = withContact(tomb, contact(u, 1_000));
+    expect(merge(repinned, tomb).contacts.map((c) => c.userId)).toEqual([u]);
+  });
+
+  it("a re-verification with a changed key on a slow clock wins the merge", () => {
+    const oldPin = withContact({ ...emptyAccountState(me), seq: 1 }, contact(u, 5_000));
+    const newKey: Contact = { ...contact(u, 1_000), identityPub: "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk" };
+    const merged = merge(withContact(oldPin, newKey), oldPin);
+    expect(merged.contacts.find((c) => c.userId === u)?.identityPub).toBe(newKey.identityPub);
+    expect(withContact(oldPin, contact(u, 1_000)).contacts.find((c) => c.userId === u)?.verifiedAt).toBe(5_000);
+  });
+});
+

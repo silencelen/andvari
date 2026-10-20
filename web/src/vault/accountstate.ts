@@ -433,16 +433,30 @@ export function sameAccountStateContent(a: AccountStateDoc | null, b: AccountSta
   return encodeAccountState({ ...a, seq: 0 }) === encodeAccountState({ ...b, seq: 0 });
 }
 
-export function withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
-  const tomb = { ...doc.contactTombstones };
-  delete tomb[c.userId];
-  return { ...doc, contacts: [...doc.contacts.filter((x) => x.userId !== c.userId), c].sort((a, b) => (a.userId < b.userId ? -1 : 1)), contactTombstones: tomb };
+/** Contacts equal in everything but `verifiedAt` (the same pin re-saved). */
+function samePin(a: Contact, b: Contact): boolean {
+  return a.userId === b.userId && a.identityPub === b.identityPub && a.label === b.label && a.method === b.method && (a.email ?? null) === (b.email ?? null);
 }
 
+export function withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
+  // A13 (q23; core AccountState.withContact twin): the newest HUMAN act wins the merge whatever this device's clock
+  // says. A pin replacing a different pin, or a tombstone, is pushed past it; the same pin re-saved keeps its time.
+  const prev = doc.contacts.find((x) => x.userId === c.userId);
+  let at = c.verifiedAt;
+  const t = doc.contactTombstones[c.userId];
+  if (t !== undefined) at = Math.max(at, t + 1);
+  if (prev) at = samePin(prev, c) ? Math.max(at, prev.verifiedAt) : Math.max(at, prev.verifiedAt + 1);
+  const tomb = { ...doc.contactTombstones };
+  delete tomb[c.userId];
+  return { ...doc, contacts: [...doc.contacts.filter((x) => x.userId !== c.userId), { ...c, verifiedAt: at }].sort((a, b) => (a.userId < b.userId ? -1 : 1)), contactTombstones: tomb };
+}
+
+/** A13 (q23): the tombstone is pushed to the removed pin's `verifiedAt` (a tie removes), so a slow-clock unpin wins. */
 export function withoutContact(doc: AccountStateDoc, userId: string, at: number): AccountStateDoc {
+  const pinnedAt = doc.contacts.find((x) => x.userId === userId)?.verifiedAt ?? Number.MIN_SAFE_INTEGER;
   return {
     ...doc,
     contacts: doc.contacts.filter((x) => x.userId !== userId),
-    contactTombstones: { ...doc.contactTombstones, [userId]: Math.max(at, doc.contactTombstones[userId] ?? at) },
+    contactTombstones: { ...doc.contactTombstones, [userId]: Math.max(at, pinnedAt, doc.contactTombstones[userId] ?? Number.MIN_SAFE_INTEGER) },
   };
 }
