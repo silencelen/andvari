@@ -73,17 +73,21 @@ describe("App.signOut — the usage-ledger flush cannot be revoked out from unde
 
   it("the Vault unmount flushes the usage buffer BEFORE dispose, on a lock that keeps the tokens", () => {
     expect(vaultTsx).toContain("void usage.flush().finally(() => usage.dispose());");
-    // App's lock keeps the persisted session + tokens (the "never revokes" pins below), so this
-    // unmount flush rides a live pair; the user sign-out on the Unlock card comes after it.
+    // With the offline copy on, App's lock keeps the persisted session + tokens (the "never
+    // revokes" pins below), so this unmount flush rides a live pair; the user sign-out on the
+    // Unlock card comes after it. Without it (A14, F5) the lock revokes — and lockPerTab awaits
+    // the Vault's registered flush first, so the order holds there too (session.tokens.test.ts).
     expect(closure(appTsx, "lockLocal", "lock")).not.toContain("setTokens(null)");
   });
 });
 
-describe("App lock — never revokes", () => {
+describe("App lock — a browser WITH the offline copy never revokes", () => {
   it("the lock path keeps the session server-side (spec 05 T3)", () => {
     // Locking drops this tab's KEYS only; the persisted session and its tokens survive so the
     // user comes back through the master-password-only Unlock card. Revoking here would turn
-    // every auto-lock into a full sign-out on every device.
+    // every auto-lock into a full sign-out on every device. A14 (F5, owner decision): that is the
+    // offline-copy-ON browser. Without the offline copy lockLocal hands over to lockPerTab, which
+    // revokes THIS tab's pair and drops it (pinned in session.tokens.test.ts).
     expect(closure(appTsx, "lockLocal", "lock")).not.toContain("revokeSessionBestEffort");
     expect(closure(appTsx, "lock", "onRevoked")).not.toContain("revokeSessionBestEffort");
   });

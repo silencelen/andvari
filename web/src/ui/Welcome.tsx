@@ -150,6 +150,9 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
   // §F.9: an unlock that succeeds but whose account has not durably CONFIRMED its recovery piece is
   // BLOCKED here — the capture gate takes over the card until the phrase is saved.
   const [capture, setCapture] = useState<CaptureHandoff | null>(null);
+  // A14 (F5): while the token-less sign-in below shows its recovery-capture gate, the card's own
+  // sign-out link steps aside (the gate carries its own).
+  const [signInBlocking, setSignInBlocking] = useState(false);
   // §E.3.4: does this device hold a durable offline copy for THIS account? Loaded async (IDB probe);
   // null (no cache / probe failed / still loading) renders nothing — the line never blocks unlock.
   const [copyStamp, setCopyStamp] = useState<{ lastSyncAt: number | null } | null>(null);
@@ -210,6 +213,26 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
             // App.signOut → the §E.4 wipe + welcome card). The gate re-fires with a fresh phrase.
             onTimeout={() => onForget(REVEAL_TIMEOUT_NOTICE)}
           />
+        </div>
+      </div>
+    );
+  }
+
+  // A14 (F5): a browser without the offline copy keeps no token once locked (and a new tab never had
+  // one), so this "unlock" is a full sign-in — the normal SignIn flow, TOTP step included, with the
+  // session's email filled in and fixed. A password-only unlock would have no session to unlock.
+  if (!session.tokens) {
+    return (
+      <div className="auth-shell">
+        <div className="card">
+          <div className="card-hero">
+            <div className="sigil"><BrandSigil /></div>
+            <h1>Welcome back</h1>
+            <p>{session.email}</p>
+          </div>
+          {notice && <Msg kind="info">{notice}</Msg>}
+          <SignIn client={client} policy={policy} onReady={onReady} onBlockingChange={setSignInBlocking} lockedEmail={session.email} />
+          {!signInBlocking && <SignOutLink userId={session.userId} onSignOut={() => onForget()} />}
         </div>
       </div>
     );
@@ -466,8 +489,11 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
   );
 }
 
-function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForgot: () => void; onBlockingChange: (blocking: boolean) => void }) {
-  const [email, setEmail] = useState("");
+/** [lockedEmail] (A14, F5): the token-less unlock card's sign-in — the email is the session's, shown
+ *  and fixed, and there is no "forgot" link (the card never had one; recovery is from the start
+ *  screen). */
+function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEmail }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForgot?: () => void; onBlockingChange: (blocking: boolean) => void; lockedEmail?: string }) {
+  const [email, setEmail] = useState(lockedEmail ?? "");
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [totpNeeded, setTotpNeeded] = useState(false);
@@ -628,10 +654,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       {/* a11y-webext--11: same silent-unseal fix as the Unlock card above. */}
       <Announcer text={busy ? UNSEALING_NOTICE : ""} />
       <Field label="Email">
-        <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input type="email" autoComplete="username" value={email} readOnly={lockedEmail !== undefined} onChange={(e) => setEmail(e.target.value)} />
       </Field>
       <Field label="Master password">
-        <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <input type="password" autoComplete="current-password" autoFocus={lockedEmail !== undefined} value={password} onChange={(e) => setPassword(e.target.value)} />
       </Field>
       {totpNeeded && (
         <Field
@@ -649,10 +675,12 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           />
         </Field>
       )}
-      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : "Sign in"}</button>
-      <div style={{ textAlign: "center", marginTop: 12 }}>
-        <button type="button" className="link" onClick={onForgot}>Forgot your master password? Recover with your recovery phrase</button>
-      </div>
+      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : lockedEmail !== undefined ? "Unlock" : "Sign in"}</button>
+      {onForgot && (
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <button type="button" className="link" onClick={onForgot}>Forgot your master password? Recover with your recovery phrase</button>
+        </div>
+      )}
     </form>
   );
 }

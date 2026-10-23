@@ -165,9 +165,12 @@ interface Props {
   /** F26: the session died server-side — full sign-out, not a lock. `kind` says
    *  whether it was an explicit revocation or plain expiry (the copy differs). */
   onRevoked: (kind: SessionEndKind) => void;
+  /** A14 (F5): hand App this session's usage-ledger flush, so a lock that revokes the tab's tokens
+   *  (no offline copy on this browser) lets the last uses land first (the H33 order). */
+  registerUsageFlush?: (flush: (() => Promise<void>) | null) => void;
 }
 
-export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowNeedsV2 = false, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked }: Props) {
+export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowNeedsV2 = false, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked, registerUsageFlush }: Props) {
   // Usage ledger (spec 02 §8.2) — one per unlocked session. Recording is in-memory and the flush
   // is debounced, because spec 03 §3 forbids a PUT per fill: that would turn the blob's own
   // updatedAt into a keystroke-grade activity trace, which is the leak the single-blob design
@@ -181,7 +184,9 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     // exactly where a session's uses would otherwise be dropped.
     const onHide = () => void usage.flush();
     window.addEventListener("pagehide", onHide);
+    registerUsageFlush?.(() => usage.flush());
     return () => {
+      registerUsageFlush?.(null);
       window.removeEventListener("pagehide", onHide);
       // Flush BEFORE dispose (dispose clears the map), and never block teardown on it — the
       // Account in this closure outlives React's unmount, so the seal still has its key.
