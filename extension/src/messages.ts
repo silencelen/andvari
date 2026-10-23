@@ -35,6 +35,11 @@
  *    through the popup-minted one-shot `revealCardForFill` ([A5] unchanged).
  *  - Locked state is FIRST-CLASS: list calls answer `{locked:true}` rather than
  *    pretending "no matches", so the UI can render an honest locked state.
+ *  - WHO MAY SEND WHAT (security review 2026-10, A14): sendergate.ts classifies every `Req` type as
+ *    content-sent or extension-page-only, and the SW's dispatch refuses an extension-page-only type
+ *    from any sender whose `sender.url` is not one of this extension's pages, before the handler
+ *    runs (the per-handler checks below stay). Adding a type here without classifying it there
+ *    fails `tsc` and the extension suite.
  */
 import type { CardFieldKind } from "./detect";
 
@@ -509,11 +514,11 @@ export type Res<T extends Req["type"]> = T extends "status"
     : T extends "unlockTotp"
       ? { ok: boolean; code?: UnlockCode; error?: string }
       : T extends "cancelTotp"
-        ? { ok: true }
+        ? { ok: boolean } // ok:false only when the A14 sender gate refused (nothing was done)
         : T extends "lock"
-          ? { ok: true }
+          ? { ok: boolean }
       : T extends "signOut"
-        ? { ok: true }
+        ? { ok: boolean }
         : T extends "unlockWithPin"
           ? { ok: boolean; code?: PinUnlockCode; attemptsRemaining?: number }
           : T extends "enrollQuickUnlock"
@@ -523,9 +528,9 @@ export type Res<T extends Req["type"]> = T extends "status"
               : T extends "enrollQuickUnlockBio"
                 ? { ok: boolean; code?: EnrollBioCode }
             : T extends "disableQuickUnlock"
-              ? { ok: true }
+              ? { ok: boolean }
               : T extends "dismissQuickUnlockOffer"
-                ? { ok: true }
+                ? { ok: boolean }
                 : T extends "ping"
         ? { ok: boolean; serverTime?: number; error?: string }
         : T extends "matches"
