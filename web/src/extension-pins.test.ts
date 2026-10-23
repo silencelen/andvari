@@ -923,11 +923,15 @@ describe("2026-07-27 polish-release audit pins (extension lane) — checkout gat
 
   it("bug-web--0 (extension half): doSignOut revokes the server session — bounded, best-effort, and NEVER from doLock", () => {
     // Android/desktop both AWAIT a bounded logout on sign-out; without it "Sign out" leaves the
-    // refresh token valid server-side for ~30 days. The revoke fires BEFORE doLock nulls the
-    // tokens; api.logout() never throws and the race caps the wait, so an offline sign-out still
-    // wipes locally. doLock stays revoke-free: a lock KEEPS the session (quick-unlock re-arm).
+    // refresh token valid server-side for ~30 days. logout() never throws and the race caps the
+    // wait. Since the A16 review (2026-10, R4) the local erase comes FIRST: doLock("signout")
+    // erases and reports the pair it saw, and the revoke rides on that pair afterwards, on an api
+    // of its own (the worker's has forgotten it). doLock stays revoke-free: a lock KEEPS the
+    // session (quick-unlock re-arm).
     const so = spanOf(bg, "async function doSignOut(", "/** Re-arm the policy idle lock");
-    expect(so).toMatch(/Promise\.race\(\[api\.logout\(\), delay\(5000\)\]\)/);
+    expect(so).toMatch(/Promise\.race\(\[revoker\.logout\(\), delay\(5000\)\]\)/);
+    expect(so.indexOf('await doLock("signout", seen);')).toBeGreaterThan(-1);
+    expect(so.indexOf('await doLock("signout", seen);')).toBeLessThan(so.indexOf("revoker.logout()"));
     const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
     expect(lock).not.toContain("logout(");
   });

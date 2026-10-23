@@ -175,7 +175,7 @@ async function refresh(): Promise<void> {
   // INSTEAD of any sign-in form (and opens no server page). Asked first, on every render.
   const info = await ask({ type: "serverInfo" });
   if (info?.block) {
-    showConfirmServer(info.block);
+    showConfirmServer(info.block, info.trustedStore === true);
     return;
   }
   el("confirm-server").hidden = true;
@@ -303,8 +303,10 @@ async function currentServer(): Promise<string | null> {
 }
 
 /** A15 review F1: the pending-server card, shown instead of the sign-in form. The origin is the worker's (display
- *  only — confirming it is the Trust Gate's job, in Options); every string here is textContent. */
-function showConfirmServer(block: ServerBlockWire): void {
+ *  only — confirming it is the Trust Gate's job, in Options); every string here is textContent. A block that cannot be
+ *  confirmed (`keepable` false) is one of two cases: no store here at all ([storeKept] false), or (A16 review R3) the
+ *  update could not confirm the old setting although a choice can be kept — then the user enters the address. */
+function showConfirmServer(block: ServerBlockWire, storeKept: boolean): void {
   showView(false); // drops any unlocked chrome (and the master form's state)
   el("locked").hidden = true;
   el("open-vault").hidden = true; // no server page opens while a server is pending
@@ -332,7 +334,9 @@ function showConfirmServer(block: ServerBlockWire): void {
   origin.textContent = block.origin;
   el("confirm-server-body").textContent = block.keepable
     ? "andvari won’t sign in anywhere until you confirm it once, in Options. If it isn’t yours, choose “Not mine”."
-    : "andvari can’t keep a server choice in this browser mode (Firefox’s “Never remember history”), so it won’t sign in to another server in its place. To keep using this one, turn that setting off, restart Firefox and enter the address in Options. If it isn’t yours, choose “Not mine”.";
+    : storeKept
+      ? "andvari couldn’t confirm it when it updated, and a web page could have changed it, so andvari won’t sign in anywhere until you decide. If it’s your own server, enter its address in Options and connect. If it isn’t yours, choose “Not mine”."
+      : "andvari can’t keep a server choice in this browser mode (Firefox’s “Never remember history”), so it won’t sign in to another server in its place. To keep using this one, turn that setting off, restart Firefox and enter the address in Options. If it isn’t yours, choose “Not mine”.";
   open.hidden = false;
   open.textContent = block.keepable ? "Confirm in Options" : "Open Options";
   notMine.hidden = false;
