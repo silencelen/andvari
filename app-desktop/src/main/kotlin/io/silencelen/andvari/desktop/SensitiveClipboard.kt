@@ -16,9 +16,11 @@ import java.nio.ByteOrder
  * A secret copy therefore also offers the formats those managers honour, as KeePassXC does (and the
  * desktop twin of Android's EXTRA_IS_SENSITIVE):
  *
- *  - Windows: `ExcludeClipboardContentFromMonitorProcessing` (any data; empty here) keeps the entry
- *    out of history and sync altogether; `CanIncludeInClipboardHistory` and
- *    `CanUploadToCloudClipboard` as DWORD 0 (4 bytes, little-endian) say the same per feature.
+ *  - Windows: `ExcludeClipboardContentFromMonitorProcessing` (any data; a DWORD 0 here, never empty:
+ *    AWT publishes an empty payload as GlobalAlloc(GMEM_MOVEABLE, 0), which may hand the clipboard a
+ *    discarded handle — A14 review N8) keeps the entry out of history and sync altogether;
+ *    `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` as DWORD 0 (4 bytes, little-endian)
+ *    say the same per feature.
  *  - Linux/X11: `x-kde-passwordManagerHint` = `secret`, which Klipper skips.
  *
  * AWT exposes a non-text native format through a [DataFlavor] whose data is raw bytes, mapped to the
@@ -34,7 +36,7 @@ internal object SensitiveClipboard {
     fun dwordLe(v: Int): ByteArray = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
 
     val hints: List<Hint> = listOf(
-        Hint("ExcludeClipboardContentFromMonitorProcessing", ByteArray(0), windows = true),
+        Hint("ExcludeClipboardContentFromMonitorProcessing", dwordLe(0), windows = true),
         Hint("CanIncludeInClipboardHistory", dwordLe(0), windows = true),
         Hint("CanUploadToCloudClipboard", dwordLe(0), windows = true),
         Hint("x-kde-passwordManagerHint", "secret".toByteArray(Charsets.US_ASCII), windows = false),

@@ -120,6 +120,32 @@ object ExportCsv {
     fun formulaAckSatisfied(cells: List<FormulaCell>, acked: List<FormulaCell>?): Boolean =
         cells.isEmpty() || acked == cells
 
+    /** What a native CSV write does with the docs it is about to write ([gatedWrite]). */
+    sealed class GatedWrite {
+        /** [csv] is [write] of exactly the docs that were checked. */
+        class Ready(val csv: String, val loginCount: Int) : GatedWrite()
+
+        /** The docs carry formula cells the acknowledgement does not cover: nothing is written, and the
+         *  caller shows [warnings] again (its [Warnings.formulaCells] is the list to acknowledge). */
+        class NeedsAcknowledgement(val warnings: Warnings, val loginCount: Int) : GatedWrite()
+    }
+
+    /**
+     * Security review 2026-10, A14 review N3: the acknowledgement re-checked against the docs a native
+     * write ACTUALLY writes. The desktop and Android dialogs gate their save button on the cells the
+     * preflight showed, but the write re-reads the vault after the file chooser, and a sync can land in
+     * between (desktop's poll runs during the chooser, Android's RESUMED loop during the SAF picker),
+     * bringing a cell nobody acknowledged. The cells are recomputed here from [docs], and the write
+     * goes ahead only when [acknowledged] covers exactly them ([formulaAckSatisfied]). Web needs no
+     * twin: its download handler writes the very items the render that enabled the button computed.
+     */
+    fun gatedWrite(docs: List<ItemDoc>, acknowledged: List<FormulaCell>?): GatedWrite {
+        val w = warnings(docs)
+        val logins = docs.count { it.type == "login" }
+        if (!formulaAckSatisfied(w.formulaCells, acknowledged)) return GatedWrite.NeedsAcknowledgement(w, logins)
+        return GatedWrite.Ready(write(docs), logins)
+    }
+
     /** F08 — the sentence the UI must render for [Warnings.formulaRisk], byte-twin of web
      *  `CSV_FORMULA_WARNING`. Ends in a colon: the caller appends the names, exactly like the
      *  other five categories. The advice is "not in a spreadsheet at all" rather than "beware

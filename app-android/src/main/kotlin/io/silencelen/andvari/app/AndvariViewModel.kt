@@ -27,6 +27,7 @@ import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
+import io.silencelen.andvari.core.client.CSV_CHANGED_NOTICE
 import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.ExportVault
@@ -378,6 +379,10 @@ data class UiState(
      *  selection so its counts and named skips describe the file that will actually be written. */
     val csvVaults: List<ExportVault> = emptyList(),
     val csvSelectedVaults: Set<String> = emptySet(),
+    /** A14 review N3: the formula cells the dialog's tick was given for, handed over as the SAF picker
+     *  opens (a configuration change while it is up must not drop them); [AndvariViewModel.csvRun]
+     *  re-checks them against the docs it actually writes. */
+    val csvAcknowledged: List<ExportCsv.FormulaCell>? = null,
     val lastExportAt: Long = 0,
     // Vault lifecycle (spec 03 §11) — notices banner, verified incoming ownership offers,
     // the Sharing screen's members/deleted/held lists, and bulk-copy / move progress.
@@ -494,7 +499,7 @@ data class UiState(
 internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     items = emptyList(), needsUpdateCount = 0,
     notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
-    backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(),
+    backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null,
     lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
     sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
     undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
@@ -622,6 +627,10 @@ internal fun enrollStillBound(
 /** A14 (F8): the unlock refusal for a session saved under another origin. */
 internal fun sessionElsewhere(sessionOrigin: String): String =
     "This saved sign-in belongs to $sessionOrigin, not this server. Sign out, then sign in here."
+
+/** A14 review N4: the sign-in whose origin moved while login was in flight. */
+internal fun signInOriginMoved(origin: String): String =
+    "The server changed while you were signing in at $origin, so that sign-in was not saved and was ended there. Sign in again."
 
 /** A14 (F8): the enroll whose origin moved while register was in flight. */
 internal fun enrollOriginMoved(origin: String): String =
@@ -1740,7 +1749,12 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(busy = false, pendingReconcile = it, error = null)
             return@op
         }
-        val a = newApi()
+        // A14 review N4: the origin and probe generation this sign-in's client is bound to, captured with
+        // the client (as enrollOp does). login() answers whoever this client dialed; the session is saved
+        // under THAT origin, and only while nothing moved the app away from it meanwhile.
+        val opOrigin = store.baseUrl
+        val opTag = probeFence.tag(store.currentOriginKey())
+        val a = newApi(origin = opOrigin)
         try {
             val pre = a.prelogin(email)
             // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
@@ -1771,8 +1785,17 @@ class AndvariViewModel(
             }
             // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
             val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPub(email, s.userId)) }
+            // A14 review N4, second layer: if the app was moved while login and the KDF ran, these tokens
+            // are not for the origin it now dials. Do not commit: revoke them at the origin that issued
+            // them (this client's own), drop them, and say so. (No pending switch existed at the start.)
+            if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey()))) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+                _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(opOrigin))
+                return@op
+            }
             store.recordSelfIdentityPub(s.userId, email, acct)
-            store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             bind(a, acct)
             // F58: a recovery TEMP password logs in with mustChangePassword=true — persist it
@@ -3624,7 +3647,10 @@ class AndvariViewModel(
         _ui.value = u.copy(csvSelectedVaults = selected, csvPreflight = csvPreflightFor(current, selected, pre.offlineNote))
     }
 
-    fun csvDismiss() { _ui.value = _ui.value.copy(csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet()) }
+    fun csvDismiss() { _ui.value = _ui.value.copy(csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null) }
+
+    /** A14 review N3: the cells the user ticked the acknowledgement for, as the save picker opens. */
+    fun csvAcknowledge(cells: List<ExportCsv.FormulaCell>?) { _ui.value = _ui.value.copy(csvAcknowledged = cells) }
 
     /** CSV step 2: write the spec 07 §1 bytes (UTF-8, no BOM) through [write], then
      *  verify the on-disk bytes via [readBack] (backstops providers that ignore the
@@ -3638,7 +3664,7 @@ class AndvariViewModel(
             // (empty-only) document and surface the abort — never a silent 0-byte file.
             runCatching { discard(false) }
             _ui.value = _ui.value.copy(
-                busy = false, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(),
+                busy = false, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null,
                 error = "The vault locked while choosing where to save — nothing was exported.",
             )
             return
@@ -3647,27 +3673,54 @@ class AndvariViewModel(
         // It lives in UiState, not Compose `remember`, for the same reason BackupRequest does: a
         // configuration change while the SAF picker is up must not drop it.
         val selected = _ui.value.csvSelectedVaults
-        _ui.value = _ui.value.copy(busy = true, error = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet())
+        // A14 review N3: the cells the tick was given for — re-checked below against the docs written.
+        val acknowledged = _ui.value.csvAcknowledged
+        val vaults = _ui.value.csvVaults
+        val offline = _ui.value.csvPreflight?.offlineNote
+        _ui.value = _ui.value.copy(busy = true, error = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null)
         viewModelScope.launch {
             var writeBegan = false
             try {
-                val count = withContext(Dispatchers.IO) {
+                val outcome = withContext(Dispatchers.IO) {
                     val docs = orderedDocs(current, selected)
-                    val bytes = ExportCsv.write(docs).encodeToByteArray()
-                    try {
-                        writeBegan = true
-                        write(bytes)
-                        val onDisk = readBack()
-                        val ok = onDisk != null && onDisk.contentEquals(bytes)
-                        onDisk?.fill(0) // plaintext passwords — wipe the read-back copy too
-                        if (!ok) throw IllegalStateException("export verification failed — the saved file does not match what was written")
-                    } finally {
-                        bytes.fill(0) // plaintext passwords — wipe our copy
+                    // The RESUMED sync loop can land while the SAF picker is up: the cells are recomputed
+                    // from exactly these docs, and a mismatch writes nothing.
+                    when (val gated = ExportCsv.gatedWrite(docs, acknowledged)) {
+                        is ExportCsv.GatedWrite.NeedsAcknowledgement -> gated
+                        is ExportCsv.GatedWrite.Ready -> {
+                            val bytes = gated.csv.encodeToByteArray()
+                            try {
+                                writeBegan = true
+                                write(bytes)
+                                val onDisk = readBack()
+                                val ok = onDisk != null && onDisk.contentEquals(bytes)
+                                onDisk?.fill(0) // plaintext passwords — wipe the read-back copy too
+                                if (!ok) throw IllegalStateException("export verification failed — the saved file does not match what was written")
+                            } finally {
+                                bytes.fill(0) // plaintext passwords — wipe our copy
+                            }
+                            gated
+                        }
                     }
-                    docs.count { it.type == "login" }
                 }
-                VaultSession.touch()
-                _ui.value = _ui.value.copy(busy = false, notice = "Exported $count logins. Delete the CSV once the other manager has imported it.")
+                when (outcome) {
+                    is ExportCsv.GatedWrite.NeedsAcknowledgement -> {
+                        // Nothing was written: drop the empty document the picker created, and show the
+                        // dialog again for the same selection with the new list and an empty tick.
+                        runCatching { discard(false) }
+                        _ui.value = _ui.value.copy(
+                            busy = false,
+                            csvVaults = vaults,
+                            csvSelectedVaults = selected,
+                            csvPreflight = CsvPreflight(outcome.warnings, outcome.loginCount, offline, selection = selected, notice = CSV_CHANGED_NOTICE),
+                        )
+                        return@launch
+                    }
+                    is ExportCsv.GatedWrite.Ready -> {
+                        VaultSession.touch()
+                        _ui.value = _ui.value.copy(busy = false, notice = "Exported ${outcome.loginCount} logins. Delete the CSV once the other manager has imported it.")
+                    }
+                }
             } catch (t: Throwable) {
                 runCatching { discard(writeBegan) }
                 fail(t, ::exportError)
@@ -3792,7 +3845,7 @@ class AndvariViewModel(
     fun openSettings() {
         _ui.value = _ui.value.copy(
             screen = Screen.Settings, totpStatus = null, totpSetup = null, totpMessage = null,
-            backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), lastExportAt = store.lastExportAt,
+            backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null, lastExportAt = store.lastExportAt,
         )
         refreshQuickUnlockState() // the quick-unlock toggle reflects current enrollment/eligibility
         viewModelScope.launch {

@@ -86,6 +86,23 @@ class SurfaceCopyPinsTest {
         assertTrue(mainActivity.contains("Text(ExportCsv.FORMULA_ACK"), "the acknowledgement sentence is the shared canon's")
     }
 
+    @Test
+    fun theCsvWriteRechecksTheAcknowledgementAgainstWhatItWrites() {
+        // A14 review N3: the RESUMED sync loop can land while the SAF picker is up. The acknowledged cells live in the
+        // ViewModel (a configuration change during the picker must not drop them), the write recomputes the cells from
+        // the docs it actually writes (ExportCsv.gatedWrite, behaviour-tested in core ExportTest), and a mismatch
+        // writes nothing, discards the just-created document and shows the dialog again with the new list.
+        val dialog = mainActivity.substringAfter("private fun CsvPreflightDialog(").substringBefore("private fun NamedSkips(")
+        assertTrue(dialog.contains("onClick = { if (canSave) { vm.csvAcknowledge(formulaAcked); onChooseDestination() } }"), "the tick is handed to the ViewModel")
+        assertTrue(dialog.contains("pre.notice?.let"), "the dialog renders why it came back")
+        val run = viewModel.substringAfter("fun csvRun(").substringBefore("private fun orderedDocs(")
+        assertTrue(run.contains("val acknowledged = _ui.value.csvAcknowledged"), "read before the state is cleared")
+        assertTrue(run.contains("ExportCsv.gatedWrite(docs, acknowledged)"), "the cells are recomputed from the docs being written")
+        assertTrue(run.contains("is ExportCsv.GatedWrite.NeedsAcknowledgement ->"))
+        assertTrue(run.contains("csvSelectedVaults = selected") && run.contains("notice = CSV_CHANGED_NOTICE"), "re-presented for the same selection, saying why")
+        assertTrue(run.contains("runCatching { discard(false) }"), "the empty document the picker created is discarded")
+    }
+
     // ---- H23 (audit 2026-09-13) ----
 
     /**

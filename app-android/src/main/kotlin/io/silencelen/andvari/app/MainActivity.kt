@@ -3221,12 +3221,17 @@ private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPrefli
     AlertDialog(
         onDismissRequest = { if (!ui.busy) vm.csvDismiss() },
         confirmButton = {
-            TextButton(onClick = { if (canSave) onChooseDestination() }, enabled = canSave) { Text("Choose where to save") }
+            TextButton(onClick = { if (canSave) { vm.csvAcknowledge(formulaAcked); onChooseDestination() } }, enabled = canSave) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = vm::csvDismiss, enabled = !ui.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                // A14 review N3: why the dialog came back (the vault changed after the tick).
+                pre.notice?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
                 pre.offlineNote?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))

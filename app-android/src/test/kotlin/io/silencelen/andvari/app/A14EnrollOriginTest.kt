@@ -69,6 +69,22 @@ class A14EnrollOriginTest {
     }
 
     @Test
+    fun theSignInSavesUnderItsOwnOriginOnlyWhileBound() {
+        // A14 review N4: the sign-in saved `Session(store.baseUrl, …)` after its awaits (prelogin, two Argon2id passes,
+        // login). It now captures the origin with the client, as enrollOp does, and aborts with a revoke if it moved.
+        val op = body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "syncNow(engine!!)")
+        assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
+        assertTrue(op.contains("val a = newApi(origin = opOrigin)"))
+        assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey())))"))
+        assertTrue(op.contains("store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"))
+        assertFalse(op.contains("store.save(Session(store.baseUrl,"), "never the live origin")
+        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf("store.save(Session(opOrigin"))
+        assertTrue(abort.contains("a.logout()") && abort.contains("return@op") && abort.contains("signInOriginMoved(opOrigin)"),
+            "an unbound commit revokes at the issuer, saves nothing and says so")
+        assertTrue(signInOriginMoved("https://a.example").contains("https://a.example"))
+    }
+
+    @Test
     fun theEnrollSavesUnderItsOwnOriginOnlyWhileBound() {
         val op = body(vm, "private fun enrollOp(", "syncNow(engine!!)")
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")

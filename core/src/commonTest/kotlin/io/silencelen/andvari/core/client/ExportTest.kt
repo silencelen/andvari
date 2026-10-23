@@ -15,6 +15,7 @@ import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -188,6 +189,41 @@ class ExportTest {
         val label = ExportCsv.formulaCellLabel(ExportCsv.FormulaCell("Bank\u201D\n(no risky cells)\u001B[8m", ExportCsv.CsvColumn.PASSWORD))
         assertEquals("Password of \u201CBank\u201D\\u000A(no risky cells)\\u001B[8m\u201D", label)
         assertFalse(label.contains('\n'))
+    }
+
+    @Test
+    fun csv_gatedWrite_aSyncBetweenThePreflightAndTheWriteNeedsAFreshAcknowledgement() {
+        // A14 review N3: the native apps preflight, then the user picks a file, then the write re-reads the vault. A
+        // sync in between (desktop's 5-minute poll runs during the file chooser; Android's RESUMED loop during the SAF
+        // picker) can bring a cell nobody acknowledged. The write recomputes the cells from the docs it actually writes.
+        val atPreflight = listOf(login("Bank", "alice", "=SUM(1)"), login("Mail", "a@x", "plain"))
+        val acked = ExportCsv.warnings(atPreflight).formulaCells
+        assertEquals(listOf(ExportCsv.FormulaCell("Bank", ExportCsv.CsvColumn.PASSWORD)), acked)
+
+        val ready = ExportCsv.gatedWrite(atPreflight, acked)
+        assertIs<ExportCsv.GatedWrite.Ready>(ready)
+        assertEquals(ExportCsv.write(atPreflight), ready.csv, "the bytes are exactly the docs checked")
+        assertEquals(2, ready.loginCount)
+
+        // The sync lands: a co-member adds an item whose note is a formula.
+        val atWrite = atPreflight + login("Shared", "bob", "x", notes = "=HYPERLINK(\"http://evil\")")
+        val refused = ExportCsv.gatedWrite(atWrite, acked)
+        assertIs<ExportCsv.GatedWrite.NeedsAcknowledgement>(refused)
+        assertEquals(
+            listOf(ExportCsv.FormulaCell("Bank", ExportCsv.CsvColumn.PASSWORD), ExportCsv.FormulaCell("Shared", ExportCsv.CsvColumn.NOTE)),
+            refused.warnings.formulaCells, "the refusal carries the NEW list, to show again",
+        )
+        assertEquals(3, refused.loginCount)
+        assertIs<ExportCsv.GatedWrite.Ready>(ExportCsv.gatedWrite(atWrite, refused.warnings.formulaCells), "acknowledged again: written")
+
+        // Same count, different cell: still refused (the acknowledgement names cells, not a number).
+        val swapped = listOf(login("Other", "alice", "=SUM(1)"), login("Mail", "a@x", "plain"))
+        assertIs<ExportCsv.GatedWrite.NeedsAcknowledgement>(ExportCsv.gatedWrite(swapped, acked))
+        // A sync that removed the only risky cell needs no acknowledgement; nothing risky ever needs one.
+        assertIs<ExportCsv.GatedWrite.Ready>(ExportCsv.gatedWrite(listOf(login("Mail", "a@x", "plain")), acked))
+        assertIs<ExportCsv.GatedWrite.Ready>(ExportCsv.gatedWrite(listOf(login("Mail", "a@x", "plain")), null))
+        // No acknowledgement at all with risky cells: refused.
+        assertIs<ExportCsv.GatedWrite.NeedsAcknowledgement>(ExportCsv.gatedWrite(atPreflight, null))
     }
 
     @Test
