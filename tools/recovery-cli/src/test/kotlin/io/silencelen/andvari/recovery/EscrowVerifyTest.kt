@@ -135,6 +135,34 @@ class EscrowVerifyTest {
         assertEquals(Bytes.toHexLower(crypto.sha256(Bytes.fromB64(rows[0].sealed))), receipt.passed.single().sealedSha256)
     }
 
+    // ---- A14 (F12): the table and the receipt print server-supplied strings ----
+
+    @Test
+    fun theTableEscapesHostileUserIdsAndDetail() {
+        // The dump is the server's data: a hostile server names a row with terminal escapes, and the
+        // unseal failure's detail carries exception text.
+        val hostile = goodRow("11111111-1111-4111-8111-111111111111")
+            .copy(userId = "\u001B[1A\u001B[2K11111111-1111-4111-8111-111111111111\u009B", sealed = Bytes.toB64(crypto.randomBytes(226)))
+        val results = EscrowVerify.verify(crypto, seed, listOf(hostile)) +
+            EscrowVerifyResult("u2", false, "unseal failed: \u001B]52;c;cHduZWQ=\u0007")
+        val out = EscrowVerify.tableLines(results).joinToString("\n")
+        assertEquals("", out.filter { it != '\n' && io.silencelen.andvari.core.client.TerminalText.isControl(it) }, out)
+        assertTrue("\\u001B[1A\\u001B[2K11111111" in out, out)
+        assertTrue("\\u009B" in out && "\\u001B]52;c;cHduZWQ=\\u0007" in out, out)
+        assertEquals(3, out.lines().size, "header + one line per row")
+    }
+
+    @Test
+    fun theTerminalReceiptIsTheSameJsonWithItsControlsEscaped() {
+        val id = "11111111-1111-4111-8111-11111111111\u009B"
+        val results = listOf(EscrowVerifyResult(id, true, "v2 ok", "ab".repeat(32)))
+        val shown = EscrowVerify.receiptForTerminal(results)
+        assertEquals("", shown.filter { it != '\n' && io.silencelen.andvari.core.client.TerminalText.isControl(it) }, shown)
+        // Lossless: \u009B is JSON's own escape, so pasting the printed receipt uploads the same userId.
+        val parsed = Json.decodeFromString(EscrowDrillReceipt.serializer(), shown)
+        assertEquals(id, parsed.passed.single().userId)
+    }
+
     @Test
     fun parsesSqliteJsonDumpShape() {
         // Exactly what `sqlite3 -json db "<EscrowVerify.DUMP_SQL>"` emits (identity columns null for a canary row).

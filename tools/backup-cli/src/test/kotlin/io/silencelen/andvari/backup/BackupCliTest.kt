@@ -278,6 +278,56 @@ class BackupCliTest {
 
     // ---- offline guarantee ----
 
+    // ---- A14 (F12): verify prints co-member-authored strings, so it escapes their controls ----
+
+    @Test
+    fun verify_rendersHostileNamesAsVisibleEscapes() {
+        // A co-member of the shared vault names things with terminal escapes: erase-line + cursor-up
+        // to overwrite the FAIL rows, an OSC 52 clipboard write, and the one-byte C1 CSI.
+        val sample = TestBackups.buildSample(
+            "hostile names phrase",
+            itemNames = mapOf(TestBackups.GITHUB_ITEM to "Bank\u001B[2K\u001B[1A"),
+            attachmentNames = "scan\u001B]52;c;cHduZWQ=\u0007.pdf" to "a\tb\nVERIFY PASS",
+            edit = { p ->
+                p.copy(
+                    origin = "https://x.example\u009B2J",
+                    userId = "aaaa\u001Bc",
+                    vaults = p.vaults.map { if (it.type == "shared") it.copy(name = "Family\u001B[8m") else it },
+                    skipped = p.skipped.copy(
+                        undecryptable = p.skipped.undecryptable.map { it.copy(itemId = it.itemId + "\u0085") },
+                        attachmentsOverCap = listOf("big\u007F.zip"),
+                        attachmentFetchFailed = listOf("gone\u001B[0m.bin"),
+                    ),
+                )
+            },
+        )
+        val report = BackupInspect.verify(crypto, sample.passphrase, sample.file)
+        val out = BackupInspect.renderVerify("backup.andvari", report)
+
+        val controls = out.filter { it != '\n' && io.silencelen.andvari.core.client.TerminalText.isControl(it) }
+        assertEquals("", controls, "no control character from the payload reaches the terminal")
+        for (visible in listOf(
+            "Bank\\u001B[2K\\u001B[1A", "scan\\u001B]52;c;cHduZWQ=\\u0007.pdf", "a\\u0009b\\u000AVERIFY PASS",
+            "https://x.example\\u009B2J", "aaaa\\u001Bc", "Family\\u001B[8m (shared, writer)",
+            "\\u0085", "big\\u007F.zip", "gone\\u001B[0m.bin",
+        )) {
+            assertTrue(visible in out, "missing visible escape $visible in:\n$out")
+        }
+        // A name cannot forge a line of its own: the only line breaks are the renderer's.
+        assertFalse(out.lines().any { it.startsWith("VERIFY PASS") }, out)
+    }
+
+    @Test
+    fun verify_exceptionDetailIsEscapedToo() {
+        assertEquals("error: bad \\u001B[31mthing", BackupInspect.errorLine(null, "bad \u001B[31mthing"))
+        assertEquals("error [backup_truncated]: cut \\u009B", BackupInspect.errorLine("backup_truncated", "cut \u009B"))
+    }
+
+    @Test
+    fun sanitizeFileName_sharesTheControlClass_C1Included() {
+        assertEquals("a_b_c_d", BackupInspect.sanitizeFileName("a\u009Bb\u0085c\u001Bd"))
+    }
+
     @Test
     fun noNetworkClassesOnClasspath() {
         // The offline guarantee (spec 07 §3 — same discipline as recovery-cli): no HTTP
