@@ -706,36 +706,99 @@ and runs the origin-clean switch. The `onChanged` trigger is gone. "Remove data 
 record under that origin's namespace in every store, by prefix, including the per-user item homes, personal wrap and
 pending change that the fixed key list had always missed although the options copy promised "cached state for that
 server". Source fences hold the layout: the content bundle and our pages never name chrome.storage or IndexedDB, and
-the worker names storage.local only as the migration's input and in the purge.
-(d) **The one-time migration adopts nothing a web page could have planted.** Any pre-A15 storage.local value may be
-planted and cannot be told apart from a real one, so: a non-default `serverUrl` is NOT adopted. The worker dials
-DEFAULT_SERVER_URL, and the old value is kept only as a display-only suggestion: the popup routes to Options, which
-shows it ("if you don't recognize it, choose Not mine") and offers it through the ordinary Trust Gate, whose Connect
-is still the only commit. The update channel is not migrated (the seq floor restarts at `MIN_SEQ`; the forced
-start/install check re-derives the offer). A pending personal change is dropped (the next unlock re-stages it). Item
-homes and the personal wrap move under their strict decoders, the same trust they had (homes are ids the server knows;
-the wrap is AEAD-sealed under the UVK). The conveniences move shape-checked. The migration flag lives in the store
-only, so a content script can neither skip the migration nor re-run it; the old keys are deleted only after the copy
-was read back and compared; a value the store already holds is never overwritten; and with no store the migration
-does nothing and retries at the next start.
-(e) **No IndexedDB means safe defaults, never storage.local.** Firefox blocks IndexedDB for extension pages in private
-browsing, and under permanent private browsing ("Never remember history") that includes the background page (bug
-1841806, Firefox 117, 116.0.3 and ESR 115.2; https://bugzilla.mozilla.org/show_bug.cgi?id=1841806; an extension page
-in a private window cannot open it either, which is one reason the pages ask the worker). There the extension uses the
-default server only (Options says why, and refuses a switch rather than pretend), keeps item homes for the browser
-session (in the session snapshot), asks for the personal vault at each unlock (the staged choice is held in worker
-memory, and an accepted one applies to that session), shows no update banner (Firefox's own `update_url` still
-updates the add-on), and remembers no email; quick unlock already did not work there (its co-key is in IndexedDB).
-Residuals: (1) Chrome 127–139 and Firefox: storage.local stays open to content scripts. Since A15 the extension reads nothing from
-it after the migration, so what is left is the window before the migration ran: values planted then move with the
-trust they always had (homes, the wrap, the conveniences), and a planted server only ever becomes a suggestion. On
+the worker hands storage.local to three leaves only (the migration, which reads it only when owed; the server state,
+which reads its `serverUrl` only with no store and only to block; the purge) and otherwise only removes from it. Since
+the A15 review every store operation, the open and the transaction together, is bounded at 4 s and then rejects as
+"unavailable, timed out" (S1: an IndexedDB open that never settled wedged worker start and with it every message),
+and a transaction whose body throws is aborted (S2: the puts issued before the throw used to auto-commit, so a write
+reported as failed had half happened); the quick-unlock co-key database opens under the same bound.
+(d) **The one-time migration adopts nothing a web page could have planted, and runs only on the upgrade it exists
+for.** Any pre-A15 storage.local value may be planted and cannot be told apart from a real one, so: a non-default
+`serverUrl` is NOT adopted; it becomes a pending server ((f) below). The update channel is not migrated (the seq floor
+restarts at `MIN_SEQ`; the forced start/install check re-derives the offer). A pending personal change is dropped (the
+next unlock re-stages it). Item homes and the personal wrap move under their strict decoders, the same trust they had
+(homes are ids the server knows; the wrap is AEAD-sealed under the UVK). The conveniences move shape-checked. Since the
+A15 review (F2) storage.local is read only when the browser attested an upgrade from a pre-A15 build:
+`runtime.onInstalled` with reason `update` and a `previousVersion` no newer than 0.28.1, the last release without the
+store (`LAST_PRE_A15_VERSION`, to be raised should another release without A15 ship first). That event is recorded in
+the store as "owed" before anything is read; the flag and the owed mark are swapped in one write when the copy has been
+read back and compared, so a migration cut short finishes at the next start (owed alone, no event needed). Every other
+start without the flag (a fresh install, an update from an A15 build, a browser update, or a start with no install
+event at all) sets the flag WITHOUT reading storage.local. Before F2 any flagless start migrated, so a store that was
+unavailable at the upgrade and available later (Firefox's "Never remember history" turned off), or that lost its data
+while storage.local kept its own, moved whatever a content script had written there in the meantime (a planted server
+suggestion, homes, an older wrap, an email, a credential id); the Options copy "Before an update, this browser was set
+to connect to" was then untrue. Worker start waits for the install event at most 5 s, and only while the store holds
+neither the flag nor the owed mark (the event arrives right after the worker first runs); an attesting event that
+lands after that wait is recorded as owed and migrated then. The migration flag and the owed mark live in the store
+only, so a content script can neither skip, re-run nor owe the migration; the old keys are deleted only after the copy
+was verified; a value the store already holds is never overwritten. **No store at the attested upgrade** (Firefox
+"Never remember history"): there is nowhere trustworthy to record "owed", so nothing migrates, then or ever. The fail
+safe is (e)'s block, and once the store is available again the first start sets the flag without reading: the device
+is on the default server with nothing migrated (a fresh install's posture) and the user enters their server in Options.
+(e) **No IndexedDB means safe defaults, never storage.local for trust.** Firefox blocks IndexedDB for extension pages
+in private browsing, and under permanent private browsing ("Never remember history") that includes the background page
+(bug 1841806, Firefox 117, 116.0.3 and ESR 115.2; https://bugzilla.mozilla.org/show_bug.cgi?id=1841806; an extension
+page in a private window cannot open it either, which is one reason the pages ask the worker). There the extension can
+keep no server choice: Options says why and refuses a switch rather than pretend. The default server is the only one
+in effect, except that since the A15 review (F1) storage.local's `serverUrl` is read at each worker start ONLY to
+block: when it names another server, the worker signs in nowhere and the popup says the previous server cannot be kept
+in this mode (turn the setting off, restart, enter the address in Options), with "Not mine" (which removes that old
+value) as the way to the default. It is never adopted and never offered for connecting. Item homes are kept for the
+browser session (in the session snapshot), the personal vault is asked for at each unlock (the staged choice is held in
+worker memory, and an accepted one applies to that session), there is no update banner (a failed seq read ends the
+check before anything is fetched; Firefox's own `update_url` still updates the add-on), and no email is remembered;
+quick unlock already did not work there (its co-key is in IndexedDB).
+(f) **A pending server dials nothing, the default included** (A15 review F1). Before the review the worker dialed
+DEFAULT_SERVER_URL while a migrated server waited for its confirm, with nothing stopping a sign-in. The update clears
+storage.session, so the user signed in again, the email prefilled, and the reference instance, which answers an unknown
+email with a deterministic fake salt, received the email and an authKey derived from the master password under a salt
+it chose (an offline-guessable verifier at the KDF floor). The update channel polled it, the open-vault, forgot and
+must-change buttons opened it, and the self-host vault UI lost its autofill exclusion. Now, while a server is pending
+(`serverstate.ts`): every sign-in lane and the connection test (`unlock`, `unlockTotp`, `unlockWithPin`,
+`unlockWithBio`, `ping`) are answered `confirm_server` right after the sender gate, before any handler; the update
+check returns before it fetches; the pending origin's match pattern joins the autofill exclusions, and an origin that
+cannot be written as one (a bracketed IPv6 literal) means no autofill at all (excluding a planted origin is harmless);
+the popup shows the confirm route INSTEAD of any sign-in form ("Before this update, andvari was set to use: …",
+"Confirm in Options" first, "Not mine — use <default host> instead" second), its header names no server, and no server
+page opens. Only the Trust Gate's Connect (`setServerUrl`, after the choice was kept) or "Not mine"
+(`forgetLegacyServer`) lifts the block; the pending state is read from the store at every start, so it survives
+restarts. The same block, `unsettled`, stands when the store did not answer in time or an owed migration did not
+complete: the worker cannot tell which server the user chose, so it signs in nowhere, registers no autofill (the
+user's vault origin is unknown) and says so (the next worker start retries). A page that gets no answer from the worker
+opens nothing and shows no origin (S3: before, it fell back to the default, and a click opened the reference instance).
+Checked in a headless Chrome 149 over the pre-A15 build's profile: after the update, the five dials were refused with
+no request to any server (an update poll and a prelogin to the default on the build before the review), the pending
+origin was excluded from autofill, the popup showed the confirm card, the block survived a restart, "Not mine" lifted it
+(a ping then reached the default), and a store wiped while storage.local held a plant migrated nothing.
+(g) **The rest of the review.** F3: the anti-rollback seq is read with the store's own `get` before the fetch, and a
+failed read ends the check (before, a read error folded into the `MIN_SEQ` floor and a verified manifest could then
+write a lower seq). S1: a lock never waits on the store beyond 1.5 s: the popup's Lock skips the general load, and
+`doLock` waits for the origin (whose namespace its arm and wipe land in) at most that long; a healthy store answers in
+milliseconds, so a cold idle lock still arms. Past the bound it erases the session snapshot first, keeps only the tab
+records' page-known half, arms nothing and wipes no quick-unlock record (the current namespace is unknown; an enrolled
+record stays unarmed, so the next unlock is a full one), and a load that read the snapshot before that erase does not
+hydrate it. The autofill registration also reconciles one call at a time now: worker start and the install event both
+reconcile on an update, and two overlapping runs made the second register fail on a duplicate id and, failing closed,
+unregister the first (no autofill until the next worker start; seen in the live check).
+Residuals: (1) Chrome 127–139 and Firefox: storage.local stays open to content scripts. The extension reads it for trust
+only during the attested migration, so what is left is the window before the upgrade: values planted then move with the
+trust they always had (homes, the wrap, the conveniences), and a planted server only ever becomes a pending server. On
 Chrome 140+ the area is locked, and the level is kept in the extension's prefs across restarts. (2) Firefox
 storage.session is kept from content scripts by the API schema only; from Firefox's source, the parent process does
 not re-check the caller's context for `get`/`set` (only for `onChanged`), so a compromised content process may reach
 it. That is inferred, not tested, and A15 does not change it; it covers the session snapshot and the armed quick-unlock
-record (the A7-extension row below), and the update throttle and quiet marker (LOW). (3) A planted non-default server
-becomes a suggestion a user may still confirm through the gate. (4) Firefox permanent private browsing loses the
-self-host choice and the remembered state across restarts, as (e) says.
+record (the A7-extension row below), and the update throttle and quiet marker (LOW). (3) A server planted before the
+upgrade is shown as the user's previous server, and "Confirm in Options" is the popup's first button; the Trust Gate
+still shows the raw origin and Connect is still the only commit. (4) Firefox permanent private browsing loses the
+self-host choice and the remembered state across restarts, as (e) says; a value a content process plants in
+storage.local there blocks sign-in until "Not mine" (a denial of service, never a repoint); and turning the mode off
+lands on the default server with nothing migrated and no pending server, so a self-hoster must re-enter the address
+(the popup's header shows the default's origin, and the earlier block told them to). (5) `LAST_PRE_A15_VERSION` is a
+release fact: if a release without A15 ships after 0.28.1, an update from it to A15 attests nothing and migrates
+nothing (the fail-safe direction: no read, the default with no pending server). (6) A session already open in this
+browser session when a block appears (possible only in the no-store mode, where the block is recomputed at each start)
+keeps its own origin's sync until it locks; the block stops new sign-ins.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
