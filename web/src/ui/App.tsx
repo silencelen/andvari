@@ -140,10 +140,12 @@ export function App() {
       // surface a notice instead of silently swallowing the scanned link (never repoint the
       // session's server from a link).
       const pendingEnroll = peekPendingEnroll();
-      // A14 (F5): a session with no tokens (a browser without the offline copy, after a lock or in
-      // a new tab) still lands on the unlock card — which then runs the normal sign-in.
+      // A14 (F5): on a browser without the offline copy a session with no tokens (after a lock, or a
+      // new tab) still lands on the unlock card, which then runs the normal sign-in. With the offline
+      // copy on, today's rule stands: no tokens, no unlock card.
+      const unlockable = session !== null && (session.tokens !== null || !tokensKeptAcrossLock(session.userId));
       setPhase(
-        session ? { kind: "unlock", session, notice: pendingEnroll ? "You're signed in on this browser. To set up a NEW account from that invite link, sign out first." : undefined }
+        unlockable ? { kind: "unlock", session, notice: pendingEnroll ? "You're signed in on this browser. To set up a NEW account from that invite link, sign out first." : undefined }
           : { kind: "welcome" },
       );
     })();
