@@ -599,6 +599,34 @@ internal fun effectiveSignupMode(declared: String?): String = when (declared) {
 internal fun switchDropsSession(oldOrigin: String, newOrigin: String): Boolean =
     OriginNamespace.canonicalOrigin(oldOrigin) != OriginNamespace.canonicalOrigin(newOrigin)
 
+/** Security review 2026-10, A14 (F8): a stored session's tokens go only to the session's own origin
+ *  (the canonical compare [switchDropsSession] uses). Unlock refuses a session saved for another
+ *  origin than the one the app dials; a locked sign-out revokes at the session's own origin. */
+internal fun sessionBelongsTo(sessionOrigin: String, liveOrigin: String): Boolean = !switchDropsSession(sessionOrigin, liveOrigin)
+
+/**
+ * A14 (F8): may an enroll that built its client for [opOrigin] while [opPending] was the pending
+ * invite switch commit its session now? Only while the app still dials that origin, the pending
+ * switch is the same one (its email may have been filled in; its origin and restore point may not
+ * change), and the probe generation has not moved (a round trip away and back counts as a change).
+ */
+internal fun enrollStillBound(
+    opOrigin: String,
+    opPending: PendingServer?,
+    liveOrigin: String,
+    livePending: PendingServer?,
+    fenceCurrent: Boolean,
+): Boolean = fenceCurrent && liveOrigin == opOrigin &&
+    opPending?.origin == livePending?.origin && opPending?.previousOrigin == livePending?.previousOrigin
+
+/** A14 (F8): the unlock refusal for a session saved under another origin. */
+internal fun sessionElsewhere(sessionOrigin: String): String =
+    "This saved sign-in belongs to $sessionOrigin, not this server. Sign out, then sign in here."
+
+/** A14 (F8): the enroll whose origin moved while register was in flight. */
+internal fun enrollOriginMoved(origin: String): String =
+    "The server changed while your account was being created at $origin, so it was not saved here. Sign in at $origin to finish setting it up."
+
 /**
  * Audit F27 — did the pre-commit probe prove the target is DIALABLE at all?
  *
@@ -1120,6 +1148,10 @@ class AndvariViewModel(
      */
     fun unlockWithBiometric(activity: FragmentActivity) = op {
         val session = store.load() ?: throw IllegalStateException("no session")
+        if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) { // A14 (F8)
+            _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
+            return@op
+        }
         val userId = session.userId
         val originKey = store.currentOriginKey() // §4.2: this unlock's namespace, captured before any await
         val uvk = when (val r = QuickUnlock.recoverUvk(activity, cacheDir, originKey, userId)) {
@@ -1313,8 +1345,8 @@ class AndvariViewModel(
 
     private fun needsUpdate(): Int = engine?.needsUpdateCount() ?: 0
 
-    private fun newApi(tokens: Tokens? = null): AndvariApi =
-        AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
+    private fun newApi(tokens: Tokens? = null, origin: String = store.baseUrl): AndvariApi =
+        AndvariApi(origin, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
 
     fun start() {
         viewModelScope.launch {
@@ -1460,6 +1492,7 @@ class AndvariViewModel(
     /** A foreign-origin enroll link was entered (design §4.4): show the Trust Gate (ENROLLMENT
      *  variant, B2-8). Connect enters the PENDING repoint; [email] seeds the crash marker. */
     fun requestInviteTrustGate(origin: String, email: String) {
+        if (_ui.value.busy) return // A14 (F8): no re-point under an op holding a client
         _ui.value = _ui.value.copy(
             trustGate = TrustGatePrompt(trustGateRender(origin), enrollment = true, action = TrustGateAction.InviteRepoint(origin, email)),
         )
@@ -1479,6 +1512,7 @@ class AndvariViewModel(
 
     /** Trust Gate → Connect: act on the held [TrustGateAction]. */
     fun trustGateConnect() {
+        if (_ui.value.busy) return // A14 (F8): every Connect moves the origin; never under a running op
         val gate = _ui.value.trustGate ?: return
         when (val a = gate.action) {
             // Manual switch — PROBE, then commit (the gate is the gesture, but the gesture must
@@ -1561,6 +1595,7 @@ class AndvariViewModel(
     /** §4.3 B2-6: "cancel and return to <previous origin>" — revert the uncommitted repoint,
      *  clear the marker, re-probe the previous origin (which re-enables sign-in). */
     fun cancelPendingSwitch() {
+        if (_ui.value.busy) return // A14 (F8): an enroll's register may still land at the pending origin
         val marker = store.pendingServer ?: run { _ui.value = _ui.value.copy(pendingSwitch = null); return }
         store.pendingServer = null
         _ui.value = _ui.value.copy(pendingSwitch = null, trustGate = null)
@@ -1766,6 +1801,11 @@ class AndvariViewModel(
 
     fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError) {
         val session = store.load() ?: throw IllegalStateException("no session")
+        // A14 (F8): a stored session's tokens go only to its own origin — refuse, never "repair".
+        if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) {
+            _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
+            return@op
+        }
         val originKey = store.currentOriginKey() // §4.2: the server this unlock talks to
 
         // §F.9: set when this unlock must land in the capture gate — the FRESH accountKeys said
@@ -1935,7 +1975,13 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters.")
             return@op
         }
-        val a = newApi()
+        // A14 (F8): the origin, pending switch and probe generation this enroll's client is bound to.
+        // register() answers whoever this client dialed; the session is saved under THAT origin, and
+        // only while nothing moved the app away from it meanwhile.
+        val opOrigin = store.baseUrl
+        val opPending = store.pendingServer
+        val opTag = probeFence.tag(store.currentOriginKey())
+        val a = newApi(origin = opOrigin)
         // §F.4/§F.7: the per-member recovery piece is generated by enroll() and committed inside
         // register(); it is held here transiently so the shown-once gate (below) can reveal it.
         var recoverySecret: ByteArray? = null
@@ -1972,8 +2018,18 @@ class AndvariViewModel(
             // (no marker). baseUrl already points at the pending origin, so register hits the right one.
             store.pendingServer?.let { store.pendingServer = it.copy(email = email) }
             val s = a.register(req)
+            // A14 (F8), second layer: the switch is frozen while this op runs, but if the app was
+            // moved anyway this account is not the one it now points at. Do not commit: revoke the
+            // tokens at the origin that issued them (this client's own), drop them, and say so.
+            if (!enrollStillBound(opOrigin, opPending, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey()))) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+                secret.fill(0); recoverySecret = null
+                _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(opOrigin))
+                return@op
+            }
             recoveryPieceId = s.recoveryPieceId
-            store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             store.recordSelfIdentityPub(s.userId, email, acct)
             bind(a, acct)
@@ -3684,8 +3740,9 @@ class AndvariViewModel(
                 // is still valid server-side — store.clear() alone would leave it live for
                 // ~30 days. Build a short-lived holder from the persisted session (same
                 // shape as newApi(): updateTokens wired so any rotation persists) purely
-                // to revoke it.
-                val a = newApi(session.tokens())
+                // to revoke it — at the session's OWN origin (A14, F8), never at whatever
+                // the app dials now.
+                val a = newApi(session.tokens(), origin = session.baseUrl)
                 runCatching { withTimeoutOrNull(5_000) { a.logout() } }
                 a.close()
             }

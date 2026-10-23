@@ -10,6 +10,8 @@ import io.silencelen.andvari.app.PersonalDeviceState
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.app.sessionBelongsTo
+import io.silencelen.andvari.app.sessionElsewhere
 import io.silencelen.andvari.app.clampAutoLockSeconds
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
@@ -112,6 +114,8 @@ object AutofillUnlock {
         // §4.2: ONE baseUrl read feeds both the api and the namespace key, so the policy verdict
         // below can only ever be enforced against the namespace of the origin it came from.
         val baseUrl = store.baseUrl
+        // A14 (F8): a stored session's tokens go only to its own origin.
+        if (!sessionBelongsTo(session.baseUrl, baseUrl)) throw IllegalStateException(sessionElsewhere(session.baseUrl))
         val originKey = OriginNamespace.originKey(baseUrl)
         val api = AndvariApi(baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
 

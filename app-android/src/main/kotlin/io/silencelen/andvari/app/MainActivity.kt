@@ -647,7 +647,7 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
         NoticeBar(ui.notice, vm::clearNotice)
         // §4.3 B2-6 pending notice sits ABOVE the shared enroll form as a separate sibling — so it
         // can appear without disturbing the form's composition identity.
-        if (pending != null) PendingSwitchNotice(vm, pending)
+        if (pending != null) PendingSwitchNotice(vm, pending, busy = ui.busy)
         // §7.1 stranger nudge — only in the non-pending enroll-tab landing case.
         if (pending == null && effTab == 1 && signupMode == "landing") LandingNudge(ui.policy?.selfHostDocsUrl)
         // ONE stable call site per auth form: SignInForm only when signed-in entry is allowed, else
@@ -724,7 +724,7 @@ private fun TrustGateDialog(gate: TrustGatePrompt, vm: AndvariViewModel) {
  * user may only complete enrollment (the form below) or cancel and return to the previous origin.
  */
 @Composable
-private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi) {
+private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi, busy: Boolean) {
     Card(
         Modifier.fillMaxWidth().padding(bottom = 12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
@@ -739,6 +739,9 @@ private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi) 
             )
             TextButton(
                 onClick = vm::cancelPendingSwitch,
+                // A14 (F8): disabled while an op (the enroll's register at the pending origin) runs —
+                // the ViewModel refuses it then too.
+                enabled = !busy,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
             ) { Text("Cancel and return to ${pending.previousOrigin}") }
         }

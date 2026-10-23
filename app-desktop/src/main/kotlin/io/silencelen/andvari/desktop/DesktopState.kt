@@ -850,8 +850,18 @@ class DesktopState(
         install(HttpTimeout) { connectTimeoutMillis = CONNECT_TIMEOUT_MS }
     }
 
-    private fun newApi(tokens: Tokens? = null) =
-        AndvariApi(baseUrl, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
+    private fun newApi(tokens: Tokens? = null, origin: String = baseUrl) =
+        AndvariApi(origin, newHttpClient(), tokens, { store.updateTokens(it) }, platform = desktopPlatform())
+
+    /**
+     * Security review 2026-10, A14 (F8): a held client is bound to the origin it was built for. While
+     * an op runs ([busy]) — on the Welcome screen that is an enroll holding a client for the pending
+     * invite origin (sign-in and recovery are locked out while a switch is pending) — Cancel, a
+     * re-pasted invite and Connect are refused here at the state layer, and the UI disables them.
+     * They used to move [baseUrl] under a register that was still in flight, so the session was
+     * saved as {origin A, B's tokens}.
+     */
+    val switchLockedByOp: Boolean get() = busy
 
     /**
      * Security review 2026-10 (A12, row 80): the tokenless client a POLICY PROBE rides. Unlike the
@@ -1125,6 +1135,7 @@ class DesktopState(
      * Connect ([trustGateConnect]) is the gesture that actually dials [origin].
      */
     fun beginEnrollSwitch(origin: String, email: String?) {
+        if (switchLockedByOp) return // A14 (F8): never re-point under an op holding a client
         val clean = origin.trim().removeSuffix("/")
         if (clean.isBlank()) return
         // Security review 2026-10 (A12, row 39): the restore point is captured ONCE, from the
@@ -1162,6 +1173,7 @@ class DesktopState(
      * stays on the prior server — it commits only on enroll SUCCESS ([commitPendingSwitch]).
      */
     fun trustGateConnect() {
+        if (switchLockedByOp) return // A14 (F8)
         val pend = pendingServer ?: return
         if (pendingConnected) return
         clearSessionForSwitch() // §4.1 rule 1: token isolation before the first request to the new origin
@@ -1193,6 +1205,7 @@ class DesktopState(
     /** §4.4 Desktop: the user's "Cancel and return to <prior origin>" affordance (Trust Gate Cancel
      *  or the pending-Welcome return button). */
     fun cancelPendingSwitch() {
+        if (switchLockedByOp) return // A14 (F8): the enroll's register may still land at the pending origin
         if (pendingServer == null) return
         error = null
         revertPendingSwitch()
@@ -1409,6 +1422,14 @@ class DesktopState(
     // master password." (the sole un-wrapped crypto step), 401 → session expired, IO → unreachable.
     fun unlock(email: String, password: String) = op(map = HouseholdCopy::forUnlockError) {
         val session = store.load() ?: error("no session")
+        // A14 (F8), second layer: a stored session's tokens go only to the session's own origin. A
+        // session saved under another origin than the one the app dials is refused, not "repaired":
+        // Sign out (which revokes at the session's origin and wipes it) and sign in again here.
+        if (!sameOrigin(session.baseUrl, baseUrl)) {
+            busy = false
+            error = sessionElsewhere(session.baseUrl)
+            return@op
+        }
         val a = newApi(session.tokens())
         // Offline unlock (spec 02 §8): cached keys when the network is down; wipe on a
         // definitive auth rejection. (v2 #15): track WHERE the keys came from — the recovery
@@ -1519,7 +1540,13 @@ class DesktopState(
             error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters."
             return@op
         }
-        val a = newApi()
+        // A14 (F8): the origin, the pending switch and the probe generation this enroll's client is
+        // bound to. register() answers whoever this client dialed; the session is saved under THAT
+        // origin, and only if nothing moved the app away from it meanwhile.
+        val opOrigin = baseUrl
+        val opPending = pendingServer
+        val opTag = probeFence.tag(originKey(opOrigin))
+        val a = newApi(origin = opOrigin)
         try {
             // §F.1/§F.4 escrow decision: required-typed fetches the org key and seals to it under
             // the verified-fingerprint discipline (Account.enroll refuses a pubkey/fingerprint
@@ -1545,8 +1572,21 @@ class DesktopState(
             // next launch instead of stranding the user on an orphaned account. Written for EVERY
             // enroll (a same-origin enroll's marker just resolves AlreadyCommitted at next launch —
             // marker.origin == store.baseUrl — and clears silently). email is the pre-fill only.
-            store.setPendingServer(PendingServer(baseUrl, email, System.currentTimeMillis()))
+            store.setPendingServer(PendingServer(opOrigin, email, System.currentTimeMillis()))
             val s = a.register(req)
+            // A14 (F8), second layer: the switch is frozen while this op runs, but a manual repoint
+            // (or any future path) that moved the app anyway means this account is not the one the
+            // app now points at. Do not commit: drop the tokens, revoke them at the origin that
+            // issued them (this client's own), and say so. The account exists at [opOrigin]; signing
+            // in there later runs the recovery capture gate for the phrase never shown here.
+            if (baseUrl != opOrigin || pendingServer != opPending || !probeFence.isCurrent(opTag, originKey(baseUrl))) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+                recoverySecret.fill(0)
+                busy = false
+                error = enrollOriginMoved(opOrigin)
+                return@op
+            }
             // §4.1 rule 3 / §4.4 Desktop: register SUCCEEDED ⇒ ENROLL SUCCESS. Commit the persisted
             // default to the origin we enrolled at (baseUrl) and drop the marker + pending state,
             // BEFORE saving the session — so store.baseUrl and the saved session stay consistent
@@ -1554,9 +1594,9 @@ class DesktopState(
             // Connect. A same-origin enroll's commit is a no-op (baseUrl already == store.baseUrl).
             commitPendingSwitch()
             syncTokenPersistence() // A12 (row 81): memory-only when at-rest storage was declined
-            store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(DesktopSession(opOrigin, s.userId, email, s.accessToken, s.refreshToken)) // A14: the client's own origin
             persistAccountKeys(s.userId, s.accountKeys)
-            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, email, acct)
+            store.recordSelfIdentityPub(originKey(opOrigin), s.userId, email, acct)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
             mustChangePassword = s.mustChangePassword // F58: never true for a fresh enroll; wired for truth
@@ -3435,8 +3475,9 @@ class DesktopState(
                 // LOCKED sign-out (the Unlock screen's "Sign out / use a different
                 // account"): no live token-holder exists, but the persisted refresh token
                 // is still valid server-side — store.clear() alone would leave it live
-                // for ~30 days. Build a short-lived holder purely to revoke it.
-                val temp = newApi(session.tokens())
+                // for ~30 days. Build a short-lived holder purely to revoke it — at the
+                // session's OWN origin (A14, F8), never at whatever the app dials now.
+                val temp = newApi(session.tokens(), origin = session.baseUrl)
                 runCatching { withTimeoutOrNull(5_000) { temp.logout() } }
                 temp.close()
             }
@@ -3806,6 +3847,14 @@ class DesktopState(
         /** Security review 2026-10 (A12, row 80): whole-request cap on an unauthenticated policy
          *  probe (a few hundred bytes of JSON). */
         const val POLICY_PROBE_TIMEOUT_MS = 15_000L
+        /** A14 (F8): unlock refuses a stored session saved for another origin than the one dialed. */
+        fun sessionElsewhere(sessionOrigin: String): String =
+            "This saved sign-in belongs to $sessionOrigin, not this server. Sign out, then sign in here."
+
+        /** A14 (F8): an enroll whose origin moved while register was in flight is not committed. */
+        fun enrollOriginMoved(origin: String): String =
+            "The server changed while your account was being created at $origin, so it was not saved here. Sign in at $origin to finish setting it up."
+
         /** A12 (row 39): the state-layer sign-in refusal while the app dials an unverified origin. */
         const val SIGN_IN_LOCKED_OUT =
             "Finish or cancel joining the other server first — signing in here is paused until you do."
