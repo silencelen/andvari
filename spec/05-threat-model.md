@@ -334,25 +334,45 @@ handover line, which reads the build host's own tag, so it closes a tag moved by
 tag moved after the handover line was printed, and an accidental re-tag, while a compromised build host chooses both
 the tag and the pin. The layer aimed at that is held by the workstation: the commit its last successful ceremony
 signed, recorded outside the repo and moved only after `prestige-release.ps1` succeeded and `bundle.json` records the
-pin. Before any of the tree's code runs, the release commit must descend from it, a `diff --stat` of the code that
-runs beside the key and then the commits since it are printed, every line taken from git escaped (C0, DEL, C1, the line
-separators and the bidi controls; A14 review R2-2), the tree is checked out and must then be clean, and the operator
-types the version; a run with no human at a console fails closed before anything is checked out. The stat covers the
-tree's scripts, its whole gradle build (wrapper, catalog, properties, every build script, `buildSrc/`) and ALL of
-`:core` and `tools/update-signer/`, matched in any case: the update-signer is handed the key's path and is a shadowJar
-of both, and Kotlin resolves an unqualified call to a same-package declaration from any module on the classpath ahead of
-the default imports (A14 review R2-1 corrected an earlier list of core's crypto directories, under which a core file
-outside them replaced the signer's key read while the stat printed no change). It does not cover the third-party
-artifacts gradle downloads (only the catalog that names them), the JDK, or the sources compiled into the MSI but never
-run on the box. A release tree with two paths that are one file on a case-insensitive disk is refused before checkout
-(NTFS). A first run compares against the commit in the workstation's own most recent signed bundle (`dist/` beside its
-signature, highest seq, never a bundle git tracks), or an operator-chosen `-Baseline`, which must be a strict ancestor of
-the release, when there is none; a tag is never the seed, because a plain fetch or pull brings in new tags and a
-planted intermediate one would hide every change up to it (A14 review R2-3, R2-4). The commit values the owner types
-come from GitHub's own pages (the merge they approved, the tag's commit), compared with the build host's handoff: that
-catches a mistyped, altered or never-published value, not a build host that pushed and tagged its own commit, against
-which only the review stands. A dry run is not tree-free: once confirmed it runs the tree's `prestige-release.ps1` with
-`-DryRun` on that account. Residual accepted: this rests on the
+pin. Before any of the tree's code runs, the release commit must descend from it; a stat, the commits and then the
+full diff since it are printed, every line taken from git escaped (C0, DEL, C1, the line separators and the bidi
+controls; A14 review R2-2) and read as bytes split at LF alone, so a CR cannot fake a commit line or a diff header (A14
+review 3); the tree is checked out and must then be clean and byte-identical to the commit where the review covers it;
+and the operator types the version; a run with no human at a console fails closed before anything is checked out.
+**The review is default-include** (A14 review 3, C1): every changed path except a short explicit list of trees that
+never run on the signing box (`app-android/`, `web/`, `extension/`, `server/`, `deploy/`, `docs/`, `spec/`,
+`.github/`), whose changes are counted instead, and even inside those trees every build script, gradle property and
+wrapper file, jar, PowerShell or batch file and git attribute file (`.gitattributes`, `.lfsconfig`, `.gitmodules`) is
+shown. So ALL of `:core` and `tools/` are covered (the update-signer is handed the key's path and is a shadowJar of
+`tools/update-signer` and all of `:core`, and Kotlin resolves an unqualified call to a same-package declaration from
+any module on the classpath ahead of the default imports; A14 review R2-1), and so are the scripts, the whole gradle
+build, any new top-level directory, and `app-desktop/`, whose MSI is the household's Windows client and runs on the
+signing account once installed there. The earlier allowlist showed a newly linked module, source directory, classpath
+file or agent jar only as the build-script line that added it, and never its contents (A14 review 3, C1); now only a
+file linked from inside an excluded tree is out of the review, and the line that links it is shown and named as a
+reason to stop. Not covered: the third-party artifacts gradle downloads (only the catalog that names them) and the JDK.
+**The full diff** is printed by `signandvari` before checkout, paged by PowerShell and never by an external pager (Git
+for Windows pages through `less -R`, which passes SGR), with `--text --no-textconv --no-ext-diff --no-color`, so neither
+the box's diff settings nor any attribute file can hide, rewrite or recolour a change (C2). **The checkout** runs with
+`core.hooksPath` pointed at an empty directory, no fsmonitor hook and the LFS smudge off, and afterwards every file the
+review covers must hash with no filter (`git hash-object --no-filters`) to what the index holds, allowing only the CRLF
+git's own Windows checkout writes; a symlink or submodule there is refused. That closes a system LFS filter writing
+unreviewed LFS content for a pointer while `git status` stays clean, and any other filter's output (C3). Every way out
+between the checkout and the confirmation (a refusal, a failed git command, Ctrl+C) puts HEAD back, in a `finally`
+(C5); closing the window does not. `prestige-release.ps1` deletes and rebuilds the update-signer jar from the tree on
+every real run, so the jar handed the key is that commit's, not one an earlier build left (A14 review 3). What the
+build host sends back after signing (the drop's `sha256sum`, the read-back manifest's fields) prints escaped too (C6).
+A release tree with two paths that are one file on a case-insensitive disk is refused before checkout (NTFS). A first
+run compares against the commit in the workstation's own most recent signed bundle (`dist/` beside its signature,
+highest seq; no seed at all while git tracks anything under `dist/` in any case, because git matches that path by case
+and NTFS does not, A14 review 3, C4), or an operator-chosen `-Baseline`, which must be a strict ancestor of the release,
+when there is none; a tag is never the seed, because a plain fetch or pull brings in new tags and a planted
+intermediate one would hide every change up to it (A14 review R2-3, R2-4). The commit values the owner types come from
+GitHub's own pages (the merge they approved, the tag's commit), compared in all 40 hex characters with the build host's
+handoff (GitHub's tag and pull-request pages show 7; the commit page's address carries all 40): that catches a
+mistyped, altered or never-published value, not a build host that pushed and tagged its own commit, against which only
+the review stands. A dry run is not tree-free: once confirmed it runs the tree's `prestige-release.ps1` with `-DryRun`
+on that account (which builds no signer). Residual accepted: this rests on the
 operator reading the diff, and a compromised build host can still cut a descendant commit that changes the build; the
 tree still runs its own scripts and gradle on the account that can open `update-signing.key`, and keeping the build
 off that account is the longer-term fix and is not built. Separately, the Linux, Arch and extension digests the
@@ -621,12 +641,20 @@ a duplicated tab (which inherits a copy of sessionStorage) is detected by a per-
 riding the shared pair when another tab turns the offline copy off locks without revoking. Since the A14 review: a
 per-tab lock records its own revocation of the pair it dropped, and a later sign-out with no pair left in the client
 reports that result instead of POSTing a logout with no token (which 401'd and raised "the server didn't confirm" on
-every sign-out after a lock); a lock whose revocation the server did not confirm says so on the unlock card (W1). A
+every sign-out after a lock); a lock whose revocation the server did not confirm says so on the unlock card (W1); since
+the third A14 review that result is also kept in the tab's sessionStorage (`pending` until the server answers, which a
+reload reads as unconfirmed), so a sign-out after a reload or in a new App instance still reports a refused lock-time
+revocation instead of "confirmed" (W-b). A
 refresh already in flight when the pair is dropped or replaced adopts nothing (a generation counter in the client), so a
 lock is never undone by a rotation landing after it (W2). A login or register pair is held in memory and written only by
 the caller's saveSession, with the new account's metadata: the client is rebound to the account the server answered for,
 so a tab that booted to Welcome for X never writes Y's pair under X's metadata, even if Y's sign-in then fails or the
-pair rotates first (W3). A sign-out in another tab, without the offline copy, revokes this tab's own pair before
+pair rotates first (W3). Since the third A14 review the client is bound to the server's userId only after
+`Account.unlock` has accepted the keys that came with it; between login and unlock it is bound to a fresh random
+placeholder no account has, so a rotation in that window is written nowhere and nothing persisted is adopted, even when
+the server names the account whose metadata the tab holds (W-a). A sign-in that fails after login() (unlock refused the
+keys, the first sync failed) revokes the new device session's pair and drops it, instead of keeping it live in the
+tab's memory until the next sign-in replaced it. A sign-out in another tab, without the offline copy, revokes this tab's own pair before
 dropping it (W4). An unlock card that still holds this tab's pair (a reload of an unlocked tab) runs the policy idle
 timer and takes the per-tab lock when it fires (W5). The lock's phase change runs in a finally and the session's storage
 writes are guarded, so a write that throws can no longer leave the vault open (W7). Turning the offline copy ON in one
@@ -652,7 +680,9 @@ so a sideloaded app that took that name on a device without real Play does not c
 because no authoritative public digest was found to pin, and a guessed one would only push real Play installs to the
 confirm); the confirm shows the app label and the installer label as one escaped, bounded, single-line text after the
 platform's `makeSafeForPresentation`, names the installer's package and whether it is a system app, and names the login
-(item and username) it would release (N2); touches through another window are dropped (`filterTouchesWhenObscured`),
+(item and username) it would release (N2); the installer's package and kind are a line of their own that leads and is
+never ellipsized, and the installer's label is a separate line, so no label length can push "NOT a system app"
+off-screen (third A14 review, A1); touches through another window are dropped (`filterTouchesWhenObscured`),
 other apps' overlays are hidden on API 31+, and the button accepts a tap only half a second after the window gained
 focus (N6); the live signer, installer, installer kind and system flag are re-read at the tap and a change refuses the
 fill, and the (package, signer) is remembered only when a fill was delivered (N7). Bindings are device-local, never
