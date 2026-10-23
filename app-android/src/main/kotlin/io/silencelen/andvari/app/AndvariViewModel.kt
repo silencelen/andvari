@@ -3748,6 +3748,9 @@ class AndvariViewModel(
             }
             // VaultSession.lock() closes the engine BEFORE we delete the DB (holders), then the api.
             VaultSession.lock()
+            // A14 (F7): the apps this member confirmed for package-only fills are their judgement,
+            // not the device's — the next account on this phone confirms its own.
+            runCatching { io.silencelen.andvari.app.autofill.AppSignerBindings.clearAll(appContext) }
             pendingBackupRequest = null // never carry a stashed export into a different account
             zeroPendingRecovery() // §F.7: the raw secret + its pieceId never outlive the account
             zeroPendingRecover() // …nor a forgot-password attempt's parsed phrase/ticket
