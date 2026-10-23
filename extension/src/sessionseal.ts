@@ -506,8 +506,9 @@ export class SessionSeal {
    *  them issued earlier and not yet landed is dropped. */
   removeKeys(keys: readonly string[]): Promise<void> {
     for (const k of keys) this.removals.set(k, (this.removals.get(k) ?? 0) + 1);
+    const removed = keys.length === 0 ? Promise.resolve() : this.deps.session.remove([...keys]); // dispatched first
     this.kick();
-    return keys.length === 0 ? Promise.resolve() : this.deps.session.remove([...keys]);
+    return removed;
   }
 
   remove(kind: SealKind, originKey: string): Promise<void> {

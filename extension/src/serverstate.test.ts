@@ -126,7 +126,8 @@ test("F1: 'Not mine' drops the pending origin where it is kept; an unsettled blo
   const trusted = area({ [LEGACY_SERVER_KEY]: "https://self.example" });
   const legacy = area({ [SERVER_URL_KEY]: "https://self.example" });
   assert.equal(await forgetPendingServer(CONFIRM, trusted, legacy), true);
-  assert.deepEqual(trusted.removed, [LEGACY_SERVER_KEY]);
+  // (A16 review R3: the unattested mark goes too, so a declined server does not come back through it.)
+  assert.deepEqual(trusted.removed, [LEGACY_SERVER_KEY, "a15UnattestedServer"]);
   assert.deepEqual(legacy.removed, [], "a keepable block lives in the trusted store only");
   const l2 = area({ [SERVER_URL_KEY]: "https://self.example" });
   assert.equal(await forgetPendingServer({ ...CONFIRM, keepable: false }, area({}, { fail: true }), l2), true);

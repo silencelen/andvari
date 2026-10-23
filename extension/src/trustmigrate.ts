@@ -79,9 +79,10 @@ export function attestsPreA15Upgrade(sig: InstallSignal | null | undefined): boo
 }
 /** A pre-A15 non-default server choice awaiting re-confirmation through the Trust Gate. Display only, never dialed. */
 export const LEGACY_SERVER_KEY = "legacyServerUrl";
-/** A16 review R3: the flag was set WITHOUT reading storage.local (nothing attested the upgrade). Written in the same
- *  write as the flag; while it stands, each start reads storage.local's `serverUrl` ONLY to block while it names
- *  another server (serverstate.ts), and it goes once it does not, or once a server is chosen. Trusted store only. */
+/** A16 review R3: the flag was set WITHOUT reading storage.local (nothing attested the upgrade). Written `true` in the
+ *  same write as the flag; the server state then reads storage.local's `serverUrl` ONLY to block while it names another
+ *  server, keeping that origin here (block-only, never adopted or offered) until a server is chosen or the user says
+ *  "Not mine" (serverstate.ts; a suggestion a late attested migration leaves outranks it). Trusted store only. */
 export const UNATTESTED_SERVER_KEY = "a15UnattestedServer";
 /** The email the user last signed in with (non-secret; the popup prefills it). */
 export const LAST_EMAIL_KEY = "lastEmail";
