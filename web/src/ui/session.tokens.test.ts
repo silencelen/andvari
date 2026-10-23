@@ -205,6 +205,14 @@ describe("A14 F5 — a duplicated tab never shares a rotating refresh token", ()
     saveSession(sess(UID, T2));
     expect(loadSession()?.tokens).toEqual(T2);
   });
+
+  it("a browser with Web Locks but no AbortSignal.timeout never waits forever for the original's lock", async () => {
+    saveSession(sess(UID, T1));
+    resetTabClaim();
+    vi.stubGlobal("AbortSignal", class {}); // no static timeout()
+    await claimTabTokens({ waitMs: 20 }); // resolves at once: an `ifAvailable` request, not an unbounded wait
+    expect(loadSession()?.tokens).toBeNull();
+  });
 });
 
 // ---- wiring: App and Welcome cannot render in node, so the call sites are pinned ----
