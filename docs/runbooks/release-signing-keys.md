@@ -21,8 +21,9 @@ signandvari 0.25.0 -Commit <sha> -SkipDrop   # produce the bundle, deliver it by
 **`-DryRun` is not a run in which no tree code runs** (A14 review R2-6). It signs nothing and
 drops nothing, but it goes through the same review and typed confirmation, and once you confirm it
 runs the release tree's own `prestige-release.ps1` on this account, beside `update-signing.key`
-(with `-DryRun`, which that tree's script is trusted to honour). Confirm a dry run only for a tree
-you would confirm a real run for.
+(with `-DryRun`, which that tree's script is trusted to honour; it then builds no update-signer and
+so skips the live manifest's signature check). Confirm a dry run only for a tree you would confirm a
+real run for.
 
 **One-time, before the first ceremony that uses `-Commit`** (security review 2026-10). The box runs
 the INSTALLED copy, so the reviewed script has to be installed before it can protect anything. An
@@ -38,7 +39,7 @@ nothing:
 ```powershell
 git -C $env:ANDVARI_REPO fetch origin main
 git -C $env:ANDVARI_REPO show <reviewed-sha>:scripts/signandvari.ps1 | Set-Content -Encoding Ascii "$HOME\bin\signandvari.new.ps1"
-git diff --no-index --ignore-cr-at-eol -- "$HOME\bin\signandvari.ps1" "$HOME\bin\signandvari.new.ps1"
+git --no-pager diff --no-index --no-color --ignore-cr-at-eol -- "$HOME\bin\signandvari.ps1" "$HOME\bin\signandvari.new.ps1"
 ```
 
 *Step 2 - only once you have read that diff and it is the change you reviewed,* install it:
@@ -48,22 +49,27 @@ Move-Item -Force "$HOME\bin\signandvari.new.ps1" "$HOME\bin\signandvari.ps1"
 ```
 
 If the diff is not what you reviewed, delete `signandvari.new.ps1` and stop. (`signandvari.ps1`
-is pure ASCII, which the PowerShell gate enforces, so `Set-Content -Encoding Ascii` is
-byte-faithful apart from line endings.) Repeat both steps whenever a release changes
+is pure printable ASCII - no control character but tab and line ends, which the PowerShell gate
+enforces - so `Set-Content -Encoding Ascii` is byte-faithful apart from line endings, and this one
+raw diff, kept out of a pager and uncoloured, cannot carry a terminal escape.) Repeat both steps whenever a release changes
 `scripts/signandvari.ps1`: the tree never updates the installed copy, by design.
 
 **Where `<reviewed-sha>` and `<sha>` come from** (A14 review R2-5). Not from the handoff alone:
 the handoff is written by the build host, and a value it supplies would become the installed
 verifier or the release pin. Read each one off GitHub's web UI yourself and compare it with the
 handoff value; stop if they differ. `<reviewed-sha>` is the merge commit (or pull request head)
-you approved there; `<sha>` is the commit GitHub's page for the release tag `v<ver>` names. What
+you approved there; `<sha>` is the commit GitHub's page for the release tag `v<ver>` names.
+**Compare all 40 hex characters** (A14 review 3): GitHub's tag, release and pull-request pages show
+only the first 7. Click the short sha through to the commit page — its address ends in the full
+40-character sha (`…/commit/<sha>`), and the copy button beside the short sha copies the full one —
+and compare that with the handoff value character for character. What
 that does: GitHub is a second view of what was pushed, served by a party the build host does not
 control, so it catches a handoff value that was mistyped, altered on its way to you, or names a
 commit that was never published, and it ties `<reviewed-sha>` to the review you actually did rather
 than to whatever the build host says you reviewed. What it does not do: the build host can push to
 that repository, so a commit it pushed and tagged there itself appears on GitHub exactly as it
-handed it over. Against that, what remains is your own review of the merge, the stat and commit
-list `signandvari` prints since the last release you signed (below), and GitHub's record of who
+handed it over. Against that, what remains is your own review of the merge, the stat, commit
+list and full diff `signandvari` prints since the last release you signed (below), and GitHub's record of who
 pushed what.
 
 **Do not `git pull` or run a plain `git fetch` in the signing checkout before the first ceremony
@@ -101,28 +107,63 @@ code runs (dry runs included) it:
    compares names case-insensitively and ignores a trailing dot or space, so
    `Scripts/prestige-release.ps1` beside `scripts/prestige-release.ps1` would be written one over
    the other);
-3. prints a `git diff --stat <last>..<commit>` of the code that runs beside the key, **first**, and
-   then `git log` of the commits in that range, every line taken from git escaped (C0, DEL, C1 and the
-   bidi controls print as `\u001B`-style text, so a commit subject cannot move the cursor or redraw
-   the stat on a VT console; A14 review R2-2). The stat matches these paths in any case:
-   `core/` (ALL of it), `tools/update-signer/`, `scripts/`, `gradlew*`, `gradle/`,
-   `*gradle.properties`, `settings.gradle.kts`, every `*.gradle.kts` and `*.gradle`, `buildSrc/`,
-   `build-logic/`, and `.gradle/`, `.kotlin/`, `local.properties` should a tree ever track them. That
-   is what the ceremony builds and runs here: its scripts, the whole gradle build, and the
-   update-signer, which is handed the key's path and is a shadowJar of `tools/update-signer` plus
-   all of `:core`. **All** of core, not its crypto (A14 review R2-1): Kotlin resolves an
-   unqualified call to a declaration in the caller's own package ahead of its default imports, from
-   any module on the classpath, so one core file that declares the signer's package and a
-   same-named function replaces the signer's own key read, and a stat over core's crypto
-   directories printed "(no changes)" over exactly that. Not covered: the third-party artifacts
-   gradle downloads (only the catalog that names them), the JDK, and the sources compiled into the
-   MSI but never run here (`app-desktop/src`), which the commit list names. The stat is names and
-   counts; the line under it gives the `git diff` command to read the change in full;
-4. checks the tree out, and refuses unless `git status --porcelain` is then empty (what is on disk
-   must be exactly the commit that was reviewed);
-5. asks the operator to **type the version** being released. Anything else stops the run and puts
-   HEAD back where it was. A run with no human at a console — `-NonInteractive`, piped or redirected
-   input, a service — stops before anything is checked out; there is no flag that skips it.
+3. prints what changed in `<last>..<commit>`: a stat **first**, then `git log` of the commits in
+   that range, then the **full diff** — every line taken from git escaped (C0, DEL, C1 and the bidi
+   controls print as `\u001B`-style text, so neither a commit subject nor a changed line can move
+   the cursor or redraw what is above it on a VT console; A14 review R2-2), and read from git as
+   bytes split at LF alone, so a CR cannot start a fake commit line or a fake `diff --git` header
+   either (A14 review 3).
+   **What it shows (A14 review 3, C1): every changed path**, except the files under a short list of
+   trees that never run on the signing box — `app-android/` (the phone app), `web/` and
+   `extension/` (browser code, built on the build host; here it runs only inside a browser),
+   `server/` and `deploy/` (run on the server host), `docs/` and `spec/` (prose, and test vectors
+   only test tasks read; the ceremony runs no test), `.github/` (CI). Their changes are **counted**
+   under the stat instead (`NOT shown: N changed file(s) in trees that never run on this box`, per
+   tree). Even inside those trees, what gradle, git or Windows reads as code or as checkout
+   instructions is shown: every `*.gradle`/`*.kts`, `gradle.properties`, gradle wrapper files,
+   `*.jar`, PowerShell and batch files, `.gitattributes`, `.lfsconfig` and `.gitmodules`. Everything
+   else is shown because it is not on the list: all of `core/` and `tools/` (the update-signer, which
+   is handed the key's path, is a shadowJar of `tools/update-signer` plus **all** of `:core` — Kotlin
+   resolves an unqualified call to a declaration in the caller's own package ahead of its default
+   imports, from any module on the classpath, so one core file that declares the signer's package
+   can replace the signer's key read; A14 review R2-1), `scripts/`, `gradle/`, `buildSrc/`, the root
+   files, any new top-level directory — and **`app-desktop/`**, because the MSI it is compiled into
+   is the household's Windows client, which runs on this very account once it is installed here. So
+   whatever a build script newly links (a module, a source or resource directory, a buildscript
+   classpath file, a `-javaagent` jar) is in the review wherever it lives, unless it lives inside one
+   of the excluded trees: **a build-script line that links a file in one of those trees is a reason to
+   stop**, since from then on that file's own changes would not be shown. Not covered at all: the
+   third-party artifacts gradle downloads (only the catalog that names them) and the JDK.
+   **The full diff (C2)** is printed by `signandvari` itself, **before** anything is checked out, with
+   `git diff --text --no-textconv --no-ext-diff --no-color`, so neither this box's diff settings nor
+   any attribute file can turn a file into "Binary files differ", rewrite it or colour it. It pages
+   one console height at a time in PowerShell (Enter: next page, `a`: the rest, `q`: stop reading) —
+   never through an external pager — and the same escaped text is saved as
+   `%LOCALAPPDATA%\andvari\signandvari-review-<commit>.txt` for reading in Notepad. Do not read the
+   change with a plain `git diff` instead: Git for Windows pages it through `less -R`, which passes
+   colour sequences that can hide text, and it honours the tree's attributes;
+4. checks the tree out with **no hook** (`core.hooksPath` is an empty directory for the checkout,
+   whatever the repo config names), no fsmonitor hook and **no LFS smudge** (`GIT_LFS_SKIP_SMUDGE=1`,
+   the LFS filter blanked): Git for Windows installs a system LFS filter, and a tree whose
+   `.gitattributes` says `filter=lfs` would otherwise have LFS content nobody reviewed written for a
+   pointer, while `git status` stays clean. It then refuses unless `git status --porcelain` is empty
+   **and** every file the review covers is, byte for byte, what git holds for it (`git hash-object
+   --no-filters` against `git ls-files -s`; A14 review 3, C3). The one difference allowed is the CRLF
+   git's own end-of-line conversion writes on a Windows checkout (`core.autocrlf=true`, the Git for
+   Windows default). A symlink or a submodule among those paths is refused;
+5. asks the operator to **type the version** being released. Anything else stops the run, and so does
+   every other way out between the checkout and that answer — a refusal above, a git command that
+   fails, Ctrl+C at the prompt — and each one **puts HEAD back** where it was (A14 review 3, C5).
+   Closing the window is the one exit that cannot; if you do, `git checkout` your branch before
+   opening the checkout in anything that runs gradle. A run with no human at a console —
+   `-NonInteractive`, piped or redirected input, a service — stops before anything is checked out;
+   there is no flag that skips it.
+
+Once confirmed, `prestige-release.ps1` **deletes the update-signer jar and rebuilds it** from the
+checked-out tree on every real run (A14 review 3), so the jar handed the key's path is this
+commit's, never one an earlier build left in `tools\update-signer\build\libs`; a dry run builds no
+signer, runs none it did not build, and so skips the live manifest's signature check, which the
+real run makes before the MSI build.
 
 The record moves only after `prestige-release.ps1` exited 0 **and** `bundle.json` records the
 pinned commit. A dry run, a refused run or a failed ceremony leaves it where it was. This is a review
@@ -134,8 +175,10 @@ release, and a change to the build is in front of a human before it runs.
 baseline is the commit in **this box's own most recent signed bundle**:
 `dist\release-bundle-<version>\bundle.json` in the checkout, beside its `manifest.json.sig`.
 `prestige-release.ps1` writes both only after a signature it verified (the `.sig` last), `dist\` is
-gitignored so no checkout replaces it, and the highest `seq` wins; a `bundle.json` that git tracks
-is the tree's content, not this box's, and is skipped. The output says FIRST RUN, names the bundle,
+gitignored so no checkout replaces it, and the highest `seq` wins. **No seed is taken while git
+tracks anything under `dist/` in any case** (A14 review 3, C4): git matches paths by case even on
+NTFS, which does not, so a tracked `Dist/…` or `…/Bundle.json` — the tree's content, not this box's —
+would land exactly where the seed is read. The output says FIRST RUN, names the bundle,
 and prints the baseline commit's date and subject — check that it is the release you last signed.
 **A tag is never the seed**: a plain `git fetch` or `git pull` brings in new tags, so a planted
 intermediate tag would become the baseline and hide every change up to it. With no signed bundle

@@ -50,8 +50,8 @@
 # record of the commit its last SUCCESSFUL ceremony signed, outside the repo and out of the tree's
 # reach before it runs: %LOCALAPPDATA%\andvari\signandvari-last-signed.json. Before any of the
 # tree's code runs, the release commit must DESCEND from that commit (git merge-base
-# --is-ancestor), a diff --stat of the code that runs beside the key and the commits since it are
-# printed, and the operator types the version to confirm. A run with no human at a console
+# --is-ancestor), a stat, the commits and the full diff since it are printed (WHAT THE REVIEW
+# SHOWS, below), and the operator types the version to confirm. A run with no human at a console
 # (-NonInteractive, redirected input, a service) fails closed before anything is checked out. The
 # record moves only after prestige-release.ps1 succeeded AND bundle.json records the pinned
 # commit; a dry run, a refused run or a failed ceremony leaves it where it was. This is a review
@@ -59,20 +59,40 @@
 # cut a descendant commit, but it can no longer swap the tree silently, rewrite history under the
 # last release, or skip the moment a human looks at what changed in the build.
 #
-# WHAT THE STAT COVERS (A14 review R2-1; see $ReviewPaths in step 3). The tree's scripts, its
-# whole gradle build (wrapper, catalog, properties, every build script, buildSrc) and the
-# update-signer, which is handed the key's path and is a shadowJar of tools/update-signer plus ALL
-# of :core - not only core's crypto, which is all an earlier version listed. It does NOT cover the
-# third-party artifacts gradle downloads (only the catalog that names them), the JDK, or the
-# sources compiled into the MSI and never run here (app-desktop's, whose changes the commit list
-# names). Every printed line from git is escaped (A14 review R2-2), the paths are matched
-# case-insensitively, and a tree with two paths that are equal on a case-insensitive disk is
-# refused before checkout (NTFS would write one over the other).
+# WHAT THE REVIEW SHOWS (A14 review 3, C1 and C2; see $ExcludedTrees in step 3). EVERY path that
+# changed since the last signed commit, first as a stat and then as the full diff, except the
+# files under a short list of trees that never run on this box (the phone app, the browser code,
+# the server and its deployment, prose and test vectors, CI); those are counted instead. Even
+# inside those trees, what gradle, git or Windows reads as code or as checkout instructions is
+# shown: build scripts, gradle properties and wrapper files, jars, PowerShell and batch files,
+# .gitattributes, .lfsconfig and .gitmodules. So whatever a build script newly links - a module, a
+# source or resource directory, a buildscript classpath file, an agent jar - is in the review
+# wherever it lives, unless it lives inside one of those trees; a build-script line that links a
+# file there is a reason to stop, because from then on that file's changes would not be shown.
+# app-desktop/ is shown: the MSI it is compiled into runs here once it is installed on this
+# account. The full diff is printed by this script BEFORE checkout, through its own pager, never
+# an external one, with --text --no-textconv --no-ext-diff --no-color, so neither this box's diff
+# settings nor the tree's attributes can hide or recolour a change. Not covered: the third-party
+# artifacts gradle downloads (only the catalog that names them) and the JDK. Every printed line
+# from git is escaped (A14 review R2-2) and read from git as bytes split at LF alone, so a CR
+# cannot start a fake line; paths are matched case-insensitively; and a tree with two paths that
+# are equal on a case-insensitive disk is refused before checkout (NTFS would write one over the
+# other).
+#
+# THE CHECKOUT (A14 review 3, C3 and C5). It runs no hook (core.hooksPath is an empty directory
+# for it, whatever the repo config names), no fsmonitor hook and no LFS smudge. Afterwards the
+# tree must be clean and every file the review covers must be, byte for byte, what git holds for
+# it (git hash-object --no-filters against git ls-files -s; the one difference allowed is the CRLF
+# git's own end-of-line conversion writes on a Windows checkout). Anything else - an LFS object, a
+# filter's output, a file changed after the checkout - stops the run before the confirmation, and
+# every way out between the checkout and the confirmation (a refusal, a git command that dies,
+# Ctrl+C at the prompt) puts HEAD back. Closing the window is the one exit that cannot.
 #
 # FIRST RUN (no record yet, A14 review R2-3): the baseline is the commit in this box's OWN most
 # recent signed bundle - dist\release-bundle-<version>\bundle.json beside its manifest.json.sig,
-# which prestige-release.ps1 writes only after a signature it verified; the highest seq wins, and a
-# bundle.json git tracks is skipped (that is the tree's content, not this box's). With no such
+# which prestige-release.ps1 writes only after a signature it verified; the highest seq wins. No
+# seed is taken while git tracks anything under dist\ in any case (A14 review 3, C4: on NTFS a
+# tracked Dist/... lands at dist\, and it is the tree's content, not this box's). With no such
 # bundle the run stops and asks for -Baseline <40-hex>, a commit the operator has reviewed (the last
 # release they signed); -Baseline may also be passed on any first run to choose the comparison, it
 # must be a STRICT ancestor of -Commit (never -Commit itself), and it is refused once a record
@@ -232,15 +252,49 @@ Write-Info "dry-run $([bool]$DryRun)   skip-drop $([bool]$SkipDrop)"
 
 Write-Step 'Tag, working tree, leftovers'
 
+# -InputLines is git's standard input, one line each (hash-object --stdin-paths below). Those lines
+# are git's own C-quoted paths, pure ASCII, so the console's code page never touches them.
 function Invoke-Git {
-    param([string[]]$Arguments, [switch]$AllowFailure)
-    $out  = Invoke-Native { & git -C $Repo @Arguments 2>&1 }
+    param([string[]]$Arguments, [switch]$AllowFailure, [string[]]$InputLines)
+    if ($PSBoundParameters.ContainsKey('InputLines')) {
+        $out = Invoke-Native { $InputLines | & git -C $Repo @Arguments 2>&1 }
+    }
+    else {
+        $out = Invoke-Native { & git -C $Repo @Arguments 2>&1 }
+    }
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFailure) {
         Write-GitText ($out | Out-String)
         Die "git $($Arguments -join ' ') failed (exit $code)"
     }
     [pscustomobject]@{ ExitCode = $code; Output = ($out | Out-String) }
+}
+
+# GIT OUTPUT THAT IS SHOWN FOR REVIEW is read as bytes and split at LF alone (A14 review 3).
+# PowerShell splits a native program's output at a lone CR as well as at LF, so a CR inside a
+# commit subject or a changed line used to start a NEW console line before any escaping could see
+# it: a fake commit in the log, or a fake "diff --git" header that would end a reviewed file early.
+# git writes the log and the diffs through --output into a temporary file instead, read here as
+# UTF-8 whatever the console's code page, so a CR stays inside its line and prints as \u000D.
+# $Arguments is a log or diff command with no "--" and no pathspec.
+function Get-GitLines {
+    param([string[]]$Arguments)
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('signandvari-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $text = ''
+    try {
+        $r = Invoke-Git -Arguments (@('--no-pager') + $Arguments + @("--output=$tmp", '--')) -AllowFailure
+        if ($r.ExitCode -ne 0) {
+            Write-GitText $r.Output
+            Die "git $($Arguments -join ' ') failed (exit $($r.ExitCode))"
+        }
+        if (Test-Path -LiteralPath $tmp -PathType Leaf) {
+            $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($tmp))
+        }
+    }
+    finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    if ($text.EndsWith("`n")) { $text = $text.Substring(0, $text.Length - 1) }
+    if ($text.Length -eq 0) { return }
+    return $text.Split([char]10)
 }
 
 # What the LOCAL tag points at before the fetch (empty when this box has never seen the tag).
@@ -273,20 +327,30 @@ function Read-LastSigned {
 # replaces it), records the commit it built (H103) and the seq it minted in bundle.json, and
 # renames manifest.json.sig into place LAST, after the signature verified. So a directory holding
 # both files is a ceremony this box completed, and the highest seq is the most recent one. A
-# bundle.json that git TRACKS is the tree's content, not this box's, and is skipped. A tag is never
-# a seed: a plain `git fetch` or `git pull` auto-follows new tags, so a planted intermediate tag
-# would become the baseline and hide every change up to it.
+# bundle.json that git TRACKS is the tree's content, not this box's. git matches a pathspec by case
+# even where the disk does not (A14 review 3, C4), and on NTFS a tracked Dist/... or .../Bundle.json
+# lands at the very path read here, so while git tracks ANYTHING under dist/ in any case there is
+# no seed at all; each candidate is also checked on its own, case-insensitively. A tag is never a
+# seed: a plain `git fetch` or `git pull` auto-follows new tags, so a planted intermediate tag would
+# become the baseline and hide every change up to it.
+$script:SeedRefusal = $null
 function Get-SeedBundle {
     $dist = Join-Path $Repo 'dist'
     if (-not (Test-Path -LiteralPath $dist -PathType Container)) { return $null }
+    $trackedDist = (Invoke-Git -Arguments @('-c', 'core.quotePath=true', 'ls-files', '--', ':(icase)dist/')).Output.Trim()
+    if ($trackedDist) {
+        Write-GitText $trackedDist -Indent '   TRACKED '
+        $script:SeedRefusal = 'git tracks files under dist/ in this checkout (above, in some case), so no bundle there can be told from the tree''s own content'
+        return $null
+    }
     $best = $null
     foreach ($dir in @(Get-ChildItem -LiteralPath $dist -Directory -Filter 'release-bundle-*' -ErrorAction SilentlyContinue)) {
         $meta = Join-Path $dir.FullName 'bundle.json'
         $sig  = Join-Path $dir.FullName 'manifest.json.sig'
         if (-not (Test-Path -LiteralPath $meta -PathType Leaf) -or -not (Test-Path -LiteralPath $sig -PathType Leaf)) { continue }
         $rel = 'dist/' + $dir.Name + '/bundle.json'
-        $tracked = Invoke-Git -Arguments @('ls-files', '--error-unmatch', '--', $rel) -AllowFailure
-        if ($tracked.ExitCode -eq 0) {
+        $tracked = (Invoke-Git -Arguments @('ls-files', '--', ":(icase,literal)$rel")).Output.Trim()
+        if ($tracked) {
             Write-Warn2 ("not a seed: {0} is tracked by git, so it is the tree's content, not this box's" -f (ConvertTo-Printable $rel))
             continue
         }
@@ -324,15 +388,18 @@ elseif ($Baseline) {
 else {
     $SeedBundle = Get-SeedBundle
     if (-not $SeedBundle) {
-        Die "FIRST RUN and nothing to compare against: there is no record at $RecordPath and no signed bundle (bundle.json beside manifest.json.sig) under $(Join-Path $Repo 'dist'). Nothing was fetched or checked out. Re-run with -Baseline <40-hex>, a commit you have reviewed (the last release you signed), never one read off the build host. A tag is never used as the baseline."
+        $why = if ($script:SeedRefusal) { $script:SeedRefusal } else { "there is no signed bundle (bundle.json beside manifest.json.sig) under $(Join-Path $Repo 'dist')" }
+        Die "FIRST RUN and nothing to compare against: there is no record at $RecordPath and $why. Nothing was fetched or checked out. Re-run with -Baseline <40-hex>, a commit you have reviewed (the last release you signed), never one read off the build host. A tag is never used as the baseline."
     }
     $BaseCommit = $SeedBundle.Commit
-    $BaseWhat   = "the commit this box's most recent signed bundle records, $($SeedBundle.Path) (seq $($SeedBundle.Seq), $($SeedBundle.Version)) (FIRST RUN: no record at $RecordPath yet)"
+    # The path is a directory name on this disk, and an NTFS name can hold a control character (C6).
+    $BaseWhat   = "the commit this box's most recent signed bundle records, $(ConvertTo-Printable $SeedBundle.Path) (seq $($SeedBundle.Seq), $($SeedBundle.Version)) (FIRST RUN: no record at $RecordPath yet)"
 }
 Write-Ok "baseline: $BaseWhat"
 # The baseline's own date and subject, so the operator can tell it is the release they last signed.
-$baseShow = Invoke-Git -Arguments @('log', '-1', '--no-color', '--no-show-signature', '--format=%ci  %s', $BaseCommit, '--') -AllowFailure
-if ($baseShow.ExitCode -eq 0) { Write-GitText $baseShow.Output.Trim() -Indent '        ' }
+if ((Invoke-Git -Arguments @('cat-file', '-e', "$BaseCommit^{commit}") -AllowFailure).ExitCode -eq 0) {
+    foreach ($l in @(Get-GitLines -Arguments @('log', '-1', '--no-color', '--no-show-signature', '--format=%ci  %s', $BaseCommit))) { Write-GitText $l -Indent '        ' }
+}
 else { Write-Info "     ($BaseCommit is not in this checkout)" }
 
 # --- fetch ONLY the release tag, never forced ---------------------------------------------------
@@ -355,7 +422,7 @@ if ($fetch.ExitCode -ne 0) {
         }
     }
     if ($LocalBefore -and $remoteCommit -and $remoteCommit -ne $LocalBefore) {
-        Die "the remote's $Tag ($remoteCommit) DIFFERS from this machine's $Tag ($LocalBefore). A tag that moved is never adopted here. Find out why it moved before signing anything; -Commit is $Commit."
+        Die "the remote's $Tag ($(ConvertTo-Printable $remoteCommit)) DIFFERS from this machine's $Tag ($LocalBefore). A tag that moved is never adopted here. Find out why it moved before signing anything; -Commit is $Commit."
     }
     if (-not $remoteCommit) { Die "the remote has no $Tag (git fetch exit $($fetch.ExitCode)) - push the tag from the build host first; nothing was checked out." }
     Die "git fetch of $Tag failed (exit $($fetch.ExitCode)) - nothing was checked out."
@@ -402,30 +469,54 @@ Write-Ok 'working tree clean'
 
 Write-Step "Changes since the last signed release, checkout $Tag, confirm"
 
-# WHAT THE STAT COVERS (A14 review R2-1). Worked out from what prestige-release.ps1 builds and runs
-# on this account beside the key:
-#   * its scripts: itself and build-windows.ps1 (scripts/);
-#   * a gradle build: gradlew.bat and the wrapper jar and properties, the version catalog and
-#     daemon settings (gradle/), gradle.properties (which can also set JVM flags and agents),
-#     settings.gradle.kts and every other build script, buildSrc/ and build-logic/ should one
-#     appear, and the project caches and machine-local files gradle would read if a tree ever
-#     tracked them (.gradle/, .kotlin/, local.properties);
-#   * the update-signer, which is handed the key's path: a shadowJar of tools/update-signer/ plus
-#     ALL of :core. ALL of it, not core's crypto: Kotlin resolves an unqualified call to a
-#     declaration in the caller's own package ahead of its default imports, from any module on the
-#     classpath, so one core file that declares the signer's package and a same-named function (an
-#     extension File.readText, say) replaces the signer's own call. A stat over core's crypto
-#     directories alone printed "(no changes)" over exactly that.
-# Not covered: the third-party artifacts gradle downloads (only the catalog that names them), the
-# JDK, and the sources compiled into the MSI but never run here (app-desktop/src); the commit list
-# names those. A new module the signer links shows here through the build scripts that add it.
-# Matched case-insensitively (:(icase)), as NTFS matches names.
-$ReviewPaths = @(
-    'core/', 'tools/update-signer/',
-    'scripts/', 'gradlew*', 'gradle/', '*gradle.properties', 'settings.gradle.kts', '*.gradle.kts', '*.gradle',
-    'buildSrc/', 'build-logic/', '.gradle/', '.kotlin/', 'local.properties'
-)
-$ReviewSpecs = @($ReviewPaths | ForEach-Object { ":(icase)$_" })
+# WHAT THE REVIEW SHOWS (A14 review 3, C1: default-include). EVERY path that changed since the
+# baseline, except under these trees. Each was checked against what prestige-release.ps1 builds and
+# runs on this account (the update-signer: tools/update-signer plus all of :core; the MSI:
+# app-desktop plus :core; the gradle build that configures every project) and against what else
+# runs on this box: no file in them is compiled into the signer, the MSI or the build, and none
+# runs here outside a browser's sandbox.
+#   app-android/      the phone app. Gradle configures its build script here (that file is shown,
+#                     below) and runs no Android task in the ceremony.
+#   web/ extension/   browser code, built on the build host; on this box it runs only inside a
+#                     browser.
+#   server/ deploy/   the server and its deployment, run on the server host (deploy/ also rides
+#                     inside the server jar). Gradle configures server's build script (shown).
+#   docs/ spec/       prose, and test vectors that only test tasks read; the ceremony runs no test.
+#   .github/          CI workflows, run on GitHub's runners.
+# NOT on the list, deliberately: app-desktop/. Its sources are compiled into the MSI this box
+# builds, and that MSI is the household's Windows client: installed here, it runs on the very
+# account that can open update-signing.key. core/, tools/, scripts/, gradle/, buildSrc/, the root
+# files and any NEW top-level directory are shown because they are not on the list - a module or
+# source directory a build script links later is in the review from the day it appears.
+$ExcludedTrees = @('app-android/', 'web/', 'extension/', 'server/', 'deploy/', 'docs/', 'spec/', '.github/')
+# Shown wherever they are, inside those trees too: what gradle, git or Windows reads as code or as
+# checkout instructions. So a build script in an excluded tree is shown, and a line in it (or in any
+# build script) that links a file from one of those trees is in front of the operator - which is a
+# reason to stop, since from then on that file's own changes would not be shown.
+$AlwaysShownPattern = '(?i)(\.gradle|\.kts|\.jar|\.ps1|\.psm1|\.psd1|\.bat|\.cmd)$|(^|/)(gradle\.properties|gradle-wrapper\.[^/]*|\.gitattributes|\.lfsconfig|\.gitmodules)$'
+
+# NTFS ignores a trailing dot or space in every name, so a path is classified as NTFS will write it.
+function Get-NtfsPath {
+    param([string]$Path)
+    return ((@($Path.Split('/')) | ForEach-Object { $_.TrimEnd([char[]]@('.', ' ')) }) -join '/')
+}
+# The excluded tree a path lies in, whether or not it is shown anyway; '' for none. Case-insensitive,
+# as NTFS matches names.
+function Get-TreeOf {
+    param([string]$Path)
+    $p = Get-NtfsPath $Path
+    foreach ($t in $ExcludedTrees) {
+        if ($p.StartsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) { return $t }
+    }
+    return ''
+}
+# '' when the review shows this path; otherwise the excluded tree that hides it.
+function Get-HiddenBy {
+    param([string]$Path)
+    $t = Get-TreeOf $Path
+    if ($t -and -not ((Get-NtfsPath $Path) -match $AlwaysShownPattern)) { return $t }
+    return ''
+}
 
 # Unattended runs fail closed BEFORE anything is checked out: with no human at a console nobody
 # reads the lines below, so the run stops instead of skipping the question. Piped input counts as
@@ -465,6 +556,52 @@ function ConvertFrom-GitQuotedPath {
     return [System.Text.Encoding]::UTF8.GetString($bytes.ToArray())
 }
 
+# The path a "diff --git a/P b/P" header names (a and b are the same path: renames are off), or null
+# when the header cannot be read - and then the section is SHOWN, never hidden.
+function Get-DiffHeaderPath {
+    param([string]$Line)
+    $rest = $Line.Substring(11)
+    if (($rest.Length % 2) -ne 1) { return $null }
+    $half = [int](($rest.Length - 1) / 2)
+    if ($rest[$half] -ne ' ') { return $null }
+    $a = $rest.Substring(0, $half); $b = $rest.Substring($half + 1)
+    if ($a.StartsWith('"a/') -and $b.StartsWith('"b/')) {
+        if ($a.Substring(3) -cne $b.Substring(3)) { return $null }
+        return (ConvertFrom-GitQuotedPath ('"' + $a.Substring(3)))
+    }
+    if ($a.StartsWith('a/') -and $b.StartsWith('b/')) {
+        if ($a.Substring(2) -cne $b.Substring(2)) { return $null }
+        return $a.Substring(2)
+    }
+    return $null
+}
+
+# The full diff is paged HERE, never by an external pager (Git for Windows pages through less -R,
+# which passes SGR sequences that can hide text): one console height at a time, every line already
+# escaped. Enter shows the next page, 'a' the rest without stopping, 'q' stops reading (the run goes
+# on to the confirmation, which is the operator's call). A console whose height cannot be read gets
+# the whole diff at once.
+function Show-Paged {
+    param([string[]]$Lines)
+    $rows = 0
+    try { $rows = [Console]::WindowHeight } catch { $rows = 0 }
+    $page = $rows - 3
+    $i = 0
+    while ($i -lt $Lines.Count) {
+        $stop = if ($page -ge 5) { [Math]::Min($i + $page, $Lines.Count) } else { $Lines.Count }
+        while ($i -lt $stop) { Write-Host ('   ' + $Lines[$i]); $i++ }
+        if ($i -lt $Lines.Count) {
+            $k = Read-Host ("   -- line {0} of {1}: Enter for the next page, 'a' for all the rest, 'q' to stop reading --" -f $i, $Lines.Count)
+            if ($null -eq $k) { $k = 'q' }
+            if ($k.Trim() -eq 'q') {
+                Write-Host ("   (stopped reading the diff at line {0} of {1})" -f $i, $Lines.Count) -ForegroundColor Yellow
+                return
+            }
+            if ($k.Trim() -eq 'a') { $page = 0 }
+        }
+    }
+}
+
 # NTFS CASE COLLISIONS (A14 review 2). NTFS compares names case-insensitively, and ignores a
 # trailing dot or space, so two tree paths that differ only that way are ONE file on this disk:
 # the checkout writes one over the other, and a case-sensitive pathspec in the review would not
@@ -500,6 +637,80 @@ function Find-CaseCollisions {
     return @($hits | Select-Object -Unique)
 }
 
+# The git object id of these bytes as a blob - what `git hash-object --no-filters` computes.
+function Get-BlobId {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        $head = [System.Text.Encoding]::ASCII.GetBytes(('blob {0}' -f $Bytes.Length) + [char]0)
+        [void]$sha.TransformBlock($head, 0, $head.Length, $null, 0)
+        [void]$sha.TransformFinalBlock($Bytes, 0, $Bytes.Length)
+        return ([System.BitConverter]::ToString($sha.Hash) -replace '-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+# True when the file on disk is exactly the blob with every LF written as CRLF - the one change git's
+# own end-of-line conversion makes on a Windows checkout (core.autocrlf=true, the Git for Windows
+# default, or an eol=crlf attribute). Every LF must carry its CR, and the bytes with each CRLF turned
+# back into LF must be the blob. Read as Latin-1, which maps every byte to one character and back.
+$script:Latin1 = [System.Text.Encoding]::GetEncoding(28591)
+function Test-CrlfCheckout {
+    param([string]$Path, [string]$WantId)
+    $text = $script:Latin1.GetString([System.IO.File]::ReadAllBytes($Path))
+    if ($text.IndexOf("`n") -lt 0 -or $text -match '(?<!\r)\n') { return $false }
+    return ((Get-BlobId $script:Latin1.GetBytes($text.Replace("`r`n", "`n"))) -eq $WantId)
+}
+
+# EVERY FILE THE REVIEW COVERS IS ON DISK AS GIT HOLDS IT (A14 review 3, C3). git status judges a
+# checked-out file by its stat data and through the clean filter, so whatever a smudge filter wrote
+# - LFS content for a pointer, any other filter's output - leaves the tree "clean". This hashes the
+# bytes on disk with no filter at all (git hash-object --no-filters) and compares them with the
+# index (git ls-files -s), allowing only the CRLF git's own checkout writes. A symlink or a
+# submodule among those paths is refused: neither is a file the review could have read.
+function Assert-ReviewedFilesOnDisk {
+    $ls = Invoke-Git -Arguments @('-c', 'core.quotePath=true', 'ls-files', '-s')
+    $quoted   = New-Object System.Collections.Generic.List[string]
+    $want     = New-Object System.Collections.Generic.List[string]
+    $paths    = New-Object System.Collections.Generic.List[string]
+    $notFiles = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($ls.Output -split "`r?`n")) {
+        if (-not $line) { continue }
+        if ($line -notmatch '^(\d{6}) ([0-9a-f]{40}) \d\t(.+)$') {
+            Die "unexpected line from git ls-files -s: $(ConvertTo-Printable $line). None of the tree's code ran."
+        }
+        $mode = $matches[1]; $id = $matches[2]; $q = $matches[3]
+        $p = ConvertFrom-GitQuotedPath $q
+        if (Get-HiddenBy $p) { continue }
+        if ($mode -ne '100644' -and $mode -ne '100755') { $notFiles.Add("$mode $q"); continue }
+        $quoted.Add($q); $want.Add($id); $paths.Add($p)
+    }
+    if ($notFiles.Count -gt 0) {
+        foreach ($n in $notFiles) { Write-GitText $n -Indent '   NOT A FILE ' }
+        Die "the release tree has a symlink or a submodule among the paths the review covers (above): neither is a file the review could have read. Refused - none of the tree's code ran."
+    }
+    $h = Invoke-Git -Arguments @('hash-object', '--no-filters', '--stdin-paths') -InputLines $quoted.ToArray() -AllowFailure
+    $got = @($h.Output -split "`r?`n" | Where-Object { $_ -match '^[0-9a-f]{40}$' })
+    if ($h.ExitCode -ne 0 -or $got.Count -ne $quoted.Count) {
+        Write-GitText $h.Output
+        Die "could not hash the checked-out files (git hash-object exit $($h.ExitCode), $($got.Count) of $($quoted.Count) hashed). None of the tree's code ran."
+    }
+    $bad = New-Object System.Collections.Generic.List[string]
+    $crlf = 0
+    for ($i = 0; $i -lt $quoted.Count; $i++) {
+        if ($got[$i] -eq $want[$i]) { continue }
+        if (Test-CrlfCheckout -Path (Join-Path $Repo $paths[$i]) -WantId $want[$i]) { $crlf++; continue }
+        $bad.Add($quoted[$i])
+    }
+    if ($bad.Count -gt 0) {
+        foreach ($b in @($bad | Select-Object -First 20)) { Write-GitText $b -Indent '   DIFFERS ' }
+        if ($bad.Count -gt 20) { Write-Host ('   ... and {0} more' -f ($bad.Count - 20)) }
+        Die ("{0} file(s) the review covers are not, on disk, what git holds for them (above): a filter, an LFS object or something else wrote them, so what would run is not what was reviewed. None of the tree's code ran." -f $bad.Count)
+    }
+    $note = if ($crlf -gt 0) { " ($crlf of them with the CRLF line endings git's own Windows checkout writes)" } else { '' }
+    Write-Ok ("all {0} files the review covers are on disk exactly as git holds them{1}" -f $quoted.Count, $note)
+}
+
 # Ancestry first: a release that does not descend from the last one signed here is not built on
 # what was reviewed then (a rewritten history, a branch nobody merged, a substituted tree).
 $anc = Invoke-Git -Arguments @('merge-base', '--is-ancestor', $BaseCommit, $Commit) -AllowFailure
@@ -520,77 +731,179 @@ if ($collisions.Count -gt 0) {
 }
 Write-Ok 'no two paths in the release tree collide on a case-insensitive disk'
 
-# The stat FIRST, then the commits (A14 review R2-2): a hostile subject printed above the stat is
-# escaped anyway, but the code that runs beside the key is the part to read before anything else.
-$stat = (Invoke-Git -Arguments (@('-c', 'core.quotePath=true', 'diff', '--stat=4000,3900', '--stat-graph-width=40',
-    '--no-renames', '--no-color', '--no-ext-diff', '--no-textconv', "$BaseCommit..$Commit", '--') + $ReviewSpecs)).Output.TrimEnd()
-$log  = (Invoke-Git -Arguments @('log', '--no-color', '--no-show-signature', '--format=%h %s', "$BaseCommit..$Commit", '--')).Output.TrimEnd()
+# The stat FIRST, then the commits (A14 review R2-2), then the full diff (A14 review 3, C2). All three
+# are read through Get-GitLines (bytes, split at LF alone) and printed escaped.
+$Range = "$BaseCommit..$Commit"
+$RangeShort = '{0}..{1}' -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12)
+$numLines = @(Get-GitLines -Arguments @('-c', 'core.quotePath=true', 'diff', '--numstat', '--summary', '--no-renames', '--text',
+    '--no-color', '--no-ext-diff', '--no-textconv', $Range))
+$created = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+$deleted = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+$changes = New-Object System.Collections.ArrayList
+foreach ($l in $numLines) {
+    if (-not $l) { continue }
+    if ($l -match '^ (create|delete) mode \d{6} (.+)$') {
+        if ($matches[1] -eq 'create') { [void]$created.Add($matches[2]) } else { [void]$deleted.Add($matches[2]) }
+        continue
+    }
+    if ($l -match '^ mode change ') { continue }
+    if ($l -notmatch '^(\d+|-)\t(\d+|-)\t(.+)$') { Die "unexpected line from git diff --numstat: $(ConvertTo-Printable $l). Nothing was checked out." }
+    [void]$changes.Add([pscustomobject]@{ Added = $matches[1]; Removed = $matches[2]; Shown = $matches[3]; Path = (ConvertFrom-GitQuotedPath $matches[3]) })
+}
+$hiddenCount = @{}
+$shownRows = New-Object System.Collections.ArrayList
+foreach ($c in $changes) {
+    $by = Get-HiddenBy $c.Path
+    if ($by) {
+        if ($hiddenCount.ContainsKey($by)) { $hiddenCount[$by] = $hiddenCount[$by] + 1 } else { $hiddenCount[$by] = 1 }
+        continue
+    }
+    [void]$shownRows.Add($c)
+}
 Write-Host ''
-Write-Host ("   ---- changed code that runs beside the key, {0}..{1} (git diff --stat) ----" -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12))
-Write-Host ("   paths (any case): {0}" -f ($ReviewPaths -join ' '))
-if ($stat) { Write-GitText $stat } else { Write-Host '   (no changes in those paths)' }
-Write-Host ("   read it in full in another window: git -C `"{0}`" diff {1}..{2} -- {3}" -f $Repo, $BaseCommit, $Commit, (($ReviewSpecs | ForEach-Object { "'$_'" }) -join ' '))
+Write-Host ("   ---- changed since the last signed release, {0}: every path except the trees that never run here ----" -f $RangeShort)
+foreach ($c in $shownRows) {
+    $st = if ($created.Contains($c.Shown)) { 'new    ' } elseif ($deleted.Contains($c.Shown)) { 'deleted' } else { '       ' }
+    # git counts no lines in a file it takes for binary (by content or a -diff attribute); the full
+    # diff below still shows it as text.
+    $counts = if ($c.Added -eq '-') { ' (git: binary)' } else { '{0,6} {1,6}' -f ('+' + $c.Added), ('-' + $c.Removed) }
+    $inTree = Get-TreeOf $c.Path
+    $note = if ($inTree) { "   (a build or git file inside $inTree, which is otherwise not shown)" } else { '' }
+    Write-GitText ('{0} {1}  {2}{3}' -f $st, $counts, $c.Shown, $note)
+}
+if ($shownRows.Count -eq 0) { Write-Host '   (no changes outside those trees)' }
+else { Write-Host ('   {0} changed file(s) shown' -f $shownRows.Count) }
+$hiddenTotal = 0
+foreach ($v in $hiddenCount.Values) { $hiddenTotal += $v }
+if ($hiddenTotal -gt 0) {
+    $perTree = @($ExcludedTrees | Where-Object { $hiddenCount.ContainsKey($_) } | ForEach-Object { '{0} {1}' -f $_, $hiddenCount[$_] })
+    Write-Host ('   NOT shown: {0} changed file(s) in trees that never run on this box ({1})' -f $hiddenTotal, ($perTree -join ', '))
+}
+else { Write-Host '   NOT shown: nothing (no change in the trees that never run on this box)' }
+Write-Host ('   the trees not shown: {0} - their build scripts, gradle files, jars, PowerShell and batch files and git attribute files are shown above' -f ($ExcludedTrees -join ' '))
+Write-Host '   a build-script line that links a file in one of those trees is a reason to stop: from then on that file''s changes would not be shown.' -ForegroundColor Yellow
+
+$log = @(Get-GitLines -Arguments @('log', '--no-color', '--no-show-signature', '--format=%h %s', $Range))
 Write-Host ''
-Write-Host ("   ---- commits {0}..{1} ----" -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12))
-if ($log) { Write-GitText $log } else { Write-Host '   (none: -Commit is the baseline commit itself)' }
+Write-Host ("   ---- commits {0} ----" -f $RangeShort)
+if ($log.Count -gt 0) { foreach ($l in $log) { Write-GitText $l } } else { Write-Host '   (none: -Commit is the baseline commit itself)' }
 
 Assert-Attended
+
+# THE FULL DIFF of every path shown above (A14 review 3, C2), printed here BEFORE anything is
+# checked out. --text: a -diff or binary attribute (this box's, or the checkout's .gitattributes)
+# cannot turn a file into "Binary files differ"; --no-textconv and --no-ext-diff: no configured
+# program rewrites it; --no-color: no SGR. The prefixes are fixed so a diff.noprefix setting cannot
+# change the headers this filter reads; a header it cannot read is shown, never hidden.
+$diffLines = @(Get-GitLines -Arguments @('-c', 'core.quotePath=true', 'diff', '--text', '--no-textconv', '--no-ext-diff', '--no-color',
+    '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', $Range))
+$FullDiff = New-Object System.Collections.Generic.List[string]
+$keep = $true
+foreach ($l in $diffLines) {
+    if ($l.StartsWith('diff --git ', [System.StringComparison]::Ordinal)) {
+        $p = Get-DiffHeaderPath $l
+        $keep = ($null -eq $p) -or -not (Get-HiddenBy $p)
+    }
+    if ($keep) { $FullDiff.Add((ConvertTo-Printable $l)) }
+}
+Write-Host ''
+Write-Host ("   ---- the full diff of every path shown above, {0}, {1} lines (git diff --text --no-textconv --no-ext-diff --no-color, escaped) ----" -f $RangeShort, $FullDiff.Count)
+# The same escaped text, for reading in an editor: outside the repo, beside the record.
+$ReviewCopy = Join-Path $RecordDir ('signandvari-review-{0}.txt' -f $Commit.Substring(0, 12))
+try {
+    if (-not (Test-Path -LiteralPath $RecordDir -PathType Container)) { New-Item -ItemType Directory -Path $RecordDir -Force | Out-Null }
+    [System.IO.File]::WriteAllLines($ReviewCopy, [string[]]$FullDiff.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Info "the same escaped text is saved at $ReviewCopy (open it in Notepad to read it there)"
+}
+catch { Write-Warn2 "could not save an escaped copy of the diff ($($_.Exception.Message)); read it here" }
+Show-Paged -Lines $FullDiff.ToArray()
+Write-Host '   ---- end of the diff ----'
 
 # prestige-release.ps1 ASSERTS HEAD == -Ref and dies otherwise; it does not check out for you.
 # Detached HEAD at the tag is the expected state for the rest of this run. The checkout comes
 # BEFORE the confirmation so the tree it leaves can be checked first (below); it runs none of the
-# tree's code. Where HEAD was is remembered, so a run that stops here puts it back.
+# tree's code. Where HEAD was is remembered, so a run that stops before the confirmation puts it back.
 $origBranch = (Invoke-Git -Arguments @('symbolic-ref', '-q', '--short', 'HEAD') -AllowFailure)
 $OrigHead   = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
 $OrigName   = if ($origBranch.ExitCode -eq 0 -and $origBranch.Output.Trim()) { $origBranch.Output.Trim() } else { $null }
+
+# The checkout, the git status after it and a checkout back run with (A14 review 3, C3):
+#   * core.hooksPath = a new, empty directory: no hook runs, whatever core.hooksPath this repo's
+#     config names - a config that points it into the work tree would otherwise run the release
+#     tree's own post-checkout hook here, before the confirmation;
+#   * core.fsmonitor off: no fsmonitor hook either;
+#   * no LFS smudge (GIT_LFS_SKIP_SMUDGE=1 and an empty filter.lfs.process / .smudge, not
+#     required): Git for Windows installs a system LFS filter, and a tree whose .gitattributes says
+#     filter=lfs would otherwise have git-lfs write, for a pointer, LFS content no review saw.
+$NoHooks = Join-Path ([System.IO.Path]::GetTempPath()) ('signandvari-nohooks-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $NoHooks -Force | Out-Null
+$SafeGit = @('-c', "core.hooksPath=$NoHooks", '-c', 'core.fsmonitor=',
+    '-c', 'filter.lfs.process=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.required=false')
 function Restore-OriginalHead {
     $back = if ($OrigName) { @('checkout', '-q', $OrigName) } else { @('checkout', '-q', '--detach', $OrigHead) }
-    $r = Invoke-Git -Arguments $back -AllowFailure
+    $r = Invoke-Git -Arguments ($SafeGit + $back) -AllowFailure
     $where = if ($OrigName) { ConvertTo-Printable $OrigName } else { $OrigHead }
     if ($r.ExitCode -eq 0) { return "HEAD is back at $where" }
     Write-GitText $r.Output
     return "HEAD could NOT be put back at $where (above): this checkout holds the unconfirmed tree, so do not open it in an IDE that runs gradle"
 }
 
-$head = $OrigHead
-if ($head -eq $Commit) {
-    Write-Ok "already at $Tag ($($head.Substring(0, 12)))"
-}
-else {
-    # Check out the PINNED COMMIT, not the tag name: the two are proven equal above, and naming the
-    # commit leaves nothing for a ref to change between that proof and this line.
-    Invoke-Git -Arguments @('checkout', '--detach', $Commit) | Out-Null
-    $head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
-    if ($head -ne $Commit) { Die "checkout of $Commit left HEAD at $head - aborting." }
-    Write-Ok "detached HEAD at $Tag ($($head.Substring(0, 12)))"
-}
-
-# The checked-out tree must be exactly the commit (A14 review 2, the NTFS case): a file written over
-# another, or anything else that left the tree differing from what git holds, is a hard stop
-# before the confirmation, because what would run is then not what was reviewed.
-$after = (Invoke-Git -Arguments @('status', '--porcelain')).Output.Trim()
-if ($after.Length -gt 0) {
-    Write-GitText $after
-    $put = Restore-OriginalHead
-    Die "after the checkout of $Commit the working tree is NOT clean (above), so the tree on disk is not the commit that was reviewed. None of its code ran; $put. Investigate by hand."
-}
-Write-Ok 'working tree clean after the checkout'
-
-Write-Host ''
-Write-Host '   Read the lines above. The next step runs this tree''s scripts and its gradle build on this' -ForegroundColor Yellow
-Write-Host '   account, beside update-signing.key (a dry run too). A change you did not expect is a reason to stop.' -ForegroundColor Yellow
-Write-Host ''
-$answer = $null
+# FROM THE CHECKOUT TO THE CONFIRMATION (A14 review 3, C5): every way out but a confirmed answer -
+# a refusal, a git command that dies, Ctrl+C at the prompt (PowerShell runs no catch on a stopped
+# pipeline, but it runs finally) - puts HEAD back, so the unconfirmed tree is never left checked
+# out for an IDE to run gradle on, or for a later first run to take a seed from.
+$confirmed  = $false
+$checkedOut = $false
+$lfsBefore  = $env:GIT_LFS_SKIP_SMUDGE
+$env:GIT_LFS_SKIP_SMUDGE = '1'
 try {
-    $answer = Read-Host ("   Type the version you are releasing ({0}) to run this tree beside the signing key; anything else stops" -f $Version)
+    if ($OrigHead -eq $Commit) {
+        Write-Ok "already at $Tag ($($OrigHead.Substring(0, 12)))"
+    }
+    else {
+        # Check out the PINNED COMMIT, not the tag name: the two are proven equal above, and naming
+        # the commit leaves nothing for a ref to change between that proof and this line.
+        $checkedOut = $true
+        Invoke-Git -Arguments ($SafeGit + @('checkout', '--detach', $Commit)) | Out-Null
+        $head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
+        if ($head -ne $Commit) { Die "checkout of $Commit left HEAD at $head - aborting." }
+        Write-Ok "detached HEAD at $Tag ($($head.Substring(0, 12))) - no hook ran, no LFS content was written"
+    }
+
+    # The checked-out tree must be exactly the commit (A14 review 2, the NTFS case): a file written
+    # over another, or anything else that left the tree differing from what git holds, is a hard
+    # stop before the confirmation, because what would run is then not what was reviewed.
+    $after = (Invoke-Git -Arguments ($SafeGit + @('status', '--porcelain'))).Output.Trim()
+    if ($after.Length -gt 0) {
+        Write-GitText $after
+        Die "after the checkout of $Commit the working tree is NOT clean (above), so the tree on disk is not the commit that was reviewed. None of its code ran, and HEAD is put back (the line above says where). Investigate by hand."
+    }
+    Write-Ok 'working tree clean after the checkout'
+    Assert-ReviewedFilesOnDisk
+
+    Write-Host ''
+    Write-Host '   Read the lines above. The next step runs this tree''s scripts and its gradle build on this' -ForegroundColor Yellow
+    Write-Host '   account, beside update-signing.key (a dry run too). A change you did not expect is a reason to stop.' -ForegroundColor Yellow
+    Write-Host ''
+    $answer = $null
+    try {
+        $answer = Read-Host ("   Type the version you are releasing ({0}) to run this tree beside the signing key; anything else stops" -f $Version)
+    }
+    catch {
+        Die "this release needs a human confirmation and it could not be read ($($_.Exception.Message)) - none of the tree's code ran."
+    }
+    if ($null -eq $answer -or $answer.Trim() -ne $Version) {
+        Die "not confirmed (typed '$(ConvertTo-Printable $answer)', expected '$Version') - none of the tree's code ran."
+    }
+    $confirmed = $true
 }
-catch {
-    $put = Restore-OriginalHead
-    Die "this release needs a human confirmation and it could not be read ($($_.Exception.Message)) - none of the tree's code ran; $put."
-}
-if ($null -eq $answer -or $answer.Trim() -ne $Version) {
-    $put = Restore-OriginalHead
-    Die "not confirmed (typed '$(ConvertTo-Printable $answer)', expected '$Version') - none of the tree's code ran; $put."
+finally {
+    if (-not $confirmed -and $checkedOut) {
+        $put = Restore-OriginalHead
+        Write-Host "   $put" -ForegroundColor Yellow
+    }
+    $env:GIT_LFS_SKIP_SMUDGE = $lfsBefore
+    Remove-Item -LiteralPath $NoHooks -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Ok "confirmed by the operator: $Version"
 
@@ -755,13 +1068,13 @@ $NewSeq     = [int]$bundleMeta.seq
 # The bundle must record the pinned commit: it is what the build-host watcher compares to the tag
 # (H103), and a bundle from any other tree is not this release.
 if (([string]$bundleMeta.commit).ToLowerInvariant() -ne $Commit) {
-    Die "bundle.json records commit '$($bundleMeta.commit)', not the pinned $Commit - nothing was dropped."
+    Die "bundle.json records commit '$(ConvertTo-Printable ([string]$bundleMeta.commit))', not the pinned $Commit - nothing was dropped."
 }
 
 # signedAt straight out of the raw manifest bytes - never through ConvertFrom-Json, which would
 # turn it into a [DateTime] and lose the exact string that was signed.
 $manRaw   = Get-Content -LiteralPath (Join-Path $BundleDir 'manifest.json') -Raw
-$SignedAt = if ($manRaw -match '"signedAt"\s*:\s*"([^"]+)"') { $matches[1] } else { '(unreadable)' }
+$SignedAt = if ($manRaw -match '"signedAt"\s*:\s*"([^"]+)"') { ConvertTo-Printable $matches[1] } else { '(unreadable)' }
 
 if ($NewSeq -ne $NextSeq) {
     Write-Warn2 "bundle seq is $NewSeq but the live manifest implied $NextSeq - the channel moved under this run."
@@ -827,12 +1140,13 @@ function Confirm-Remote {
         Write-GitText ($out | Out-String)
         Die "could not sha256sum $Name on the drop host (exit $LASTEXITCODE) - ABORTING BEFORE THE SIGNATURE."
     }
+    # The build host's own answer: escaped wherever it is printed (A14 review 3, C6).
     $got = ((($out | Out-String).Trim()) -split '\s+')[0].ToLowerInvariant()
     if ($got -ne $want) {
         Write-Host ''
         Write-Host "   REMOTE CHECKSUM MISMATCH on $Name" -ForegroundColor Red
         Write-Host "     local  $want" -ForegroundColor Red
-        Write-Host "     remote $got"  -ForegroundColor Red
+        Write-Host "     remote $(ConvertTo-Printable $got)"  -ForegroundColor Red
         Die "$Name did not arrive intact - ABORTING BEFORE THE SIGNATURE. Nothing will be published."
     }
     Write-Ok ("verified remotely  {0}  {1}" -f $Name, $got)
@@ -932,7 +1246,9 @@ else {
     Write-Ok ("channel reached seq {0}" -f $NewSeq)
 
     # Versions and digests through ConvertFrom-Json: these are plain strings, so the [DateTime]
-    # coercion that forced the raw-bytes reads above does not apply to them.
+    # coercion that forced the raw-bytes reads above does not apply to them. Every value read back
+    # from the served manifest is the build host's text, and prints escaped (A14 review 3, C6): a
+    # control sequence in it could otherwise hide a MISMATCH line.
     $served  = $servedRaw | ConvertFrom-Json
     $rbFail  = @()
 
@@ -945,14 +1261,14 @@ else {
             continue
         }
         if ($node.version -ne $Version) {
-            $rbFail += ("{0}.version is {1}, expected {2}" -f $plat, $node.version, $Version)
+            $rbFail += ("{0}.version is {1}, expected {2}" -f $plat, (ConvertTo-Printable ([string]$node.version)), $Version)
         }
     }
 
     # The MSI is the artifact this box produced and signed; if the served digest is not the one
     # step 7 hashed, the published channel points at different bytes than the ones just signed.
     if ($served.windows -and $served.windows.sha256 -and ($served.windows.sha256.ToLowerInvariant() -ne $MsiSha)) {
-        $rbFail += ("windows.sha256 is {0}, expected {1}" -f $served.windows.sha256.ToLowerInvariant(), $MsiSha)
+        $rbFail += ("windows.sha256 is {0}, expected {1}" -f (ConvertTo-Printable $served.windows.sha256.ToLowerInvariant()), $MsiSha)
     }
 
     if ($rbFail.Count -gt 0) {
@@ -961,10 +1277,10 @@ else {
         Die 'the served manifest carries this run''s seq but does NOT describe this release. The channel is now serving something other than what was just signed - stop and reconcile /downloads on the build host.'
     }
 
-    $servedSignedAt = if ($servedRaw -match '"signedAt"\s*:\s*"([^"]+)"') { $matches[1] } else { '(unreadable)' }
+    $servedSignedAt = if ($servedRaw -match '"signedAt"\s*:\s*"([^"]+)"') { ConvertTo-Printable $matches[1] } else { '(unreadable)' }
     Write-Ok ("served manifest names {0} on linux + linuxArch + windows, signedAt {1}" -f $Version, $servedSignedAt)
     if ($served.browserExtension -and $served.browserExtension.version) {
-        Write-Info ("browserExtension stays at {0} (this ceremony does not move it)" -f $served.browserExtension.version)
+        Write-Info ("browserExtension stays at {0} (this ceremony does not move it)" -f (ConvertTo-Printable ([string]$served.browserExtension.version)))
     }
 }
 
