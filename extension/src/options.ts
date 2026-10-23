@@ -97,7 +97,14 @@ async function renderCurrent(): Promise<void> {
   legacyNote.hidden = pending === null;
   legacyReview.hidden = !pending?.keepable;
   legacyForget.textContent = `Not mine — use ${new URL(DEFAULT_SERVER_URL).host}`;
-  if (pending && !pending.keepable) {
+  if (pending && !pending.keepable && info?.trustedStore) {
+    // A16 review R3: the update could not confirm the old setting (nothing attested it), so it is never offered for
+    // connecting; it is read only to keep andvari from signing in to another server in its place. A choice CAN be kept
+    // here: the user enters the address themselves and connects through the gate.
+    legacyLead.textContent = "This browser has a server address saved by an older version of andvari:";
+    legacyBody.textContent =
+      "andvari couldn't confirm this setting when it updated, and a web page could have changed it, so andvari won't use it, or sign in anywhere, until you decide. If it is your own andvari server, enter its address in the server field and connect. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
+  } else if (pending && !pending.keepable) {
     // A15 review F1: no trusted store in this mode, so the old setting can only be declined here. It is read only to
     // keep andvari from signing in to another server in its place.
     legacyLead.textContent = "This browser has a server address saved by an older version of andvari:";

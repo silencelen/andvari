@@ -133,7 +133,7 @@ test("A16: every storage.session write in the worker goes through the seal or th
   for (const t of rawLines) {
     const approved =
       t === "const sessionRaw = chrome.storage.session as unknown as KvArea;" ||
-      t === "const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME) });" ||
+      t === "const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME), originKey: () => serverReady.then(() => currentOriginKey) });" ||
       t === "const plainSession = plainSessionArea(sessionRaw);";
     assert.ok(approved, `sessionRaw reached code this fence has not approved: ${t}`);
   }
@@ -163,6 +163,34 @@ test("A16: every storage.session write in the worker goes through the seal or th
       assert.ok(!/plainSession|sessionRaw/.test(l), `${key} beside the plain area: ${l.trim()}`);
     }
   }
+});
+
+// A16 review (2026-10-23), fence gap: background hands the WHOLE chrome.storage namespace to storageaccess.ts (to set the
+// access levels), so the session fence above did not see what that leaf does with it. It may set access levels and test
+// that storage.session exists — nothing else: no read, write, removal or listener on any area.
+test("A16 review: the access-level leaf, handed all of chrome.storage, only sets access levels — it reads, writes and removes nothing", () => {
+  const bg = code(src("background.ts"));
+  const whole = bg
+    .split("\n")
+    .filter((l) => /\bchrome\s*\.\s*storage\b(?!\s*\.\s*(?:local|session)\b)/.test(l))
+    .map((l) => l.trim());
+  assert.deepEqual(
+    whole,
+    ["const storageAccess: Promise<StorageAccessVerdict> = restrictStorageAccess(chrome.storage as unknown as StorageAccessAreas);"],
+    "the namespace itself is handed to exactly one leaf, once",
+  );
+  const sa = code(src("storageaccess.ts"));
+  assert.equal(sa.match(/^\s*import\b/m), null, "it imports nothing (no other module gets the namespace through it)");
+  assert.equal(sa.match(/\b(?:get|set|remove|clear|getKeys|getBytesInUse)\s*\(/), null, "no storage call");
+  assert.ok(!/\bonChanged\b|\bsync\b|\bmanaged\b/.test(sa), "no listener, no other area");
+  // Every member it touches on an area: `setAccessLevel` (called, with the one TRUSTED level) and `get` (only tested
+  // for existence, the Firefox fallback); the areas themselves are `session` and `local`.
+  const members = [...sa.matchAll(/\?\.\s*([A-Za-z_]+)/g)].map((m) => m[1]!);
+  for (const m of members) assert.ok(["setAccessLevel", "session", "local", "get"].includes(m), `storageaccess.ts touches .${m}`);
+  assert.deepEqual([...sa.matchAll(/\.call\(([^)]*)\)/g)].map((m) => m[1]), ["area, TRUSTED"], "setAccessLevel is called once, with TRUSTED");
+  assert.ok(sa.includes('const TRUSTED = { accessLevel: "TRUSTED_CONTEXTS" } as const;'));
+  assert.deepEqual([...sa.matchAll(/typeof [^\n]*?\.get\b[^\n]*/g)].map((m) => m[0].trim()), ['typeof storage?.session?.get === "function");'], "`get` is only tested for existence");
+  assert.equal((sa.match(/\.get\b/g) ?? []).length, 1, "and named nowhere else");
 });
 
 test("A16: the seal is the worker's alone — no content-side module or page names it", () => {

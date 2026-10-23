@@ -213,8 +213,10 @@ export type UnlockCode =
   | "unknown";
 
 /** A15 review F1 (serverstate.ts ServerBlock, structurally): while one stands, the worker dials no server. `confirm` —
- *  a previous server awaits the user's confirm (`keepable` false: this browser cannot keep a server choice, so it can
- *  only be declined here); `unsettled` — the trusted store did not answer, so the server is unknown. */
+ *  a previous server awaits the user's confirm (`keepable` false: the origin was read from storage.local only to block,
+ *  so it can only be declined here — because this browser cannot keep a server choice, or, A16 review R3, because the
+ *  update could not confirm it; serverInfo's `trustedStore` tells the two apart); `unsettled` — the trusted store did not
+ *  answer, so the server is unknown. */
 export type ServerBlockWire = { kind: "confirm"; origin: string; keepable: boolean } | { kind: "unsettled" };
 
 /** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
