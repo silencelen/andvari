@@ -31,13 +31,21 @@ export interface KvArea {
   remove(keys: string | readonly string[]): Promise<void>;
 }
 
-/** The store could not be opened or used. Callers treat it as "no record" and use their safe default. */
+/** The store could not be opened or used. Callers treat it as "no record" and use their safe default. [timedOut] says the
+ *  store did not answer within its bound (a hung open or transaction), as opposed to refusing outright (no IndexedDB in
+ *  this browser mode): the worker cannot tell then which server the user chose, so it signs in nowhere (serverstate.ts). */
 export class TrustedStoreUnavailable extends Error {
-  constructor(detail: string) {
+  readonly timedOut: boolean;
+  constructor(detail: string, timedOut = false) {
     super(`trusted store unavailable: ${detail}`);
     this.name = "TrustedStoreUnavailable";
+    this.timedOut = timedOut;
   }
 }
+
+/** A15 review S1: the bound on one store operation (open + transaction). An IndexedDB open that never settles used to
+ *  wedge the worker: serverReady waited on it, and every message (a lock included) waited on serverReady. */
+export const TRUSTED_OP_TIMEOUT_MS = 4000;
 
 export const TRUSTED_DB_NAME = "andvari-trusted";
 export const TRUSTED_STORE_NAME = "kv";
@@ -47,82 +55,133 @@ export type IdbFactoryLike = Pick<IDBFactory, "open">;
 
 const describe = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
 
-function openDb(resolve: () => IdbFactoryLike | null | undefined, name: string): Promise<IDBDatabase> {
+/**
+ * Open [name] (version 1, creating [storeName] on first use) within [timeoutMs] (A15 review S1). A request that has not
+ * succeeded by then rejects as a timed-out [TrustedStoreUnavailable]; should it succeed later, that connection is closed
+ * at once. Also used by the worker for the quick-unlock co-key database, which is the same IndexedDB.
+ */
+export function openBoundedIdb(
+  resolve: () => IdbFactoryLike | null | undefined,
+  name: string,
+  storeName: string,
+  timeoutMs: number = TRUSTED_OP_TIMEOUT_MS,
+): Promise<IDBDatabase> {
   return new Promise((res, rej) => {
+    let settled = false;
+    const finish = (f: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      f();
+    };
+    const timer = setTimeout(() => finish(() => rej(new TrustedStoreUnavailable(`opening ${name} took over ${timeoutMs} ms`, true))), timeoutMs);
     let factory: IdbFactoryLike | null | undefined;
     try {
       factory = resolve();
     } catch (e) {
-      rej(new TrustedStoreUnavailable(describe(e)));
+      finish(() => rej(new TrustedStoreUnavailable(describe(e))));
       return;
     }
     if (!factory || typeof factory.open !== "function") {
-      rej(new TrustedStoreUnavailable("IndexedDB is not available here"));
+      finish(() => rej(new TrustedStoreUnavailable("IndexedDB is not available here")));
       return;
     }
     let req: IDBOpenDBRequest;
     try {
       req = factory.open(name, 1);
     } catch (e) {
-      rej(new TrustedStoreUnavailable(describe(e)));
+      finish(() => rej(new TrustedStoreUnavailable(describe(e))));
       return;
     }
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(TRUSTED_STORE_NAME)) db.createObjectStore(TRUSTED_STORE_NAME);
+      if (!db.objectStoreNames.contains(storeName)) db.createObjectStore(storeName);
     };
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(new TrustedStoreUnavailable(describe(req.error)));
+    req.onsuccess = () => {
+      if (settled) {
+        req.result.close(); // it answered after the bound: nobody holds this connection
+        return;
+      }
+      finish(() => res(req.result));
+    };
+    req.onerror = () => finish(() => rej(new TrustedStoreUnavailable(describe(req.error))));
     // No onblocked: the store is only ever opened at version 1, so no upgrade can wait on another connection.
   });
 }
 
 /**
  * Run one transaction. [body] issues its requests and returns a collector that runs once the transaction COMPLETED
- * (so a write is never reported before it is durable). The connection is closed on every exit.
+ * (so a write is never reported before it is durable). The connection is closed on every exit. The whole operation,
+ * open included, is bounded by [timeoutMs] (S1): a transaction still running then is aborted, so a write reported as
+ * failed cannot land later. A [body] that throws aborts the transaction too (A15 review S2): without that, the puts it
+ * issued before the throw would auto-commit, and a write reported as failed would have half happened.
  */
 async function runTx<T>(
   resolve: () => IdbFactoryLike | null | undefined,
   name: string,
   mode: IDBTransactionMode,
   body: (store: IDBObjectStore) => () => T,
+  timeoutMs: number,
 ): Promise<T> {
-  const db = await openDb(resolve, name);
+  const started = Date.now();
+  const db = await openBoundedIdb(resolve, name, TRUSTED_STORE_NAME, timeoutMs);
   return new Promise<T>((res, rej) => {
     let collect: () => T;
-    let tx: IDBTransaction;
+    let tx: IDBTransaction | undefined;
+    let settled = false;
+    const finish = (f: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      db.close();
+      f();
+    };
+    const timer = setTimeout(
+      () =>
+        finish(() => {
+          try {
+            tx?.abort();
+          } catch {
+            /* already finished */
+          }
+          rej(new TrustedStoreUnavailable(`a transaction on ${name} took over ${timeoutMs} ms`, true));
+        }),
+      Math.max(0, timeoutMs - (Date.now() - started)),
+    );
     try {
       tx = db.transaction(TRUSTED_STORE_NAME, mode);
       collect = body(tx.objectStore(TRUSTED_STORE_NAME));
     } catch (e) {
-      db.close();
-      rej(new TrustedStoreUnavailable(describe(e)));
+      finish(() => {
+        try {
+          tx?.abort(); // S2: nothing [body] issued before the throw may commit
+        } catch {
+          /* the transaction was never created, or is already finishing */
+        }
+        rej(new TrustedStoreUnavailable(describe(e)));
+      });
       return;
     }
-    tx.oncomplete = () => {
-      db.close();
-      try {
-        res(collect());
-      } catch (e) {
-        rej(new TrustedStoreUnavailable(describe(e)));
-      }
-    };
-    tx.onerror = () => {
-      db.close();
-      rej(new TrustedStoreUnavailable(describe(tx.error)));
-    };
-    tx.onabort = () => {
-      db.close();
-      rej(new TrustedStoreUnavailable(describe(tx.error ?? "transaction aborted")));
-    };
+    tx.oncomplete = () =>
+      finish(() => {
+        try {
+          res(collect());
+        } catch (e) {
+          rej(new TrustedStoreUnavailable(describe(e)));
+        }
+      });
+    tx.onerror = () => finish(() => rej(new TrustedStoreUnavailable(describe(tx?.error))));
+    tx.onabort = () => finish(() => rej(new TrustedStoreUnavailable(describe(tx?.error ?? "transaction aborted"))));
   });
 }
 
 const keyList = (keys: string | readonly string[]): string[] => (typeof keys === "string" ? [keys] : [...keys]);
 
 /** A [KvArea] over one IndexedDB object store. [resolve] is called on every operation, so a store that failed to
- *  open is simply tried again next time (no sticky failure, no cached connection to go stale). */
-export function idbKv(resolve: () => IdbFactoryLike | null | undefined, name: string = TRUSTED_DB_NAME): KvArea {
+ *  open is simply tried again next time (no sticky failure, no cached connection to go stale). Each operation is bounded
+ *  by [opts.timeoutMs] (default [TRUSTED_OP_TIMEOUT_MS]). */
+export function idbKv(resolve: () => IdbFactoryLike | null | undefined, name: string = TRUSTED_DB_NAME, opts: { timeoutMs?: number } = {}): KvArea {
+  const timeoutMs = opts.timeoutMs ?? TRUSTED_OP_TIMEOUT_MS;
   return {
     get(keys) {
       return runTx(resolve, name, "readonly", (store) => {
@@ -145,19 +204,19 @@ export function idbKv(resolve: () => IdbFactoryLike | null | undefined, name: st
           for (const [k, r] of reqs) if (r.result !== undefined) out[k] = r.result;
           return out;
         };
-      });
+      }, timeoutMs);
     },
     set(items) {
       return runTx(resolve, name, "readwrite", (store) => {
         for (const [k, v] of Object.entries(items)) store.put(v, k);
         return () => undefined;
-      });
+      }, timeoutMs);
     },
     remove(keys) {
       return runTx(resolve, name, "readwrite", (store) => {
         for (const k of keyList(keys)) store.delete(k);
         return () => undefined;
-      });
+      }, timeoutMs);
     },
   };
 }

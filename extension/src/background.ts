@@ -60,9 +60,10 @@ import { captureBinding, requestHost } from "./senderorigin";
 import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
-import { canonicalizeServerUrl, DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, setServerUrl } from "./serverurl";
-import { trustedStore, type KvArea } from "./trustedkv";
-import { LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail } from "./trustmigrate";
+import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, setServerUrl } from "./serverurl";
+import { openBoundedIdb, trustedStore, type KvArea } from "./trustedkv";
+import { A15_OWED_KEY, attestsPreA15Upgrade, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail, type InstallSignal, type MigrationOutcome } from "./trustmigrate";
+import { autofillExcludeMatches, dialRefusal, forgetPendingServer, loadServerState, type ServerBlock } from "./serverstate";
 import { offerDownloadUrl, readUpdateOffer } from "./updateoffer";
 import { restrictStorageAccess, type StorageAccessAreas } from "./storageaccess";
 import { armGate, withRedeemInFlight } from "./locksequence";
@@ -111,8 +112,11 @@ const trusted = trustedStore();
 const legacyLocal = chrome.storage.local as unknown as KvArea;
 /** storage.session as a KvArea, for the purge's prefix sweep. */
 const sessionArea = chrome.storage.session as unknown as KvArea;
-/** A read where a failure means "absent" (the safe default for every value read this way). */
+/** A read where a failure means "absent" (the safe default for every value read this way). Once worker start found no
+ *  trusted store, it is not asked again for a best-effort read (a store that timed out would cost every caller the
+ *  whole bound again). */
 async function trustedGet(key: string): Promise<unknown> {
+  if (!trustedStoreOk) return undefined;
   try {
     return (await trusted.get(key))[key];
   } catch {
@@ -481,28 +485,76 @@ const storageAccess: Promise<void> = restrictStorageAccess(chrome.storage as unk
   quCompartmentTrusted = v.sessionTrusted;
 });
 
-/** Resolves once the storage access levels settled, the one-time A15 migration ran, the persisted server
- *  origin is loaded and `serverUrl`/`currentOriginKey`/`api` reflect it (plus the §4.2 one-shot legacy-key
+/** A15 review F1: while set, the worker dials NO server (serverstate.ts): a previous server awaits the user's confirm,
+ *  or the trusted store did not answer. Set by serverReady; cleared only by a Trust-Gate commit (commitServerUrl) or
+ *  "Not mine" (forgetLegacyServer). */
+let dialBlock: ServerBlock | null = null;
+/** Whether worker start found a trusted store (false: none in this browser mode, or it did not answer in time). */
+let trustedStoreOk = true;
+/** A15 review S1: how long a lock waits for serverReady (the trusted store) before it locks without the origin. */
+const LOCK_STORE_WAIT_MS = 1500;
+/** A15 review S1: a lock ran before serverReady settled, erasing the session snapshot; ensureLoaded must not hydrate
+ *  a copy it read before that erase. Once set it stays set: ensureLoaded hydrates at most once per worker life. */
+let lockedBeforeOrigin = false;
+
+/** A15 review F2: the browser's install event for this worker life, which says whether the A15 migration is owed.
+ *  `runtime.onInstalled` is registered below at top level, and the event is delivered right after this script first
+ *  runs; worker start waits for it at most INSTALL_SIGNAL_WAIT_MS, and only when the trusted store holds neither the
+ *  migration flag nor the owed mark. A later event is handled by lateInstallSignal. */
+const INSTALL_SIGNAL_WAIT_MS = 5000;
+let installSignalSeen: (d: InstallSignal) => void = () => {};
+const installSignal = new Promise<InstallSignal>((r) => (installSignalSeen = r));
+/** True when worker start gave up waiting for the install event and set the flag without reading storage.local. */
+let installWaitTimedOut = false;
+
+/** Apply the server state worker start (or a late migration) computed. The url changes only at start. */
+async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Promise<void> {
+  const st = await loadServerState(outcome, trusted, legacyLocal);
+  if (atStart && st.url !== serverUrl) {
+    serverUrl = st.url;
+    currentOriginKey = originKeyFor(st.url);
+    api = makeApi(st.url);
+  }
+  dialBlock = st.block;
+  trustedStoreOk = st.trustedStore;
+}
+
+/** Resolves once the storage access levels settled, the one-time A15 migration was settled, the persisted server
+ *  origin is loaded and `serverUrl`/`currentOriginKey`/`api`/`dialBlock` reflect it (plus the §4.2 one-shot legacy-key
  *  adoption). EVERY path that touches the api, the per-origin namespace, or the network awaits this first
- *  (ensureLoaded, doLock, checkForUpdate) — the module-eval placeholders above exist only so the symbols are
- *  never undefined. */
+ *  (ensureLoaded, checkForUpdate) — the module-eval placeholders above exist only so the symbols are never undefined.
+ *  A lock waits for it only within LOCK_STORE_WAIT_MS (doLock, A15 review S1). Never rejects. */
 const serverReady: Promise<void> = (async () => {
   await storageAccess;
-  // A15: move the trust state out of storage.local once (trustmigrate.ts). A planted pre-A15 serverUrl is NEVER
-  // adopted: a non-default one only becomes a suggestion the options page re-confirms through the Trust Gate.
-  await migrateTrustState(legacyLocal, trusted);
   try {
-    const url = await getServerUrl(trusted);
-    if (url !== serverUrl) {
-      serverUrl = url;
-      currentOriginKey = originKeyFor(url);
-      api = makeApi(url);
-    }
+    // A15: move the trust state out of storage.local once (trustmigrate.ts) — and since the A15 review (F2) only when
+    // the browser attested an upgrade from a pre-A15 build. A planted pre-A15 serverUrl is NEVER adopted: a
+    // non-default one becomes a pending server that blocks every dial until the user confirms it or says "Not mine".
+    const outcome = await migrateTrustState(legacyLocal, trusted, () =>
+      Promise.race([installSignal, delay(INSTALL_SIGNAL_WAIT_MS).then(() => null)]),
+    );
+    installWaitTimedOut = outcome.kind === "skipped" && outcome.signal === "none";
+    await applyServerState(outcome, true);
   } catch {
-    /* unreachable in practice (getServerUrl folds every store failure into the default) — stay on the default */
+    dialBlock = { kind: "unsettled" }; // unreachable in practice (both leaves never throw) — dial nothing
   }
-  await adoptLegacyNamespaceOnce();
+  if (trustedStoreOk) await adoptLegacyNamespaceOnce();
 })();
+
+/** A15 review F2: the install event landed after worker start stopped waiting for it, and it attests an upgrade from a
+ *  pre-A15 build. Record the migration as owed and run it now (it reads storage.local only because of that record). */
+async function lateInstallSignal(d: InstallSignal): Promise<void> {
+  if (!installWaitTimedOut || !attestsPreA15Upgrade(d)) return;
+  installWaitTimedOut = false;
+  try {
+    await trusted.set({ [A15_OWED_KEY]: true });
+  } catch {
+    return; // no store to record it in: nothing migrates (the store-unavailable case, trustmigrate.ts)
+  }
+  const outcome = await migrateTrustState(legacyLocal, trusted, async () => null);
+  await applyServerState(outcome, false);
+  await registerAutofillScripts();
+}
 
 // ---- quick-unlock Tier B engine (spec 01 §8.4) ----
 // The non-extractable co-key (breaker A1) persists in IndexedDB — a service worker CAN open IDB, and
@@ -511,13 +563,10 @@ const IDB_NAME = "andvari-qu";
 const IDB_STORE = "cokey";
 const IDB_KEY = "k_nonexp";
 
+/** A15 review S1: bounded like the trusted store's opens (the same IndexedDB) — an open that never settles rejects,
+ *  so a lock's quick-unlock wipe cannot hang on it. */
 function idbOpen(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error("idb open failed"));
-  });
+  return openBoundedIdb(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, IDB_NAME, IDB_STORE);
 }
 function idbRun<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBRequest | null): Promise<T> {
   return idbOpen().then(
@@ -947,9 +996,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // re-checks against the NEW installed version and so clears a now-satisfied signal immediately.
 // Both hooks also reconcile the dynamic autofill registration (B2-5) — install/update is exactly
 // when a stale or missing registration is most likely.
-chrome.runtime.onInstalled.addListener(() => {
-  void checkForUpdate(true);
-  void serverReady.then(registerAutofillScripts);
+chrome.runtime.onInstalled.addListener((details) => {
+  // A15 review F2: the browser's own word on whether this start follows an upgrade from a pre-A15 build — the ONLY
+  // thing that lets the one-time migration read storage.local (trustmigrate.ts). Worker start is waiting for it.
+  const sig: InstallSignal = { reason: String(details.reason), previousVersion: details.previousVersion };
+  installSignalSeen(sig);
+  // A late attesting event migrates first, so the forced update check and the reconcile below see its pending server.
+  const late = serverReady.then(() => lateInstallSignal(sig)).catch(() => {});
+  void late.then(() => checkForUpdate(true));
+  void late.then(registerAutofillScripts);
 });
 chrome.runtime.onStartup.addListener(() => {
   void checkForUpdate(true);
@@ -987,17 +1042,24 @@ const AUTOFILL_SCRIPT_ID = "autofill";
  *  start, on install/update, on every server switch, and on every host-permission grant — a
  *  registration that failed (or predates a switch) is detected and self-healed here (§5.1
  *  corollary: a failure means no autofill until the SW next runs, never a mis-scoped injection). */
-async function registerAutofillScripts(): Promise<void> {
-  const excludeMatches: string[] = [];
-  for (const origin of new Set([serverUrl, DEFAULT_SERVER_URL])) {
-    const p = originMatchPattern(origin);
-    if (p === null) {
-      // The vault origin cannot be expressed as a match pattern (e.g. an IPv6-literal host), so it
-      // cannot be EXCLUDED — fail CLOSED to "no autofill anywhere" rather than inject into a vault.
-      await unregisterAutofillScripts();
-      return;
-    }
-    if (!excludeMatches.includes(p)) excludeMatches.push(p);
+/** One reconcile at a time (A15 review, found by the live check): worker start and onInstalled both reconcile on an
+ *  update, and two overlapping runs both saw "not registered", so the second register threw a duplicate id and its
+ *  fail-closed catch unregistered the first — no autofill until the next worker start. F1 adds callers (the late
+ *  migration, "Not mine", the gate's commit), so every call now queues behind the one before. */
+let autofillChain: Promise<void> = Promise.resolve();
+function registerAutofillScripts(): Promise<void> {
+  autofillChain = autofillChain.then(reconcileAutofillScripts, reconcileAutofillScripts);
+  return autofillChain;
+}
+
+async function reconcileAutofillScripts(): Promise<void> {
+  // The dialed origin, the shipped default, and (A15 review F1) a pending server awaiting its confirm. Null = fail
+  // CLOSED to "no autofill anywhere" rather than inject into a vault UI we failed to exclude: an origin that cannot be
+  // expressed as a match pattern (an IPv6-literal host), or a store that did not answer (the vault origin is unknown).
+  const excludeMatches = autofillExcludeMatches(serverUrl, dialBlock);
+  if (excludeMatches === null) {
+    await unregisterAutofillScripts();
+    return;
   }
   const desired: chrome.scripting.RegisteredContentScript = {
     id: AUTOFILL_SCRIPT_ID,
@@ -1069,23 +1131,30 @@ async function commitServerUrl(raw: unknown): Promise<Res<"setServerUrl">> {
     return { ok: false, code: "storage" };
   }
   await trusted.remove(LEGACY_SERVER_KEY).catch(() => {});
+  trustedStoreOk = true;
   switchChain = switchChain.then(() => applyServerChange(canonical)).catch(() => {});
   await switchChain;
+  // A15 review F1: the user confirmed a server through the gate and it is kept, so a pending one no longer blocks —
+  // lifted only once the switch took effect (an unlock that slipped in earlier would have gone to the old api's origin);
+  // a switch that did not apply leaves the server unknown in this worker life (the store names the new one at the next).
+  if (serverUrl === canonical) dialBlock = null;
+  else if (dialBlock !== null) dialBlock = { kind: "unsettled" };
+  await registerAutofillScripts(); // a pending origin's exclusion goes (the switch re-registers only on a change)
   return { ok: true, url: canonical };
 }
 
-/** A15: what the pages show — the origin this worker dials (not a store read: what is in effect), a pre-A15 choice
- *  awaiting re-confirmation (display only), and whether a server choice can be kept here at all. */
-async function serverInfo(): Promise<Res<"serverInfo">> {
-  let legacy: string | null = null;
-  let trustedStoreOk = true;
-  try {
-    const v = (await trusted.get(LEGACY_SERVER_KEY))[LEGACY_SERVER_KEY];
-    legacy = typeof v === "string" ? canonicalizeServerUrl(v) : null;
-  } catch {
-    trustedStoreOk = false;
-  }
-  return { url: serverUrl, legacy: legacy === serverUrl ? null : legacy, trustedStore: trustedStoreOk };
+/** A15: what the pages show — the origin this worker's api is built for (what is in effect, not a store read), whether
+ *  a server choice can be kept here at all, and (A15 review F1) a block: while one stands, no server is dialed. */
+function serverInfo(): Res<"serverInfo"> {
+  return { url: serverUrl, trustedStore: trustedStoreOk, block: dialBlock };
+}
+
+/** A15 review F1: "Not mine" — drop the pending server and lift the block; the default is then the server. */
+async function forgetLegacyServer(): Promise<Res<"forgetLegacyServer">> {
+  if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };
+  dialBlock = null;
+  await registerAutofillScripts();
+  return { ok: true };
 }
 
 /** Apply a server change. Order is the whole story (§4.1): lock under the OLD origin
@@ -1269,6 +1338,9 @@ function ensureLoaded(): Promise<void> {
     await serverReady; // api/originKey/namespace reflect the persisted origin before any state hydrates
     const got = await chrome.storage.session.get([SKEY, TKEY]);
     let snap = got[SKEY] as SessionSnapshot | undefined;
+    // A15 review S1: a lock that ran before the origin was known erased the snapshot without this load; one read
+    // before that erase landed must not bring the session back.
+    if (lockedBeforeOrigin) snap = undefined;
     // §4.1 rule 1 (no token replay across a serverUrl change): a snapshot minted against another
     // origin is DROPPED, not hydrated — the user re-unlocks at the new server. A pre-0.16 snapshot
     // (no `origin` field) fails the same check: fail closed, never guess.
@@ -1310,7 +1382,9 @@ function ensureLoaded(): Promise<void> {
       autoLockSeconds = clampAutoLockSeconds(snap.autoLockSeconds, DEFAULT_AUTOLOCK_SECONDS);
       clipboardClearSeconds = clampClipboardClearSeconds(snap.clipboardClearSeconds, DEFAULT_CLIPBOARD_CLEAR_SECONDS);
     }
-    const t = got[TKEY] as Record<string, TabState> | undefined;
+    // (After a lock that ran before the origin was known, doLock already loaded the tab records and kept only their
+    // page-known half; a copy read here before that would bring a pending save's password back.)
+    const t = lockedBeforeOrigin ? undefined : (got[TKEY] as Record<string, TabState> | undefined);
     if (t) {
       tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
       // [U14] the Tier-2 registry shape ({forms}) deliberately broke the additive rule — a record
@@ -1442,8 +1516,21 @@ function persistTabs(): void {
  *  When quick unlock is not enrolled, an idle/manual lock stays byte-identical to today's full erase. */
 async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {
   // A15: the compartment verdict below is sampled now, so the awaited access-level calls must have settled (a lock
-  // fired into a cold SW would otherwise read the initial `false` and wipe an enrolled quick unlock).
+  // fired into a cold SW would otherwise read the initial `false` and wipe an enrolled quick unlock). Those are
+  // chrome.storage calls, not the trusted store.
   await storageAccess;
+  // A15 review S1: a lock never waits on the trusted store. serverReady (which reads it) loads the origin whose
+  // namespace the arm/wipe below lands in; a lock waits for it at most LOCK_STORE_WAIT_MS — a healthy store answers
+  // in milliseconds, so a cold idle lock still arms. Past that the origin is unknown: the lock erases the session
+  // snapshot and the tab records' sensitive half without it, arms nothing and wipes no quick-unlock record (it cannot
+  // tell which origin's namespace is current); an enrolled record is left unarmed, so the next unlock is a full one.
+  const originKnown = await Promise.race([serverReady.then(() => true), delay(LOCK_STORE_WAIT_MS).then(() => false)]);
+  if (!originKnown) {
+    lockedBeforeOrigin = true; // ensureLoaded will not hydrate a snapshot it read before the erase below
+    await chrome.storage.session.remove(SKEY); // first: the unlocked snapshot goes before anything else is awaited
+    const t = (await chrome.storage.session.get(TKEY))[TKEY] as Record<string, TabState> | undefined;
+    if (t) tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
+  }
   // D3: armGate AWAITS ensureLoaded (hydrates the persisted token pair) BEFORE it samples api.getTokens()
   // for the arm decision, returning both the sampled pair (the armed branch stashes it) and the verdict.
   // An idle-autolock alarm can fire into a COLD SW whose `api` holds no tokens yet; sampling before
@@ -1453,12 +1540,14 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // namespace (§4.2), and it is idempotent — every other doLock caller (applyServerChange, handle(),
   // onRevoked) already ran it. It restores session too, but every write below is a CLEAR (session=null,
   // tabs.clear, SKEY remove), so a briefly-rehydrated session is immediately re-locked — never resurrected.
-  const { tokens: toks, attempt: attemptArm } = await armGate({
-    hydrate: ensureLoaded,
-    readTokens: () => api.getTokens(),
-    isSignout: reason === "signout",
-    compartmentTrusted: quCompartmentTrusted,
-  });
+  const { tokens: toks, attempt: attemptArm } = originKnown
+    ? await armGate({
+        hydrate: ensureLoaded,
+        readTokens: () => api.getTokens(),
+        isSignout: reason === "signout",
+        compartmentTrusted: quCompartmentTrusted,
+      })
+    : { tokens: { access: null, refresh: null }, attempt: false };
   redeemGen++; // any lock invalidates an in-flight quick-unlock redeem (owns() guard, breaker A5⊕B4)
   events?.close(); // live socket + all its timers die FIRST — locked means no bell traffic at all
   events = null;
@@ -1517,7 +1606,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
     if (armed === "declined") {
       await quickUnlock.wipe(); // stale/ineligible/fail-closed → erase the residue
     }
-  } else {
+  } else if (originKnown) {
     // signout, no live token, OR an untrusted compartment → full wipe (never leave standing material).
     await quickUnlock.wipe();
   }
@@ -1533,7 +1622,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // erase as the quick-unlock blob (the record is only worth holding where TRUSTED_CONTEXTS holds).
   if (reason === "signout" || !quCompartmentTrusted) {
     knownLoginsKey = null;
-    await chrome.storage.session.remove(nsk(KLKEY));
+    if (originKnown) await chrome.storage.session.remove(nsk(KLKEY)); // S1: no namespace known → left as it stood
   }
   // …then re-persist the [S3-lock] allow-listed remainder (top origin + card-form KINDS only — no
   // pending, no password, no username). The blanket remove above is what guarantees the sensitive
@@ -1713,6 +1802,8 @@ interface UpdateInfo {
 async function checkForUpdate(force = false): Promise<void> {
   try {
     await serverReady; // the channel state below is per-origin (nsk) and the fetch needs serverUrl
+    // A15 review F1: while a server is pending (or the store did not answer), no update poll reaches any server.
+    if (dialBlock) return;
     const kInfo = nsk(UKEY);
     const kLast = nsk(ULAST);
     const kSeq = nsk(USEQ);
@@ -1728,6 +1819,17 @@ async function checkForUpdate(force = false): Promise<void> {
     // self-host/custom origin gets NO fetch and NO quiet marker — the exact fail-closed-quiet
     // "disabled" posture the un-armed build gave every origin. (Per-instance keys are later work.)
     if (serverUrl !== DEFAULT_SERVER_URL) return;
+    // A15: the anti-rollback seq lives in the trusted store and was NOT migrated (a planted storage.local seq could only
+    // suppress genuine offers); an absent record is the MIN_SEQ floor below. A15 review F3: a read that FAILS aborts
+    // the check before anything is fetched — it is not "absent" (folding it into the floor let the write below lower a
+    // genuine higher seq), and without the store nothing verified could be kept anyway (Firefox "Never remember
+    // history": no update banner there; Firefox's own update_url still updates the add-on).
+    let storedSeq: unknown;
+    try {
+      storedSeq = (await trusted.get(kSeq))[kSeq];
+    } catch {
+      return;
+    }
 
     const base = serverUrl + "/downloads/manifest.json";
     let mResp: Response;
@@ -1758,9 +1860,6 @@ async function checkForUpdate(force = false): Promise<void> {
       return;
     }
     const sigText = new TextDecoder().decode(sigBytes);
-    // A15: the seq lives in the trusted store and was NOT migrated (a planted storage.local seq could only suppress
-    // genuine offers); no trusted store reads as "none" — the MIN_SEQ floor below.
-    const storedSeq = await trustedGet(kSeq);
     // §M-D4(a) anti-rollback FLOOR: a fresh install (or a wiped USEQ) starts at MIN_SEQ, not 0, so a
     // T1 server can't steer it to any validly-signed-but-older (known-vuln) manifest below the floor.
     const lastAcceptedSeq = Math.max(typeof storedSeq === "number" ? storedSeq : 0, MIN_SEQ);
@@ -1835,7 +1934,8 @@ async function updateStatus(): Promise<Res<"updateStatus">> {
 // ---- message dispatch ----
 
 async function handle(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {
-  await ensureLoaded();
+  // A15 review S1: a lock never waits on the trusted store through here — doLock bounds its own wait for the origin.
+  if (msg.type !== "lock") await ensureLoaded();
   const res = await dispatch(msg, sender);
   // Policy idle window: only genuine user activity re-arms the lock. Automated traffic
   // (pageInfo on every load, the popup's 1 s TOTP poll) must not defer autolock while away —
@@ -1852,6 +1952,10 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
   // per-handler checks below stay as a second layer. See sendergate.ts.
   const gate = senderGate(msg.type, sender, EXTENSION_BASE);
   if (gate.refused) return gate.answer;
+  // A15 review F1: while a server is pending (a previous one awaits the user's confirm, or the trusted store did not
+  // answer), nothing that would reach a server runs — no sign-in lane, no connection test (serverstate.ts).
+  const held = dialRefusal(msg.type, dialBlock);
+  if (held) return held;
   switch (msg.type) {
     case "ping": {
       const p = await api.clientPolicy(); // host_permissions + reachability
@@ -1929,12 +2033,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // already refused any sender that is not one of our pages; commitServerUrl canonicalizes and persists first.
       return commitServerUrl(msg.url);
     case "forgetLegacyServer":
-      try {
-        await trusted.remove(LEGACY_SERVER_KEY);
-        return { ok: true } satisfies Res<"forgetLegacyServer">;
-      } catch {
-        return { ok: false } satisfies Res<"forgetLegacyServer">;
-      }
+      return forgetLegacyServer();
     case "personalAcceptChange":
       // A5b: only our own extension pages (the popup) may confirm a personal-vault change; a content
       // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).

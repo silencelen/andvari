@@ -322,9 +322,9 @@ test("A10: every trust record is read through its strict decoder (since A15 from
 // The leaves (trustedkv.ts, trustmigrate.ts, updateoffer.ts, storageaccess.ts, serverswitch.purgeOriginRecords) are
 // behaviour-tested; these pins hold the worker to them, and storagefence.test.ts holds who touches which storage.
 
-test("A15: worker start awaits the storage access levels, then migrates, then reads the server from the trusted store", () => {
+test("A15: worker start awaits the storage access levels, then settles the migration, then loads the server state", () => {
   const ready = spanOf(bg, "const serverReady: Promise<void> = (async () => {", "})();");
-  const order = ["await storageAccess;", "await migrateTrustState(legacyLocal, trusted);", "const url = await getServerUrl(trusted);", "await adoptLegacyNamespaceOnce();"];
+  const order = ["await storageAccess;", "await migrateTrustState(legacyLocal, trusted, () =>", "await applyServerState(outcome, true);", "if (trustedStoreOk) await adoptLegacyNamespaceOnce();"];
   let at = -1;
   for (const step of order) {
     const i = ready.indexOf(step);
@@ -361,7 +361,7 @@ test("A15: the update offer is re-checked on read, its link built only by the of
   assert.ok(!status.includes("isNewerVersion("), "the read goes through the leaf, not a version-only check");
   const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
   assert.ok(check.includes("chromeUrl: offerDownloadUrl(ext.chromeUrl, serverUrl), firefoxUrl: offerDownloadUrl(ext.firefoxUrl, serverUrl)"));
-  assert.ok(check.includes("const storedSeq = await trustedGet(kSeq);"), "the anti-rollback seq is read from the trusted store");
+  assert.ok(check.includes("storedSeq = (await trusted.get(kSeq))[kSeq];"), "the anti-rollback seq is read from the trusted store");
   assert.ok(check.includes("await trusted.set({ [kInfo]: info, [kSeq]: decision.seq });"), "…and written there with the offer");
   assert.ok(!bg.includes("function downloadUrl("), "the old absolutizer (any https URL passed) is gone");
   // The throttle and the quiet marker are not trust state: storage.session (re-derived by the forced start check).
@@ -378,4 +378,106 @@ test("A15: the remembered email is recorded by the worker, from the popup's own 
   assert.ok(mapper.includes('if (r.ok || r.code === "totp_required") await rememberEmail(email);'));
   const status = spanOf(bg, 'case "status": {', 'case "lock": {');
   assert.ok(status.includes("rememberedEmail: session ? null : await readRememberedEmail(),"));
+});
+
+// ---- A15 review (2026-10-22): F1 the pending server dials nothing, F2 the attested migration, F3 the seq read, S1 the
+// lock path, S3 the popup's no-answer. The leaves (serverstate.ts, trustmigrate.ts, trustedkv.ts) are behaviour-tested;
+// these pins hold the worker and the pages to them. ----
+
+test("A15 review F1: every dial is refused right after the sender gate while a server is pending", () => {
+  const head = spanOf(bg, "async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {", "switch (msg.type) {");
+  const gate = head.indexOf("if (gate.refused) return gate.answer;");
+  const held = head.indexOf("const held = dialRefusal(msg.type, dialBlock);");
+  assert.ok(gate > -1 && held > gate, "after the A14 sender gate, before any handler");
+  assert.ok(head.includes("if (held) return held;"));
+  // The handlers the leaf names are the real ones (a renamed case would silently escape the hold).
+  for (const t of ["ping", "unlock", "unlockTotp", "unlockWithPin", "unlockWithBio"]) assert.ok(bg.includes(`case "${t}":`), `case "${t}" exists`);
+});
+
+test("A15 review F1: no update poll while a server is pending; autofill excludes the pending origin (fail closed)", () => {
+  const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
+  const ready = check.indexOf("await serverReady;");
+  const skip = check.indexOf("if (dialBlock) return;");
+  assert.ok(ready > -1 && skip > ready && skip < check.indexOf("fetch("), "checked before any fetch");
+  const reg = spanOf(bg, "async function reconcileAutofillScripts(): Promise<void> {", "async function unregisterAutofillScripts(");
+  // One reconcile at a time: two overlapping runs (worker start + onInstalled) made the second register throw a
+  // duplicate id, and its fail-closed catch unregistered the first (seen live on an update).
+  assert.ok(bg.includes("autofillChain = autofillChain.then(reconcileAutofillScripts, reconcileAutofillScripts);"));
+  assert.ok(reg.includes("const excludeMatches = autofillExcludeMatches(serverUrl, dialBlock);"));
+  assert.ok(/if \(excludeMatches === null\) \{\s*await unregisterAutofillScripts\(\);\s*return;/.test(reg), "null = no autofill at all");
+});
+
+test("A15 review F1: only the gate's commit and 'Not mine' lift the block; the pages render from serverInfo's block", () => {
+  const commit = spanOf(bg, "async function commitServerUrl(", "/** Apply a server change.");
+  assert.ok(commit.indexOf("await setServerUrl(canonical, trusted);") < commit.indexOf("dialBlock = null;"), "lifted only after the choice was kept");
+  assert.ok(commit.indexOf("await switchChain;") < commit.indexOf("if (serverUrl === canonical) dialBlock = null;"), "…and only once the switch took effect");
+  const forget = spanOf(bg, "async function forgetLegacyServer(", "\n}\n");
+  assert.ok(forget.includes("if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };"));
+  assert.ok(forget.indexOf("forgetPendingServer(") < forget.indexOf("dialBlock = null;"));
+  assert.equal((bg.match(/dialBlock = null;/g) ?? []).length, 2, "nowhere else");
+  assert.ok(bg.includes("return { url: serverUrl, trustedStore: trustedStoreOk, block: dialBlock };"));
+});
+
+test("A15 review F1: the popup leads with the confirm route; no server page opens and the header names no server meanwhile", () => {
+  const refresh = spanOf(popup, "async function refresh(): Promise<void> {", "/** Render the self-update banner");
+  const info = refresh.indexOf('const info = await ask({ type: "serverInfo" });');
+  const confirm = refresh.indexOf("showConfirmServer(info.block);");
+  const status = refresh.indexOf('const s = await ask({ type: "status" });');
+  assert.ok(info > -1 && confirm > info && status > confirm, "asked first; the confirm card replaces every sign-in form");
+  const show = spanOf(popup, "function showConfirmServer(block: ServerBlockWire): void {", "\n}\n");
+  assert.ok(show.includes('el("locked").hidden = true;'), "the sign-in form is hidden");
+  assert.ok(show.includes("Not mine — use ${new URL(DEFAULT_SERVER_URL).host} instead"), '"Not mine" names the server it switches to');
+  assert.ok(show.includes('open.textContent = block.keepable ? "Confirm in Options" : "Open Options";'));
+  assert.ok(popup.includes('const r = await ask({ type: "forgetLegacyServer" });'));
+  const html = readFileSync(new URL("../popup.html", import.meta.url), "utf-8");
+  assert.ok(html.includes('<section id="confirm-server"') && html.includes('id="confirm-server-not-mine"') && html.includes('id="confirm-server-open"'));
+  assert.ok(!html.includes("legacy-server-cta"), "the old strip (beside a live sign-in form) is gone");
+  const header = spanOf(popup, "async function renderServerOrigin(): Promise<void> {", "\n}\n");
+  assert.ok(header.includes("!info.block ? info.url : null"), "the header shows an origin only when one is in effect");
+});
+
+test("A15 review S3: no answer from the worker opens nothing (never a guessed default)", () => {
+  const cur = spanOf(popup, "async function currentServer(): Promise<string | null> {", "\n}\n");
+  assert.ok(cur.includes("!r.block ? r.url : null"));
+  assert.ok(!cur.includes("DEFAULT_SERVER_URL"), "no fallback to the default");
+  const open = spanOf(popup, "async function openServerPage(path = \"\"): Promise<void> {", "\n}\n");
+  assert.ok(open.indexOf("if (base === null) {") > -1 && open.indexOf("if (base === null) {") < open.indexOf("chrome.tabs.create("));
+  const opt = readFileSync(new URL("./options.ts", import.meta.url), "utf-8");
+  const info = spanOf(opt, "async function serverInfoNow(): Promise<Res<\"serverInfo\"> | null> {", "\n}\n");
+  assert.ok(info.includes("return null;") && !info.includes("DEFAULT_SERVER_URL"), "options: no answer is no server, not the default");
+});
+
+test("A15 review F2: worker start waits (bounded) for the browser's install event; a late one still owes the migration", () => {
+  const ready = spanOf(bg, "const serverReady: Promise<void> = (async () => {", "})();");
+  assert.ok(ready.includes("Promise.race([installSignal, delay(INSTALL_SIGNAL_WAIT_MS).then(() => null)])"));
+  const installed = spanOf(bg, "chrome.runtime.onInstalled.addListener((details) => {", "chrome.runtime.onStartup.addListener(");
+  assert.ok(installed.includes("installSignalSeen(sig);"));
+  assert.ok(installed.includes("const late = serverReady.then(() => lateInstallSignal(sig)).catch(() => {});"));
+  assert.ok(installed.includes("void late.then(() => checkForUpdate(true));"), "the forced check runs after a late migration");
+  const late = spanOf(bg, "async function lateInstallSignal(", "\n}\n");
+  assert.ok(late.includes("if (!installWaitTimedOut || !attestsPreA15Upgrade(d)) return;"));
+  assert.ok(late.indexOf("await trusted.set({ [A15_OWED_KEY]: true });") < late.indexOf("migrateTrustState("), "owed is recorded before the run");
+});
+
+test("A15 review F3: a failed seq read aborts the update check before anything is fetched", () => {
+  const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
+  const read = check.indexOf("storedSeq = (await trusted.get(kSeq))[kSeq];");
+  assert.ok(read > -1 && read < check.indexOf("fetch("), "read before the fetch");
+  assert.ok(/storedSeq = \(await trusted\.get\(kSeq\)\)\[kSeq\];\s*\} catch \{\s*return;\s*\}/.test(check), "a read error returns");
+  assert.ok(!check.includes("trustedGet(kSeq)"), "not the fold-to-absent reader");
+});
+
+test("A15 review S1: a lock waits for the trusted store only within its bound, and a cold lock erases the snapshot first", () => {
+  const lock = spanOf(bg, 'async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {', "redeemGen++;");
+  const race = lock.indexOf("const originKnown = await Promise.race([serverReady.then(() => true), delay(LOCK_STORE_WAIT_MS).then(() => false)]);");
+  assert.ok(race > -1 && race < lock.indexOf("armGate("), "bounded, before the arm gate");
+  const cold = lock.slice(lock.indexOf("if (!originKnown) {"));
+  assert.ok(cold.indexOf("lockedBeforeOrigin = true;") < cold.indexOf("await chrome.storage.session.remove(SKEY);"));
+  assert.ok(cold.indexOf("await chrome.storage.session.remove(SKEY);") < cold.indexOf("await chrome.storage.session.get(TKEY)"), "the snapshot goes before anything else is awaited");
+  assert.ok(lock.includes(": { tokens: { access: null, refresh: null }, attempt: false };"), "no arm without the origin");
+  assert.ok(bg.includes("if (msg.type !== \"lock\") await ensureLoaded();"), "handle() does not make a lock wait on serverReady");
+  const load = spanOf(bg, "function ensureLoaded(): Promise<void> {", "\nfunction ");
+  assert.ok(load.includes("if (lockedBeforeOrigin) snap = undefined;"), "a snapshot read before a cold lock's erase never hydrates");
+  assert.ok(load.includes("const t = lockedBeforeOrigin ? undefined :"), "nor do the tab records' sensitive half");
+  assert.ok(bg.includes("return openBoundedIdb(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, IDB_NAME, IDB_STORE);"), "the co-key DB opens bounded too");
 });

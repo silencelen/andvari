@@ -8,8 +8,10 @@
 //   2. our pages (popup, options, connector, offscreen, the KDF worker) never touch them either — they ask the worker,
 //      so "the worker is the only writer" is true by construction (and a Firefox page shown in a private window,
 //      which would get a private IndexedDB of its own, never reads a different store than the worker);
-//   3. the worker reads chrome.storage.local in exactly one place, the one-time migration, and otherwise only removes
-//      from it (the purge); it no longer listens to storage.onChanged at all.
+//   3. the worker hands chrome.storage.local to exactly three leaves — the one-time migration (which reads it only when
+//      the browser attested the upgrade, A15 review F2), the server state (which, with no trusted store, reads its
+//      `serverUrl` ONLY to block sign-in, A15 review F1), and the purge — and otherwise only removes from it; it no
+//      longer listens to storage.onChanged at all.
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -83,11 +85,31 @@ test("the worker reads chrome.storage.local only through the one-time migration,
   for (const t of legacyLines) {
     const approved =
       t === "const legacyLocal = chrome.storage.local as unknown as KvArea;" ||
-      t === "await migrateTrustState(legacyLocal, trusted);" ||
+      t === "const outcome = await migrateTrustState(legacyLocal, trusted, () =>" || // worker start (F2: attested only)
+      t === "const outcome = await migrateTrustState(legacyLocal, trusted, async () => null);" || // a late install event
+      t === "const st = await loadServerState(outcome, trusted, legacyLocal);" || // F1: block-only read, no store
+      t === "if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };" || // "Not mine"
       t === "await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionArea]);";
     assert.ok(approved, `legacyLocal reached code this fence has not approved: ${t}`);
   }
-  assert.equal(legacyLines.length, 3);
+  assert.equal(legacyLines.length, 6);
+});
+
+test("the server state reads storage.local only with no trusted store, only its serverUrl, and only to block; it never writes there", () => {
+  const ss = code(src("serverstate.ts"));
+  const reads = ss.match(/legacy\.get\(/g) ?? [];
+  assert.equal(reads.length, 1, "one read");
+  assert.ok(ss.includes("previous = otherServer((await legacy.get(SERVER_URL_KEY))[SERVER_URL_KEY]);"), "of serverUrl alone");
+  const unavailable = ss.slice(ss.indexOf('if (outcome.kind === "unavailable") {'), ss.indexOf('if (outcome.kind === "failed")'));
+  assert.ok(unavailable.includes("legacy.get(SERVER_URL_KEY)"), "inside the no-trusted-store branch");
+  assert.ok(unavailable.includes('{ kind: "confirm", origin: previous, keepable: false }'), "as a block that cannot be confirmed (never adopted)");
+  assert.ok(!/legacy\.set\(/.test(ss), "never a write");
+  assert.equal((ss.match(/legacy\.remove\(/g) ?? []).length, 1, "the one removal: 'Not mine' in the no-store mode");
+  // The migration leaf: storage.local is read in exactly one place, the owed run.
+  const tm = code(src("trustmigrate.ts"));
+  assert.equal((tm.match(/legacy\.get\(/g) ?? []).length, 1);
+  const owedRun = tm.slice(tm.indexOf("async function runOwedMigration("));
+  assert.ok(owedRun.includes("all = await legacy.get(null);"), "inside the owed run only");
 });
 
 test("no trust record is read from, or written to, a chrome.storage area by name", () => {

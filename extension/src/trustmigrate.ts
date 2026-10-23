@@ -1,19 +1,21 @@
 // Runtime (value) imports carry the .ts extension so this leaf resolves under `node --test` (trustmigrate.test.ts).
 import { canonicalizeServerUrl, DEFAULT_SERVER_URL, SERVER_URL_KEY } from "./serverurl.ts";
-import type { KvArea } from "./trustedkv.ts";
+import { TrustedStoreUnavailable, type KvArea } from "./trustedkv.ts";
 import { decodeItemHomes, decodePersonalWrap, encodeItemHomes } from "./trustrecords.ts";
+import { isNewerVersion } from "./version.ts";
 import { isUuid } from "./wireids.ts";
 
 /**
  * The one-time move of the extension's trust state from chrome.storage.local into the trusted store (security review
- * 2026-10, branch A15; trustedkv.ts says why). Runs at worker start until it has completed once.
+ * 2026-10, branch A15; trustedkv.ts says why). Settled at every worker start; it reads storage.local only while it is
+ * owed, which only the browser's report of the upgrade it exists for can make it (below).
  *
  * The rule: a pre-A15 storage.local value may already have been PLANTED by a content script, and nothing in that
  * area can be told apart from a genuine value. So nothing content-reachable becomes trusted, canonical, pinned or
  * adopted on the way in:
  *  - `serverUrl` is NEVER adopted. A non-default value is kept only as a display-only suggestion
  *    ([LEGACY_SERVER_KEY]) that the options page offers for re-confirmation through the Trust Gate; until the user
- *    connects again, the worker dials DEFAULT_SERVER_URL.
+ *    connects again or says "Not mine", the worker dials NO server, the default included (serverstate.ts, F1).
  *  - The update channel is NOT migrated: no offer, no throttle stamp, no quiet marker, and no anti-rollback seq (the
  *    floor restarts at MIN_SEQ; a planted seq is indistinguishable from a real one). The forced start check re-derives
  *    the rest.
@@ -26,12 +28,48 @@ import { isUuid } from "./wireids.ts";
  *    nor make it run again. Once it is set, storage.local is never read again.
  *  - Nothing is deleted from storage.local until the copy has been read back and compared. A value the trusted store
  *    already holds is never overwritten (a retry after a partial run, or a choice made since).
- *  - If the trusted store is unavailable, the migration does nothing at all and retries at the next start; the callers
- *    meanwhile use their safe defaults (never storage.local).
+ *
+ * WHEN it reads storage.local (A15 review F2): only when the BROWSER attested an upgrade from a pre-A15 build —
+ * `runtime.onInstalled` with reason "update" and a `previousVersion` no newer than [LAST_PRE_A15_VERSION]. That event is
+ * recorded in the trusted store as "owed" ([A15_OWED_KEY]) before anything is read, so a migration cut short (the worker
+ * died, a write failed) is finished at the next start, and the flag and the owed mark are swapped in ONE write when it
+ * completes. Every other start without the flag — a fresh install, an update from an A15 build, or a later start with
+ * no install event at all (the trusted store was unavailable at the upgrade, or lost its data while storage.local kept
+ * its own) — sets the flag WITHOUT reading storage.local. Before F2 any flagless start migrated, so whatever a content
+ * script had written to storage.local in the meantime (a planted server suggestion, homes, an older wrap, an email,
+ * a credential id) moved into the trusted store.
+ *  - The store unavailable at the attested upgrade (Firefox "Never remember history"): "owed" cannot be recorded, so
+ *    nothing migrates, then or ever; there is nothing trustworthy to remember the event in. The fail-safe is the
+ *    worker's: while the store is unavailable it reads storage.local's `serverUrl` ONLY to refuse sign-in while that
+ *    names another server (serverstate.ts), and once the store is available again the first start sets the flag
+ *    without reading. The device is then on the default server with nothing migrated (a fresh install's posture), and
+ *    the user re-enters their server in Options.
+ *  - The install event arrives after the bounded wait ([awaitInstall] answered null): the worker re-runs this with the
+ *    late event once it lands (background.ts); the owed mark makes that run migrate even though the flag was set.
  */
 
 /** The migration's "done" flag — trusted store only. */
 export const A15_MIGRATED_KEY = "a15Migrated";
+/** A15 review F2: the browser attested an upgrade from a pre-A15 build and the migration has not completed yet. Trusted
+ *  store only; set before storage.local is read, cleared in the same write that sets [A15_MIGRATED_KEY]. */
+export const A15_OWED_KEY = "a15MigrationOwed";
+/** The newest extension release WITHOUT the trusted store (A15). An update FROM this version or an older one owes the
+ *  migration. If another release without A15 ships before A15 does, raise this to that release's version. */
+export const LAST_PRE_A15_VERSION = "0.28.1";
+
+/** What `runtime.onInstalled` reported (the two fields this needs). */
+export interface InstallSignal {
+  reason: string;
+  previousVersion?: string;
+}
+
+/** True only for the browser's own report of an update from a pre-A15 build ([LAST_PRE_A15_VERSION] or older). A
+ *  missing or malformed previous version attests nothing. */
+export function attestsPreA15Upgrade(sig: InstallSignal | null | undefined): boolean {
+  if (!sig || sig.reason !== "update" || typeof sig.previousVersion !== "string") return false;
+  const v = sig.previousVersion.trim();
+  return /^\d{1,9}(\.\d{1,9}){0,3}$/.test(v) && !isNewerVersion(v, LAST_PRE_A15_VERSION);
+}
 /** A pre-A15 non-default server choice awaiting re-confirmation through the Trust Gate. Display only, never dialed. */
 export const LEGACY_SERVER_KEY = "legacyServerUrl";
 /** The email the user last signed in with (non-secret; the popup prefills it). */
@@ -47,6 +85,7 @@ const LEGACY_GLOBAL_DROP = new Set([
   "updateAcceptedSeq",
   "updateChannelQuiet",
   A15_MIGRATED_KEY,
+  A15_OWED_KEY,
   LEGACY_SERVER_KEY,
 ]);
 
@@ -134,17 +173,59 @@ function stable(v: unknown): string {
 
 export type MigrationOutcome =
   | { kind: "already" }
-  | { kind: "unavailable" }
+  /** The flag was set without reading storage.local: a fresh install, an update from an A15 build, or a start with no
+   *  install event within the wait (`signal: "none"` — background re-runs the migration if a late event attests one). */
+  | { kind: "skipped"; signal: "none" | "other" }
+  /** No trusted store (it refused, or did not answer in time): nothing was read or written. */
+  | { kind: "unavailable"; timedOut: boolean }
+  /** An owed migration did not complete; it stays owed and runs again at the next start. */
   | { kind: "failed" }
   | { kind: "migrated"; legacyServer: string | null; moved: string[]; removed: number };
 
-/** Run the migration once (see the module comment). Never throws. */
-export async function migrateTrustState(legacy: KvArea, trusted: KvArea): Promise<MigrationOutcome> {
+const unavailable = (e: unknown): MigrationOutcome => ({ kind: "unavailable", timedOut: e instanceof TrustedStoreUnavailable && e.timedOut });
+
+/**
+ * Settle the one-time migration at worker start (see the module comment). [awaitInstall] answers the browser's install
+ * event for this start, or null when none arrives within the wait; it is asked only when the store holds neither the
+ * flag nor the owed mark. Never throws.
+ */
+export async function migrateTrustState(
+  legacy: KvArea,
+  trusted: KvArea,
+  awaitInstall: () => Promise<InstallSignal | null>,
+): Promise<MigrationOutcome> {
+  let owed: boolean;
   try {
-    if ((await trusted.get(A15_MIGRATED_KEY))[A15_MIGRATED_KEY] === true) return { kind: "already" };
-  } catch {
-    return { kind: "unavailable" }; // no trusted store: touch nothing, retry at the next start
+    const got = await trusted.get([A15_MIGRATED_KEY, A15_OWED_KEY]);
+    owed = got[A15_OWED_KEY] === true;
+    if (!owed && got[A15_MIGRATED_KEY] === true) return { kind: "already" };
+  } catch (e) {
+    return unavailable(e); // no trusted store: touch nothing — and record nothing, for there is nowhere to
   }
+  if (!owed) {
+    let sig: InstallSignal | null = null;
+    try {
+      sig = await awaitInstall();
+    } catch {
+      sig = null;
+    }
+    if (!attestsPreA15Upgrade(sig)) {
+      // F2: nothing attests a pre-A15 upgrade, so storage.local is NOT read — whatever sits there may be a content
+      // script's. Best effort: a flag that could not be written is simply set at a later start, the same way.
+      await trusted.set({ [A15_MIGRATED_KEY]: true }).catch(() => {});
+      return { kind: "skipped", signal: sig === null ? "none" : "other" };
+    }
+    try {
+      await trusted.set({ [A15_OWED_KEY]: true }); // recorded BEFORE storage.local is read
+    } catch (e) {
+      return e instanceof TrustedStoreUnavailable && e.timedOut ? unavailable(e) : { kind: "failed" };
+    }
+  }
+  return runOwedMigration(legacy, trusted);
+}
+
+/** The owed migration proper: read storage.local, move what may move, verify, then swap owed for done in one write. */
+async function runOwedMigration(legacy: KvArea, trusted: KvArea): Promise<MigrationOutcome> {
   let all: Record<string, unknown>;
   try {
     all = await legacy.get(null);
@@ -165,7 +246,8 @@ export async function migrateTrustState(legacy: KvArea, trusted: KvArea): Promis
       const back = await trusted.get(keys);
       for (const k of keys) if (stable(back[k]) !== stable(put[k])) return { kind: "failed" }; // keep storage.local, retry
     }
-    await trusted.set({ [A15_MIGRATED_KEY]: true });
+    // One write, so no start can see "done" while still owed, or "owed" once done.
+    await trusted.set({ [A15_MIGRATED_KEY]: true, [A15_OWED_KEY]: false });
     let removed = 0;
     try {
       if (p.remove.length > 0) await legacy.remove(p.remove);

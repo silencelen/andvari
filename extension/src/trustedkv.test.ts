@@ -13,9 +13,13 @@ import { idbKv, removeByPrefix, TRUSTED_DB_NAME, TRUSTED_STORE_NAME, TrustedStor
 
 type Req = { result?: unknown; error?: unknown; onsuccess?: (() => void) | null; onerror?: (() => void) | null; onupgradeneeded?: (() => void) | null; onblocked?: (() => void) | null };
 
-function fakeIdb(opts: { failOpen?: "throw" | "error"; failTx?: boolean } = {}) {
+// Transactional like the real thing (A15 review S2): requests work on a copy that replaces the store only when the
+// transaction completes; abort() discards it. put() clones synchronously, so an uncloneable value throws from put()
+// itself (DataCloneError) after earlier puts in the same transaction were already issued. `hangOpen` never answers an
+// open; `lateOpenMs` answers it that late; `hangTx` never completes a transaction (the S1 cases).
+function fakeIdb(opts: { failOpen?: "throw" | "error"; failTx?: boolean; hangOpen?: boolean; lateOpenMs?: number; hangTx?: boolean } = {}) {
   const dbs = new Map<string, Map<string, Map<string, unknown>>>(); // db name → store name → key → value
-  const stats = { opens: 0, closes: 0, txs: 0 };
+  const stats = { opens: 0, closes: 0, txs: 0, aborts: 0, commits: 0 };
   const later = (f: () => void) => setTimeout(f, 0);
   const clone = <T>(v: T): T => structuredClone(v);
   function makeDb(name: string) {
@@ -33,32 +37,52 @@ function fakeIdb(opts: { failOpen?: "throw" | "error"; failTx?: boolean } = {}) 
         stats.txs++;
         const data = stores.get(storeName);
         if (!data) throw new Error(`no store ${storeName}`);
-        const tx: { oncomplete?: () => void; onerror?: () => void; onabort?: () => void; error?: unknown; objectStore: (n: string) => unknown } = {
+        const work = new Map(data); // this transaction's view; committed on complete
+        let finished = false;
+        const complete = () => {
+          if (finished || opts.hangTx) return;
+          finished = true;
+          data.clear();
+          for (const [k, v] of work) data.set(k, v);
+          stats.commits++;
+          tx.oncomplete?.();
+        };
+        const tx: { oncomplete?: () => void; onerror?: () => void; onabort?: () => void; error?: unknown; abort: () => void; objectStore: (n: string) => unknown } = {
+          abort() {
+            if (finished) throw new Error("InvalidStateError: the transaction has finished");
+            finished = true;
+            stats.aborts++;
+            later(() => tx.onabort?.());
+          },
           objectStore(n: string) {
             assert.equal(n, storeName);
             const req = (fn: () => unknown): Req => {
               const r: Req = {};
               pending++;
               later(() => {
+                if (finished) return;
                 r.result = fn();
                 r.onsuccess?.();
-                if (--pending === 0) later(() => tx.oncomplete?.());
+                if (--pending === 0) later(complete);
               });
               return r;
             };
             return {
-              get: (k: string) => req(() => (data.has(k) ? clone(data.get(k)) : undefined)),
-              put: (v: unknown, k: string) => req(() => void data.set(k, clone(v))),
-              delete: (k: string) => req(() => void data.delete(k)),
-              getAllKeys: () => req(() => [...data.keys()].sort()),
-              getAll: () => req(() => [...data.keys()].sort().map((k) => clone(data.get(k)))),
+              get: (k: string) => req(() => (work.has(k) ? clone(work.get(k)) : undefined)),
+              put: (v: unknown, k: string) => {
+                const c = clone(v); // synchronous, like IDBObjectStore.put: an uncloneable value throws HERE
+                return req(() => void work.set(k, c));
+              },
+              delete: (k: string) => req(() => void work.delete(k)),
+              getAllKeys: () => req(() => [...work.keys()].sort()),
+              getAll: () => req(() => [...work.keys()].sort().map((k) => clone(work.get(k)))),
             };
           },
         };
         let pending = 0;
         // A transaction with no request still completes.
         later(() => {
-          if (pending === 0) tx.oncomplete?.();
+          if (pending === 0) complete();
         });
         return tx;
       },
@@ -70,7 +94,8 @@ function fakeIdb(opts: { failOpen?: "throw" | "error"; failTx?: boolean } = {}) 
       assert.equal(version, 1);
       if (opts.failOpen === "throw") throw new Error("SecurityError: the operation is insecure");
       const r: Req = {};
-      later(() => {
+      if (opts.hangOpen) return r; // never answers
+      (opts.lateOpenMs === undefined ? later : (f: () => void) => setTimeout(f, opts.lateOpenMs))(() => {
         if (opts.failOpen === "error") {
           r.error = new Error("InvalidStateError");
           r.onerror?.();
@@ -191,4 +216,67 @@ test("removeByPrefix removes exactly the keys under the prefix and reports how m
   assert.deepEqual([...map.keys()].sort(), ["ns.aaaaaaaaaaaaaaaaX", "ns.bbbbbbbbbbbbbbbb.itemHomes:u1", "serverUrl"]);
   assert.equal(await removeByPrefix(area, "ns.aaaaaaaaaaaaaaaa."), 0, "nothing left: no remove call needed");
   await assert.rejects(() => removeByPrefix(area, ""), /prefix/, "an empty prefix would sweep everything: refused");
+});
+
+// ---- A15 review S1: a store that never answers must not wedge the worker ----
+
+/** Fails (rather than hangs the suite) when [p] has not settled within [ms]: the pre-fix store had no bound at all. */
+function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${what}: still pending after ${ms} ms (no bound)`)), ms))]);
+}
+
+test("S1: an open that never settles rejects as a timed-out TrustedStoreUnavailable within the bound", async () => {
+  const idb = fakeIdb({ hangOpen: true });
+  const kv = (idbKv as unknown as (r: () => IDBFactory, n?: string, o?: { timeoutMs: number }) => KvArea)(() => idb.factory as unknown as IDBFactory, undefined, { timeoutMs: 40 });
+  for (const [name, op] of [
+    ["get", () => kv.get("serverUrl")],
+    ["get(null)", () => kv.get(null)],
+    ["set", () => kv.set({ serverUrl: "https://self.example" })],
+    ["remove", () => kv.remove("serverUrl")],
+  ] as const) {
+    const t0 = Date.now();
+    const e = await within((op as () => Promise<unknown>)().then(() => null, (x: unknown) => x), 1000, name);
+    assert.ok(e instanceof TrustedStoreUnavailable, `${name}: rejects with TrustedStoreUnavailable`);
+    assert.equal((e as { timedOut?: unknown }).timedOut, true, `${name}: and says it timed out (not "no IndexedDB here")`);
+    assert.ok(Date.now() - t0 < 900, `${name}: within the bound`);
+  }
+});
+
+test("S1: an open that answers after the bound has its connection closed at once (nobody holds it)", async () => {
+  const idb = fakeIdb({ lateOpenMs: 80 });
+  const kv = (idbKv as unknown as (r: () => IDBFactory, n?: string, o?: { timeoutMs: number }) => KvArea)(() => idb.factory as unknown as IDBFactory, undefined, { timeoutMs: 20 });
+  await assert.rejects(() => within(kv.get("serverUrl"), 1000, "late open"), TrustedStoreUnavailable);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(idb.stats.opens, 1);
+  assert.equal(idb.stats.closes, 1, "the late connection was closed");
+});
+
+test("S1: a transaction that never completes rejects within the bound and is aborted, so a failed write cannot land later", async () => {
+  const idb = fakeIdb({ hangTx: true });
+  const kv = (idbKv as unknown as (r: () => IDBFactory, n?: string, o?: { timeoutMs: number }) => KvArea)(() => idb.factory as unknown as IDBFactory, undefined, { timeoutMs: 40 });
+  const e = await within(kv.set({ serverUrl: "https://self.example" }).then(() => null, (x: unknown) => x), 1000, "hung tx");
+  assert.ok(e instanceof TrustedStoreUnavailable);
+  assert.equal((e as { timedOut?: unknown }).timedOut, true);
+  assert.equal(idb.stats.aborts, 1, "the transaction was aborted");
+  assert.equal(idb.stats.commits, 0);
+});
+
+test("S1: the default bound is a few seconds, and the shared store uses it", async () => {
+  const mod = (await import("./trustedkv.ts")) as Record<string, unknown>;
+  const ms = mod.TRUSTED_OP_TIMEOUT_MS;
+  assert.equal(typeof ms, "number", "trustedkv.ts exports TRUSTED_OP_TIMEOUT_MS");
+  assert.ok((ms as number) >= 1000 && (ms as number) <= 10_000, `a bound of ${ms} ms`);
+  assert.equal(typeof mod.openBoundedIdb, "function", "the worker's co-key database opens through the same bound");
+});
+
+// ---- A15 review S2: a body that throws aborts its transaction ----
+
+test("S2: a set whose second value cannot be stored writes NOTHING (the first put is aborted, not auto-committed)", async () => {
+  const idb = fakeIdb();
+  const kv = idbKv(() => idb.factory as unknown as IDBFactory);
+  await kv.set({ keep: "before" });
+  await assert.rejects(() => kv.set({ a: "first", b: () => "a function is not cloneable" }), TrustedStoreUnavailable);
+  await new Promise((r) => setTimeout(r, 20)); // give an un-aborted transaction time to auto-commit
+  assert.deepEqual(await kv.get(null), { keep: "before" }, "the put issued before the throw did not commit");
+  assert.equal(idb.stats.closes, idb.stats.opens, "and the connection was closed");
 });

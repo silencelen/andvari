@@ -138,7 +138,7 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
   updateStatus: { current: "", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null },
   cardFillOffers: { fillable: false, origin: null, crossOriginFormsOnly: false },
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
-  serverInfo: { url: "", legacy: null, trustedStore: false },
+  serverInfo: { url: "", trustedStore: false, block: null },
   setServerUrl: { ok: false, code: "not_allowed" },
   forgetLegacyServer: { ok: false },
 };

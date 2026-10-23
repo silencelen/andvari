@@ -215,15 +215,19 @@
 
         <!-- A15 (security review 2026-10): a server chosen before this update is NOT reconnected silently. The old
              value sat in storage a web page could have written, so it is shown here for the user to review through
-             the Trust Gate (Connect is still the only commit), or to drop. Hidden unless the worker reports one. -->
+             the Trust Gate (Connect is still the only commit), or to drop. Since the A15 review (F1) the worker signs
+             in nowhere, the default included, until one of the two happens; (F2) the address is offered only when the
+             browser itself reported the update from an older version. When this browser cannot keep a server choice
+             (Firefox "Never remember history") the address came from the old settings, can only be declined here, and
+             the review button is hidden (options.ts sets both texts). Hidden unless the worker reports one. -->
         <div id="legacy-note" class="trust-gate" role="group" aria-labelledby="legacy-h" hidden>
           <h3 id="legacy-h">Confirm your server</h3>
-          <p class="gate-body">Before an update, this browser was set to connect to:</p>
+          <p id="legacy-lead" class="gate-body">When andvari updated to this version, this browser was set to use:</p>
           <code id="legacy-origin" class="gate-origin"></code>
-          <p class="gate-body">
-            andvari now keeps the server choice where web pages can't change it, so it asks you to confirm that
-            address once. If it is your own andvari server, review it and connect. If you don't recognize it, choose
-            "Not mine": andvari stays on the server shown above.
+          <p id="legacy-body" class="gate-body">
+            That setting was kept where a web page could have changed it, so andvari won't use it, or sign in anywhere,
+            until you decide. If it is your own andvari server, review it and connect. If you don't recognize it,
+            choose "Not mine" and andvari uses its default server instead.
           </p>
           <div class="gate-actions">
             <button id="legacy-forget" class="ghost" type="button">Not mine</button>

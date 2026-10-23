@@ -7,10 +7,10 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
-import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
+import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
 import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./serverurl";
 import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
@@ -117,11 +117,12 @@ function clearMsg(): void {
   clearLiveMsg(el("msg"));
 }
 
-function setConn(ok: boolean): void {
+function setConn(ok: boolean, noServer = false): void {
   const dot = el("conn");
   dot.className = `dot ${ok ? "on" : "off"}`;
-  dot.title = ok ? "server reachable" : "server unreachable";
-  el("conn-status").textContent = ok ? "Server reachable" : "Server unreachable"; // a11y 5a twin
+  // A15 review F1: while a server is pending nothing was dialed, so "unreachable" would be the wrong word.
+  dot.title = ok ? "server reachable" : noServer ? "no server confirmed" : "server unreachable";
+  el("conn-status").textContent = ok ? "Server reachable" : noServer ? "No server confirmed" : "Server unreachable"; // a11y 5a twin
 }
 
 /** a11y 2d — one polite announcer for copy confirmations. The visible feedback (button ✓, TOTP
@@ -170,6 +171,15 @@ function showView(unlocked: boolean): void {
 }
 
 async function refresh(): Promise<void> {
+  // A15 review F1: while a server is pending the worker signs in nowhere, so the popup leads with the confirm route
+  // INSTEAD of any sign-in form (and opens no server page). Asked first, on every render.
+  const info = await ask({ type: "serverInfo" });
+  if (info?.block) {
+    showConfirmServer(info.block);
+    return;
+  }
+  el("confirm-server").hidden = true;
+  el("open-vault").hidden = false;
   const s = await ask({ type: "status" });
   if (!s) {
     showView(false);
@@ -265,7 +275,7 @@ async function renderUpdate(): Promise<void> {
   // A15 step 0: the popup re-checks the link itself before it becomes an href — only
   // `${DEFAULT_SERVER_URL}/downloads/<basename>`, and only while the current server is the default.
   const isFirefox = /firefox/i.test(navigator.userAgent);
-  const server = await currentServer();
+  const server = (await currentServer()) ?? ""; // no answer / pending: no link (offerDownloadUrl needs the default)
   const url = [isFirefox ? r.firefoxUrl : r.chromeUrl, r.chromeUrl, r.firefoxUrl].map((u) => offerDownloadUrl(u, server)).find((u) => u !== null) ?? null;
   if (url) {
     link.href = url;
@@ -285,10 +295,49 @@ function updateQuietCopy(reason: string): string {
 }
 
 /** A15: the configured server origin, from the worker (the only reader of its trusted store) — asked on every use,
- *  never cached in the popup. A worker that does not answer reads as the default (the fail-safe it always had). */
-async function currentServer(): Promise<string> {
+ *  never cached in the popup. Null when there is no server to use: the worker did not answer (A15 review S3 — before,
+ *  that read as the default, and a click opened the reference instance), or a server is pending (F1). */
+async function currentServer(): Promise<string | null> {
   const r = await ask({ type: "serverInfo" });
-  return r?.url || DEFAULT_SERVER_URL;
+  return r && typeof r.url === "string" && r.url && !r.block ? r.url : null;
+}
+
+/** A15 review F1: the pending-server card, shown instead of the sign-in form. The origin is the worker's (display
+ *  only — confirming it is the Trust Gate's job, in Options); every string here is textContent. */
+function showConfirmServer(block: ServerBlockWire): void {
+  showView(false); // drops any unlocked chrome (and the master form's state)
+  el("locked").hidden = true;
+  el("open-vault").hidden = true; // no server page opens while a server is pending
+  const box = el("confirm-server");
+  box.hidden = false;
+  const notMine = el<HTMLButtonElement>("confirm-server-not-mine");
+  const open = el<HTMLButtonElement>("confirm-server-open");
+  if (block.kind === "unsettled") {
+    el("confirm-server-h").textContent = "andvari couldn’t load its settings";
+    el("confirm-server-lead").hidden = true;
+    el("confirm-server-origin").hidden = true;
+    el("confirm-server-body").textContent =
+      "It can’t tell which server you use right now, so it won’t sign in anywhere. Close this window and open it again in a minute.";
+    open.hidden = true;
+    notMine.hidden = true;
+    return;
+  }
+  el("confirm-server-h").textContent = "Confirm your server";
+  el("confirm-server-lead").hidden = false;
+  el("confirm-server-lead").textContent = block.keepable
+    ? "Before this update, andvari was set to use:"
+    : "This browser has a server address saved by an older version of andvari:";
+  const origin = el("confirm-server-origin");
+  origin.hidden = false;
+  origin.textContent = block.origin;
+  el("confirm-server-body").textContent = block.keepable
+    ? "andvari won’t sign in anywhere until you confirm it once, in Options. If it isn’t yours, choose “Not mine”."
+    : "andvari can’t keep a server choice in this browser mode (Firefox’s “Never remember history”), so it won’t sign in to another server in its place. To keep using this one, turn that setting off, restart Firefox and enter the address in Options. If it isn’t yours, choose “Not mine”.";
+  open.hidden = false;
+  open.textContent = block.keepable ? "Confirm in Options" : "Open Options";
+  notMine.hidden = false;
+  notMine.textContent = `Not mine — use ${new URL(DEFAULT_SERVER_URL).host} instead`;
+  open.focus();
 }
 
 function relocked(): void {
@@ -1087,6 +1136,11 @@ async function unlock(): Promise<void> {
     } else if (r?.code === "aborted") {
       // A server switch / lock landed mid-sign-in — the SW installed nothing; just re-render silently.
       await refresh();
+    } else if (r?.code === "confirm_server") {
+      // A15 review F1: a server is pending — nothing was sent. Clear the password and show the confirm route.
+      pw.value = "";
+      await refresh();
+      showMsg("info", unlockErrorCopy(r.code));
     } else {
       // E1-3: render the coded ladder (errors.ts), never the SW's raw `error` debug detail.
       showMsg("err", unlockErrorCopy(r?.code));
@@ -1433,6 +1487,11 @@ el("lock").addEventListener("click", async () => {
  *  AFTER tabs.create resolves: a closed popup's pending promise continuations never run. */
 async function openServerPage(path = ""): Promise<void> {
   const base = await currentServer();
+  if (base === null) {
+    // A15 review S3 / F1: no answer from the worker, or a server pending — open nothing (never a guessed default).
+    showMsg("err", "andvari can’t tell which server to open right now — close this window and try again.");
+    return;
+  }
   try {
     await chrome.tabs.create({ url: base + path });
   } catch {
@@ -1477,9 +1536,10 @@ el("personal-change-accept").addEventListener("click", async () => {
 el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
   const r = await ask({ type: "ping" });
-  setConn(r?.ok === true);
+  setConn(r?.ok === true, r?.code === "confirm_server");
   // #23: the conn-status twin's sentence — the old line leaked a raw epoch (`t=1752…`).
   if (r?.ok) showMsg("info", "Server reachable.");
+  else if (r?.code === "confirm_server") showMsg("err", CONFIRM_SERVER_FIRST); // A15 review F1: nothing was dialed
   // E1-3/extux-05: the one canonical unreachable sentence — never the raw exception text. (A
   // mid-restart SW → undefined shares this copy, mildly conflating SW death with the network;
   // accepted per design.)
@@ -1499,11 +1559,19 @@ document.addEventListener("keydown", (e) => {
  *  of the worker every open — never cached — so it shows the origin the worker actually dials. */
 async function renderServerOrigin(): Promise<void> {
   const info = await ask({ type: "serverInfo" });
-  const origin = info?.url || DEFAULT_SERVER_URL;
-  // A15: a server chosen before the update is not reconnected silently (the old value sat where a web page could have
-  // written it); the strip routes to Options, where the user reviews that address through the Trust Gate or drops it.
-  el("legacy-server-cta").hidden = !info?.legacy;
   const node = el("server-origin");
+  // A15 review F1 / S3: the header names the server in effect only when there is one. A pending server (the card below
+  // says why) or a worker that did not answer is said in words — never shown as the default, which would be a lie on
+  // an anti-phishing display.
+  const origin = info && typeof info.url === "string" && info.url && !info.block ? info.url : null;
+  if (origin === null) {
+    const why = info?.block ? "No server confirmed yet" : "Server unknown";
+    node.textContent = why;
+    node.title = why;
+    node.setAttribute("role", "note");
+    node.setAttribute("aria-label", why);
+    return;
+  }
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
   // a11y-webext--5: the element is a bare <span> (role=generic), and aria-label is PROHIBITED on a
@@ -1523,7 +1591,8 @@ async function renderServerOrigin(): Promise<void> {
 async function detectMissingHostGrant(): Promise<void> {
   let granted: boolean | null = null;
   try {
-    const pattern = originMatchPattern(await currentServer());
+    const server = await currentServer();
+    const pattern = server === null ? null : originMatchPattern(server);
     if (pattern) granted = await chrome.permissions.contains({ origins: [pattern] });
   } catch {
     /* permissions API unavailable — granted stays null (no detection, no false route) */
@@ -1532,13 +1601,21 @@ async function detectMissingHostGrant(): Promise<void> {
   if (shouldRouteToOptions(granted)) el("host-grant-cta").hidden = false;
 }
 
-el("legacy-server-cta").addEventListener("click", () => {
+// A15 review F1: the confirm route. Confirming is the Trust Gate's job, in Options (Connect is the only commit);
+// "Not mine" drops the pending server, and the default (named on the button) is then the server.
+el("confirm-server-open").addEventListener("click", () => {
   try {
     chrome.runtime.openOptionsPage();
   } catch {
     void chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
   }
   window.close();
+});
+el("confirm-server-not-mine").addEventListener("click", async () => {
+  const r = await ask({ type: "forgetLegacyServer" });
+  if (!r?.ok) showMsg("err", "Couldn’t change the server — close this window and try again.");
+  await renderServerOrigin();
+  await refresh();
 });
 
 el("host-grant-cta").addEventListener("click", () => {
@@ -1584,6 +1661,6 @@ void renderServerOrigin();
 void probeBioCapable().finally(() => void refresh());
 void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
-void ask({ type: "ping" }).then((r) => setConn(r?.ok === true));
+void ask({ type: "ping" }).then((r) => setConn(r?.ok === true, r?.code === "confirm_server"));
 void detectMissingHostGrant();
 void detectMissingBroadGrant();
