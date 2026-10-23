@@ -238,6 +238,7 @@ if [ "${EXT_FILES:-0}" -lt 20 ]; then
   exit 1
 fi
 EXT_OUT=$( (cd "$REPO_DIR/extension" && npm run typecheck && npm test) 2>&1 ) || { printf '%s\n' "$EXT_OUT" >&2; exit 1; }
+# TAP summary line: `npm test` pins --test-reporter=tap (newer Node prints spec even when piped).
 EXT_PASS=$(printf '%s\n' "$EXT_OUT" | grep -m1 -oE '^# pass [0-9]+' | grep -oE '[0-9]+') || true
 if [ "${EXT_PASS:-0}" -lt 200 ]; then
   printf '%s\n' "$EXT_OUT" >&2
