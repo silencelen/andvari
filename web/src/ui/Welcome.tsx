@@ -42,6 +42,7 @@ import {
 import { BrandSigil } from "./Sigil";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { MasterPasswordHint } from "./passwordadvice";
+import { abandonSignIn, pendingSignInBinding } from "./tabsession";
 import { meetsMasterPasswordFloor } from "./strength";
 import { useAutoLock } from "./useAutoLock";
 
@@ -514,6 +515,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEma
     e.preventDefault();
     setBusy(true);
     setErr("");
+    // A14 review 3: once login() has answered, the client holds a new device session's pair. Until saveSession below
+    // has recorded it, a failure must not leave that pair live in this tab's memory (abandonSignIn in the catch).
+    let signedIn = false;
+    let saved = false;
     try {
       const pre = await net(client.prelogin(email));
       const authKey = await Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams);
@@ -525,12 +530,15 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEma
           installId: installId(),
         }),
       );
-      // A14 review W3: login() held the pair in memory only. Bind the client to the account the server
-      // answered for, so a rotation before our saveSession below is written nowhere (not under whatever
-      // account's metadata this tab booted with), and the saveSession below is its only writer.
-      client.boundUserId = s.userId;
+      signedIn = true;
+      // A14 review W3: login() held the pair in memory only, and the saveSession below is its only writer.
+      // A14 review 3 (W-a): s.userId is the server's word until Account.unlock has checked the keys it came with, so
+      // until then the client is bound to a placeholder no account has: a rotation in that window is written nowhere
+      // and no persisted pair is adopted. The account the server answered for is bound only once unlock succeeded.
+      client.boundUserId = pendingSignInBinding();
       // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
       const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId, email));
+      client.boundUserId = s.userId;
       recordSelfIdentityPub(s.userId, account, email);
       // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
       // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1 dark-ship
@@ -556,6 +564,7 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEma
         // W3: the CURRENT pair — the sync above may already have rotated the one login returned.
         tokens: client.getTokens(),
       });
+      saved = true;
       const meta: LoginMeta = { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowNeedsV2: s.accountKeys.escrowNeedsV2 ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint };
       if (needsRecoveryCapture(s.accountKeys)) {
         // `authKey` IS the login authKey derived from the just-typed master password — reuse it as
@@ -574,6 +583,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEma
       if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, currentWrappedUvk: s.accountKeys.wrappedUvk, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword, onUpgraded: () => refreshCachedAccountKeys(client, account.userId) });
       onReady(account, store, meta);
     } catch (e) {
+      // A14 review 3: login() succeeded and something after it failed before the session was saved (unlock refused the
+      // keys, the first sync failed): revoke the pair it got and drop it, rather than keep it live in memory.
+      if (signedIn && !saved) void abandonSignIn(client);
       if (e instanceof ApiError && e.code === "totp_required") {
         // §2.6 row 1 (origin-independent): the account has server-TOTP enrolled; the
         // password checked out and the server additionally wants the current code.

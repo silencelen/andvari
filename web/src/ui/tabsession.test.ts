@@ -2,12 +2,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiClient, type Tokens } from "../api/client";
-import { loadSession, makeClient, resetTabClaim, saveSession, type Session } from "./session";
+import { clearSession, lockRevokeUnconfirmed, loadSession, makeClient, recordLockRevoke, resetTabClaim, saveSession, type Session } from "./session";
 import {
+  abandonSignIn,
   adoptSharedPair,
   dropOnSignOutElsewhere,
   idleTimerUserId,
   lockTabTokens,
+  pendingSignInBinding,
   revokeForSignOut,
   storageVerdict,
 } from "./tabsession";
@@ -111,6 +113,56 @@ describe("W1 — a sign-out with no pair never POSTs unauthenticated; the lock's
     const seen = server();
     expect(await revokeForSignOut(new ApiClient("", PAIR), null)).toBe(true);
     expect(seen.logouts).toEqual(["Bearer acc-1"]);
+  });
+});
+
+describe("W-b (A14 review 3) — the lock's revoke result outlives a reload, in the tab's sessionStorage", () => {
+  it("a lock-time revoke the server did not confirm is still reported after a reload (a new App, no in-memory record)", async () => {
+    server({ logoutStatus: 500 });
+    const client = new ApiClient("", PAIR);
+    recordLockRevoke(UID, "pending"); // App records it as it locks
+    const { revoked: atLock } = await lockTabTokens(client, { flush: null, flushWaitMs: 10, revoke: true });
+    recordLockRevoke(UID, (await atLock) ? "confirmed" : "unconfirmed"); // ...and the answer when it lands
+    // The reload: a fresh client with no pair and no in-memory lock record; only sessionStorage remains.
+    resetTabClaim();
+    const seen = server();
+    expect(await revokeForSignOut(new ApiClient("", null), null, lockRevokeUnconfirmed(UID))).toBe(false);
+    expect(seen.logouts, "still nothing POSTed unauthenticated").toEqual([]);
+  });
+
+  it("a reload before the server answered counts as unconfirmed: the answer can never arrive", async () => {
+    recordLockRevoke(UID, "pending");
+    expect(lockRevokeUnconfirmed(UID)).toBe(true);
+    expect(await revokeForSignOut(new ApiClient("", null), null, lockRevokeUnconfirmed(UID))).toBe(false);
+  });
+
+  it("a confirmed lock-time revoke, another account's record, or none at all reports confirmed", async () => {
+    recordLockRevoke(UID, "unconfirmed");
+    recordLockRevoke(UID, "confirmed");
+    expect(lockRevokeUnconfirmed(UID)).toBe(false);
+    recordLockRevoke("22222222-2222-4222-8222-222222222222", "unconfirmed");
+    expect(lockRevokeUnconfirmed(UID), "another account's lock is not this sign-out's").toBe(false);
+    expect(lockRevokeUnconfirmed(null)).toBe(false);
+    expect(await revokeForSignOut(new ApiClient("", null), null, lockRevokeUnconfirmed(UID))).toBe(true);
+  });
+
+  it("the record lives in sessionStorage, never in localStorage, and a sign-out's clearSession removes it", () => {
+    recordLockRevoke(UID, "unconfirmed");
+    expect(sessionStorage.length).toBe(1);
+    expect(localStorage.length).toBe(0);
+    clearSession();
+    expect(lockRevokeUnconfirmed(UID)).toBe(false);
+  });
+
+  it("App records the lock's revoke in the tab, reads it at sign-out, and drops it at unlock", () => {
+    const lockPerTab = appTsx.slice(appTsx.indexOf("const lockPerTab = useCallback"), appTsx.indexOf("const lockLocal = useCallback"));
+    expect(lockPerTab).toContain('recordLockRevoke(meta.userId, "pending");');
+    expect(lockPerTab).toContain('recordLockRevoke(meta.userId, ok ? "confirmed" : "unconfirmed");');
+    expect(lockPerTab.indexOf("if (lockRevokeRef.current !== revoked) return;")).toBeLessThan(lockPerTab.indexOf('recordLockRevoke(meta.userId, ok ?'));
+    const signOut = appTsx.slice(appTsx.indexOf("const signOut = useCallback"), appTsx.indexOf("const lockChannelRef = "));
+    expect(signOut).toContain("revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid))");
+    const onUnlocked = appTsx.slice(appTsx.indexOf("const onUnlocked = "), appTsx.indexOf("const signOut = useCallback"));
+    expect(onUnlocked).toContain("clearLockRevoke();");
   });
 });
 
@@ -272,11 +324,15 @@ describe("W3 — the caller's saveSession is the only writer of a fresh login pa
     expect(loadSession(), "login() persisted nothing: X's metadata is untouched").toEqual(meta(X, null));
     expect(everywhere()).not.toContain("y-ref");
 
-    // Welcome binds the client to the account that signed in; a rotation before its saveSession (the first sync) is
-    // still not written under X.
-    client.boundUserId = s.userId;
+    // A14 review 3 (W-a): until Account.unlock has checked the keys the login came with, Welcome binds the client to a
+    // placeholder no account has - a rotation is written nowhere. Then it binds the account that signed in; a rotation
+    // before its saveSession (the first sync) is still not written under X.
+    client.boundUserId = pendingSignInBinding();
     await client.accountKeys();
     expect(rotated).toBe(1);
+    expect(everywhere()).not.toContain("y-ref");
+    client.boundUserId = s.userId; // unlock succeeded
+    await client.accountKeys();
     expect(everywhere()).not.toContain("y-ref");
     expect(loadSession()?.userId).toBe(X);
 
@@ -284,6 +340,50 @@ describe("W3 — the caller's saveSession is the only writer of a fresh login pa
     saveSession({ ...meta(Y, client.getTokens()), email: "y@example.com" });
     expect(loadSession()?.userId).toBe(Y);
     expect(loadSession()?.tokens?.refreshToken).toBe("y-ref1");
+  });
+
+  it("W-a: before unlock checks it, the login's userId is no binding - even when it names the persisted account", async () => {
+    // A server that answers with X's userId for a login that is not X's: until Account.unlock has checked the keys, the
+    // client must not treat X's persisted session as its own (no rotation written into it, no persisted pair adopted).
+    localStorage.setItem(`andvari.cacheOptIn.${X}`, "1");
+    saveSession(meta(X, { accessToken: "x-acc", refreshToken: "x-ref" }));
+    const client = makeClient(null, "");
+    vi.stubGlobal("fetch", async (url: string | URL) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/auth/login")) return jsonResp(200, { ...ySession, userId: X });
+      if (u.endsWith("/api/v1/auth/refresh")) return jsonResp(200, { accessToken: "y-acc9", refreshToken: "y-ref9" });
+      if (u.endsWith("/api/v1/account/keys")) return jsonResp(401, { error: "unauthorized" });
+      return jsonResp(404, {});
+    });
+    const s = await client.login("y@example.com", "auth", "test");
+    client.boundUserId = pendingSignInBinding();
+    expect(client.boundUserId).not.toBe(s.userId);
+    expect(client.boundUserId, "a fresh placeholder each time").not.toBe(pendingSignInBinding());
+    await client.accountKeys().catch(() => {});
+    expect(loadSession()?.tokens?.refreshToken, "X's persisted pair is neither replaced nor adopted").toBe("x-ref");
+  });
+
+  it("a sign-in that fails after login() revokes the pair it got and drops it, writing nothing", async () => {
+    localStorage.setItem(`andvari.cacheOptIn.${X}`, "1");
+    saveSession(meta(X, { accessToken: "x-acc", refreshToken: "x-ref" })); // another tab's live shared pair for X
+    const client = makeClient(null, "");
+    const seen = { logouts: [] as (string | null)[] };
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/auth/login")) return jsonResp(200, { ...ySession, userId: X });
+      if (u.endsWith("/api/v1/auth/logout")) {
+        seen.logouts.push((init?.headers as Record<string, string> | undefined)?.["Authorization"] ?? null);
+        return jsonResp(204, {});
+      }
+      return jsonResp(404, {});
+    });
+    await client.login("y@example.com", "auth", "test");
+    client.boundUserId = X; // even after unlock had bound it, a later failure must not write under X
+    expect(await abandonSignIn(client)).toBe(true);
+    expect(seen.logouts).toEqual(["Bearer y-acc"]);
+    expect(client.getTokens()).toBeNull();
+    expect(loadSession()?.tokens?.refreshToken, "the persisted session is untouched").toBe("x-ref");
+    expect(abandonSignIn(client), "nothing held, nothing to revoke").toBeNull();
   });
 
   it("login() fires no onTokens; register's pair is installed without persisting either", async () => {
@@ -299,7 +399,17 @@ describe("W3 — the caller's saveSession is the only writer of a fresh login pa
 
   it("Welcome binds the client and saves the CURRENT pair, for both sign-in and register", () => {
     const signIn = welcomeTsx.slice(welcomeTsx.indexOf("function SignIn("), welcomeTsx.indexOf("const ADMIN_PIN_PENDING"));
-    expect(signIn.indexOf("client.boundUserId = s.userId;")).toBeGreaterThan(signIn.indexOf("client.login(email, authKey, deviceName()"));
+    // W-a: a placeholder between login() and Account.unlock; the server's userId only after unlock succeeded.
+    const login = signIn.indexOf("client.login(email, authKey, deviceName()");
+    const pending = signIn.indexOf("client.boundUserId = pendingSignInBinding();");
+    const unlock = signIn.indexOf("await Account.unlock(s.userId");
+    const bind = signIn.indexOf("client.boundUserId = s.userId;");
+    expect(login).toBeGreaterThan(0);
+    expect(pending).toBeGreaterThan(login);
+    expect(unlock).toBeGreaterThan(pending);
+    expect(bind).toBeGreaterThan(unlock);
+    // The pre-existing leak: a sign-in that fails after login() revokes and drops the pair it got.
+    expect(signIn).toContain("if (signedIn && !saved) void abandonSignIn(client);");
     expect(signIn).toContain("tokens: client.getTokens(),");
     expect(welcomeTsx).toContain("client.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });");
     expect(welcomeTsx).not.toContain("client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });");
@@ -313,6 +423,6 @@ describe("W1 wiring in App", () => {
     expect(lockPerTab).toContain("lockRevokeRef.current = revoked;");
     expect(lockPerTab).toContain("LOCK_REVOKE_UNCONFIRMED");
     const signOut = appTsx.slice(appTsx.indexOf("const signOut = useCallback"), appTsx.indexOf("const lockChannelRef = "));
-    expect(signOut).toContain('kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current) : true');
+    expect(signOut).toContain('kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid)) : true');
   });
 });
