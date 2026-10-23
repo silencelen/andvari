@@ -55,6 +55,7 @@ import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carrie
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
 import { captureBinding, requestHost } from "./senderorigin";
+import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
@@ -611,6 +612,9 @@ async function benchPinParams(): Promise<KdfParams> {
 // pair here and in connector.ts had already drifted on `error`'s optionality.
 let pendingBio: { req: BioReq; resolve: (r: BioResult) => void; windowId?: number } | null = null;
 const CONNECTOR_URL = chrome.runtime.getURL("connector.html");
+/** This extension's own page prefix (`chrome-extension://<id>/`, `moz-extension://<uuid>/`) — the
+ *  A14 sender gate's notion of "one of our pages" (sendergate.ts). */
+const EXTENSION_BASE = chrome.runtime.getURL("");
 /** bug-ext-gating--4: the RP-ID claim rides the manifest's install-time host permission for the
  *  reference instance (design 2026-07-18 §3 — deliberately independent of the configured server, so
  *  a self-hoster's domain never has to be dragged through an optional-permission prompt). But that
@@ -1751,12 +1755,20 @@ async function handle(msg: Req, sender: chrome.runtime.MessageSender): Promise<u
   await ensureLoaded();
   const res = await dispatch(msg, sender);
   // Policy idle window: only genuine user activity re-arms the lock. Automated traffic
-  // (pageInfo on every load, the popup's 1 s TOTP poll) must not defer autolock while away.
-  if (session && msg.type !== "lock" && !PASSIVE_MSGS.has(msg.type)) armAutoLock();
+  // (pageInfo on every load, the popup's 1 s TOTP poll) must not defer autolock while away —
+  // and neither does a message the sender gate refused (A14): a page-side context spamming a
+  // popup-only type is not the user.
+  if (session && msg.type !== "lock" && !PASSIVE_MSGS.has(msg.type) && senderMaySend(msg.type, sender, EXTENSION_BASE)) armAutoLock();
   return res;
 }
 
 async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  // Security review 2026-10, A14 (F3/F4/F11): ONE structural gate before any handler. A type no
+  // content script sends (unlock, the quick-unlock lanes, lock/signOut, status, cardItems, …) is
+  // answered with its own refusal shape unless sender.url is one of this extension's pages. The
+  // per-handler checks below stay as a second layer. See sendergate.ts.
+  const gate = senderGate(msg.type, sender, EXTENSION_BASE);
+  if (gate.refused) return gate.answer;
   switch (msg.type) {
     case "ping": {
       const p = await api.clientPolicy(); // host_permissions + reachability
