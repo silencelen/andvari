@@ -14,6 +14,8 @@ import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.crypto.LifecycleProof
+import io.silencelen.andvari.core.crypto.RemovalProof
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountStatePut
 import io.silencelen.andvari.core.model.AccountStateResponse
@@ -214,5 +216,45 @@ class AccountStateTest {
         assertEquals(newKey.identityPub, merged.contact(u)?.identityPub, "the newer human act wins, not the faster clock")
         // The same pin re-saved does not churn its time.
         assertEquals(5_000, AccountState.withContact(oldPin, contact(u, 1_000)).contact(u)?.verifiedAt)
+    }
+
+    // ---- A13 review RF3: a consumed nonce keeps the EARLIEST time any device recorded for it ----
+
+    private val nonceVault = "66666666-6666-4666-8666-666666666666"
+
+    @Test
+    fun withConsumedKeepsTheEarliestTimeForARepeatedNonce() {
+        val doc = AccountState.empty(me).copy(seq = 1, consumedNonces = mapOf(nonceVault to listOf(ConsumedNonce("v1-nonce-a", 100))))
+        // This device's own row for the same nonce is LATER (it consumed it after another device did): the record stays put.
+        val later = AccountState.withConsumed(doc, mapOf(nonceVault to listOf(ConsumedNonce("v1-nonce-a", 5_000), ConsumedNonce("v1-nonce-c", 200))))
+        assertEquals(listOf(ConsumedNonce("v1-nonce-c", 200), ConsumedNonce("v1-nonce-a", 100)), later.consumedNonces[nonceVault])
+        // ...and an EARLIER local row moves the record back to it.
+        val earlier = AccountState.withConsumed(
+            doc.copy(consumedNonces = mapOf(nonceVault to listOf(ConsumedNonce("v1-nonce-a", 5_000)))),
+            mapOf(nonceVault to listOf(ConsumedNonce("v1-nonce-a", 100))),
+        )
+        assertEquals(listOf(ConsumedNonce("v1-nonce-a", 100)), earlier.consumedNonces[nonceVault])
+    }
+
+    @Test
+    fun aLaterReRecordingCannotLaunderAReplayedV1RemovalIntoTheWindow() {
+        // Device D consumed a v1 removal at t=1_000. Another device of the account later wrote the SAME nonce with a fresh
+        // time (an N-1 build's already_recorded, or its own valid_legacy) at t=50_000_000. A device that saw the vault go
+        // live again at t=40_000_000 is then shown the proof replayed: for a v1 proof the record's time is the only time,
+        // so it must still be D's, and the replay is the anomaly, not a calm already_recorded.
+        val key = crypto.randomBytes(32)
+        val nonce = "v1-nonce-a"
+        val d = AccountState.empty(me).copy(seq = 3, consumedNonces = mapOf(nonceVault to listOf(ConsumedNonce(nonce, 1_000))))
+        val e = AccountState.empty(me).copy(seq = 4, consumedNonces = mapOf(nonceVault to listOf(ConsumedNonce(nonce, 50_000_000))))
+        for ((local, served) in listOf(d to e, e to d)) {
+            val at = AccountState.merge(me, local, served, 0).doc.consumedNonces.getValue(nonceVault).associate { it.nonce to it.issuedAt }
+            assertEquals(1_000L, at[nonce], "the earliest consumption survives the merge, whichever copy is served")
+            val decision = RemovalProof.decide(
+                crypto, key, nonceVault, me, "removed", 1, LifecycleProof.remove(crypto, key, nonceVault, me, nonce), nonce, null,
+                consumed = emptySet(), consumedAccount = at.keys, liveSince = 40_000_000, now = 50_000_100, consumedAccountAt = at,
+            )
+            assertEquals(RemovalProof.Verdict.ANOMALY, decision.verdict, "a replay after the re-add is the anomaly")
+            assertEquals("window", decision.step)
+        }
     }
 }
