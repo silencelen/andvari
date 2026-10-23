@@ -2,8 +2,10 @@
 #
 # One image = server shadowJar + built web assets + recovery-cli as a subcommand:
 #   docker run ... ghcr.io/silencelen/andvari:<ver>                    # runs the server
-#   docker run --rm --network none ghcr.io/silencelen/andvari:<ver> \
+#   docker run --rm --network none --log-driver none ghcr.io/silencelen/andvari:<ver> \
 #       recovery-cli keygen                                            # escrow ceremony
+#   (--log-driver none: keygen prints the org recovery seed, and docker copies an attached
+#   container's stdout to its log driver; deploy/bringup.sh runs it the same way)
 #
 # Multi-arch (amd64/arm64) friendly: the two build stages are pinned to
 # $BUILDPLATFORM (jars and vite output are architecture-independent), so a

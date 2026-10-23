@@ -187,8 +187,11 @@ Everything lives in `./data` next to `docker-compose.yml`:
 - `data/andvari.db` — the SQLite database (accounts, ciphertext items, audit log)
 - `data/blobs/` — encrypted attachment blobs
 
-Both are ciphertext (a stolen backup is as useless to a thief as the live server is —
-spec 05 T7), but they are the *only* copy of your household's vaults. Back them up:
+The vault contents in both are ciphertext the server cannot read (spec 05 T7), but a copy of
+the database is not harmless to a thief: it also holds every member's sign-in TOTP seed in
+plaintext and the login verifiers a guess at a master password can be checked against offline
+(the master password's Argon2id cost is what slows that down). Keep backups as private as the
+live `./data`, and remember they are the *only* copy of your household's vaults. Back them up:
 
 ```sh
 # consistent DB snapshot, safe against the live WAL (needs sqlite3 on the host):
@@ -201,6 +204,10 @@ mv -f ./data/backup/andvari-nightly.db.tmp ./data/backup/andvari-nightly.db
 `./data` is owner-only: the container makes it mode 700, owned by its `andvari` user
 (uid 10001), and the database files 0600, because the database also holds the members'
 sign-in TOTP seeds and login verifiers. Run the snapshot and the copy as root (or that uid).
+Under **rootless docker** the container's uid 10001 is not 10001 on the host: it maps to a
+subordinate uid (the first one in your `/etc/subuid` range plus 10000), so `./data` belongs to
+that uid and your own account cannot read it. Run the host-side snapshot and copy as real root,
+or as that mapped subordinate uid.
 
 Cron that nightly, and alert yourself when it fails — a backup you never notice
 breaking is not a backup. Restore = put `andvari.db` + `blobs/` back under `./data`

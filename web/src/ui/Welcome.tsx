@@ -525,6 +525,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEma
           installId: installId(),
         }),
       );
+      // A14 review W3: login() held the pair in memory only. Bind the client to the account the server
+      // answered for, so a rotation before our saveSession below is written nowhere (not under whatever
+      // account's metadata this tab booted with), and the saveSession below is its only writer.
+      client.boundUserId = s.userId;
       // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
       const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId, email));
       recordSelfIdentityPub(s.userId, account, email);
@@ -549,7 +553,8 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEma
         personalVaultId: account.personalVaultId,
         email,
         isAdmin: s.isAdmin,
-        tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
+        // W3: the CURRENT pair — the sync above may already have rotated the one login returned.
+        tokens: client.getTokens(),
       });
       const meta: LoginMeta = { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowNeedsV2: s.accountKeys.escrowNeedsV2 ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint };
       if (needsRecoveryCapture(s.accountKeys)) {
@@ -877,7 +882,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       // BEFORE anything can bounce us back to the form (a resubmit could only yield "invite used").
       secretRef.current = recoverySecret;
       clearPendingEnroll();
-      client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
+      // A14 review W3: installed without the persistence hook and bound to the new account; the
+      // saveSession right below is the only writer of this pair.
+      client.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
+      client.boundUserId = s.userId;
       // No breach check on the new master password (security review 2026-10, root cause C): its
       // SHA-1 prefix would go to this server, which now holds the Argon2id verifier for it.
       saveSession({
@@ -886,7 +894,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         personalVaultId: request.personalVault.vaultId,
         email,
         isAdmin: s.isAdmin,
-        tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
+        tokens: client.getTokens(),
       });
       const store = new VaultStore(client, account);
       await store.sync().catch(() => {});

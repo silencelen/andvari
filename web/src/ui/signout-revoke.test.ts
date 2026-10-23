@@ -29,12 +29,14 @@ function closure(src: string, name: string, until: string): string {
 describe("App.signOut — revokes before the local teardown, and only for a USER sign-out", () => {
   const signOut = closure(appTsx, "signOut", "lockChannelRef");
 
-  it("routes the user sign-out through revokeSessionBestEffort", () => {
-    expect(signOut).toContain("revokeSessionBestEffort(clientRef.current)");
+  it("routes the user sign-out through revokeForSignOut (revokeSessionBestEffort when a pair is held)", () => {
+    // A14 review W1: with no pair left (a per-tab lock dropped it) the lock's own result is reported, and
+    // nothing is POSTed unauthenticated — behaviour-tested in tabsession.test.ts.
+    expect(signOut).toContain("revokeForSignOut(clientRef.current, lockRevokeRef.current)");
   });
 
   it("gates it on kind === \"user\" — an expired/revoked session is already dead server-side", () => {
-    expect(signOut).toMatch(/kind === "user" \? await revokeSessionBestEffort\(/);
+    expect(signOut).toMatch(/kind === "user" \? await revokeForSignOut\(/);
   });
 
   it("tells the member when the server did NOT confirm the revocation (security review 2026-10)", () => {
@@ -46,8 +48,8 @@ describe("App.signOut — revokes before the local teardown, and only for a USER
   });
 
   it("issues it BEFORE the teardown — logout() reads the pair synchronously at call time", () => {
-    expect(signOut.indexOf("revokeSessionBestEffort(")).toBeLessThan(signOut.indexOf("clearSession()"));
-    expect(signOut.indexOf("revokeSessionBestEffort(")).toBeLessThan(signOut.indexOf("setTokens(null)"));
+    expect(signOut.indexOf("revokeForSignOut(")).toBeLessThan(signOut.indexOf("clearSession()"));
+    expect(signOut.indexOf("revokeForSignOut(")).toBeLessThan(signOut.indexOf("setTokens(null)"));
   });
 });
 

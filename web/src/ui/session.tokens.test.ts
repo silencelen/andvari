@@ -232,13 +232,10 @@ describe("A14 F5 — lock revokes and drops a per-tab pair; unlock is then a ful
   });
 
   it("per-tab lock: usage flushed first (H33), then revoked while the pair is still held, then dropped", () => {
+    // The order itself is behaviour-tested on tabsession.lockTabTokens (tabsession.test.ts); this pins that the
+    // lock hands it the Vault's flush and lands on the token-less unlock card.
     expect(lockPerTab.length).toBeGreaterThan(0);
-    const flush = lockPerTab.indexOf("usageFlushRef.current");
-    const revoke = lockPerTab.indexOf("revokeSessionBestEffort(client)");
-    const drop = lockPerTab.indexOf("client.setTokens(null)");
-    expect(flush).toBeGreaterThan(-1);
-    expect(revoke).toBeGreaterThan(flush);
-    expect(drop).toBeGreaterThan(revoke);
+    expect(lockPerTab).toContain("lockTabTokens(clientRef.current, { flush: usageFlushRef.current, flushWaitMs: LOCK_USAGE_FLUSH_WAIT_MS, revoke })");
     expect(lockPerTab).toContain("clearTabTokens()");
     expect(lockPerTab).toContain("session: { ...meta, tokens: null }");
   });
@@ -268,6 +265,6 @@ describe("A14 F5 — lock revokes and drops a per-tab pair; unlock is then a ful
 
   it("a tab that rode the shared pair locks without revoking when another tab turns the offline copy off", () => {
     const listener = appTsx.slice(appTsx.indexOf("const onStorage = (e: StorageEvent) => {"), appTsx.indexOf('window.addEventListener("storage", onStorage);'));
-    expect(listener).toContain("void lockPerTab(\"The offline copy was turned off in another tab — sign in again.\", after, false);");
+    expect(listener).toContain("void lockPerTab(\"The offline copy was turned off in another tab — sign in again.\", v.meta, false);");
   });
 });

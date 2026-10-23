@@ -101,6 +101,45 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     expect(client.getTokens()).toEqual({ accessToken: "a1", refreshToken: "r1" });
   });
 
+  it("A14 review W2: a refresh in flight when the pair is dropped never resurrects it", async () => {
+    // A 401 starts the rotation (e.g. the usage flush running past its cap); the per-tab lock then drops
+    // the pair (setTokens(null)) and clears the tab's slot. The rotation lands afterwards: it must not
+    // re-install the pair, and must not hand it to the persistence hook (which would rewrite the slot).
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const server = fakeAuthServer({ accessToken: "a0", refreshToken: "r0" }, { beforeRotate: () => gate });
+    vi.stubGlobal("fetch", vi.fn(server.fetchImpl));
+    const onTokens = vi.fn();
+    const client = new ApiClient("http://server", { ...STALE }, onTokens);
+
+    const call = client.accountKeys().catch((e: unknown) => e);
+    await flush();
+    expect(server.state.refreshPosts).toBe(1);
+    client.setTokens(null); // the lock
+    onTokens.mockClear();
+    release();
+    await call;
+
+    expect(client.getTokens()).toBeNull();
+    expect(onTokens).not.toHaveBeenCalled();
+  });
+
+  it("A14 review W2: a fresh sign-in installed while an old refresh is in flight is not overwritten by it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const server = fakeAuthServer({ accessToken: "a0", refreshToken: "r0" }, { beforeRotate: () => gate });
+    vi.stubGlobal("fetch", vi.fn(server.fetchImpl));
+    const client = new ApiClient("http://server", { ...STALE });
+
+    const call = client.accountKeys().catch((e: unknown) => e);
+    await flush();
+    client.useSessionTokens({ accessToken: "fresh-a", refreshToken: "fresh-r" });
+    release();
+    await call;
+
+    expect(client.getTokens()).toEqual({ accessToken: "fresh-a", refreshToken: "fresh-r" });
+  });
+
   it("sequential expiries rotate again — the in-flight handle is released after settling", async () => {
     const server = fakeAuthServer({ accessToken: "a0", refreshToken: "r0" });
     vi.stubGlobal("fetch", vi.fn(server.fetchImpl));

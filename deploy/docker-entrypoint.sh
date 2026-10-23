@@ -37,8 +37,10 @@ prepare_data_dir() {
   mkdir -p "$dir"
   if [ "$(id -u)" = "0" ]; then
     chown -R andvari:andvari "$dir"
-    chmod 700 "$dir"
-  elif ! chmod 700 "$dir" 2>/dev/null; then
+  fi
+  # Guarded in both branches (A14 review Wd): under `set -e` an unguarded chmod that fails (a read-only
+  # or root-squashed bind mount) would kill the entrypoint before the server starts.
+  if ! chmod 700 "$dir" 2>/dev/null; then
     echo "WARN: could not restrict $dir to its owner (chmod 700) — fix the bind mount's mode on the host" >&2
   fi
   for f in "$db"*; do
