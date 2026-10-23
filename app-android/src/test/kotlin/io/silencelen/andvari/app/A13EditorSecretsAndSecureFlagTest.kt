@@ -11,6 +11,7 @@ import kotlin.test.assertTrue
  *  - q27: the item editor's secret fields (password, TOTP seed, card number, security code) never go into
  *    `rememberSaveable` — the saved-instance Bundle is held by system_server, outside the app's lock and zeroization.
  *    They live in the ViewModel's editor session instead, cleared when a session opens or closes (and so on lock).
+ *    The A13 review (RF5) added the notes (a note item's whole payload) and the attachment list (each ref's fileKey).
  *  - q30: FLAG_SECURE is cleared for the whole window on the Autofill Status screen, so nothing that shows vault
  *    values (the attention area) may be composed there.
  */
@@ -30,6 +31,23 @@ class A13EditorSecretsAndSecureFlagTest {
             assertFalse(line.contains("rememberSaveable"), "$seed is held in rememberSaveable (saved-instance state): $line")
             assertTrue(line.contains("vm.editorSecretState("), "$seed must live in the ViewModel's editor session: $line")
         }
+    }
+
+    @Test
+    fun theEditorsNotesAndAttachmentKeysAreNeverSaveable() {
+        // A13 review RF5 (a q27 variant): `notes` is the whole payload of a note item, and every AttachmentRef in the
+        // editor's attachment list carries the file's decryption key (fileKey). Both went into saved-instance state.
+        for (seed in listOf("initial.notes", "initial.attachments")) {
+            assertTrue(editor.contains(seed), "the editor still seeds from $seed (pin moved?)")
+            val line = editor.lines().single { it.trimStart().startsWith("var ") && it.contains(seed) }
+            assertFalse(line.contains("rememberSaveable"), "$seed is held in rememberSaveable (saved-instance state): $line")
+            assertTrue(line.contains("vm.editorSecretState("), "$seed must live in the ViewModel's editor session: $line")
+        }
+        val main = src("MainActivity.kt")
+        assertFalse(main.contains("attachmentListSaver"), "a saved-state Saver still serializes AttachmentRef (and its fileKey)")
+        assertFalse(Regex("""rememberSaveable\([^)]*stateSaver""").containsMatchIn(editor), "the editor still saves a custom-Saver value")
+        // The ViewModel holds them in the same session map the four secrets use, typed, so a list fits.
+        assertTrue(vm.contains("fun <T> editorSecretState(field: String, seed: () -> T): MutableState<T>"), "editorSecretState is not generic")
     }
 
     @Test
