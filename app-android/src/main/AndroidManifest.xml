@@ -95,6 +95,14 @@
             android:noHistory="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Andvari.Translucent" />
+        <!-- Security review 2026-10, A14 (F7): the one-tap confirm before an androidapp:// login fills
+             an app that is neither a system app nor Play-installed. Result-returning dataset auth. -->
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.AppFillConfirmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.Andvari.Translucent" />
         <!-- "Trust {browser} to fill here" confirm, launched from the autofill dropdown row. -->
         <activity
             android:name="io.silencelen.andvari.app.autofill.TrustBrowserActivity"

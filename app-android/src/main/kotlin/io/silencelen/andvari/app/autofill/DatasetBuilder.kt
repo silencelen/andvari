@@ -22,6 +22,7 @@ import com.silencelen.andvari.R
 import io.silencelen.andvari.app.MainActivity
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.app.browserLabel
+import io.silencelen.andvari.core.client.autofill.AppFillGate
 import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import io.silencelen.andvari.core.client.autofill.CardFill
 import io.silencelen.andvari.core.client.autofill.FieldKind
@@ -245,6 +246,9 @@ object DatasetBuilder {
         // checkout. Zero buildable cards → cap stays MAX_DATASETS (logins are never starved
         // for cards that don't exist); the counting rail degrades to exactly that.
         val loginCap = loginDatasetCap(runCatching { countBuildableCardDatasets(items, form, trusted) }.getOrDefault(0))
+        // A14 (F7): a non-browser app can only match `androidapp://` logins (package-only); whether
+        // they fill silently is decided once, here, from PackageManager (never the host's structure).
+        val appGate = appGateFor(context, form)
         val out = ArrayList<Dataset>()
         for (item in items) {
             if (out.size >= loginCap) break
@@ -265,7 +269,13 @@ object DatasetBuilder {
             if (userFields.isEmpty() && passFields.isEmpty()) continue
 
             val spec = specForIndex(specs, out.size, maxInline)
-            val dataset = buildDataset(context, item, username, password, userFields, passFields, spec)
+            val dataset = if (appGate != null && appGate.verdict != AppFillGate.Verdict.SILENT) {
+                // Not a system app, not Play-installed, not a confirmed (package, signer), or a lookup
+                // failed: the row carries no credential; the tap opens the one-tap confirm.
+                confirmDataset(context, item, form, userFields + passFields, appGate, spec)
+            } else {
+                buildDataset(context, item, username, password, userFields, passFields, spec)
+            }
             if (dataset != null) out.add(dataset)
         }
         // Card datasets ride AFTER the login datasets, under the same cap. runCatching rail:
@@ -462,6 +472,92 @@ object DatasetBuilder {
         }
         return runCatching { b.build() }.getOrNull()
     }
+
+    // ---- A14 (F7): package-only app fills ----
+
+    /**
+     * The app-identity verdict for [form]'s requesting package, or null for a known browser (browsers
+     * never match app URIs — [UriMatch]). PackageManager, read in this process; a lookup that throws
+     * becomes [AppFillGate.Identity.lookupFailed] and so a confirm, never a silent fill.
+     */
+    internal fun appGateFor(context: Context, form: ParsedForm): AppFillBinding.AppGate? {
+        if (form.appPackage in BrowserCertPins.TABLE) return null
+        val identity = runCatching { AppIdentityLookup.lookup(context, form.appPackage) }
+            .getOrElse { AppFillGate.Identity(form.appPackage, null, null, null, null, lookupFailed = true) }
+        val remembered = runCatching { AppSignerBindings.rememberedDigest(context, form.appPackage) }.getOrNull()
+        val installerLabel = runCatching { AppIdentityLookup.installerLabel(context, identity.installer) }.getOrNull()
+        return AppFillBinding.AppGate(identity, AppFillGate.decide(identity, remembered), installerLabel)
+    }
+
+    /**
+     * A confirm row for one matched app login: the item's name and username as usual, NULL values
+     * for its fields (no credential leaves until the confirm), and an authentication IntentSender to
+     * [AppFillConfirmActivity] whose BASE intent carries the parsed form and the service's identity
+     * verdict (root cause G). Result-returning like the unlock row, so no NEW_TASK; MUTABLE for the
+     * same platform reason as the other dataset-auth rows, while the activity reads only the bake.
+     */
+    @Suppress("DEPRECATION") // legacy setValue overloads pre-33, as in buildDatasetLegacy
+    private fun confirmDataset(
+        context: Context,
+        item: VaultItem,
+        form: ParsedForm,
+        fields: List<ParsedField>,
+        appGate: AppFillBinding.AppGate,
+        inlineSpec: InlinePresentationSpec?,
+    ): Dataset? = runCatching {
+        if (fields.isEmpty()) return null
+        val username = item.doc.login?.username?.takeIf { it.isNotEmpty() }
+        val title = item.doc.name.ifBlank { username ?: "login" }
+        val subtitle = if (appGate.verdict == AppFillGate.Verdict.CONFIRM_SIGNER_CHANGED) "This app's signer changed — tap to check" else "Tap to confirm this app"
+        val menu = presentationRow(context, title, subtitle)
+        val inline = if (Build.VERSION.SDK_INT >= 30 && inlineSpec != null) buildInline(context, title, subtitle, inlineSpec) else null
+        val flags = if (Build.VERSION.SDK_INT >= 31) {
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
+        } else {
+            PendingIntent.FLAG_CANCEL_CURRENT
+        }
+        val launch = AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, item.itemId)
+        val pi = PendingIntent.getActivity(context, CONFIRM_REQUEST_BASE + confirmCounter.getAndIncrement(), launch, flags)
+        val b = if (Build.VERSION.SDK_INT >= 33) {
+            val pres = Presentations.Builder().setMenuPresentation(menu)
+            if (inline != null) pres.setInlinePresentation(inline)
+            Dataset.Builder(pres.build())
+        } else {
+            Dataset.Builder(menu)
+        }
+        for (f in fields) {
+            when {
+                Build.VERSION.SDK_INT >= 33 -> b.setValue(f.id, null)
+                Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(f.id, null, menu, inline)
+                else -> b.setValue(f.id, null)
+            }
+        }
+        b.setAuthentication(pi.intentSender)
+        b.build()
+    }.getOrNull()
+
+    /**
+     * The authentication RESULT for a confirmed app login: the item's username and password for the
+     * baked form's fields, matched exactly as [buildDatasets] matches them (package-only, so no web
+     * host). Null when the item no longer matches this form or carries nothing to fill.
+     */
+    @Suppress("DEPRECATION") // 2-arg setValue (Dataset.Field is API 33+)
+    fun appLoginResultDataset(item: VaultItem, form: ParsedForm): Dataset? {
+        if (item.doc.type != "login" || form.appPackage in BrowserCertPins.TABLE) return null
+        val login = item.doc.login ?: return null
+        val username = login.username?.takeIf { it.isNotEmpty() }
+        val password = login.password?.takeIf { it.isNotEmpty() }
+        val userFields = if (username != null) form.fields.filter { it.kind == FieldKind.USERNAME && UriMatch.matchLogins(login.uris, targetFor(it, form, false)) } else emptyList()
+        val passFields = if (password != null) fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, false)) } else emptyList()
+        if (userFields.isEmpty() && passFields.isEmpty()) return null
+        val b = Dataset.Builder()
+        if (username != null) for (f in userFields) b.setValue(f.id, AutofillValue.forText(username))
+        if (password != null) for (f in passFields) b.setValue(f.id, AutofillValue.forText(password))
+        return runCatching { b.build() }.getOrNull()
+    }
+
+    private const val CONFIRM_REQUEST_BASE = 0x0A14_0000
+    private val confirmCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ---- no-match fallback row ----
 
