@@ -6,11 +6,17 @@
 # Normally driven by signandvari.ps1, which verifies the tag against the same -Commit pin before
 # it checks anything out.
 #
-# WHY THIS EXISTS. The update-manifest signing key lives ONLY on this machine - deliberately, so a
-# build-host compromise cannot forge a signed update to every armed client. That means the last mile
-# of every release is done by hand here, and until now it was driven by a prompt re-authored per
-# release. That prompt is where a `seq` or a checksum goes wrong. This script does the same steps
-# with the numbers read from the wire instead of typed.
+# WHY THIS EXISTS. The update-manifest signing key lives ONLY on this machine, deliberately: the
+# build host never holds it. That does NOT make a build-host compromise harmless, and this comment
+# used to say it did (security review 2026-10). Two gaps remain: this script, the MSI build and the
+# update-signer all come from the tree being released and run here beside the key (c03; the
+# -Commit pin and signandvari's last-signed baseline narrow that, see -Commit below), and the
+# linux / linuxArch / extension digests this run signs come from release-spec.json, which the
+# download origin serves unsigned, so a substituted spec and artifact pair that agree with each other
+# pass every check here (q15). Keeping the key here means the last mile of every release is done by
+# hand on this box; it used to be driven by a prompt re-authored per release, and that prompt is
+# where a `seq` or a checksum goes wrong. This script does the same steps with the numbers read
+# from the wire instead of typed.
 #
 # WHAT IT DOES
 #   1. Preflight    - Windows, signing key present, signtool/java, clean tree on the expected ref,
@@ -58,8 +64,13 @@ param(
     [string]$Ref,
 
     # The full 40-hex commit -Ref must resolve to (security review 2026-10). -Ref alone is a name
-    # whose target can be moved on the remote; this pin is supplied out of band by the operator,
-    # so HEAD == -Ref == -Commit is a check against something the tree being built cannot choose.
+    # whose target can be moved on the remote. The pin comes from the build host's handover line,
+    # which reads the build host's own tag, so HEAD == -Ref == -Commit closes a tag moved by anyone
+    # other than the build host, a tag moved after the handover line was printed, and an accidental
+    # re-tag - but a compromised build host chooses both the tag and the pin. The layer aimed at
+    # that is signandvari's workstation-held baseline (the commit last signed here, outside the
+    # repo: the release must descend from it, and the operator reviews and confirms the change
+    # before this script runs); this script is the tree's own code and cannot be that check.
     # It is what bundle.json records as `commit`.
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-fA-F]{40}$')]

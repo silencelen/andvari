@@ -215,8 +215,12 @@ fi
 #   * every other file by sha256, every symlink by its target;
 #   * packaging metadata only one side carries is excluded: the deb's .desktop copy under lib/ and
 #     share/doc/copyright, and the app-image's lib/app/.jpackage.xml.
+#   * a jar whose entries cannot be listed, or that lists none, STOPS the proof. Two copies that both
+#     fail to list would otherwise hash the same empty list and "match" (A13 review I1), and so would
+#     every jar under an awk that reads `{8}` literally (mawk before 20200717 has no intervals) —
+#     which is why the CRC column is matched by length and class, never by an interval.
 image_manifest() {
-  local root="$1" rel f key
+  local root="$1" rel f key listing entries
   ( cd "$root" && find . \( -type f -o -type l \) -printf '%P\n' | LC_ALL=C sort ) | while IFS= read -r rel; do
     case "$rel" in
       "lib/$PKG_NAME-$PKG_NAME.desktop"|share/doc/copyright|lib/app/.jpackage.xml) continue ;;
@@ -227,7 +231,10 @@ image_manifest() {
       printf '%s link %s\n' "$key" "$(readlink "$f")"
     elif [[ "$rel" == *.jar ]]; then
       # `unzip -lv` columns: Length Method Size Cmpr Date Time CRC-32 Name — keep name, CRC, length.
-      printf '%s jar %s\n' "$key" "$(unzip -lv "$f" | awk '$7 ~ /^[0-9a-f]{8}$/ && NF >= 8 { name = $8; for (i = 9; i <= NF; i++) name = name " " $i; print name, $7, $1 }' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
+      listing="$(unzip -lv "$f" 2>&1)" || die "unzip could not list $root/$rel (exit $?) — the same-build proof cannot read this jar: $(printf '%s' "$listing" | tail -1)"
+      entries="$(printf '%s\n' "$listing" | awk 'NF >= 8 && length($7) == 8 && $7 ~ /^[0-9a-f]+$/ { name = $8; for (i = 9; i <= NF; i++) name = name " " $i; print name, $7, $1 }' | LC_ALL=C sort)"
+      [ -n "$entries" ] || die "$root/$rel lists no entries — the same-build proof would compare nothing for this jar"
+      printf '%s jar %s\n' "$key" "$(printf '%s\n' "$entries" | sha256sum | cut -d' ' -f1)"
     elif [[ "$rel" == lib/app/*.cfg ]]; then
       printf '%s cfg %s\n' "$key" "$(sed -E 's/-[0-9a-f]{16,40}\.jar/.jar/g' "$f" | sha256sum | cut -d' ' -f1)"
     else
@@ -239,8 +246,10 @@ image_manifest() {
 DEB_X="$(mktemp -d)"; trap 'rm -rf "$DEB_X"' EXIT
 dpkg-deb -x "$DEB_LOCAL" "$DEB_X/root" || die "could not unpack $DEB_LOCAL for the same-build proof"
 [ -d "$DEB_X/root/opt/$PKG_NAME" ] || die "the deb has no /opt/$PKG_NAME — not the layout package-arch.sh repacks"
-image_manifest "$DEB_X/root/opt/$PKG_NAME" > "$DEB_X/manifest-deb"
-image_manifest "$IMG_DIR"                  > "$DEB_X/manifest-img"
+# image_manifest runs its loop in a pipeline subshell, so a `die` inside it ends only that subshell:
+# its status is what must stop the script here.
+image_manifest "$DEB_X/root/opt/$PKG_NAME" > "$DEB_X/manifest-deb" || die "could not build the deb's image manifest (above) — no same-build proof"
+image_manifest "$IMG_DIR"                  > "$DEB_X/manifest-img" || die "could not build the app-image's manifest (above) — no same-build proof"
 grep -q '^lib/app/app-desktop\.jar jar ' "$DEB_X/manifest-deb" \
   || die "could not find the app-desktop jar in the deb — the same-build proof has nothing to anchor on"
 if ! cmp -s "$DEB_X/manifest-deb" "$DEB_X/manifest-img"; then

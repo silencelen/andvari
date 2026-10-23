@@ -4,9 +4,11 @@
 #   signandvari 0.24.0 -Commit <sha> -DryRun    # preflight, seq arithmetic and manifest preview only
 #   signandvari 0.24.0 -Commit <sha> -SkipDrop  # produce the bundle, deliver it by hand
 #   signandvari 0.24.0 -Commit <sha> -SkipReadBack  # ... and do not assert the channel afterwards (rare)
+#   signandvari 0.24.0 -Commit <sha> -Baseline <sha> # FIRST RUN ONLY, when no older release tag is held
 #
 # -Commit is REQUIRED: the full 40-hex commit the build host cut the tag at, copied from the
-# handover line the build host prints. See "THE TAG IS NOT TRUSTED" below.
+# handover line the build host prints. See "THE TAG IS NOT TRUSTED" and "THE LAST SIGNED COMMIT"
+# below. Every run, -DryRun included, stops for one typed confirmation before the tree's code runs.
 #
 # WHY THIS EXISTS. scripts\prestige-release.ps1 already does the signing correctly. What it does
 # NOT do is the handling around it: fetching tags, checking out the ref it then asserts you are on,
@@ -29,13 +31,39 @@
 # THE TAG IS NOT TRUSTED (security review 2026-10). This box runs the tag's tree - its scripts and
 # its gradle build - with the update-signing key openable by the same account. A tag is a mutable
 # ref on a remote the build host can write to, so "whatever v<Version> points at today" is not a
-# fact this machine can rely on. Two rules close that:
-#   * the fetch never force-updates a tag. A remote tag that disagrees with the local one is a
-#     hard stop that names both commits, never a silent replacement;
-#   * the operator passes -Commit <sha>, the commit the release was cut at, out of band. The tag
+# fact this machine can rely on. Two rules narrow that:
+#   * only the release tag is fetched, and never with --force. A remote v<Version> that disagrees
+#     with the local one is a hard stop that names both commits, never a silent replacement; any
+#     OTHER tag that moved on the remote is not fetched at all, so it cannot block a ceremony;
+#   * the operator passes -Commit <sha>, the commit the build host's handover line names. The tag
 #     must resolve to exactly that commit BEFORE anything is checked out, HEAD must equal it after
 #     the checkout, and again immediately before prestige-release.ps1 starts - which is handed the
 #     same pin and records it in bundle.json.
+# What the pin closes: a tag moved by anyone other than the build host, a tag moved after the
+# handover line was printed, and an accidental re-tag. What it does NOT close: the handover line
+# reads the build host's own local tag, so a compromised build host chooses both the tag and the
+# pin. That is what the next rule is for.
+#
+# THE LAST SIGNED COMMIT (security review 2026-10, A13 review RF1). This workstation keeps its own
+# record of the commit its last SUCCESSFUL ceremony signed, outside the repo and out of the tree's
+# reach before it runs: %LOCALAPPDATA%\andvari\signandvari-last-signed.json. Before any of the
+# tree's code runs, the release commit must DESCEND from that commit (git merge-base
+# --is-ancestor), the commits since it and a diff --stat of every path whose code runs during the
+# ceremony are printed, and the operator types the version to confirm. A run with no human at a
+# console (-NonInteractive, redirected input, a service) fails closed at that prompt. The record
+# moves only after prestige-release.ps1 succeeded AND bundle.json records the pinned commit; a
+# dry run, a refused run or a failed ceremony leaves it where it was. This is a review aid that
+# rests on the operator reading the diff, not a proof: a compromised build host can still cut a
+# descendant commit, but it can no longer swap the tree silently, rewrite history under the last
+# release, or skip the moment a human looks at what changed in the build.
+#
+# FIRST RUN (no record yet): the baseline is the newest local tag v<x.y.z> BELOW -Version that this
+# checkout already held before this run's fetch (the fetch only ever adds v<Version>, and never
+# moves an existing tag, so nothing this run fetches can choose the baseline). With no such tag the
+# run stops and asks for -Baseline <40-hex>, a commit the operator has reviewed (it may also be
+# passed on any first run to choose the comparison: a checkout cloned just before the run holds
+# the remote's tags as they were at clone time); -Baseline is refused once a record exists. Deleting the record is the deliberate reset (history rewritten on
+# purpose, a new checkout): the next run is a first run again.
 #
 # THE KEYS ARE NEVER TOUCHED. The update-signing key and the Authenticode cert live on this machine
 # and only on this machine. This tool never reads, prints, copies, exports or relocates either, and
@@ -49,12 +77,20 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version,
 
-    # The full 40-hex commit the release tag must resolve to. REQUIRED, and deliberately not
-    # derivable from anything this script fetches: it comes from the build host's handover line
-    # (`signandvari <ver> -Commit <sha>`), so a tag moved on the remote cannot also move the pin.
+    # The full 40-hex commit the release tag must resolve to. REQUIRED. It comes from the build
+    # host's handover line (`signandvari <ver> -Commit <sha>`), which reads the build host's own
+    # local tag: it closes a tag moved by anyone other than the build host, a tag moved after the
+    # handover line was printed, and an accidental re-tag. A compromised build host chooses both
+    # the tag and this pin; THE LAST SIGNED COMMIT (above) is the layer aimed at that.
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$Commit,
+
+    # FIRST RUN ONLY: the commit to compare this release against when this workstation has no
+    # last-signed record AND holds no release tag below -Version. A commit the operator reviewed
+    # (the last release they signed), never one read off the build host. Refused once a record exists.
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$Baseline,
 
     # Preflight, fetch, seq arithmetic and a manifest preview. No build, no signing, no drop.
     [switch]$DryRun,
@@ -138,8 +174,17 @@ $DropHost = $matches['hostspec']
 $DropPath = $matches['path']
 if (-not $DropPath.EndsWith('/')) { $DropPath += '/' }
 
+# THE LAST SIGNED COMMIT lives under the account's local app data: outside the repo (no checkout
+# replaces it, no tree writes it before a confirmation) and per account, like the key itself.
+if (-not $env:LOCALAPPDATA) {
+    Die 'LOCALAPPDATA is not set - the last-signed record lives under %LOCALAPPDATA%\andvari\.'
+}
+$RecordDir  = Join-Path $env:LOCALAPPDATA 'andvari'
+$RecordPath = Join-Path $RecordDir 'signandvari-last-signed.json'
+
 Write-Ok "repo $Repo"
 Write-Ok "drop $DropTarget"
+Write-Ok "last-signed record $RecordPath"
 Write-Info "version $Version   tag $Tag   commit $Commit"
 Write-Info "dry-run $([bool]$DryRun)   skip-drop $([bool]$SkipDrop)"
 
@@ -166,10 +211,74 @@ function Get-LocalTagCommit {
 }
 $LocalBefore = Get-LocalTagCommit
 
-# NO --force. git refuses to replace an existing local tag with a different remote one ("would
+# --- the last-signed record, and the first-run seed -- read BEFORE the fetch ----------------------
+# The record is this workstation's own memory of the last commit it signed (see THE LAST SIGNED
+# COMMIT). It is parsed out of the raw text, never through ConvertFrom-Json (which would coerce
+# recordedAt into a [DateTime]), and a record that exists but cannot be read is a hard stop: it is
+# never silently treated as "first run", which would let a damaged file widen what gets compared.
+function Read-LastSigned {
+    if (-not (Test-Path -LiteralPath $RecordPath)) { return $null }
+    $raw = [string](Get-Content -LiteralPath $RecordPath -Raw)
+    $c = $null; $v = $null
+    if ($raw -match '"commit"\s*:\s*"([0-9a-f]{40})"') { $c = $matches[1] }
+    if ($raw -match '"version"\s*:\s*"(\d+\.\d+\.\d+)"') { $v = $matches[1] }
+    if (-not $c) {
+        Die "the last-signed record at $RecordPath exists but names no 40-hex commit - refusing. Inspect it; delete it only to re-bootstrap on purpose (the next run is then a first run)."
+    }
+    return [pscustomobject]@{ Commit = $c; Version = $v }
+}
+
+# FIRST RUN: the newest local release tag BELOW -Version that this checkout already holds. Called
+# before the fetch, and the fetch below only ever adds v<Version> and never moves an existing tag,
+# so nothing this run fetches can pick the baseline it is compared against.
+function Get-SeedTag {
+    $r = Invoke-Git -Arguments @('for-each-ref', '--format=%(refname:strip=2)', 'refs/tags/') -AllowFailure
+    if ($r.ExitCode -ne 0) { return $null }
+    $want = [version]$Version
+    $best = $null; $bestVer = $null
+    foreach ($line in ($r.Output -split "`r?`n")) {
+        $name = $line.Trim()
+        if ($name -notmatch '^v(\d+)\.(\d+)\.(\d+)$') { continue }
+        $ver = [version]('{0}.{1}.{2}' -f $matches[1], $matches[2], $matches[3])
+        if ($ver -ge $want) { continue }
+        if ($null -eq $bestVer -or $ver -gt $bestVer) { $best = $name; $bestVer = $ver }
+    }
+    if (-not $best) { return $null }
+    $c = Invoke-Git -Arguments @('rev-parse', '-q', '--verify', "refs/tags/$best^{commit}") -AllowFailure
+    if ($c.ExitCode -ne 0) { return $null }
+    return [pscustomobject]@{ Tag = $best; Commit = $c.Output.Trim().ToLowerInvariant() }
+}
+
+$LastSigned = Read-LastSigned
+$Seed = $null
+if ($LastSigned) {
+    if ($Baseline) {
+        Die "-Baseline is for the first run only, and $RecordPath already records $($LastSigned.Commit). Nothing was fetched or checked out. To re-bootstrap on purpose, delete that record first."
+    }
+    $BaseCommit = $LastSigned.Commit
+    $BaseWhat   = "the last commit this workstation signed ($(if ($LastSigned.Version) { $LastSigned.Version } else { 'version not recorded' }), from $RecordPath)"
+}
+elseif ($Baseline) {
+    $BaseCommit = $Baseline.ToLowerInvariant()
+    $BaseWhat   = "-Baseline $BaseCommit (FIRST RUN: no record at $RecordPath yet)"
+}
+else {
+    $Seed = Get-SeedTag
+    if (-not $Seed) {
+        Die "FIRST RUN and nothing to compare against: there is no record at $RecordPath and this checkout holds no release tag below $Tag. Nothing was fetched or checked out. Re-run with -Baseline <40-hex>, a commit you have reviewed (the last release you signed), never one read off the build host."
+    }
+    $BaseCommit = $Seed.Commit
+    $BaseWhat   = "local tag $($Seed.Tag) at $BaseCommit, which this checkout held before this run's fetch (FIRST RUN: no record at $RecordPath yet)"
+}
+Write-Ok "baseline: $BaseWhat"
+
+# --- fetch ONLY the release tag, never forced ---------------------------------------------------
+# NO --force: git refuses to replace an existing local tag with a different remote one ("would
 # clobber existing tag") and exits non-zero; with --force it would adopt the moved tag silently,
 # and everything after this line would then build and sign the remote's choice of tree.
-$fetch = Invoke-Git -Arguments @('fetch', '--tags') -AllowFailure
+# ONLY v<Version>, with --no-tags (no auto-following): a plain `fetch --tags` also refuses on ANY
+# other tag that moved on the remote, so one unrelated re-tag used to block every ceremony.
+$fetch = Invoke-Git -Arguments @('fetch', '--no-tags', 'origin', "refs/tags/${Tag}:refs/tags/${Tag}") -AllowFailure
 if ($fetch.ExitCode -ne 0) {
     Write-Host $fetch.Output
     # Name both commits, so the operator can tell a moved tag from a network failure.
@@ -185,12 +294,13 @@ if ($fetch.ExitCode -ne 0) {
     if ($LocalBefore -and $remoteCommit -and $remoteCommit -ne $LocalBefore) {
         Die "the remote's $Tag ($remoteCommit) DIFFERS from this machine's $Tag ($LocalBefore). A tag that moved is never adopted here. Find out why it moved before signing anything; -Commit is $Commit."
     }
-    Die "git fetch --tags failed (exit $($fetch.ExitCode)) - nothing was checked out."
+    if (-not $remoteCommit) { Die "the remote has no $Tag (git fetch exit $($fetch.ExitCode)) - push the tag from the build host first; nothing was checked out." }
+    Die "git fetch of $Tag failed (exit $($fetch.ExitCode)) - nothing was checked out."
 }
-Write-Ok 'git fetch --tags (no force: a moved tag is refused, never adopted)'
+Write-Ok "git fetch $Tag only (no force: a moved release tag is refused, never adopted; other tags are not fetched)"
 
 $tagRes = Invoke-Git -Arguments @('rev-parse', '--verify', "$Tag^{commit}") -AllowFailure
-if ($tagRes.ExitCode -ne 0) { Die "tag $Tag does not exist (after fetching tags) - nothing to sign." }
+if ($tagRes.ExitCode -ne 0) { Die "tag $Tag does not exist (after fetching it) - nothing to sign." }
 $TagCommit = $tagRes.Output.Trim().ToLowerInvariant()
 if ($LocalBefore -and $TagCommit -ne $LocalBefore) {
     # Belt and braces: a git that DID move the tag despite the missing --force.
@@ -225,9 +335,75 @@ if ($status.Length -gt 0) {
 }
 Write-Ok 'working tree clean'
 
-# ============================================================ 3. CHECKOUT THE TAG ===============
+# ============================================================ 3. REVIEW, THEN CHECKOUT THE TAG ==
 
-Write-Step "Checkout $Tag"
+Write-Step "Changes since the last signed release, then checkout $Tag"
+
+# Every path whose code runs on this box during the ceremony, worked out from what
+# prestige-release.ps1 invokes: itself and build-windows.ps1 (scripts/); gradlew.bat and the gradle
+# wrapper, version catalog and properties (gradle/, gradle.properties - which can also set JVM
+# flags); every build script (*.gradle.kts, settings included) and buildSrc/ should one appear;
+# the update-signer, which is handed the key's path (tools/update-signer/), and the core crypto it
+# links. The app's own sources are compiled into the MSI, not run here; the commit log covers them.
+$CeremonyPaths = @(
+    'scripts/', 'gradlew.bat', 'gradlew', 'gradle/', 'gradle.properties', '*.gradle.kts', 'buildSrc/',
+    'tools/update-signer/',
+    'core/src/commonMain/kotlin/io/silencelen/andvari/core/crypto/',
+    'core/src/jvmMain/kotlin/io/silencelen/andvari/core/crypto/',
+    'core/src/jvmShared/kotlin/io/silencelen/andvari/core/crypto/'
+)
+
+# The confirmation. Fail closed on every unattended path: with no human at a console nobody reads
+# the lines above, so the run stops instead of skipping the question. Piped input counts as
+# unattended too - a pipe that types the version is an automation that never looked.
+function Confirm-Release {
+    $why = $null
+    if (-not [Environment]::UserInteractive) { $why = 'this session is not interactive' }
+    elseif ([Console]::IsInputRedirected) { $why = 'standard input is redirected (a pipe or a file cannot confirm a release)' }
+    elseif (@([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^[-/]noni' }).Count -gt 0) { $why = 'PowerShell was started with -NonInteractive' }
+    if ($why) {
+        Die "this release needs a human confirmation and $why - nothing was checked out. Run signandvari from an interactive console."
+    }
+    Write-Host ''
+    $answer = $null
+    try {
+        $answer = Read-Host ("   Type the version you are releasing ({0}) to run this tree beside the signing key; anything else stops" -f $Version)
+    }
+    catch {
+        Die "this release needs a human confirmation and it could not be read ($($_.Exception.Message)) - nothing was checked out."
+    }
+    if ($null -eq $answer -or $answer.Trim() -ne $Version) {
+        Die "not confirmed (typed '$answer', expected '$Version') - nothing was checked out."
+    }
+    Write-Ok "confirmed by the operator: $Version"
+}
+
+# Ancestry first: a release that does not descend from the last one signed here is not built on
+# what was reviewed then (a rewritten history, a branch nobody merged, a substituted tree).
+$anc = Invoke-Git -Arguments @('merge-base', '--is-ancestor', $BaseCommit, $Commit) -AllowFailure
+if ($anc.ExitCode -eq 1) {
+    Die "$Tag ($Commit) does not descend from $BaseCommit, $BaseWhat. A release that is not a descendant of the last one signed here is refused - nothing was checked out. Merge the release line into the history the last release came from; if history was rewritten on purpose, see the runbook's reset step."
+}
+if ($anc.ExitCode -ne 0) {
+    Write-Host $anc.Output
+    Die "could not test whether $Commit descends from $BaseCommit (git exit $($anc.ExitCode)) - is that commit in this checkout? Nothing was checked out."
+}
+Write-Ok "$Commit descends from $BaseCommit"
+Write-Info "compared against $BaseWhat"
+
+$log  = (Invoke-Git -Arguments @('log', '--oneline', "$BaseCommit..$Commit")).Output.TrimEnd()
+$stat = (Invoke-Git -Arguments (@('diff', '--stat=200', "$BaseCommit..$Commit", '--') + $CeremonyPaths)).Output.TrimEnd()
+Write-Host ''
+Write-Host ("   ---- commits {0}..{1} ----" -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12))
+if ($log) { $log -split "`r?`n" | ForEach-Object { Write-Host "   $_" } } else { Write-Host '   (none: -Commit is the baseline commit itself)' }
+Write-Host ''
+Write-Host '   ---- changed code that runs on this box during the ceremony (git diff --stat) ----'
+Write-Host ("   paths: {0}" -f ($CeremonyPaths -join ' '))
+if ($stat) { $stat -split "`r?`n" | ForEach-Object { Write-Host "   $_" } } else { Write-Host '   (no changes in those paths)' }
+Write-Host ''
+Write-Host '   Read the lines above. The next step checks out this tree and runs its scripts and its gradle' -ForegroundColor Yellow
+Write-Host '   build on this account, beside update-signing.key. A change you did not expect is a reason to stop.' -ForegroundColor Yellow
+Confirm-Release
 
 # prestige-release.ps1 ASSERTS HEAD == -Ref and dies otherwise; it does not check out for you.
 # Detached HEAD at the tag is the expected state for the rest of this run.
@@ -372,7 +548,7 @@ Write-Ok 'prestige-release.ps1 completed'
 if ($DryRun) {
     Write-Step 'Dry run complete'
     Write-Info "live seq $LiveSeq -> would mint $NextSeq for $Version"
-    Write-Info 'no MSI was built, nothing was signed, nothing was dropped.'
+    Write-Info 'no MSI was built, nothing was signed, nothing was dropped; the last-signed record did not move.'
     Write-Host ''
     Write-Host "   repo is at $Tag (detached HEAD) - the expected state for the real run." -ForegroundColor Green
     Write-Host ''
@@ -421,6 +597,18 @@ Write-Ok "all five files present in $BundleDir"
 Write-Info ("seq {0}   signedAt {1}" -f $NewSeq, $SignedAt)
 Write-Info ("{0}  {1} bytes" -f $MsiName, $MsiSize)
 Write-Info ("sha256 {0}" -f $MsiSha)
+
+# THE LAST SIGNED COMMIT moves HERE and nowhere else: prestige-release.ps1 exited 0, the bundle is
+# complete and records the pinned commit, so this commit has now been signed on this box. A dry run
+# returned before this point, and every refusal above died before it. Written to a temporary name
+# and renamed, so a crash mid-write leaves the old record (or none), never half of a new one.
+if (-not (Test-Path -LiteralPath $RecordDir -PathType Container)) { New-Item -ItemType Directory -Path $RecordDir -Force | Out-Null }
+$recordText = '{{"commit": "{0}", "version": "{1}", "recordedAt": "{2}"}}' -f $Commit, $Version,
+    [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [cultureinfo]::InvariantCulture)
+$recordTmp = "$RecordPath.partial"
+[System.IO.File]::WriteAllText($recordTmp, $recordText + "`n", (New-Object System.Text.UTF8Encoding($false)))
+Move-Item -LiteralPath $recordTmp -Destination $RecordPath -Force
+Write-Ok "recorded $Commit as the last signed commit ($RecordPath)"
 
 if ($SkipDrop) {
     Write-Step 'Drop skipped (-SkipDrop)'
