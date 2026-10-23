@@ -249,7 +249,8 @@ describe("A14 F5 — lock revokes and drops a per-tab pair; unlock is then a ful
   });
 
   it("a session with no tokens boots to the unlock card, which runs the normal sign-in, TOTP included", () => {
-    expect(appTsx).toContain('session ? { kind: "unlock", session,');
+    expect(appTsx).toContain("const unlockable = session !== null && (session.tokens !== null || !tokensKeptAcrossLock(session.userId));");
+    expect(appTsx).toContain('unlockable ? { kind: "unlock", session,');
     const unlock = welcomeTsx.slice(welcomeTsx.indexOf("function Unlock("), welcomeTsx.indexOf("export type LandingMode"));
     expect(unlock).toContain("if (!session.tokens) {");
     expect(unlock).toContain("<SignIn client={client} policy={policy} onReady={onReady} onBlockingChange={setSignInBlocking} lockedEmail={session.email} />");
