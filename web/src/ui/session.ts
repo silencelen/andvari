@@ -101,11 +101,17 @@ function lockManager(): LockManagerLike | null {
 }
 const tabLockName = (tabId: string): string => `andvari-tab-${tabId}`;
 
-/** Hold `andvari-tab-<tabId>` for the rest of this document's life (the callback never settles). */
+/** Hold `andvari-tab-<tabId>` for the rest of this document's life (the callback never settles).
+ *  With [signal] the request waits until it is granted or the signal aborts; without one it only
+ *  takes a lock that is free right now (`ifAvailable`), so it can never wait forever. */
 function holdTabLock(locks: LockManagerLike, tabId: string, signal?: AbortSignal): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     locks
-      .request(tabLockName(tabId), { signal }, () => {
+      .request(tabLockName(tabId), signal ? { signal } : { ifAvailable: true }, (lock) => {
+        if (lock === null) {
+          resolve(false); // ifAvailable and held elsewhere
+          return undefined;
+        }
         resolve(true);
         return new Promise(() => {});
       })
@@ -128,6 +134,9 @@ export async function claimTabTokens(opts: { waitMs?: number } = {}): Promise<vo
   const locks = lockManager();
   if (!locks) return;
   const waitMs = opts.waitMs ?? 1500;
+  // No AbortSignal.timeout (some browsers have Web Locks without it): no bounded wait is possible, so
+  // only a lock that is free right now counts — a reload that races its previous document's unload
+  // then signs in again, which is the safe side.
   const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(waitMs) : undefined;
   if (await holdTabLock(locks, slot.tabId, signal)) {
     claimedTabId = slot.tabId;
