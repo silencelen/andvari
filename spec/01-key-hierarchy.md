@@ -890,14 +890,18 @@ NOT the session snapshot: `ensureLoaded` MUST NOT hydrate the live session from 
 so while locked-armed every `!session` gate still reports **fully locked**.
 
 **Compartment precondition (hard).** The blob is a crackable UVK **plus a live
-refresh token**, so `chrome.storage.session`'s `TRUSTED_CONTEXTS` access level is a
-**hard precondition**: if `setAccessLevel` throws and content scripts cannot be
-guaranteed excluded, the client MUST NOT arm and MUST NOT retain tokens (it falls
-back to today's full erase). A `storage.local` fallback for the blob is **forbidden**
-(that is the rejected durable Tier C). Since A15 the call is awaited at worker start and
-a call that exists but fails means no arm; Firefox has no `setAccessLevel`, so there the
-client arms on Firefox's documented default, which its API schema enforces in the
-content process only (spec 05 A15, residual 2).
+refresh token**, so it may sit in `chrome.storage.session` only where a content
+script cannot read it, and since A16 (spec 05) that rests on sealing, not on the
+area's access level: the record is AES-GCM sealed, its AAD binding the record kind
+and the origin, under a **non-extractable session sealing key held in the extension
+origin's IndexedDB** and made fresh for each browser session. The client MUST NOT arm
+and MUST NOT retain tokens unless that key is available (it falls back to today's
+full erase); where `setAccessLevel` exists (Chrome) its awaited call on
+`storage.session` must also have resolved, as a second layer. That content scripts
+cannot reach `storage.session` is not relied on, on either engine. The seal is not
+a lock (a lock still erases): it keeps the record from anything that can reach
+`storage.session` but not the extension's IndexedDB. A `storage.local` fallback for
+the blob is **forbidden** (that is the rejected durable Tier C).
 
 **Locked-but-authenticated state.** When armed, `doLock()` keeps a slim
 `{access, refresh, userId, email, blob, counter}` record under the distinct key and
@@ -921,15 +925,16 @@ banner) and resolved by the unlock-time dedupe (unchanged → dropped silently;
 changed → the Update offer). An unknown pair keeps the "unlock to save" banner.
 Honest disclosure bound, accepted by design: a reader of the locked compartment
 can test *guessed* (site, username) pairs for membership — strictly less than the
-plaintext locked-minted pendings the same compartment already holds. Wiped at
-sign-out / definitive-401 (with the quick-unlock material) and never armed where
-`TRUSTED_CONTEXTS` cannot be guaranteed; a `storage.local` copy is **forbidden**
-(the rejected durable Tier C, again).
+plaintext locked-minted pendings the same compartment already holds. Sealed like
+the quick-unlock record (A16), wiped at sign-out / definitive-401 (with the
+quick-unlock material), and never kept across a lock where the compartment
+precondition above does not hold; a `storage.local` copy is **forbidden** (the
+rejected durable Tier C, again).
 
 **Locked-minted pendings (amendment 2026-08-18).** "Pending saves die at lock"
 covers pendings alive AT the lock transition; a pending captured *while already
-locked* necessarily post-dates it and persists (plaintext) in `storage.session`
-for the post-unlock offer. That window is now **bounded**: a locked-minted
+locked* necessarily post-dates it and persists in `storage.session` (with the
+page's password, sealed since A16) for the post-unlock offer. That window is now **bounded**: a locked-minted
 pending carries its capture stamp and is dropped unoffered once
 `LOCKED_PENDING_TTL_MS` (30 min) passes — enforced at every re-offer surface and
 at the unlock re-offer itself, ahead of any offer. Re-offers of a still-live

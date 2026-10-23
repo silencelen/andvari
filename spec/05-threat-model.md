@@ -692,7 +692,8 @@ the pinned key signs. The worker builds it from the verified manifest, re-checks
 storage.session and, where it exists (Chrome 140+), on storage.local, both awaited before any lock samples the
 quick-unlock compartment verdict. That verdict now says what the code saw: on Chrome the session call resolved (a call
 that exists and fails leaves the compartment untrusted, so nothing arms); on Firefox, which has no such call, only that
-storage.session exists. `minimum_chrome_version` stays 127. Checked in a headless Chrome 149: once locked, a content
+storage.session exists. Since A16 the verdict also needs the session sealing key (below). `minimum_chrome_version`
+stays 127. Checked in a headless Chrome 149: once locked, a content
 script's storage.local `get` and `set` are refused, where both worked before.
 (c) **Durable trust state lives in the extension origin's IndexedDB** (step 2; `trustedkv.ts`), with the service worker
 as its only reader and writer: the server choice, the update offer and its anti-rollback seq, item homes, the
@@ -784,11 +785,9 @@ unregister the first (no autofill until the next worker start; seen in the live 
 Residuals: (1) Chrome 127–139 and Firefox: storage.local stays open to content scripts. The extension reads it for trust
 only during the attested migration, so what is left is the window before the upgrade: values planted then move with the
 trust they always had (homes, the wrap, the conveniences), and a planted server only ever becomes a pending server. On
-Chrome 140+ the area is locked, and the level is kept in the extension's prefs across restarts. (2) Firefox
-storage.session is kept from content scripts by the API schema only; from Firefox's source, the parent process does
-not re-check the caller's context for `get`/`set` (only for `onChanged`), so a compromised content process may reach
-it. That is inferred, not tested, and A15 does not change it; it covers the session snapshot and the armed quick-unlock
-record (the A7-extension row below), and the update throttle and quiet marker (LOW). (3) A server planted before the
+Chrome 140+ the area is locked, and the level is kept in the extension's prefs across restarts. (2) A15 left
+storage.session as it was: on Firefox, its exclusion of content scripts was relied on for the session snapshot and the
+armed quick-unlock record. Since A16 it is not relied on (below). (3) A server planted before the
 upgrade is shown as the user's previous server, and "Confirm in Options" is the popup's first button; the Trust Gate
 still shows the raw origin and Connect is still the only commit. (4) Firefox permanent private browsing loses the
 self-host choice and the remembered state across restarts, as (e) says; a value a content process plants in
@@ -799,6 +798,65 @@ release fact: if a release without A15 ships after 0.28.1, an update from it to 
 nothing (the fail-safe direction: no read, the default with no pending server). (6) A session already open in this
 browser session when a block appears (possible only in the no-store mode, where the block is recomputed at each start)
 keeps its own origin's sync until it locks; the block stops new sign-ins.
+
+**A16 (security review 2026-10, sealed custody in storage.session).** The extension keeps unlocked custody in
+`storage.session` on both engines, because the worker is stopped when idle: the session snapshot (tokens, unwrapped
+vault keys, decrypted items), the tab records (a pending save holds a page's password in plaintext, also while locked),
+the armed quick-unlock record (the PIN-crackable UVK blob and a live refresh token) and the known-logins digest (an HMAC
+key beside its digests). A compromised content process is in the model (A14's F11, A15), and that a content script
+cannot reach `storage.session` is no longer relied on: Firefox's exclusion of content scripts from it is not relied on,
+and Chrome's browser-side enforcement is kept as a second layer. The boundary relied on instead is the extension
+origin's IndexedDB, which a compromised renderer cannot read or write
+(https://chromium.googlesource.com/chromium/src/+/main/docs/security/compromised-renderers.md), and which Mozilla
+names as the origin-bound storage to use (https://bugzilla.mozilla.org/show_bug.cgi?id=2018494). Memory-only custody
+was not an option: Firefox stops the event page after about 30 s idle, and the vault would lock every time. The seal
+is not a lock (spec 01 §8.4 rejects a key-beside-ciphertext lock): a lock still erases; the seal keeps what
+`storage.session` holds from anything that can reach that area but not the extension's IndexedDB.
+(a) **One sealing key per browser session** (`sessionseal.ts`): a non-extractable AES-GCM 256 key in its own IndexedDB
+database (`andvari-session-seal`, apart from the quick-unlock co-key and the A15 trusted store), every operation bounded
+like the trusted store's (4 s). At worker start, when `storage.session` holds no sealed record (a browser restart, an
+extension reload or update), a fresh key replaces the old one, so a key never outlives the records it seals; sealed
+records with no usable key are dropped, since nothing can open them.
+(b) **Every secret-bearing record is sealed, through one helper**, and stored as `{v:1, iv, ct}`. The AAD binds the
+record kind and the origin namespace, so a record copied into another record's slot, or into another origin's slot,
+does not open. The session snapshot and the tab records are also bound to a custody epoch that every lock advances and
+that is kept beside the key, so a copy taken while unlocked does not open after the lock, a worker restart included. A
+record that does not open (no key, another key, tampered, swapped, from before the last lock, or plaintext) is
+absent, which reads as locked, and it is dropped; it is never adopted. The inventory: sealed — `session`, `tabs`,
+`ns.<origin>.quickUnlock`, `ns.<origin>.knownLogins`; plain, as none is secret — `lockNotice` (the idle-lock reason
+line), `ns.<origin>.updateCheckedAt` (the update-check throttle stamp) and `ns.<origin>.updateChannelQuiet` (a quiet
+reason from a fixed set); a write to one of those can at most show a false reason line or move an update check, and the
+forced check at start re-derives the last two. The worker reaches `storage.session` through two wrappers only: the
+seal, and a plain area that refuses any other key when called. A source fence holds every write to them.
+(c) **Migration.** At worker start a plaintext value in a sealed slot (the previous build's, or anyone's), the
+pre-namespacing bare quick-unlock key and any key this build does not keep are dropped, never unsealed into trust. The
+cost is one more unlock after the update, and the update clears `storage.session` anyway.
+(d) **No key store** (no IndexedDB, as under Firefox's "Never remember history", or no answer within the bound): no
+secret-bearing record is written to `storage.session` (a write removes the slot instead, so no older copy stays);
+custody stays in worker memory, so a stopped worker means a locked vault; quick unlock does not arm, and enrolling it is
+refused with a sentence that says why. The Options note for that mode says the vault locks whenever the browser pauses
+andvari. The next worker start tries the store again.
+(e) **The quick-unlock compartment verdict** (`quCompartmentTrusted`) now means that the sealing key is available,
+and, on Chrome, that `setAccessLevel(TRUSTED_CONTEXTS)` on `storage.session` resolved (kept as a second layer). It gates
+arming, enrolling, and keeping the known-logins digest across a lock.
+(f) **A lock never waits on IndexedDB to erase.** It removes the snapshot and the tab records, and advances the epoch,
+before anything in it can wait on IndexedDB (the arm's sealed write, the quick-unlock co-key delete) or on the network
+(the usage flush); the new epoch is written beside the key without the lock waiting for it, and a sealed write still in
+flight for a removed record is dropped. A lock that does not get the origin and the key within 1.5 s (A15 review S1)
+reads the tab records only if the key is already in hand, and otherwise erases them whole.
+Checked in a headless Chrome 149 against a local server: after a full unlock `storage.session` held only sealed
+records (no item name, email or password in it); a worker stopped and restarted stayed unlocked; quick unlock armed at
+the lock, survived a restart and redeemed with the PIN; the snapshot copied before a lock and put back after it did not
+open (the restarted worker stayed locked and dropped it); a plaintext snapshot planted while locked was dropped at the
+next start.
+Residuals: (1) custody in worker memory is still exposed to a compromised extension process: the worker holds the
+unlocked vault and the key's handle. (2) Chrome's browser-side enforcement of the `storage.session` access level is
+now a second layer, not the only one. (3) The quick-unlock record and the known-logins digest survive a lock by design,
+so they are not bound to the epoch: a party that can both read and write `storage.session` can put back an older sealed
+copy of either, which restores an earlier attempt count (already accepted, A7-extension (b)) or an earlier digest. (4)
+The new epoch is written after the lock; if the worker stops before that write lands, or the write fails, a copy of the
+snapshot from before the lock can still open at the next start. (5) A sealed record is about a third larger than the
+plain one (base64), against the area's quota.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
@@ -825,8 +883,9 @@ full-password rule (spec 01 §8.1).
 The MV3 extension's quick unlock (spec 01 §8.4) has a **different** A7 posture than
 Android's: **non-durable but hardware-less**. Enabling it puts a PIN-wrapped,
 session-scoped UVK blob (`ct = AEAD(K_pin, AEAD(K_nonexp, UVK))`) **plus a live
-refresh token** in `chrome.storage.session` (memory-backed, `TRUSTED_CONTEXTS`,
-gone at browser exit), and the non-extractable co-key `K_nonexp` in IndexedDB. What
+refresh token** in `chrome.storage.session` (memory-backed, sealed since A16 under a
+non-extractable key in the extension origin's IndexedDB, gone at browser exit), and
+the non-extractable co-key `K_nonexp` in IndexedDB. What
 each attacker gets:
 
 | Attacker | Outcome |
@@ -834,14 +893,14 @@ each attacker gets:
 | **Device powered off / browser closed (thief, border search)** | Nothing quick-unlock-specific: `chrome.storage.session` is memory-backed and **evaporates at browser exit**, so the blob, counter, and retained token are simply gone. **Strictly better than A7-android vs a powered-off device** (no durable blob at all). Residual: OS **swap / hibernation** may page a memory image (blob + token) to disk — the co-key mitigates data-exfil of the blob alone but not a full RAM/swap image; ⊆ T7 for a disk that also holds the swapfile. |
 | **Human-at-keyboard opportunist, browser running, extension locked-armed** | The in-scope delta. Where a locked extension previously required the master password, it now falls to a **6+-char PIN, 5 attempts, then wipe**. This is the accepted, opt-in narrowing. The attempt counter is same-compartment and **attacker-resettable** (below), so against a *sophisticated* local attacker it is theater; against the opportunist it holds, and the PIN entropy floor + session scoping are the real bounds. |
 | **Malware / debugger reading the browser process or `storage.session`** | **T5, out of scope** for every client (a keylogger already gets the master password; unlocked-process memory already holds `vaultKeys`). Such an attacker gets a **PIN-crackable blob (double-wrapped: ~32 MiB+ Argon2id over a ≥6-char / ≥10-digit PIN ≈ GPU-hours for a floor PIN, more for a word) *plus* a live refresh token** — but note the blob alone is useless without the **non-extractable co-key** (A1): a pure `storage.session` dump cannot open it. **Per-extension storage isolation is a PLUS**: a co-installed extension cannot read another extension's `storage.session` except via a `chrome.debugger` grant or OS access (both T5). |
-| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and the `TRUSTED_CONTEXTS` access level is a hard precondition to arming at all (if it can't be guaranteed, the client does NOT arm — spec 01 §8.4). A page can neither send the PIN nor read the blob. On Chrome the level is set and awaited; on Firefox it is the schema default, which a compromised content process may bypass (A15 residual 2, inferred from source). |
+| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and arming requires the session sealing key (A16; spec 01 §8.4): the record is AES-GCM ciphertext under a non-extractable key in the extension origin's IndexedDB, which a content process cannot open, so that it cannot reach `storage.session` is not relied on. On Chrome the `TRUSTED_CONTEXTS` level is also set and awaited, a second layer. A page can neither send the PIN nor read the blob; a party that can write `storage.session` can put back an older sealed copy of the record (residual (b)). |
 | **The server** | Learns nothing — quick unlock is wire-invisible (spec 01 §8); no new endpoint/header/field. The one wire *interaction* is that a redeem forces a `POST /auth/refresh` FIRST, so revocation / a rescue (which revokes sessions) takes effect at the next redeem (T1 unaffected). |
 
 Residuals accepted (A7-extension): (a) **memory-backed ≠ never-on-disk** — OS
 swap/hiberfil can page the blob + token; the co-key defends data-exfil of the blob,
 not a full RAM/swap image. (b) The **attempt counter, freshness stamp, and pinParams
 are same-compartment and attacker-resettable** by a `storage.session`/DevTools write
-(= T5) — they defend only the unsophisticated opportunist; a **pinParams ceiling**
+(= T5; since A16 such a write can no longer forge them, only put back an older sealed copy) — they defend only the unsophisticated opportunist; a **pinParams ceiling**
 still bounds a planted-params OOM, and a sub-range set is treated as corrupt → wipe.
 (c) The whole in-scope delta reduces to the **human-at-keyboard opportunist on an
 unlocked machine with the browser running**; a machine that is unlocked with the
