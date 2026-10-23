@@ -24,6 +24,21 @@
 #     then be on disk exactly as git holds it (CRLF from git's own conversion allowed), all before the confirmation
 #     (C3); any way out between the checkout and the confirmation puts HEAD back (C5);
 #   * what the build host sends back after signing (the drop's sha256sum, the read-back manifest) prints escaped (C6).
+# Since the fifth review (A14 review 5), for the box's Windows PowerShell 5.1 and against a hostile tree:
+#   * H1: no native command reads a pipeline: the reviewed files are hashed in-process, so a profile's UTF-8
+#     $OutputEncoding (a byte-order mark in front of a native program's stdin) cannot break an honest run;
+#   * H2: every PowerShell file beside signandvari.ps1 is pure printable ASCII (5.1 reads a script without a BOM in
+#     the ANSI code page);
+#   * S1: a reviewed PowerShell file with a byte above 0x7F and no BOM is refused, a byte that is not UTF-8 prints as
+#     \xNN and a real U+FFFD as \uFFFD;
+#   * S2: a reviewed text file with a CR that no LF follows is refused (a binary is not);
+#   * S3: the pager counts console rows, not lines, and a line longer than 400 characters is cut at a marker,
+#     counted, and whole in the review copy;
+#   * S4: the CRLF form passes the byte check only for a blob git would convert (no NUL, no CR);
+#   * S5: the invisible characters (zero-width, word joiner, U+FEFF, Hangul fillers, tag characters, variation
+#     selectors, soft hyphen) print escaped;
+#   * the clean-filter belt: no git command signandvari runs calls an LFS clean filter, and from the checkout on the
+#     release tree's .gitattributes cannot name a filter this box defines (--attr-source, where git has it).
 #
 # This drives the real script under pwsh against a scratch "remote" and a scratch "workstation" clone. The ceremony
 # itself needs Windows, signtool and the key, so the scratch tree carries a stub prestige-release.ps1 (it writes a
@@ -100,12 +115,20 @@ chmod 755 "$W/dropbin/scp" "$W/dropbin/ssh"
 # --- the scratch release history ------------------------------------------------------------------------------------
 # P0 (v9.9.0) -> C0 (v9.9.8) -> E1 -> C1 (v9.9.9) -> C2 on main.
 #   E1 has a hostile subject (ESC sequences that would hide lines, a bidi override, an 8-bit CSI). It touches a
-#   core/src/jvmMain file outside core's crypto (A14 review R2-1) whose content carries ESC sequences and a CR that
-#   would fake a "diff --git" header, a case-variant GRADLE.PROPERTIES, a NEW module outside every old allowlist
+#   core/src/jvmMain file outside core's crypto (A14 review R2-1) whose content carries ESC sequences, a case-variant
+#   GRADLE.PROPERTIES, a NEW module outside every old allowlist
 #   (tools/hook), a web/ file (a tree that never runs on the signing box), git attribute files inside excluded trees,
 #   an android build script, and an in-tree hooks directory (A14 review 3, C1-C3).
 # S1 (v9.9.10) on a side branch off C0, NOT a descendant of C1.
 # K1 (v9.9.11) off C1 adds Scripts/prestige-release.ps1 beside scripts/prestige-release.ps1: one file on NTFS.
+# Off C1 too, one release each for the fifth review (A14 review 5):
+#   L1 (v9.9.12): 40 lines of 301 characters and one of 5001 (S3), and a "jar" holding NUL bytes and LFs (S4);
+#   R1 (v9.9.13): a .kt whose CR would fake a "diff --git" header (C2) - a CR that no LF follows (S2) - and a
+#                 binary .png holding a NUL and a lone CR (not refused);
+#   B1 (v9.9.14): a PowerShell file with byte 0x94 and no BOM (on 5.1 a curly quote that closes the string), one with
+#                 a BOM, and a .kt and a subject full of invisible characters, a real U+FFFD and a byte that is not
+#                 UTF-8 (S1, S5);
+#   A1 (v9.9.15): a .gitattributes naming a filter the workstation's git config defines (the attr-source belt).
 # The stub prints "stub ceremony RAN" built at run time, so the string is in its output but never in its source (the
 # full diff of scripts/prestige-release.ps1 is printed too).
 STUB='param([string]$Version, [string]$Ref, [string]$Commit, [string]$SignToolPath, [switch]$DryRun)
@@ -140,7 +163,7 @@ C0="$(git -C "$W/build" rev-parse HEAD)"
 g -C "$W/build" tag -a v9.9.8 -m 'release 9.9.8'
 mkdir -p "$W/build/$(dirname "$HIJACK")" "$W/build/$(dirname "$NEWMOD")" "$W/build/web/src" "$W/build/web/sub" \
   "$W/build/docs" "$W/build/deploy" "$W/build/app-android" "$W/build/.githooks"
-printf 'package io.silencelen.andvari.updatesigner\nfun java.io.File.readText(): String = "HIJACKED"\n// \033[2KHIDDEN-IN-CONTENT\n// SAFE\rdiff --git a/web/fake.ts b/web/fake.ts\n// AFTER-FAKE-HEADER-MARKER\n' > "$W/build/$HIJACK"
+printf 'package io.silencelen.andvari.updatesigner\nfun java.io.File.readText(): String = "HIJACKED"\n// \033[2KHIDDEN-IN-CONTENT\n' > "$W/build/$HIJACK"
 printf 'org.gradle.jvmargs=-javaagent:x.jar\n' > "$W/build/GRADLE.PROPERTIES"
 printf '// NEW-MODULE-MARKER: linked by a build script, under no old allowlist\n' > "$W/build/$NEWMOD"
 printf '// WEB-CONTENT-MARKER\n' > "$W/build/web/src/app.ts"
@@ -170,14 +193,44 @@ mkdir -p "$W/build/Scripts"; printf 'Write-Host "the other one"\n' > "$W/build/S
 g -C "$W/build" add Scripts/prestige-release.ps1; g -C "$W/build" commit -qm 'collide: a second ceremony script'
 K1="$(git -C "$W/build" rev-parse HEAD)"
 g -C "$W/build" tag -a v9.9.11 -m 'release 9.9.11'
+g -C "$W/build" checkout -q -b long "$C1"
+mkdir -p "$W/build/tools/long" "$W/build/tools/zz"
+{ for i in $(seq 1 40); do printf '%s\n' "$(printf 'x%.0s' $(seq 1 300))"; done; printf '%s\n' "$(printf 'z%.0s' $(seq 1 5000))"; } > "$W/build/tools/long/Long.kt"
+printf 'PK\003\004\000\000\nline\nend\n' > "$W/build/tools/zz/blob.jar"
+g -C "$W/build" add tools/long/Long.kt tools/zz/blob.jar; g -C "$W/build" commit -qm 'long: lines that wrap, a binary'
+L1="$(git -C "$W/build" rev-parse HEAD)"
+g -C "$W/build" tag -a v9.9.12 -m 'release 9.9.12'
+g -C "$W/build" checkout -q -b cr "$C1"
+mkdir -p "$W/build/tools/cr"
+printf '// cr\n// SAFE\rdiff --git a/web/fake.ts b/web/fake.ts\n// AFTER-FAKE-HEADER-MARKER\n' > "$W/build/tools/cr/Cr.kt"
+printf '\211PNG\r\n\032\n\000\000\rIHDR\n' > "$W/build/tools/cr/icon.png"
+g -C "$W/build" add tools/cr/Cr.kt tools/cr/icon.png; g -C "$W/build" commit -qm 'cr: a lone CR'
+R1="$(git -C "$W/build" rev-parse HEAD)"
+g -C "$W/build" tag -a v9.9.13 -m 'release 9.9.13'
+g -C "$W/build" checkout -q -b ansi "$C1"
+mkdir -p "$W/build/tools/ps" "$W/build/tools/inv"
+printf 'Write-Host "inert \224; Write-Host PWNED; \224"\n' > "$W/build/tools/ps/Evil.ps1"
+printf '\357\273\277# caf\303\251\n' > "$W/build/tools/ps/Ok.ps1"
+printf '// FFFD:\357\277\275 zwsp:a\342\200\213b wj:\342\201\240 bom:\357\273\277 hf:\343\205\244\341\205\237\341\205\240 tag:\363\240\201\201 vs:\357\270\217 shy:\302\255 bad:\377 end\n' > "$W/build/tools/inv/Inv.kt"
+g -C "$W/build" add tools/ps/Evil.ps1 tools/ps/Ok.ps1 tools/inv/Inv.kt
+g -C "$W/build" commit -qm "$(printf 'inv: a\342\200\213b tag:\363\240\201\201 shy:\302\255 vs:\357\270\217')"
+B1="$(git -C "$W/build" rev-parse HEAD)"
+g -C "$W/build" tag -a v9.9.14 -m 'release 9.9.14'
+g -C "$W/build" checkout -q -b attrs "$C1"
+mkdir -p "$W/build/tools/attr"
+printf '*.kt filter=boxfilter\n' > "$W/build/.gitattributes"
+printf '// attr\n' > "$W/build/tools/attr/A.kt"
+g -C "$W/build" add .gitattributes tools/attr/A.kt; g -C "$W/build" commit -qm 'attrs: the tree names a filter'
+A1="$(git -C "$W/build" rev-parse HEAD)"
+g -C "$W/build" tag -a v9.9.15 -m 'release 9.9.15'
 g -C "$W/build" checkout -q main
-g -C "$W/build" push -q origin main side collide v9.9.0 v9.9.8 v9.9.9 v9.9.10 v9.9.11 2>/dev/null
+g -C "$W/build" push -q origin main side collide long cr ansi attrs v9.9.0 v9.9.8 v9.9.9 v9.9.10 v9.9.11 v9.9.12 v9.9.13 v9.9.14 v9.9.15 2>/dev/null
 
 # fresh_ws - a new workstation checkout at C2 on main that holds v9.9.0 and v9.9.8 but has not seen the newer tags.
 fresh_ws() {
   rm -rf "$W/ws"
   g clone -q "$W/remote.git" "$W/ws" 2>/dev/null
-  git -C "$W/ws" tag -d v9.9.9 v9.9.10 v9.9.11 >/dev/null
+  git -C "$W/ws" tag -d v9.9.9 v9.9.10 v9.9.11 v9.9.12 v9.9.13 v9.9.14 v9.9.15 >/dev/null
 }
 # at_old - the workstation on a branch `old` at C0, so a checkout of C1 rewrites every file that changed since.
 at_old() { g -C "$W/ws" checkout -q -b old "$C0"; }
@@ -207,9 +260,15 @@ run() { # run <args...> - NON-interactive (stdin redirected, -NonInteractive). O
   OUT="$(cd "$W" && envs pwsh -NoProfile -NonInteractive -File "$S" "$@" < /dev/null 2>&1)"; RC=$?
   OUT="$(printf '%s\n' "$OUT" | flatten)"
 }
-runpty() { # runpty <typed answer lines> <args...> - a console session (a pty, ROWS rows); the answers are typed in turn.
+runpty() { # runpty <typed answer lines> <args...> - a console session (a pty, ROWS x COLS); the answers are typed in turn.
+  # PS_PRELUDE=<PowerShell> runs it first, in the session the script then runs in (a profile line, say).
   local answer="$1"; shift
-  local cmd; cmd="stty rows ${ROWS:-1000} cols 4000; $(printf '%q ' pwsh -NoProfile -File "$S" "$@")"
+  local cmd
+  if [ -n "${PS_PRELUDE:-}" ]; then
+    cmd="stty rows ${ROWS:-1000} cols ${COLS:-4000}; $(printf '%q ' pwsh -NoProfile -Command "$PS_PRELUDE; & '$S' $*")"
+  else
+    cmd="stty rows ${ROWS:-1000} cols ${COLS:-4000}; $(printf '%q ' pwsh -NoProfile -File "$S" "$@")"
+  fi
   RAW="$(cd "$W" && printf '%s\n' "$answer" | envs timeout 120 script -qec "$cmd" /dev/null 2>&1)"; RC=$?
   OUT="$(printf '%s\n' "$RAW" | flatten)"
   # PIN_TEST_LOG=<file> keeps every console session's raw output, for reading what an operator would see.
@@ -309,9 +368,7 @@ $OUT"
 # by the workstation's diff attributes and config, and with no advice to run a raw git diff.
 has "NEW-MODULE-MARKER" || fail "the full diff of the review set is not shown (A14 review 3, C2):
 $OUT"
-before "AFTER-FAKE-HEADER-MARKER" "detached HEAD at v9.9.9" || fail "the full diff is not shown before the checkout (C2), or a CR faked a header and hid the rest of a reviewed file:
-$OUT"
-has '// SAFE\u000Ddiff --git a/web/fake.ts' || fail "a CR in a changed line is not shown escaped inside its own line (C2):
+before "NEW-MODULE-MARKER" "detached HEAD at v9.9.9" || fail "the full diff is not shown before the checkout (C2):
 $OUT"
 has '// \u001B[2KHIDDEN-IN-CONTENT' || fail "an ESC sequence in a changed line is not shown escaped (C2):
 $OUT"
@@ -539,6 +596,141 @@ $OUT"
 has "HEAD is back at main" || fail "the die does not say HEAD was put back:
 $OUT"
 has "stub ceremony RAN" && fail "the stub ceremony ran after a failure before the confirmation"
+
+# ===================================================================== review 5 (A14 review 5) =======================
+echo "==> signandvari no stdin (H1): a profile's UTF-8 \$OutputEncoding (a BOM on a native stdin) does not break an honest run"
+PRELUDE='$OutputEncoding = [Text.UTF8Encoding]::new($true)'
+bom="$(pwsh -NoProfile -Command "$PRELUDE; 'x' | & od -An -tx1" 2>&1)"
+case "$bom" in *"ef bb bf"*) ;; *) fail "this pwsh writes no BOM to a native program's stdin under a UTF-8 \$OutputEncoding, so the next run proves nothing: $bom" ;; esac
+fresh_ws; record "$C0" 9.9.8; at_old
+PS_PRELUDE="$PRELUDE" runpty 9.9.9 9.9.9 -Commit "$C1" -DryRun
+[ "$RC" -eq 0 ] || fail "an honest dry run failed under a UTF-8 \$OutputEncoding (H1: a native command read a BOM from a pipeline):
+$OUT"
+has "files the review covers are on disk exactly as git holds them" || fail "the byte check did not pass under a UTF-8 \$OutputEncoding (H1):
+$OUT"
+has "stub ceremony RAN: dry run" || fail "the dry run's stub ceremony did not run under a UTF-8 \$OutputEncoding (H1):
+$OUT"
+
+echo "==> scripts (H2): every PowerShell file beside signandvari.ps1 is pure printable ASCII"
+SD="$(dirname "$S")"
+[ -f "$SD/prestige-release.ps1" ] || fail "no prestige-release.ps1 beside $S, so the ASCII check proves nothing"
+for f in "$SD"/*.ps1 "$SD"/*.psm1 "$SD"/*.psd1; do
+  [ -f "$f" ] || continue
+  bad="$(LC_ALL=C grep -nP '[^\t\r\x20-\x7E]' "$f" | head -3)"
+  [ -z "$bad" ] || fail "$(basename "$f") is not pure printable ASCII (Windows PowerShell 5.1 reads a script without a BOM in the ANSI code page): $(printf '%q' "$bad")"
+done
+
+echo "==> signandvari review (S1, S5): invisible characters, a real U+FFFD and bytes that are not UTF-8 print escaped;"
+echo "    a reviewed PowerShell file with a byte above 0x7F and no BOM is refused after the checkout, HEAD put back"
+fresh_ws; record "$C1" 9.9.9
+runpty 9.9.14 9.9.14 -Commit "$B1" -DryRun
+[ "$RC" -ne 0 ] || fail "a reviewed .ps1 with byte 0x94 and no BOM was accepted (S1)"
+has '// FFFD:\uFFFD zwsp:a\u200Bb wj:\u2060 bom:\uFEFF hf:\u3164\u115F\u1160 tag:\U000E0041 vs:\uFE0F shy:\u00AD bad:\xFF end' \
+  || fail "the invisible characters, U+FFFD or a byte that is not UTF-8 are not printed escaped (S1, S5):
+$OUT"
+has 'inv: a\u200Bb tag:\U000E0041 shy:\u00AD vs:\uFE0F' || fail "a commit subject's invisible characters are not printed escaped (S5):
+$OUT"
+has 'Write-Host "inert \x94; Write-Host PWNED; \x94"' || fail "the 0x94 bytes of a PowerShell file are not shown as \\x94 (S1):
+$OUT"
+has '\uFEFF# caf' || fail "the BOM of a PowerShell file is not shown escaped:
+$OUT"
+no_raw "an invisible character, U+FFFD or a byte that is not UTF-8" $'\xef\xbf\xbd' $'\xe2\x80\x8b' $'\xe2\x81\xa0' $'\xef\xbb\xbf' \
+  $'\xe3\x85\xa4' $'\xe1\x85\x9f' $'\xe1\x85\xa0' $'\xf3\xa0\x81\x81' $'\xef\xb8\x8f' $'\xc2\xad'
+has "NOT ASCII, NO BOM tools/ps/Evil.ps1" || fail "the S1 refusal does not name the PowerShell file without a BOM:
+$OUT"
+has "NO BOM tools/ps/Ok.ps1" && fail "a PowerShell file WITH a UTF-8 BOM was refused (S1):
+$OUT"
+has "reads such a script in the ANSI code page" || fail "the S1 refusal does not say why:
+$OUT"
+has "HEAD is back at main" || fail "the S1 refusal does not put HEAD back:
+$OUT"
+has "stub ceremony RAN" && fail "the stub ceremony ran on a tree with a PowerShell file 5.1 would read differently (S1)"
+[ "$(head_of)" = "$C2" ] || fail "the S1 refusal left HEAD at $(head_of)"
+
+echo "==> signandvari checkout (S2): a reviewed text file with a CR that no LF follows is refused, a binary is not"
+fresh_ws; record "$C1" 9.9.9
+runpty 9.9.13 9.9.13 -Commit "$R1" -DryRun
+[ "$RC" -ne 0 ] || fail "a reviewed .kt with a CR that no LF follows was accepted (S2)"
+# The C2 property, on this tree: the CR is shown escaped inside its own line, and the fake header it would start does
+# not end the reviewed file early; all of it before the checkout.
+has '// SAFE\u000Ddiff --git a/web/fake.ts' || fail "a CR in a changed line is not shown escaped inside its own line (C2):
+$OUT"
+before "AFTER-FAKE-HEADER-MARKER" "detached HEAD at v9.9.13" || fail "the full diff is not shown before the checkout (C2), or a CR faked a header and hid the rest of a reviewed file:
+$OUT"
+has "LONE CR tools/cr/Cr.kt" || fail "the S2 refusal does not name the .kt with a lone CR:
+$OUT"
+has "LONE CR tools/cr/icon.png" && fail "a binary (a NUL, not a source file) with a lone CR was refused (S2):
+$OUT"
+has "Kotlin, Java and PowerShell end a line there" || fail "the S2 refusal does not say why:
+$OUT"
+has "HEAD is back at main" || fail "the S2 refusal does not put HEAD back:
+$OUT"
+has "stub ceremony RAN" && fail "the stub ceremony ran on a tree with a lone CR in a reviewed source (S2)"
+[ "$(head_of)" = "$C2" ] || fail "the S2 refusal left HEAD at $(head_of)"
+
+echo "==> signandvari pager (S3): a page is counted in console rows, not lines"
+fresh_ws; record "$C1" 9.9.9
+ROWS=12 COLS=80 runpty $'q\n9.9.12' 9.9.12 -Commit "$L1" -DryRun
+[ "$RC" -eq 0 ] || fail "a confirmed dry run after stopping the pager failed (S3):
+$OUT"
+first="$(printf '%s\n' "$OUT" | grep -oE -- '-- line [0-9]+ of' | head -1)"
+# 12 rows: the prompt wraps to 2 at 80 columns, so 9 rows of diff. Six one-row header lines, then a 304-column line
+# that takes 4 rows: the first page stops after the sixth line. Counting lines, it stopped after the ninth.
+[ "$first" = "-- line 6 of" ] || fail "the first page of a diff whose lines wrap stopped at '$first', not after line 6 (S3: rows, not lines):
+$OUT"
+
+echo "==> signandvari review (S3): a line longer than 400 characters is cut at a marker, counted, and whole in the review copy"
+fresh_ws; record "$C1" 9.9.9
+runpty 9.9.12 9.9.12 -Commit "$L1" -DryRun
+[ "$RC" -eq 0 ] || fail "the confirmed dry run over a long line failed (S3):
+$OUT"
+has "<<CAPPED: 400 of 5001 characters shown - the review copy holds the whole line>>" || fail "a 5001-character line is not cut at a marker (S3):
+$OUT"
+has "1 line(s) of this review are longer than 400 characters" || fail "the cut lines are not counted (S3):
+$OUT"
+case "$RAW" in *"$(printf 'z%.0s' $(seq 1 401))"*) fail "a line longer than 400 characters reached the console whole (S3)" ;; esac
+grep -qx -- "+$(printf 'z%.0s' $(seq 1 5000))" "$LAD/andvari/signandvari-review-${L1:0:12}.txt" \
+  || fail "the review copy does not hold the cut line whole (S3)"
+
+echo "==> signandvari checkout (S4): the CRLF form passes only for a blob git would convert (no NUL, no CR)"
+fresh_ws; record "$C1" 9.9.9
+# An attribute that forces a binary to text with CRLF endings: git rewrites the jar on checkout, status stays clean.
+printf '*.jar text eol=crlf\n' > "$W/ws/.git/info/attributes"
+runpty 9.9.12 9.9.12 -Commit "$L1" -DryRun
+[ "$RC" -ne 0 ] || fail "the CRLF form of a binary blob (forced by an attribute) passed the byte check (S4)"
+has "DIFFERS tools/zz/blob.jar" || fail "the S4 refusal does not name the rewritten binary:
+$OUT"
+has "an attribute forced it" || fail "the S4 refusal does not say why:
+$OUT"
+has "HEAD is back at main" || fail "the S4 refusal does not put HEAD back:
+$OUT"
+has "stub ceremony RAN" && fail "the stub ceremony ran on a tree whose binary was rewritten with CRLF (S4)"
+
+echo "==> signandvari git (the clean-filter belt): no git command signandvari runs calls an LFS clean filter"
+fresh_ws; record "$C0" 9.9.8; at_old
+printf '* filter=lfs\n' > "$W/ws/.git/info/attributes"
+git -C "$W/ws" config filter.lfs.clean "sh -c 'touch \"$W/lfs-clean-ran\"; cat'"
+rm -f "$W/lfs-clean-ran"
+runpty 9.9.9 9.9.9 -Commit "$C1" -DryRun
+[ "$RC" -eq 0 ] || fail "the confirmed dry run with an LFS clean filter configured failed:
+$OUT"
+[ ! -e "$W/lfs-clean-ran" ] || fail "git ran this box's LFS clean filter (filter.lfs.clean) during signandvari's checkout or a git command after it"
+
+echo "==> signandvari checkout (the attr-source belt): the release tree's .gitattributes cannot name a filter this box defines"
+if git --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 -C "$W/build" check-attr -a -- x >/dev/null 2>&1; then
+  fresh_ws; record "$C1" 9.9.9
+  git -C "$W/ws" config filter.boxfilter.smudge "sh -c 'touch \"$W/boxfilter-ran\"; cat'"
+  git -C "$W/ws" config filter.boxfilter.clean "sh -c 'touch \"$W/boxfilter-ran\"; cat'"
+  rm -f "$W/boxfilter-ran"
+  runpty 9.9.15 9.9.15 -Commit "$A1" -DryRun
+  [ "$RC" -eq 0 ] || fail "the confirmed dry run over a tree whose .gitattributes names a filter failed:
+$OUT"
+  [ ! -e "$W/boxfilter-ran" ] || fail "the release tree's .gitattributes made git run a filter this box defines (no --attr-source)"
+  has "read no .gitattributes from the release tree" || fail "the run does not say the release tree's .gitattributes are not read:
+$OUT"
+else
+  echo "    SKIP: this git has no --attr-source (2.42+); the attr-source belt is not exercised here."
+fi
 
 # ===================================================================== after signing (A14 review 3, C6) =============
 echo "==> signandvari drop: the build host's sha256sum answer prints escaped"
