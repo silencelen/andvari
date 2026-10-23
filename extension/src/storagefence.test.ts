@@ -107,7 +107,7 @@ test("the server state reads storage.local only to block — with no trusted sto
   const unavailable = ss.slice(ss.indexOf('if (outcome.kind === "unavailable") {'), ss.indexOf('if (outcome.kind === "failed")'));
   assert.ok(unavailable.includes("await previousServer(legacy)"), "inside the no-trusted-store branch");
   assert.ok(unavailable.includes('{ kind: "confirm", origin: previous, keepable: false }'), "as a block that cannot be confirmed (never adopted)");
-  const unattested = ss.slice(ss.indexOf('if (outcome.kind === "skipped" || got[UNATTESTED_SERVER_KEY] === true) {'));
+  const unattested = ss.slice(ss.indexOf('if (outcome.kind === "skipped" || mark === true) {'));
   assert.ok(unattested.indexOf("await previousServer(legacy)") > -1, "inside the unattested branch");
   assert.ok(unattested.indexOf('block: { kind: "confirm", origin: previous, keepable: false }') > unattested.indexOf("await previousServer(legacy)"), "as the same read-only block");
   assert.ok(!/legacy\.set\(/.test(ss), "never a write");

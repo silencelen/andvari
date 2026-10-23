@@ -561,6 +561,11 @@ async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Pr
   // worker dials leaves the server unknown in this worker life (unsettled) instead of lifting the block onto the wrong one.
   dialBlock = !atStart && st.url !== serverUrl ? { kind: "unsettled" } : st.block;
   trustedStoreOk = st.trustedStore;
+  // A16 review R4: a block that stands from now on dials nothing — a live socket included.
+  if (dialBlock) {
+    events?.close();
+    events = null;
+  }
 }
 
 /** Resolves once the storage access levels settled, the one-time A15 migration was settled, the persisted server
@@ -1686,7 +1691,8 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
     ? await armGate({
         hydrate: async () => {
           // Only where there is no live pair (a cold worker): a warm one holds the pair and the tab records in memory.
-          if (!api.getTokens().access) copy = await erase.opened(currentOriginKey);
+          // Bounded like the wait above (the key is in hand by now, unless a browser-start report is replacing it).
+          if (!api.getTokens().access) copy = await Promise.race([erase.opened(currentOriginKey), delay(LOCK_STORE_WAIT_MS).then(() => ({}))]);
         },
         readTokens: () => {
           const live = api.getTokens();
@@ -1829,6 +1835,8 @@ function browserSessionReported(): void {
   session = null;
   api.setTokens(null, null);
   personalChangeDescribed = null;
+  stagedChangeFallback = null;
+  dropEnrollSecretCache();
   clearPendingUsage();
   clearPendingTotp();
   knownLoginsKey = null;

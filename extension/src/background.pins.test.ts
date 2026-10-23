@@ -487,6 +487,7 @@ test("A16 review: a later server-state application never lifts the block onto an
   const apply = spanOf(bg, "async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Promise<void> {", "\n}\n");
   assert.ok(apply.includes('dialBlock = !atStart && st.url !== serverUrl ? { kind: "unsettled" } : st.block;'));
   assert.ok(apply.indexOf("if (atStart && st.url !== serverUrl) {") < apply.indexOf("dialBlock ="), "the url moves only at start, before");
+  assert.ok(/if \(dialBlock\) \{\s*events\?\.close\(\);\s*events = null;/.test(apply), "a block that appears mid-life closes the socket");
 });
 
 test("A15 review F3: a failed seq read aborts the update check before anything is fetched", () => {
@@ -598,7 +599,7 @@ test("A16 (review R4): the lock's erase is its first act â€” before ANY await â€
     assert.ok(at > -1 && at < firstAwait, `"${sync}" is in the erase's synchronous step`);
   }
   // The arm is decided after: from the live pair, or the lock's own copy (opened, not loaded).
-  assert.ok(body.indexOf("if (!api.getTokens().access) copy = await erase.opened(currentOriginKey);") > firstAwait);
+  assert.ok(body.indexOf("if (!api.getTokens().access) copy = await Promise.race([erase.opened(currentOriginKey), delay(LOCK_STORE_WAIT_MS).then(() => ({}))]);") > firstAwait, "bounded");
   assert.ok(body.includes("return live.access ? live : snapshotTokens(copy.session);"));
   assert.ok(!body.includes("hydrate: ensureLoaded"), "no general load inside a lock");
   const kl = body.indexOf('if (reason === "signout" || !quCompartmentTrusted) {');

@@ -89,6 +89,28 @@ test("R3: 'Not mine' lifts it for good: storage.local's value and the mark both 
   assert.equal((await loadServerState(later, trusted.a, legacy.a)).block, null);
 });
 
+test("R3: once a skipped start blocked, deleting storage.local's value (anyone can) does not lift the block", async () => {
+  const legacy = area({ [SERVER_URL_KEY]: SELF });
+  const trusted = area();
+  const s1 = await loadServerState(await migrateTrustState(legacy.a, trusted.a, none), trusted.a, legacy.a);
+  assert.deepEqual(s1.block, { kind: "confirm", origin: SELF, keepable: false });
+  legacy.data.delete(SERVER_URL_KEY); // a content script on Firefox or Chrome before 140
+  legacy.data.set(SERVER_URL_KEY, "https://evil.example"); // …or rewrites it
+  const later = await loadServerState(await migrateTrustState(legacy.a, trusted.a, none), trusted.a, legacy.a);
+  assert.deepEqual(later.block, { kind: "confirm", origin: SELF, keepable: false }, "the origin read at the skipped start stands");
+  assert.equal(later.url, DEFAULT_SERVER_URL);
+});
+
+test("R3: 'Not mine' on a migrated suggestion also clears an unattested mark left by an earlier skipped start", async () => {
+  const legacy = area({ [SERVER_URL_KEY]: SELF });
+  const trusted = area({ [LEGACY_SERVER_KEY]: SELF, [MARK]: SELF });
+  const st = await loadServerState({ kind: "already" }, trusted.a, legacy.a);
+  assert.deepEqual(st.block, { kind: "confirm", origin: SELF, keepable: true }, "the attested suggestion outranks the mark");
+  assert.equal(await forgetPendingServer(st.block, trusted.a, legacy.a), true);
+  assert.equal(trusted.data.has(MARK), false);
+  assert.equal((await loadServerState({ kind: "already" }, trusted.a, legacy.a)).block, null, "declined for good");
+});
+
 test("R3: a server chosen through the gate lifts it, and the mark goes with the choice", async () => {
   const legacy = area({ [SERVER_URL_KEY]: SELF });
   const trusted = area();
@@ -112,11 +134,13 @@ test("R3: a fresh install, or storage.local naming the default or nothing, block
   }
 });
 
-test("R3: storage.local is read only for its serverUrl, and only while the mark stands", async () => {
+test("R3: storage.local is read only for its serverUrl, and only at the start that skipped the migration", async () => {
   const legacy = area({ [SERVER_URL_KEY]: SELF, lastEmail: "a@example.org" });
   const trusted = area();
   await loadServerState(await migrateTrustState(legacy.a, trusted.a, none), trusted.a, legacy.a);
   assert.deepEqual(legacy.reads, [SERVER_URL_KEY], "the one key, nothing else");
+  await loadServerState(await migrateTrustState(legacy.a, trusted.a, none), trusted.a, legacy.a);
+  assert.deepEqual(legacy.reads, [SERVER_URL_KEY], "not again: the origin is kept in the mark");
   // A completed migration (the flag, no mark): storage.local is not consulted at all.
   const plain = area({ [SERVER_URL_KEY]: SELF });
   await loadServerState({ kind: "already" }, area({ [A15_MIGRATED_KEY]: true }).a, plain.a);

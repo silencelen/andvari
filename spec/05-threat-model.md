@@ -766,11 +766,12 @@ life: when the store refuses it or does not answer, nothing is recorded, so the 
 (at once, then after 2, 10 and 30 s), and the block stays `unsettled` meanwhile (A16 review R3: before, the next start
 then skipped the migration and dialed the default while storage.local still named the self-hoster's server). Every
 other start without the flag (a fresh install, an update from an A15 build, a browser update, or a start with no install
-event at all) sets the flag WITHOUT reading storage.local, and in the same write a mark that it did so; while that mark
-stands and the store holds no server choice, each start reads storage.local's `serverUrl` ONLY to block, decline-only as
-in (e): when it names another server, the worker signs in nowhere, the address is never offered for connecting (the
-user enters their server in Options, or chooses "Not mine", which removes the old value and the mark), so a planted
-value is only a denial of service; the mark goes once storage.local names no other server or a server is chosen. Before F2 any flagless start migrated, so a store that was
+event at all) sets the flag WITHOUT reading storage.local, and in the same write a mark that it did so. With the store
+holding no server choice, that start then reads storage.local's `serverUrl` ONLY to block, decline-only as in (e): when
+it names another server, the worker signs in nowhere and the address is never offered for connecting (the user enters
+their server in Options, or chooses "Not mine"), so a planted value is only a denial of service. The origin is kept in
+the mark, so later starts block on it without reading storage.local again; it goes when that start finds no other
+server named there, when a server is chosen, or on "Not mine" (which also removes the old value). Before F2 any flagless start migrated, so a store that was
 unavailable at the upgrade and available later (Firefox's "Never remember history" turned off), or that lost its data
 while storage.local kept its own, moved whatever a content script had written there in the meantime (a planted server
 suggestion, homes, an older wrap, an email, a credential id); the Options copy "Before an update, this browser was set
@@ -849,9 +850,12 @@ worker life where a block stands — from a sealed snapshot of the dialed origin
 but the seal's key did (`unsettled`), or in the no-store mode, where the block is recomputed at each start — stays
 unlocked on this device and serves what it holds, but dials nothing until the block is lifted (no sync, save, refresh,
 socket or revoke); signed out meanwhile, it is wiped locally only, and its refresh token stays valid server-side until
-it expires or the device is revoked. (7) The unattested mark (d) is written with the flag; if that write fails, the
-next start still skips without reading and writes it again, so the block holds; a plant in storage.local at a start
-that skips the migration is a denial of service until "Not mine".
+it expires or the device is revoked. (7) The unattested block (d) rests on storage.local at the one start that skips
+the migration: a content process that deletes the old value before that start (after an attested upgrade whose "owed"
+write failed, and was not recorded by the retries within that worker life) leaves no block, and the default is then the
+server, as in the no-store mode (4); one that plants a value then gets a denial of service until "Not mine". After that
+start the origin is kept in the store, and storage.local no longer moves it. If the write of the flag and the mark
+fails, the next start skips again, reads again and blocks again.
 
 **A16 (security review 2026-10, sealed custody in storage.session).** The extension keeps unlocked custody in
 `storage.session` on both engines, because the worker is stopped when idle: the session snapshot (tokens, unwrapped
@@ -910,7 +914,8 @@ the quick-unlock arm from what stood at the lock: the live token pair or, in a w
 yet, its own copy, opened under the epoch it was sealed in (it keeps the tab records' page-known half the same way).
 Without the origin and the key in time it arms nothing, wipes no quick-unlock record and keeps no tab record. Before
 the A16 review a cold lock waited up to those 1.5 s before it erased (R4). A sign-out is that lock, then the server
-revoke on the pair the lock saw (before, it waited on a load and on the network, up to 7 s, before erasing). After the
+revoke on the pair the lock saw (before, it waited on a load and on the network, up to 7 s, before erasing); it waits
+up to 5 s for the origin and the key, after the erase, and one that gets neither wipes locally only. After the
 erase the lock waits, at most 1.5 s more, for the new epoch to reach the key store; a write that failed is retried by
 every later seal operation in that worker life; and the snapshot and the tab records are written only under an epoch
 the key store holds (held until it does, and not written at all while it refuses, so custody stays in memory), so no

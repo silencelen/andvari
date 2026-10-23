@@ -72,13 +72,15 @@ async function previousServer(legacy: KvArea): Promise<string | null> {
  *    read ONLY to block (`keepable: false`): the user's previous server cannot be kept here, and signing in to the
  *    default in its place is exactly what F1 forbids. Read at every such start, never adopted, never connectable.
  *  - Store timed out, or an owed migration failed: `unsettled`.
- *  - A16 review R3: a start that skipped the migration (no flag, nothing attested the upgrade), or any later start while
- *    the [UNATTESTED_SERVER_KEY] mark it wrote with the flag stands, with no choice and no suggestion in the store: if
- *    storage.local still names another server, the same read-only block as with no store (`keepable: false`:
- *    decline-only, never offered for connecting, so a planted value is only a denial of service). The mark goes once
- *    storage.local no longer names one, or a server is chosen. Before this the start that skipped the migration — the
- *    next one after an attested upgrade whose "owed" write failed — dialed the default, and so did every start after
- *    it, while storage.local still named the self-hoster's server: the A15 review's F1 harm again.
+ *  - A16 review R3: a start that skipped the migration (no flag, nothing attested the upgrade) — it wrote the
+ *    [UNATTESTED_SERVER_KEY] mark with the flag — with no choice and no suggestion in the store: if storage.local names
+ *    another server, the same read-only block as with no store (`keepable: false`: decline-only, never offered for
+ *    connecting, so a planted value is only a denial of service). The origin is then kept in the mark, so later starts
+ *    block on it without reading storage.local again (a content script that deletes the value there cannot lift the
+ *    block); the mark goes when storage.local names no other server at that start, when a server is chosen, or on
+ *    "Not mine". Before this the start that skipped the migration — the next one after an attested upgrade whose
+ *    "owed" write failed — dialed the default, and so did every start after it, while storage.local still named the
+ *    self-hoster's server: the A15 review's F1 harm again.
  */
 export async function loadServerState(outcome: MigrationOutcome, trusted: KvArea, legacy: KvArea): Promise<ServerState> {
   const unsettled: ServerState = { url: DEFAULT_SERVER_URL, trustedStore: true, block: { kind: "unsettled" } };
@@ -104,32 +106,34 @@ export async function loadServerState(outcome: MigrationOutcome, trusted: KvArea
   }
   const pending = otherServer(got[LEGACY_SERVER_KEY]);
   if (pending !== null) return { url, trustedStore: true, block: { kind: "confirm", origin: pending, keepable: true } };
-  if (outcome.kind === "skipped" || got[UNATTESTED_SERVER_KEY] === true) {
+  const mark = got[UNATTESTED_SERVER_KEY];
+  const kept = otherServer(mark); // an origin a skipped start read from storage.local: block on it, never re-read
+  if (kept !== null) return { url, trustedStore: true, block: { kind: "confirm", origin: kept, keepable: false } };
+  if (outcome.kind === "skipped" || mark === true) {
     const previous = await previousServer(legacy);
     if (previous !== null) {
-      if (got[UNATTESTED_SERVER_KEY] !== true) await trusted.set({ [UNATTESTED_SERVER_KEY]: true }).catch(() => {});
+      await trusted.set({ [UNATTESTED_SERVER_KEY]: previous }).catch(() => {}); // best effort: the start that skipped blocks anyway
       return { url, trustedStore: true, block: { kind: "confirm", origin: previous, keepable: false } };
     }
-    if (got[UNATTESTED_SERVER_KEY] !== undefined) await trusted.remove(UNATTESTED_SERVER_KEY).catch(() => {});
   }
+  if (mark !== undefined) await trusted.remove(UNATTESTED_SERVER_KEY).catch(() => {});
   return { url, trustedStore: true, block: null };
 }
 
 /**
  * "Not mine": drop a `confirm` block's origin where it is kept — the trusted store's suggestion, or (keepable false)
- * storage.local's old `serverUrl`, the only write this extension makes there besides removals by the purge (and, A16
- * review R3, the unattested mark beside it, best effort: with no store there is none). An `unsettled` block cannot be
- * dismissed (there is nothing to dismiss: the store did not answer). Returns whether the block may be lifted.
+ * storage.local's old `serverUrl`, the only write this extension makes there besides removals by the purge — and, A16
+ * review R3, the unattested mark, best effort (with no store there is none). An `unsettled` block cannot be dismissed
+ * (there is nothing to dismiss: the store did not answer). Returns whether the block may be lifted.
  */
 export async function forgetPendingServer(block: ServerBlock | null, trusted: KvArea, legacy: KvArea): Promise<boolean> {
   if (block === null) return true;
   if (block.kind !== "confirm") return false;
   try {
     if (block.keepable) await trusted.remove(LEGACY_SERVER_KEY);
-    else {
-      await legacy.remove(SERVER_URL_KEY);
-      await trusted.remove(UNATTESTED_SERVER_KEY).catch(() => {});
-    }
+    else await legacy.remove(SERVER_URL_KEY);
+    // The unattested mark goes either way (with no store there is none): a declined server does not come back.
+    await trusted.remove(UNATTESTED_SERVER_KEY).catch(() => {});
     return true;
   } catch {
     return false;
