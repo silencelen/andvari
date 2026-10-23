@@ -585,7 +585,7 @@ if ($specHasStore) {
 # andvari_<ver>-<rev>_amd64.deb; /downloads serves andvari-<ver>.deb) and the one with no
 # SHA256SUMS cross-check on the build host: the spec's sha256 was hashed from the LOCAL build
 # output and the served URL is constructed by convention. So the agreement is PROVEN here, not
-# assumed: GET the served deb and require it to hash to .linux.sha256 — before the multi-minute
+# assumed: GET the served deb and require it to hash to .linux.sha256 - before the multi-minute
 # MSI build, and long before a signed manifest can point every Linux client at bytes that do not
 # match their pinned digest. (The deb is already published when this ceremony runs; the spec is
 # emitted alongside the uploaded artifacts.)

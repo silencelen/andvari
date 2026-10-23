@@ -1,11 +1,11 @@
-# andvari — build the Windows MSI installer. Run on a Windows box with JDK 17 + WiX.
+# andvari - build the Windows MSI installer. Run on a Windows box with JDK 17 + WiX.
 # Prerequisites: JDK 17 and the WiX Toolset on PATH. Produces dist\andvari-<version>.msi + sha256.
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
-Write-Host "[build-windows] packaging MSI (gradlew :app-desktop:packageMsi)…"
+Write-Host "[build-windows] packaging MSI (gradlew :app-desktop:packageMsi)..."
 & .\gradlew.bat :app-desktop:packageMsi --console=plain
 if ($LASTEXITCODE -ne 0) { throw "gradle packageMsi failed" }
 

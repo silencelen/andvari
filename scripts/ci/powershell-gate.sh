@@ -37,6 +37,20 @@
 #      and the MSI link), and the full diff, printed by signandvari before checkout (C2); the checkout runs
 #      no hook and no LFS smudge, and every reviewed file must then hash to what git holds (C3); a way out
 #      before the confirmation puts HEAD back (C5); prestige-release.ps1 rebuilds the signer jar every run.
+#      Since its fifth review: the reviewed files are hashed in-process, so no native command reads a pipeline
+#      (H1), every git command runs with the LFS filters blanked and, from the checkout on, with
+#      --attr-source where git has it; a reviewed PowerShell file with a byte above 0x7F and no BOM, a reviewed
+#      text file with a lone CR, and the CRLF form of a blob git would not convert are refused (S1, S2, S4);
+#      a byte that is not UTF-8 prints as \xNN, U+FFFD and the invisible characters print escaped (S1, S5);
+#      the pager counts console rows and caps long lines (S3).
+#
+#   4. For EVERY scripts/*.ps1|psm1|psd1 (A14 review 5): pure printable ASCII (H2: Windows PowerShell 5.1
+#      reads a script without a byte-order mark in the ANSI code page, where the UTF-8 bytes of an em dash
+#      hold 0x94, a closing double quote to its tokenizer), and NO PIPELINE INTO A NATIVE COMMAND (H1: 5.1
+#      writes a pipeline into a native program's stdin in $OutputEncoding, and a profile's UTF-8 puts a
+#      byte-order mark in front of it) unless the enclosing script block sets an ASCII $OutputEncoding.
+#      Found with the PowerShell parser: every pipeline element after the first that is a native program,
+#      an `&`/`.` call of anything but an inline script block, or a command this box cannot resolve.
 #
 # Skips (green, loudly) when pwsh is absent, because a contributor without PowerShell must still
 # be able to run the release gate; CI and the maintainer's box have it.
@@ -45,8 +59,17 @@ cd "$(dirname "$0")/../.."
 
 fail() { echo "    POWERSHELL GATE FAILED: $*" >&2; exit 1; }
 
-mapfile -t PS_FILES < <(find scripts -maxdepth 1 -name '*.ps1' | sort)
+mapfile -t PS_FILES < <(find scripts -maxdepth 1 \( -name '*.ps1' -o -name '*.psm1' -o -name '*.psd1' \) | sort)
 [ "${#PS_FILES[@]}" -gt 0 ] || fail "no .ps1 files found under scripts/ — this gate is pointed at nothing."
+
+# H2 (A14 review 5): every PowerShell file is pure printable ASCII - no byte above 0x7F, no control character but
+# tab and line ends, no CR that an LF does not follow.
+for f in "${PS_FILES[@]}"; do
+  LC_ALL=C grep -nP '[^\x00-\x7F]' "$f" >&2 && fail "$f contains non-ASCII characters (lines above): Windows PowerShell 5.1 reads a script without a byte-order mark in the ANSI code page (A14 review 5, H2)."
+  LC_ALL=C grep -nP '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' "$f" >&2 && fail "$f contains a control character (lines above)."
+  LC_ALL=C grep -nP '\r(?!$)' "$f" >&2 && fail "$f contains a CR that no LF follows (lines above): PowerShell ends a line there."
+done
+echo "    pure printable ASCII: ${PS_FILES[*]}"
 
 if command -v pwsh >/dev/null 2>&1; then
   for f in "${PS_FILES[@]}"; do
@@ -54,11 +77,45 @@ if command -v pwsh >/dev/null 2>&1; then
     # as PowerShell syntax, not as an argument separator.
     out=$(PS_TARGET="$f" pwsh -NoProfile -NonInteractive -Command '
       $errs = $null; $toks = $null
-      [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $env:PS_TARGET), [ref]$toks, [ref]$errs) | Out-Null
+      $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $env:PS_TARGET), [ref]$toks, [ref]$errs)
       if ($errs) { $errs | ForEach-Object { "line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message }; exit 1 }
+      # H1 (A14 review 5): no pipeline feeds a native command, unless its script block sets an ASCII $OutputEncoding.
+      $defined = @{}
+      foreach ($fd in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $defined[$fd.Name.ToLowerInvariant()] = $true }
+      $bad = @()
+      foreach ($pl in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.PipelineAst] }, $true)) {
+        $els = $pl.PipelineElements
+        for ($k = 1; $k -lt $els.Count; $k++) {
+          $el = $els[$k]
+          if ($el -isnot [System.Management.Automation.Language.CommandAst]) { continue }
+          $native = $false
+          if ($el.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) {
+            $native = -not ($el.CommandElements[0] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])
+          }
+          else {
+            $name = $el.GetCommandName()
+            if (-not $name) { $native = $true }
+            elseif (-not $defined.ContainsKey($name.ToLowerInvariant())) {
+              $cmd = Get-Command -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+              $native = ($null -eq $cmd) -or ($cmd.CommandType -eq "Application") -or ($cmd.CommandType -eq "ExternalScript")
+            }
+          }
+          if (-not $native) { continue }
+          $sb = $el.Parent
+          while ($sb -and $sb -isnot [System.Management.Automation.Language.ScriptBlockAst]) { $sb = $sb.Parent }
+          $ascii = $false
+          if ($sb) {
+            foreach ($as in $sb.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+              if ($as.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and ($as.Left.VariablePath.UserPath -replace "^(script|global|local|private):", "") -eq "OutputEncoding" -and $as.Right.Extent.Text -match "ASCIIEncoding") { $ascii = $true }
+            }
+          }
+          if (-not $ascii) { $bad += ("line {0}: a pipeline feeds the stdin of {1}" -f $el.Extent.StartLineNumber, $el.Extent.Text) }
+        }
+      }
+      if ($bad) { $bad; exit 2 }
       exit 0
-    ' 2>&1) || { echo "$out" >&2; fail "$f does not parse."; }
-    echo "    parsed  $f"
+    ' 2>&1) || { echo "$out" >&2; fail "$f does not parse, or pipes into a native command (A14 review 5, H1: set a local ASCII \$OutputEncoding or drop the pipe)."; }
+    echo "    parsed  $f (no pipeline into a native command)"
   done
 else
   echo "    SKIP: pwsh not installed — .ps1 files not parsed on this box."
@@ -128,9 +185,8 @@ write_pos=$(grep -n 'Move-Item -LiteralPath \$recordTmp -Destination \$RecordPat
 # The one-time install recipe (release-signing-keys.md §0) writes this file through PowerShell 5.1,
 # which also reads a BOM-less .ps1 in the ANSI code page: it stays pure ASCII. And PRINTABLE ASCII
 # (A14 review 3): the operator reads that install as a raw `git diff --no-index`, so no control
-# character but tab and line ends may be in it - an ESC would reach the console unescaped.
-LC_ALL=C grep -nP '[^\x00-\x7F]' "$S" >&2 && fail "$S contains non-ASCII characters (lines above) — keep it pure ASCII."
-LC_ALL=C grep -nP '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' "$S" >&2 && fail "$S contains a control character (lines above) — the install diff is read raw."
+# character but tab and line ends may be in it - an ESC would reach the console unescaped. (Both are
+# now checked for every scripts/*.ps1|psm1|psd1 at the top of this gate, A14 review 5, H2.)
 # A14 review 3, C1: default-include. The review shows every changed path except $ExcludedTrees, a short list of trees
 # that never run on the signing box. None of them may hold a module the update-signer or the MSI links (the signer is
 # a shadowJar of tools/update-signer and every module it links, ALL of each: an unqualified call resolves to a
@@ -193,21 +249,42 @@ grep -qE "for-each-ref.*refs/tags|Get-SeedTag" "$S" && fail "$S seeds the first-
 # index after it, before the confirmation; and a finally puts HEAD back on every way out before the confirmation.
 coll_pos=$(grep -n '^\$collisions = Find-CaseCollisions' "$S" | head -1 | cut -d: -f1) || true
 page_pos=$(grep -n '^Show-Paged -Lines \$FullDiff' "$S" | head -1 | cut -d: -f1) || true
-co_pos=$(grep -n "Invoke-Git -Arguments (\$SafeGit + @('checkout', '--detach', \$Commit))" "$S" | head -1 | cut -d: -f1) || true
-clean_pos=$(grep -n "\$after = (Invoke-Git -Arguments (\$SafeGit + @('status', '--porcelain')))" "$S" | head -1 | cut -d: -f1) || true
+attr_pos=$(grep -n '\$script:GitPrefix = @("--attr-source=\$EmptyTree") + \$SafeGit' "$S" | head -1 | cut -d: -f1) || true
+co_pos=$(grep -n "Invoke-Git -Arguments @('checkout', '--detach', \$Commit)" "$S" | head -1 | cut -d: -f1) || true
+clean_pos=$(grep -n "\$after = (Invoke-Git -Arguments @('status', '--porcelain'))" "$S" | head -1 | cut -d: -f1) || true
 bytes_pos=$(grep -n '^    Assert-ReviewedFilesOnDisk$' "$S" | head -1 | cut -d: -f1) || true
 ask_pos=$(grep -n 'Read-Host ("   Type the version' "$S" | head -1 | cut -d: -f1) || true
-{ [ -n "$coll_pos" ] && [ -n "$page_pos" ] && [ -n "$co_pos" ] && [ -n "$clean_pos" ] && [ -n "$bytes_pos" ] && [ -n "$ask_pos" ] \
-  && [ "$coll_pos" -lt "$page_pos" ] && [ "$page_pos" -lt "$co_pos" ] && [ "$co_pos" -lt "$clean_pos" ] \
+{ [ -n "$coll_pos" ] && [ -n "$page_pos" ] && [ -n "$attr_pos" ] && [ -n "$co_pos" ] && [ -n "$clean_pos" ] && [ -n "$bytes_pos" ] && [ -n "$ask_pos" ] \
+  && [ "$coll_pos" -lt "$page_pos" ] && [ "$page_pos" -lt "$attr_pos" ] && [ "$attr_pos" -lt "$co_pos" ] && [ "$co_pos" -lt "$clean_pos" ] \
   && [ "$clean_pos" -lt "$bytes_pos" ] && [ "$bytes_pos" -lt "$ask_pos" ]; } \
-  || fail "$S must refuse collisions, then show the full diff, then check out, then check the tree clean and every reviewed file's bytes, then ask."
+  || fail "$S must refuse collisions, then show the full diff, then take --attr-source where git has it, then check out, then check the tree clean and every reviewed file's bytes, then ask."
 safe_line=$(grep -m1 '^\$SafeGit = ' "$S") || true
-for need in 'core.hooksPath=$NoHooks' "'core.fsmonitor='"; do
+for need in 'core.hooksPath=$($script:NoHooks)' "'core.fsmonitor='"; do
   printf '%s\n' "$safe_line" | grep -qF -- "$need" || fail "$S \$SafeGit lost $need (A14 review 3, C3)."
 done
-grep -qF "'filter.lfs.process=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.required=false'" "$S" || fail "$S no longer checks out with the LFS smudge off (A14 review 3, C3)."
+grep -qF "'-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false'" "$S" || fail "$S no longer blanks every LFS filter, clean included (A14 review 3, C3; review 5)."
 grep -qF "\$env:GIT_LFS_SKIP_SMUDGE = '1'" "$S" || fail "$S no longer sets GIT_LFS_SKIP_SMUDGE for the checkout (A14 review 3, C3)."
-grep -qF "@('hash-object', '--no-filters', '--stdin-paths')" "$S" || fail "$S no longer hashes the reviewed files with no filter (A14 review 3, C3)."
+# A14 review 5: every git command carries $script:GitPrefix (from the first, with $SafeGit), and from the checkout on
+# --attr-source=<the empty tree> where this git has it.
+grep -qF '$gitArgs = @($script:GitPrefix) + @($Arguments)' "$S" || fail "$S no longer puts \$script:GitPrefix in front of every git command (A14 review 5)."
+grep -qF '$script:GitPrefix = $SafeGit' "$S" || fail "$S no longer starts every git command with \$SafeGit (A14 review 5)."
+grep -qF "\$EmptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'" "$S" || fail "$S lost the empty tree id for --attr-source (A14 review 5)."
+[ "$(grep -cE '& git( |$)' "$S")" = 1 ] || fail "$S runs git outside Invoke-Git (A14 review 5: every git command carries \$script:GitPrefix)."
+# A14 review 5, H1: the reviewed files are hashed in-process; nothing feeds git (or any native command) a pipeline.
+grep -nE -- "--stdin|InputLines|RedirectStandardInput|StandardInput" "$S" | grep -vE '^[0-9]+:[[:space:]]*#' >&2 && fail "$S feeds a native command's standard input again (lines above; A14 review 5, H1)."
+grep -qF '[System.IO.File]::ReadAllBytes((Join-Path $Repo $paths[$i]))' "$S" && grep -qF '(Get-BlobId $bytes) -ne $want[$i]' "$S" \
+  || fail "$S no longer hashes every reviewed file in-process against the index (A14 review 3, C3; review 5, H1)."
+grep -qF "\$sshOpts = @('-n', " "$S" || fail "$S runs ssh without -n: it would read this console (A14 review 5, H1)."
+# A14 review 5, S1-S5: the shape of each fix; the scratch-repo test below drives each one.
+grep -qF '$script:PowerShellFilePattern' "$S" && grep -qF 'NOT ASCII, NO BOM' "$S" || fail "$S no longer refuses a reviewed PowerShell file with a byte above 0x7F and no BOM (A14 review 5, S1)."
+grep -qF "\$text -match '\\r(?!\\n)'" "$S" && grep -qF 'LONE CR' "$S" || fail "$S no longer refuses a reviewed text file with a lone CR (A14 review 5, S2)."
+grep -qF "if (\$lf.IndexOf([char]0) -ge 0 -or \$lf.IndexOf([char]13) -ge 0) { return 'forced' }" "$S" || fail "$S allows the CRLF form of a blob holding a NUL or a CR again (A14 review 5, S4)."
+grep -qF '$script:MaxDisplayChars = 400' "$S" && grep -qF '$r = Get-DisplayRows $shown $width' "$S" || fail "$S no longer caps displayed lines and pages by console rows (A14 review 5, S3)."
+pat_u=$(grep -m1 -A1 '^\$script:UnsafeTextPattern = ' "$S") || true
+for need in '\p{Cf}' '\uDB40[\uDC00-\uDC7F' '\u00AD' '\u115F\u1160' '\u2000-\u200F' '\u205F-\u206F' '\u3164' '\uFE00-\uFE0F' '\uFEFF' '\uFFF9-\uFFFD' '(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]'; do
+  printf '%s\n' "$pat_u" | grep -qF -- "$need" || fail "$S \$UnsafeTextPattern lost $need (A14 review 5, S1/S5)."
+done
+grep -qF '$script:StrictUtf8.GetString(' "$S" && grep -qF '[char](0xDC00 + $b)' "$S" || fail "$S no longer keeps a byte that is not UTF-8 as a byte for display (A14 review 5, S1)."
 grep -qF 'if (-not $confirmed -and $checkedOut) {' "$S" || fail "$S no longer puts HEAD back in a finally on every way out before the confirmation (A14 review 3, C5)."
 # A14 review 3 (suspected): the update-signer jar is deleted and rebuilt from the tree on every real run.
 P=scripts/prestige-release.ps1
@@ -222,4 +299,5 @@ bash scripts/ci/signandvari-pin.test.sh || fail "the signandvari tag-pin scratch
 echo "    signandvari.ps1 + prestige-release.ps1 verify the tag against -Commit; release tag fetched alone, unforced;"
 echo "    the release descends from the workstation's last signed commit and is confirmed by a human;"
 echo "    the review shows every changed path but the trees that never run there, escaped, stat first, then the full"
-echo "    diff before checkout; a hook-less, smudge-less checkout whose reviewed files hash to git's; HEAD put back on refusal"
+echo "    diff before checkout; a hook-less, filter-less checkout whose reviewed files hash (in-process) to git's; HEAD put back on refusal;"
+echo "    no pipeline into a native command; reviewed PowerShell ASCII or BOM-marked, no lone CR, CRLF only where git converts"

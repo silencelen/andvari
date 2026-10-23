@@ -74,19 +74,35 @@
 # an external one, with --text --no-textconv --no-ext-diff --no-color, so neither this box's diff
 # settings nor the tree's attributes can hide or recolour a change. Not covered: the third-party
 # artifacts gradle downloads (only the catalog that names them) and the JDK. Every printed line
-# from git is escaped (A14 review R2-2) and read from git as bytes split at LF alone, so a CR
-# cannot start a fake line; paths are matched case-insensitively; and a tree with two paths that
-# are equal on a case-insensitive disk is refused before checkout (NTFS would write one over the
-# other).
+# from git is escaped (A14 review R2-2; the invisible characters too, review 5) and read from git
+# as bytes split at LF alone, so a CR cannot start a fake line; a byte that is not UTF-8 prints as
+# \xNN and a real U+FFFD as \uFFFD, so neither hides behind a replacement character; no displayed
+# line is longer than $MaxDisplayChars (a longer one is cut, marked and counted, and is whole in
+# the review copy), and the pager counts the console rows a line wraps to; paths are matched
+# case-insensitively; and a tree with two paths that are equal on a case-insensitive disk is
+# refused before checkout (NTFS would write one over the other).
 #
-# THE CHECKOUT (A14 review 3, C3 and C5). It runs no hook (core.hooksPath is an empty directory
-# for it, whatever the repo config names), no fsmonitor hook and no LFS smudge. Afterwards the
-# tree must be clean and every file the review covers must be, byte for byte, what git holds for
-# it (git hash-object --no-filters against git ls-files -s; the one difference allowed is the CRLF
-# git's own end-of-line conversion writes on a Windows checkout). Anything else - an LFS object, a
-# filter's output, a file changed after the checkout - stops the run before the confirmation, and
-# every way out between the checkout and the confirmation (a refusal, a git command that dies,
-# Ctrl+C at the prompt) puts HEAD back. Closing the window is the one exit that cannot.
+# THE CHECKOUT (A14 review 3, C3 and C5; review 5). Every git command this script runs uses no hook
+# (core.hooksPath is an empty directory, whatever the repo config names), no fsmonitor hook and no
+# LFS filter at all (clean, smudge and process blanked). From the checkout on, where this git has
+# --attr-source (2.42 and later), the release tree's own .gitattributes are not read either, so the
+# tree cannot name a filter this box defines. Afterwards the tree must be clean and every file the
+# review covers must be, byte for byte, what git holds for it: this script hashes the bytes on disk
+# itself, as git hashes a blob, and compares them with git ls-files -s. The one difference allowed
+# is the CRLF git's own end-of-line conversion writes on a Windows checkout, and only for a blob
+# git would convert (no NUL, no CR). Anything else - an LFS object, a filter's output, a file changed
+# after the checkout - stops the run before the confirmation, and so does a reviewed PowerShell file
+# with a byte above 0x7F and no byte-order mark (Windows PowerShell 5.1 would read it in the ANSI
+# code page, not as the UTF-8 the review showed) and a reviewed text file with a CR that no LF
+# follows (Kotlin, Java and PowerShell end a line there; the review does not). Every way out
+# between the checkout and the confirmation (a refusal, a git command that dies, Ctrl+C at the
+# prompt) puts HEAD back. Closing the window is the one exit that cannot.
+#
+# NO STANDARD INPUT TO A NATIVE PROGRAM (A14 review 5, H1). Windows PowerShell writes a pipeline
+# into a native program's stdin in $OutputEncoding, and a profile that sets it to UTF-8 puts a
+# byte-order mark in front of the first line. Nothing in this script pipes into git, ssh or scp;
+# the one place that used to (git hash-object --stdin-paths) hashes in-process now, and ssh runs
+# with -n. powershell-gate.sh refuses a pipeline into a native command in any scripts/*.ps1.
 #
 # FIRST RUN (no record yet, A14 review R2-3): the baseline is the commit in this box's OWN most
 # recent signed bundle - dist\release-bundle-<version>\bundle.json beside its manifest.json.sig,
@@ -161,7 +177,14 @@ function Write-Step  { param([string]$Text) $script:StepNo++; Write-Host ''; Wri
 function Write-Info  { param([string]$Text) Write-Host "   $Text" }
 function Write-Ok    { param([string]$Text) Write-Host "   OK   $Text" -ForegroundColor Green }
 function Write-Warn2 { param([string]$Text) Write-Host "   WARN $Text" -ForegroundColor Yellow }
-function Die         { param([string]$Text) throw "signandvari: $Text" }
+# The empty hooks directory every git command points core.hooksPath at (step 2) goes with any
+# refusal, so a run that stops leaves nothing behind in the temporary directory.
+$script:NoHooks = $null
+function Die {
+    param([string]$Text)
+    if ($script:NoHooks) { Remove-Item -LiteralPath $script:NoHooks -Recurse -Force -ErrorAction SilentlyContinue }
+    throw "signandvari: $Text"
+}
 
 function Get-Sha256Lower {
     param([string]$Path)
@@ -185,22 +208,92 @@ function Invoke-Native {
 # console (Windows Terminal is the Windows 11 default) a subject can move the cursor and erase or
 # redraw the lines above it - hide the stat, or draw a fake "(no changes)". Every C0 control (tab,
 # CR and LF too: one line stays one line), DEL, every C1 control (0x80-0x9F, which holds the 8-bit
-# CSI), the line and paragraph separators and the bidi controls become a visible \uXXXX. The
-# pattern is spelled with \u escapes so this file stays pure ASCII, and the replacement is a
-# MatchEvaluator, which Windows PowerShell 5.1 runs.
-$script:UnsafeTextPattern = '[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]'
+# CSI), the line and paragraph separators and the bidi controls become a visible \uXXXX. So do the
+# characters that print as nothing or as a plain space (A14 review 5, S5): every format character
+# (\p{Cf}: the zero-width space, joiners and word joiner, U+FEFF, the soft hyphen, the invisible
+# operators), the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0 (letters, so valid inside an
+# identifier), the variation selectors, the combining grapheme joiner, the Mongolian and Khmer
+# invisibles, the non-ASCII spaces, U+FFF9-U+FFFD (U+FFFD so a real one is not taken for a byte
+# that is not UTF-8), and the tag characters and supplementary variation selectors (U+E0000-U+E007F,
+# U+E0100-U+E01EF; outside the BMP they print as \U000Exxxx). A byte that is not UTF-8 reaches this
+# as a lone low surrogate U+DC80-U+DCFF (ConvertFrom-Utf8Bytes, below) and prints as \xNN; any other
+# lone surrogate prints as \uXXXX. The pattern is spelled with \u escapes so this file stays pure
+# ASCII, and the replacement is a MatchEvaluator, which Windows PowerShell 5.1 runs.
+$script:UnsafeTextPattern = '\uDB40[\uDC00-\uDC7F\uDD00-\uDDEF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|\p{Cf}|' +
+    '[\u0000-\u001F\u007F-\u00A0\u00AD\u034F\u061C\u115F\u1160\u1680\u17B4\u17B5\u180B-\u180F\u2000-\u200F\u2028-\u202F\u205F-\u206F\u3000\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFD]'
 function ConvertTo-Printable {
     param([AllowNull()][AllowEmptyString()][string]$Text)
     if ($null -eq $Text) { return '' }
     return [regex]::Replace($Text, $script:UnsafeTextPattern, [System.Text.RegularExpressions.MatchEvaluator] {
         param($m)
-        '\u{0:X4}' -f [int][char]$m.Value
+        $v = $m.Value
+        if ($v.Length -eq 2) { return ('\U{0:X8}' -f [char]::ConvertToUtf32($v[0], $v[1])) }
+        $c = [int][char]$v
+        if ($c -ge 0xDC80 -and $c -le 0xDCFF) { return ('\x{0:X2}' -f ($c - 0xDC00)) }
+        return ('\u{0:X4}' -f $c)
     })
+}
+
+# BYTES TO TEXT FOR DISPLAY (A14 review 5, S1). A strict UTF-8 decode when the bytes are UTF-8 (the
+# usual case, and fast); otherwise each byte that does not belong to a well-formed UTF-8 sequence
+# becomes the lone low surrogate U+DC00 + byte, which ConvertTo-Printable shows as \xNN. The plain
+# decoder turned every such byte into U+FFFD, so the review could not say WHICH byte it was - and
+# Windows PowerShell 5.1 reads a script without a byte-order mark in the ANSI code page, where
+# 0x91-0x94 are the curly quotes PowerShell takes for real ones.
+$script:StrictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+function ConvertFrom-Utf8Bytes {
+    param([byte[]]$Bytes, [int]$Offset = 0, [int]$Count = -1)
+    if ($Count -lt 0) { $Count = $Bytes.Length - $Offset }
+    if ($Count -le 0) { return '' }
+    try { return $script:StrictUtf8.GetString($Bytes, $Offset, $Count) } catch { }
+    $sb = New-Object System.Text.StringBuilder ($Count)
+    $i = $Offset; $end = $Offset + $Count
+    while ($i -lt $end) {
+        $b = [int]$Bytes[$i]
+        if ($b -lt 0x80) { [void]$sb.Append([char]$b); $i++; continue }
+        $need = 0; $lo = 0x80; $hi = 0xBF; $cp = 0
+        if ($b -ge 0xC2 -and $b -le 0xDF) { $need = 1; $cp = $b -band 0x1F }
+        elseif ($b -ge 0xE0 -and $b -le 0xEF) {
+            $need = 2; $cp = $b -band 0x0F
+            if ($b -eq 0xE0) { $lo = 0xA0 } elseif ($b -eq 0xED) { $hi = 0x9F }
+        }
+        elseif ($b -ge 0xF0 -and $b -le 0xF4) {
+            $need = 3; $cp = $b -band 0x07
+            if ($b -eq 0xF0) { $lo = 0x90 } elseif ($b -eq 0xF4) { $hi = 0x8F }
+        }
+        $ok = ($need -gt 0) -and (($i + $need) -lt $end)
+        for ($k = 1; $ok -and $k -le $need; $k++) {
+            $c = [int]$Bytes[$i + $k]
+            $min = if ($k -eq 1) { $lo } else { 0x80 }
+            $max = if ($k -eq 1) { $hi } else { 0xBF }
+            if ($c -lt $min -or $c -gt $max) { $ok = $false }
+            else { $cp = ($cp -shl 6) -bor ($c -band 0x3F) }
+        }
+        if ($ok) {
+            if ($cp -ge 0x10000) { [void]$sb.Append([char]::ConvertFromUtf32($cp)) } else { [void]$sb.Append([char]$cp) }
+            $i += $need + 1
+        }
+        else { [void]$sb.Append([char](0xDC00 + $b)); $i++ }
+    }
+    return $sb.ToString()
+}
+
+# NO DISPLAYED LINE IS LONGER THAN THIS (A14 review 5, S3). One long line wraps over many console
+# rows, and enough of them push what came before out of the scrollback unseen. A longer line is cut
+# here with a visible marker; step 3 counts the lines it cut, and the review copy holds every
+# reviewed line whole.
+$script:MaxDisplayChars = 400
+function Limit-DisplayLine {
+    param([string]$Text, [string]$Where = '')
+    if ($Text.Length -le $script:MaxDisplayChars) { return $Text }
+    $cut = $script:MaxDisplayChars
+    if ([char]::IsHighSurrogate($Text[$cut - 1])) { $cut-- }
+    return ('{0} <<CAPPED: {1} of {2} characters shown{3}>>' -f $Text.Substring(0, $cut), $cut, $Text.Length, $Where)
 }
 function Write-GitText {
     param([AllowNull()][AllowEmptyString()][string]$Text, [string]$Indent = '   ')
     if ($null -eq $Text) { return }
-    foreach ($line in ($Text -split "`r?`n")) { Write-Host ($Indent + (ConvertTo-Printable $line)) }
+    foreach ($line in ($Text -split "`r?`n")) { Write-Host ($Indent + (Limit-DisplayLine (ConvertTo-Printable $line))) }
 }
 
 # ============================================================ 1. ENVIRONMENT ====================
@@ -252,16 +345,31 @@ Write-Info "dry-run $([bool]$DryRun)   skip-drop $([bool]$SkipDrop)"
 
 Write-Step 'Tag, working tree, leftovers'
 
-# -InputLines is git's standard input, one line each (hash-object --stdin-paths below). Those lines
-# are git's own C-quoted paths, pure ASCII, so the console's code page never touches them.
+# EVERY GIT COMMAND THIS SCRIPT RUNS goes through Invoke-Git, with $script:GitPrefix in front of its
+# arguments (A14 review 3, C3; review 5):
+#   * core.hooksPath = a new, empty directory: no hook runs, whatever core.hooksPath this repo's
+#     config names - a config that points it into the work tree would otherwise run the release
+#     tree's own post-checkout hook here, before the confirmation;
+#   * core.fsmonitor off: no fsmonitor hook either;
+#   * no LFS filter at all: an empty filter.lfs.clean, .smudge and .process, not required. Git for
+#     Windows installs a system LFS filter, and a tree whose .gitattributes says filter=lfs would
+#     otherwise have git-lfs write, for a pointer, LFS content no review saw at the checkout, and run
+#     git-lfs clean on the files git status re-reads after it (review 5, the clean-filter belt);
+#   * from the checkout on, where this git has it, --attr-source=<the empty tree>: the release
+#     tree's .gitattributes are not read at all, so the tree can name no filter (LFS or any other
+#     this box defines) and no conversion. This box's own attribute files still apply.
+# And NO STANDARD INPUT (A14 review 5, H1): git is never fed a pipeline. Windows PowerShell writes
+# one in $OutputEncoding, and a profile that sets UTF-8 puts a byte-order mark in front of the first
+# line, so git read a path that does not exist and every honest ceremony died after the checkout.
+$script:NoHooks = Join-Path ([System.IO.Path]::GetTempPath()) ('signandvari-nohooks-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $script:NoHooks -Force | Out-Null
+$SafeGit = @('-c', "core.hooksPath=$($script:NoHooks)", '-c', 'core.fsmonitor=',
+    '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false')
+$script:GitPrefix = $SafeGit
 function Invoke-Git {
-    param([string[]]$Arguments, [switch]$AllowFailure, [string[]]$InputLines)
-    if ($PSBoundParameters.ContainsKey('InputLines')) {
-        $out = Invoke-Native { $InputLines | & git -C $Repo @Arguments 2>&1 }
-    }
-    else {
-        $out = Invoke-Native { & git -C $Repo @Arguments 2>&1 }
-    }
+    param([string[]]$Arguments, [switch]$AllowFailure)
+    $gitArgs = @($script:GitPrefix) + @($Arguments)
+    $out = Invoke-Native { & git -C $Repo @gitArgs 2>&1 }
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFailure) {
         Write-GitText ($out | Out-String)
@@ -275,26 +383,40 @@ function Invoke-Git {
 # commit subject or a changed line used to start a NEW console line before any escaping could see
 # it: a fake commit in the log, or a fake "diff --git" header that would end a reviewed file early.
 # git writes the log and the diffs through --output into a temporary file instead, read here as
-# UTF-8 whatever the console's code page, so a CR stays inside its line and prints as \u000D.
+# UTF-8 whatever the console's code page, so a CR stays inside its line and prints as \u000D. A
+# byte that is not UTF-8 stays a byte (ConvertFrom-Utf8Bytes) and prints as \xNN (A14 review 5).
 # $Arguments is a log or diff command with no "--" and no pathspec.
 function Get-GitLines {
     param([string[]]$Arguments)
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('signandvari-' + [guid]::NewGuid().ToString('N') + '.txt')
-    $text = ''
+    $bytes = [byte[]]@()
     try {
         $r = Invoke-Git -Arguments (@('--no-pager') + $Arguments + @("--output=$tmp", '--')) -AllowFailure
         if ($r.ExitCode -ne 0) {
             Write-GitText $r.Output
             Die "git $($Arguments -join ' ') failed (exit $($r.ExitCode))"
         }
-        if (Test-Path -LiteralPath $tmp -PathType Leaf) {
-            $text = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($tmp))
-        }
+        if (Test-Path -LiteralPath $tmp -PathType Leaf) { $bytes = [System.IO.File]::ReadAllBytes($tmp) }
     }
     finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-    if ($text.EndsWith("`n")) { $text = $text.Substring(0, $text.Length - 1) }
-    if ($text.Length -eq 0) { return }
-    return $text.Split([char]10)
+    $n = $bytes.Length
+    if ($n -gt 0 -and $bytes[$n - 1] -eq 10) { $n-- }
+    if ($n -eq 0) { return }
+    # The usual case: all of it is UTF-8, decoded at once.
+    $text = $null
+    try { $text = $script:StrictUtf8.GetString($bytes, 0, $n) } catch { $text = $null }
+    if ($null -ne $text) { return $text.Split([char]10) }
+    # Otherwise line by line, so only the lines with a byte that is not UTF-8 take the slow path.
+    $lines = New-Object System.Collections.Generic.List[string]
+    $start = 0
+    while ($true) {
+        $j = [Array]::IndexOf($bytes, [byte]10, $start, $n - $start)
+        $stop = if ($j -lt 0) { $n } else { $j }
+        $lines.Add((ConvertFrom-Utf8Bytes -Bytes $bytes -Offset $start -Count ($stop - $start)))
+        if ($j -lt 0) { break }
+        $start = $j + 1
+    }
+    return $lines.ToArray()
 }
 
 # What the LOCAL tag points at before the fetch (empty when this box has never seen the tag).
@@ -553,7 +675,8 @@ function ConvertFrom-GitQuotedPath {
         else { foreach ($b in [System.Text.Encoding]::UTF8.GetBytes([string]$Text[$i])) { $bytes.Add($b) } }
         $i++
     }
-    return [System.Text.Encoding]::UTF8.GetString($bytes.ToArray())
+    # A byte that is not UTF-8 stays a byte (\xNN when printed), never a U+FFFD (A14 review 5, S1).
+    return (ConvertFrom-Utf8Bytes -Bytes $bytes.ToArray())
 }
 
 # The path a "diff --git a/P b/P" header names (a and b are the same path: renames are off), or null
@@ -576,28 +699,52 @@ function Get-DiffHeaderPath {
     return $null
 }
 
+# The console rows a line takes once the console wraps it (A14 review 5, S3), counted on the safe
+# side: every character outside ASCII counts as two columns (a wide character takes two), so a page
+# can only come out shorter than the console, never longer.
+function Get-DisplayRows {
+    param([string]$Text, [int]$Width)
+    $cols = $Text.Length + ($Text -replace '[\x00-\x7F]', '').Length
+    if ($cols -le $Width) { return 1 }
+    return [int][Math]::Ceiling($cols / $Width)
+}
+
 # The full diff is paged HERE, never by an external pager (Git for Windows pages through less -R,
 # which passes SGR sequences that can hide text): one console height at a time, every line already
-# escaped. Enter shows the next page, 'a' the rest without stopping, 'q' stops reading (the run goes
-# on to the confirmation, which is the operator's call). A console whose height cannot be read gets
-# the whole diff at once.
+# escaped. A page is counted in CONSOLE ROWS, not in lines (A14 review 5, S3): a long line wraps
+# over several rows, and counting it as one let a page scroll its own top out of sight. No line is
+# longer than $MaxDisplayChars here (Limit-DisplayLine); a longer one is cut with a marker, and the
+# review copy holds it whole. Enter shows the next page, 'a' the rest without stopping, 'q' stops
+# reading (the run goes on to the confirmation, which is the operator's call). A console whose
+# height cannot be read gets the whole diff at once.
 function Show-Paged {
     param([string[]]$Lines)
-    $rows = 0
-    try { $rows = [Console]::WindowHeight } catch { $rows = 0 }
-    $page = $rows - 3
+    $height = 0; $width = 0
+    try { $height = [Console]::WindowHeight; $width = [Console]::WindowWidth } catch { $height = 0; $width = 0 }
+    if ($width -lt 20) { $width = 80 }
+    $ask = "   -- line {0} of {1}: Enter for the next page, 'a' for all the rest, 'q' to stop reading --"
+    # The prompt and the answer typed under it take rows of the page too.
+    $page = $height - 1 - (Get-DisplayRows ($ask -f $Lines.Count, $Lines.Count) $width)
+    $all = $page -lt 3
     $i = 0
     while ($i -lt $Lines.Count) {
-        $stop = if ($page -ge 5) { [Math]::Min($i + $page, $Lines.Count) } else { $Lines.Count }
-        while ($i -lt $stop) { Write-Host ('   ' + $Lines[$i]); $i++ }
+        $used = 0
+        while ($i -lt $Lines.Count) {
+            $shown = '   ' + (Limit-DisplayLine $Lines[$i] ' - the review copy holds the whole line')
+            $r = Get-DisplayRows $shown $width
+            if (-not $all -and $used -gt 0 -and ($used + $r) -gt $page) { break }
+            Write-Host $shown
+            $used += $r
+            $i++
+        }
         if ($i -lt $Lines.Count) {
-            $k = Read-Host ("   -- line {0} of {1}: Enter for the next page, 'a' for all the rest, 'q' to stop reading --" -f $i, $Lines.Count)
+            $k = Read-Host ($ask -f $i, $Lines.Count)
             if ($null -eq $k) { $k = 'q' }
             if ($k.Trim() -eq 'q') {
                 Write-Host ("   (stopped reading the diff at line {0} of {1})" -f $i, $Lines.Count) -ForegroundColor Yellow
                 return
             }
-            if ($k.Trim() -eq 'a') { $page = 0 }
+            if ($k.Trim() -eq 'a') { $all = $true }
         }
     }
 }
@@ -650,24 +797,48 @@ function Get-BlobId {
     finally { $sha.Dispose() }
 }
 
-# True when the file on disk is exactly the blob with every LF written as CRLF - the one change git's
-# own end-of-line conversion makes on a Windows checkout (core.autocrlf=true, the Git for Windows
-# default, or an eol=crlf attribute). Every LF must carry its CR, and the bytes with each CRLF turned
-# back into LF must be the blob. Read as Latin-1, which maps every byte to one character and back.
+# Whether the bytes on disk are the blob with every LF written as CRLF - the one change git's own
+# end-of-line conversion makes on a Windows checkout (core.autocrlf=true, the Git for Windows
+# default, or an eol=crlf attribute). Every LF must carry its CR, and the bytes with each CRLF
+# turned back into LF must be the blob. Read as Latin-1, which maps every byte to one character and
+# back. ONLY FOR A BLOB GIT WOULD CONVERT (A14 review 5, S4): one with no NUL and no CR. git's own
+# text=auto leaves a blob holding either alone (it reads it as binary, or as one whose CRs would not
+# survive the round trip); the CRLF form of such a blob is a conversion an attribute FORCED - a
+# binary rewritten by "text eol=crlf" - so it is not git's ordinary checkout and is refused.
+# 'crlf' = that conversion of the blob; 'forced' = the CRLF form of a blob git would not convert;
+# '' = neither.
 $script:Latin1 = [System.Text.Encoding]::GetEncoding(28591)
 function Test-CrlfCheckout {
-    param([string]$Path, [string]$WantId)
-    $text = $script:Latin1.GetString([System.IO.File]::ReadAllBytes($Path))
-    if ($text.IndexOf("`n") -lt 0 -or $text -match '(?<!\r)\n') { return $false }
-    return ((Get-BlobId $script:Latin1.GetBytes($text.Replace("`r`n", "`n"))) -eq $WantId)
+    param([byte[]]$Bytes, [string]$WantId)
+    $text = $script:Latin1.GetString($Bytes)
+    if ($text.IndexOf("`n") -lt 0 -or $text -match '(?<!\r)\n') { return '' }
+    $lf = $text.Replace("`r`n", "`n")
+    if ((Get-BlobId $script:Latin1.GetBytes($lf)) -ne $WantId) { return '' }
+    if ($lf.IndexOf([char]0) -ge 0 -or $lf.IndexOf([char]13) -ge 0) { return 'forced' }
+    return 'crlf'
 }
+
+# Read as text by the tools that run here whatever bytes they hold (A14 review 5, S2): sources,
+# scripts and build, config and git files. Any other file is text too unless it holds a NUL.
+$script:TextFilePattern = '(?i)\.(kt|kts|java|groovy|gradle|properties|ps1|psm1|psd1|ps1xml|bat|cmd|sh|py|toml|xml|json|ya?ml|wxs|wxi|pro|cfg|conf|ini)$|(^|/)(gradlew|\.gitattributes|\.gitignore|\.gitmodules|\.lfsconfig)$'
+# Read by Windows PowerShell 5.1 in the ANSI code page unless it starts with a byte-order mark (S1).
+$script:PowerShellFilePattern = '(?i)\.(ps1|psm1|psd1)$'
 
 # EVERY FILE THE REVIEW COVERS IS ON DISK AS GIT HOLDS IT (A14 review 3, C3). git status judges a
 # checked-out file by its stat data and through the clean filter, so whatever a smudge filter wrote
-# - LFS content for a pointer, any other filter's output - leaves the tree "clean". This hashes the
-# bytes on disk with no filter at all (git hash-object --no-filters) and compares them with the
-# index (git ls-files -s), allowing only the CRLF git's own checkout writes. A symlink or a
-# submodule among those paths is refused: neither is a file the review could have read.
+# - LFS content for a pointer, any other filter's output - leaves the tree "clean". This reads the
+# bytes on disk and hashes them HERE, as git hashes a blob, with no filter and no git process at all
+# (A14 review 5, H1: git hash-object --stdin-paths used to read the paths from a pipeline, which a
+# UTF-8 $OutputEncoding starts with a byte-order mark), and compares them with the index (git
+# ls-files -s), allowing only the CRLF git's own checkout writes (S4). A symlink or a submodule among
+# those paths is refused: neither is a file the review could have read. Then two things the review
+# could not have shown as the tools here read them:
+#   * a PowerShell file with a byte above 0x7F and no UTF-8 byte-order mark (S1). Windows PowerShell
+#     5.1 reads such a script in the ANSI code page, where 0x91-0x94 are curly quotes that PowerShell
+#     takes for real ones: one line can read as an inert string in the review and run code on 5.1;
+#   * a text file with a CR that no LF follows (S2). The review splits lines at LF alone and prints
+#     that CR as \u000D inside its line; Kotlin, Java and PowerShell end a line there, so text after
+#     a // can read as a comment and compile as code.
 function Assert-ReviewedFilesOnDisk {
     $ls = Invoke-Git -Arguments @('-c', 'core.quotePath=true', 'ls-files', '-s')
     $quoted   = New-Object System.Collections.Generic.List[string]
@@ -689,26 +860,45 @@ function Assert-ReviewedFilesOnDisk {
         foreach ($n in $notFiles) { Write-GitText $n -Indent '   NOT A FILE ' }
         Die "the release tree has a symlink or a submodule among the paths the review covers (above): neither is a file the review could have read. Refused - none of the tree's code ran."
     }
-    $h = Invoke-Git -Arguments @('hash-object', '--no-filters', '--stdin-paths') -InputLines $quoted.ToArray() -AllowFailure
-    $got = @($h.Output -split "`r?`n" | Where-Object { $_ -match '^[0-9a-f]{40}$' })
-    if ($h.ExitCode -ne 0 -or $got.Count -ne $quoted.Count) {
-        Write-GitText $h.Output
-        Die "could not hash the checked-out files (git hash-object exit $($h.ExitCode), $($got.Count) of $($quoted.Count) hashed). None of the tree's code ran."
-    }
-    $bad = New-Object System.Collections.Generic.List[string]
+    $bad      = New-Object System.Collections.Generic.List[string]
+    $ansiPs   = New-Object System.Collections.Generic.List[string]
+    $loneCr   = New-Object System.Collections.Generic.List[string]
     $crlf = 0
     for ($i = 0; $i -lt $quoted.Count; $i++) {
-        if ($got[$i] -eq $want[$i]) { continue }
-        if (Test-CrlfCheckout -Path (Join-Path $Repo $paths[$i]) -WantId $want[$i]) { $crlf++; continue }
-        $bad.Add($quoted[$i])
+        $bytes = $null
+        try { $bytes = [System.IO.File]::ReadAllBytes((Join-Path $Repo $paths[$i])) }
+        catch { $bad.Add(('{0}  (cannot be read: {1})' -f $quoted[$i], $_.Exception.Message)); continue }
+        if ((Get-BlobId $bytes) -ne $want[$i]) {
+            $form = Test-CrlfCheckout -Bytes $bytes -WantId $want[$i]
+            if ($form -eq 'crlf') { $crlf++ }
+            elseif ($form -eq 'forced') { $bad.Add(('{0}  (the CRLF form of a blob holding a NUL or a CR: git''s own conversion never writes that, an attribute forced it)' -f $quoted[$i])); continue }
+            else { $bad.Add($quoted[$i]); continue }
+        }
+        $ntfs = Get-NtfsPath $paths[$i]
+        $text = $script:Latin1.GetString($bytes)
+        if ($ntfs -match $script:PowerShellFilePattern -and $text -match '[\x80-\xFF]' -and
+            -not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) {
+            $ansiPs.Add($quoted[$i])
+        }
+        if ($text -match '\r(?!\n)' -and ($ntfs -match $script:TextFilePattern -or $text.IndexOf([char]0) -lt 0)) {
+            $loneCr.Add($quoted[$i])
+        }
     }
     if ($bad.Count -gt 0) {
         foreach ($b in @($bad | Select-Object -First 20)) { Write-GitText $b -Indent '   DIFFERS ' }
         if ($bad.Count -gt 20) { Write-Host ('   ... and {0} more' -f ($bad.Count - 20)) }
-        Die ("{0} file(s) the review covers are not, on disk, what git holds for them (above): a filter, an LFS object or something else wrote them, so what would run is not what was reviewed. None of the tree's code ran." -f $bad.Count)
+        Die ("{0} file(s) the review covers are not, on disk, what git holds for them (above): a filter, an LFS object, an attribute or something else wrote them, so what would run is not what was reviewed. None of the tree's code ran." -f $bad.Count)
+    }
+    if ($ansiPs.Count -gt 0) {
+        foreach ($b in $ansiPs) { Write-GitText $b -Indent '   NOT ASCII, NO BOM ' }
+        Die ("{0} PowerShell file(s) the review covers hold a byte above 0x7F and no UTF-8 byte-order mark (above). Windows PowerShell 5.1 reads such a script in the ANSI code page, not as the UTF-8 the review showed, so what it would run is not what was reviewed. Refused - none of the tree's code ran." -f $ansiPs.Count)
+    }
+    if ($loneCr.Count -gt 0) {
+        foreach ($b in $loneCr) { Write-GitText $b -Indent '   LONE CR ' }
+        Die ("{0} text file(s) the review covers hold a CR that no LF follows (above, shown as \u000D in the diff). Kotlin, Java and PowerShell end a line there and the review did not, so what would compile or run is not what was reviewed. Refused - none of the tree's code ran." -f $loneCr.Count)
     }
     $note = if ($crlf -gt 0) { " ($crlf of them with the CRLF line endings git's own Windows checkout writes)" } else { '' }
-    Write-Ok ("all {0} files the review covers are on disk exactly as git holds them{1}" -f $quoted.Count, $note)
+    Write-Ok ("all {0} files the review covers are on disk exactly as git holds them{1}, hashed here" -f $quoted.Count, $note)
 }
 
 # Ancestry first: a release that does not descend from the last one signed here is not built on
@@ -732,7 +922,20 @@ if ($collisions.Count -gt 0) {
 Write-Ok 'no two paths in the release tree collide on a case-insensitive disk'
 
 # The stat FIRST, then the commits (A14 review R2-2), then the full diff (A14 review 3, C2). All three
-# are read through Get-GitLines (bytes, split at LF alone) and printed escaped.
+# are read through Get-GitLines (bytes, split at LF alone) and printed escaped. Every line of the
+# review is also kept, escaped and whole, for the review copy saved before the diff is paged; on
+# screen a line longer than $MaxDisplayChars is cut at a marker, and the cut lines are counted
+# (A14 review 5, S3).
+$ReviewText = New-Object System.Collections.Generic.List[string]
+$script:ReviewCapped = 0
+function Write-Review {
+    param([AllowEmptyString()][string]$Text, [switch]$FromGit, [string]$Color)
+    $line = if ($FromGit) { ConvertTo-Printable $Text } else { $Text }
+    $ReviewText.Add($line)
+    if ($line.Length -gt $script:MaxDisplayChars) { $script:ReviewCapped++ }
+    $shown = '   ' + (Limit-DisplayLine $line ' - the review copy holds the whole line')
+    if ($Color) { Write-Host $shown -ForegroundColor $Color } else { Write-Host $shown }
+}
 $Range = "$BaseCommit..$Commit"
 $RangeShort = '{0}..{1}' -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12)
 $numLines = @(Get-GitLines -Arguments @('-c', 'core.quotePath=true', 'diff', '--numstat', '--summary', '--no-renames', '--text',
@@ -761,7 +964,7 @@ foreach ($c in $changes) {
     [void]$shownRows.Add($c)
 }
 Write-Host ''
-Write-Host ("   ---- changed since the last signed release, {0}: every path except the trees that never run here ----" -f $RangeShort)
+Write-Review ("---- changed since the last signed release, {0}: every path except the trees that never run here ----" -f $RangeShort)
 foreach ($c in $shownRows) {
     $st = if ($created.Contains($c.Shown)) { 'new    ' } elseif ($deleted.Contains($c.Shown)) { 'deleted' } else { '       ' }
     # git counts no lines in a file it takes for binary (by content or a -diff attribute); the full
@@ -769,24 +972,24 @@ foreach ($c in $shownRows) {
     $counts = if ($c.Added -eq '-') { ' (git: binary)' } else { '{0,6} {1,6}' -f ('+' + $c.Added), ('-' + $c.Removed) }
     $inTree = Get-TreeOf $c.Path
     $note = if ($inTree) { "   (a build or git file inside $inTree, which is otherwise not shown)" } else { '' }
-    Write-GitText ('{0} {1}  {2}{3}' -f $st, $counts, $c.Shown, $note)
+    Write-Review -FromGit ('{0} {1}  {2}{3}' -f $st, $counts, $c.Shown, $note)
 }
-if ($shownRows.Count -eq 0) { Write-Host '   (no changes outside those trees)' }
-else { Write-Host ('   {0} changed file(s) shown' -f $shownRows.Count) }
+if ($shownRows.Count -eq 0) { Write-Review '(no changes outside those trees)' }
+else { Write-Review ('{0} changed file(s) shown' -f $shownRows.Count) }
 $hiddenTotal = 0
 foreach ($v in $hiddenCount.Values) { $hiddenTotal += $v }
 if ($hiddenTotal -gt 0) {
     $perTree = @($ExcludedTrees | Where-Object { $hiddenCount.ContainsKey($_) } | ForEach-Object { '{0} {1}' -f $_, $hiddenCount[$_] })
-    Write-Host ('   NOT shown: {0} changed file(s) in trees that never run on this box ({1})' -f $hiddenTotal, ($perTree -join ', '))
+    Write-Review ('NOT shown: {0} changed file(s) in trees that never run on this box ({1})' -f $hiddenTotal, ($perTree -join ', '))
 }
-else { Write-Host '   NOT shown: nothing (no change in the trees that never run on this box)' }
-Write-Host ('   the trees not shown: {0} - their build scripts, gradle files, jars, PowerShell and batch files and git attribute files are shown above' -f ($ExcludedTrees -join ' '))
-Write-Host '   a build-script line that links a file in one of those trees is a reason to stop: from then on that file''s changes would not be shown.' -ForegroundColor Yellow
+else { Write-Review 'NOT shown: nothing (no change in the trees that never run on this box)' }
+Write-Review ('the trees not shown: {0} - their build scripts, gradle files, jars, PowerShell and batch files and git attribute files are shown above' -f ($ExcludedTrees -join ' '))
+Write-Review 'a build-script line that links a file in one of those trees is a reason to stop: from then on that file''s changes would not be shown.' -Color Yellow
 
 $log = @(Get-GitLines -Arguments @('log', '--no-color', '--no-show-signature', '--format=%h %s', $Range))
 Write-Host ''
-Write-Host ("   ---- commits {0} ----" -f $RangeShort)
-if ($log.Count -gt 0) { foreach ($l in $log) { Write-GitText $l } } else { Write-Host '   (none: -Commit is the baseline commit itself)' }
+Write-Review ("---- commits {0} ----" -f $RangeShort)
+if ($log.Count -gt 0) { foreach ($l in $log) { Write-Review -FromGit $l } } else { Write-Review '(none: -Commit is the baseline commit itself)' }
 
 Assert-Attended
 
@@ -806,18 +1009,31 @@ foreach ($l in $diffLines) {
     }
     if ($keep) { $FullDiff.Add((ConvertTo-Printable $l)) }
 }
-Write-Host ''
-Write-Host ("   ---- the full diff of every path shown above, {0}, {1} lines (git diff --text --no-textconv --no-ext-diff --no-color, escaped) ----" -f $RangeShort, $FullDiff.Count)
-# The same escaped text, for reading in an editor: outside the repo, beside the record.
+$diffHead = "---- the full diff of every path shown above, {0}, {1} lines (git diff --text --no-textconv --no-ext-diff --no-color, escaped) ----" -f $RangeShort, $FullDiff.Count
+$diffCapped = 0
+foreach ($l in $FullDiff) { if ($l.Length -gt $script:MaxDisplayChars) { $diffCapped++ } }
+$capped = $script:ReviewCapped + $diffCapped
+# The same escaped text - the stat, the commits and the diff, every line whole - for reading in an
+# editor: outside the repo, beside the record. A line cut on screen can be read nowhere else, so
+# when one is cut and the copy cannot be saved, the run stops here.
 $ReviewCopy = Join-Path $RecordDir ('signandvari-review-{0}.txt' -f $Commit.Substring(0, 12))
 try {
     if (-not (Test-Path -LiteralPath $RecordDir -PathType Container)) { New-Item -ItemType Directory -Path $RecordDir -Force | Out-Null }
-    [System.IO.File]::WriteAllLines($ReviewCopy, [string[]]$FullDiff.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
-    Write-Info "the same escaped text is saved at $ReviewCopy (open it in Notepad to read it there)"
+    [System.IO.File]::WriteAllLines($ReviewCopy, [string[]](@($ReviewText.ToArray()) + @('', $diffHead) + @($FullDiff.ToArray())), (New-Object System.Text.UTF8Encoding($false)))
 }
-catch { Write-Warn2 "could not save an escaped copy of the diff ($($_.Exception.Message)); read it here" }
+catch {
+    if ($capped -gt 0) { Die "could not save the review copy at $ReviewCopy ($($_.Exception.Message)), and $capped line(s) of this review are too long to show here whole. Nothing was checked out." }
+    Write-Warn2 "could not save an escaped copy of the review ($($_.Exception.Message)); read it here"
+    $ReviewCopy = $null
+}
+$cappedNote = if ($capped -gt 0) { '{0} line(s) of this review are longer than {1} characters: each is cut on screen at a <<CAPPED>> marker and is whole in the review copy' -f $capped, $script:MaxDisplayChars } else { '' }
+Write-Host ''
+Write-Host ('   ' + $diffHead)
+if ($ReviewCopy) { Write-Info "the same escaped text, every line whole, is saved at $ReviewCopy (open it in Notepad to read it there)" }
+if ($cappedNote) { Write-Warn2 $cappedNote }
 Show-Paged -Lines $FullDiff.ToArray()
 Write-Host '   ---- end of the diff ----'
+if ($cappedNote) { Write-Warn2 $cappedNote }
 
 # prestige-release.ps1 ASSERTS HEAD == -Ref and dies otherwise; it does not check out for you.
 # Detached HEAD at the tag is the expected state for the rest of this run. The checkout comes
@@ -827,21 +1043,26 @@ $origBranch = (Invoke-Git -Arguments @('symbolic-ref', '-q', '--short', 'HEAD') 
 $OrigHead   = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
 $OrigName   = if ($origBranch.ExitCode -eq 0 -and $origBranch.Output.Trim()) { $origBranch.Output.Trim() } else { $null }
 
-# The checkout, the git status after it and a checkout back run with (A14 review 3, C3):
-#   * core.hooksPath = a new, empty directory: no hook runs, whatever core.hooksPath this repo's
-#     config names - a config that points it into the work tree would otherwise run the release
-#     tree's own post-checkout hook here, before the confirmation;
-#   * core.fsmonitor off: no fsmonitor hook either;
-#   * no LFS smudge (GIT_LFS_SKIP_SMUDGE=1 and an empty filter.lfs.process / .smudge, not
-#     required): Git for Windows installs a system LFS filter, and a tree whose .gitattributes says
-#     filter=lfs would otherwise have git-lfs write, for a pointer, LFS content no review saw.
-$NoHooks = Join-Path ([System.IO.Path]::GetTempPath()) ('signandvari-nohooks-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $NoHooks -Force | Out-Null
-$SafeGit = @('-c', "core.hooksPath=$NoHooks", '-c', 'core.fsmonitor=',
-    '-c', 'filter.lfs.process=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.required=false')
+# The checkout, the git status after it, a checkout back and every git command after them run like
+# every other git command here ($script:GitPrefix: no hook, no fsmonitor, no LFS filter at all; A14
+# review 3, C3 and review 5) and, with GIT_LFS_SKIP_SMUDGE=1, no LFS smudge. From here on, where
+# this git has --attr-source (Git 2.42 and later), they also read the attributes from the empty
+# tree instead of the release tree's .gitattributes: the tree cannot name a filter (git-lfs or any
+# other this box's config defines), an ident or an encoding for the checkout to apply. This box's
+# own attribute files (info/attributes, core.attributesFile) still apply; the byte check after the
+# checkout catches what they do. An older git keeps the LFS filters blanked and says so.
+$EmptyTree = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+$attrProbe = Invoke-Git -Arguments @("--attr-source=$EmptyTree", 'check-attr', '-a', '--', '.gitattributes') -AllowFailure
+if ($attrProbe.ExitCode -eq 0) {
+    $script:GitPrefix = @("--attr-source=$EmptyTree") + $SafeGit
+    Write-Ok 'the checkout and every git command after it read no .gitattributes from the release tree (--attr-source)'
+}
+else {
+    Write-Warn2 "this git has no --attr-source (Git 2.42 and later have it): the checkout reads the release tree's .gitattributes, with the LFS filters blanked, but a filter of any other name that this box's git config defines would run. Update Git for Windows."
+}
 function Restore-OriginalHead {
     $back = if ($OrigName) { @('checkout', '-q', $OrigName) } else { @('checkout', '-q', '--detach', $OrigHead) }
-    $r = Invoke-Git -Arguments ($SafeGit + $back) -AllowFailure
+    $r = Invoke-Git -Arguments $back -AllowFailure
     $where = if ($OrigName) { ConvertTo-Printable $OrigName } else { $OrigHead }
     if ($r.ExitCode -eq 0) { return "HEAD is back at $where" }
     Write-GitText $r.Output
@@ -864,16 +1085,16 @@ try {
         # Check out the PINNED COMMIT, not the tag name: the two are proven equal above, and naming
         # the commit leaves nothing for a ref to change between that proof and this line.
         $checkedOut = $true
-        Invoke-Git -Arguments ($SafeGit + @('checkout', '--detach', $Commit)) | Out-Null
+        Invoke-Git -Arguments @('checkout', '--detach', $Commit) | Out-Null
         $head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
         if ($head -ne $Commit) { Die "checkout of $Commit left HEAD at $head - aborting." }
-        Write-Ok "detached HEAD at $Tag ($($head.Substring(0, 12))) - no hook ran, no LFS content was written"
+        Write-Ok "detached HEAD at $Tag ($($head.Substring(0, 12))) - no hook ran, no LFS filter ran"
     }
 
     # The checked-out tree must be exactly the commit (A14 review 2, the NTFS case): a file written
     # over another, or anything else that left the tree differing from what git holds, is a hard
     # stop before the confirmation, because what would run is then not what was reviewed.
-    $after = (Invoke-Git -Arguments ($SafeGit + @('status', '--porcelain'))).Output.Trim()
+    $after = (Invoke-Git -Arguments @('status', '--porcelain')).Output.Trim()
     if ($after.Length -gt 0) {
         Write-GitText $after
         Die "after the checkout of $Commit the working tree is NOT clean (above), so the tree on disk is not the commit that was reviewed. None of its code ran, and HEAD is put back (the line above says where). Investigate by hand."
@@ -903,7 +1124,7 @@ finally {
         Write-Host "   $put" -ForegroundColor Yellow
     }
     $env:GIT_LFS_SKIP_SMUDGE = $lfsBefore
-    Remove-Item -LiteralPath $NoHooks -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:NoHooks -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Ok "confirmed by the operator: $Version"
 
@@ -1118,7 +1339,9 @@ Write-Step 'Drop'
 # truncated file. So: every payload file lands first, each one is re-hashed REMOTELY to prove it
 # arrived intact, and only then does the signature go, alone.
 
-$sshOpts = @('-o', 'BatchMode=yes', '-o', 'RequestTTY=no', '-o', 'ConnectTimeout=20')
+# ssh -n: its standard input is not this console (A14 review 5, H1: no native command here reads
+# anything from this script or from the operator's keyboard).
+$sshOpts = @('-n', '-o', 'BatchMode=yes', '-o', 'RequestTTY=no', '-o', 'ConnectTimeout=20')
 $scpOpts = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20')
 
 function Send-One {
