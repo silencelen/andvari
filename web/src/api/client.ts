@@ -136,9 +136,37 @@ export class ApiClient {
     private readPersistedTokens: (() => Tokens | null) | null = null,
   ) {}
 
+  /**
+   * A14 review W3: the account whose session this client's pair belongs to, for the persistence
+   * hooks ui/session.ts wires (makeClient): a rotation is written, and another tab's pair adopted,
+   * only while the persisted session is this account's. makeClient sets it from the session it was
+   * built for; a sign-in or register rebinds it to the account the server just answered for, before
+   * anything else can rotate the new pair.
+   */
+  boundUserId: string | null = null;
+
+  /**
+   * A14 review W2: bumped by every [setTokens] and [useSessionTokens]. A refresh records it before its
+   * fetch and adopts the rotated pair only if nothing set the pair meanwhile — a lock that dropped it
+   * (setTokens(null)) or a fresh sign-in must never be undone by a refresh that was already in flight.
+   */
+  private generation = 0;
+
   setTokens(t: Tokens | null) {
+    this.generation++;
     this.tokens = t;
     this.onTokens(t);
+  }
+
+  /**
+   * A14 review W3: install a pair from a login or register response WITHOUT the persistence hook. The
+   * caller's saveSession is the only writer of a fresh pair: the hook would place it under whatever
+   * metadata is persisted now — on a tab that booted to Welcome for account X, X's — before the new
+   * account's sign-in had even finished, and a sign-in that then failed would leave it there.
+   */
+  useSessionTokens(t: Tokens) {
+    this.generation++;
+    this.tokens = t;
   }
 
   getTokens(): Tokens | null {
@@ -278,6 +306,7 @@ export class ApiClient {
   private async refreshNow(): Promise<boolean> {
     const spending = this.tokens;
     if (!spending) return false;
+    const generation = this.generation; // W2: the pair this refresh may replace
     // Re-read INSIDE the lock: if another tab already rotated (the persisted refresh
     // token differs from the one we were about to spend), adopt its pair — POSTing
     // ours now would replay a consumed token and revoke the device.
@@ -294,6 +323,8 @@ export class ApiClient {
       // every OTHER tab's (they queue behind us for up to REFRESH_LOCK_WAIT_MS).
       signal: timeoutSignal(REFRESH_FETCH_TIMEOUT_MS),
     });
+    // W2: the pair was dropped or replaced while this refresh was in flight — adopt nothing.
+    if (this.generation !== generation) return false;
     if (!resp.ok) {
       // Only a definitive refusal means the pair is dead. Anything else (502/503/504/
       // 429, a proxy error page) is transient: keep the pair — clearing it here would
@@ -303,6 +334,7 @@ export class ApiClient {
       return false;
     }
     const pair = (await resp.json()) as Tokens;
+    if (this.generation !== generation) return false; // W2: …or while its body was read
     this.setTokens(pair);
     return true;
   }
@@ -387,7 +419,8 @@ export class ApiClient {
       false,
     );
     const session = this.session("login", s);
-    this.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
+    // A14 review W3: held in memory only; the caller's saveSession writes it, with this account's metadata.
+    this.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
     return session;
   }
 

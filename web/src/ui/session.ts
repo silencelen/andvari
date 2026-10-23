@@ -33,8 +33,13 @@ export interface Session {
 export const SESSION_STORAGE_KEY = "andvari.session";
 const KEY = SESSION_STORAGE_KEY;
 
-/** This tab's token slot in sessionStorage (A14 F5): `{ tabId, userId, tokens }`. Per tab, never on
- *  disk — but browsers COPY sessionStorage into a duplicated tab, hence {@link claimTabTokens}. */
+/** This tab's token slot in sessionStorage (A14 F5): `{ tabId, userId, tokens }`. Per tab, and gone when
+ *  the tab is closed — but NOT guaranteed off disk (A14 review Wb): Chrome and Firefox write
+ *  sessionStorage into the profile's session-restore data so a crash restore, "continue where you left
+ *  off" or reopen-closed-tab can bring the tab back with it. So an UNLOCKED tab's pair (only an unlocked
+ *  tab holds one; a lock drops it) can sit in those files while it is valid, and a tab brought back that
+ *  way resumes at the unlock card with its pair; anyone who can read the profile can read it then.
+ *  Browsers COPY sessionStorage into a duplicated tab, hence {@link claimTabTokens}. */
 export const TAB_TOKENS_KEY = "andvari.tabTokens";
 
 interface TabSlot {
@@ -181,19 +186,23 @@ export function loadSession(): Session | null {
   return { ...meta, tokens: slot && slot.userId === meta.userId ? slot.tokens : null };
 }
 
+/** A14 review W7: every storage write here is guarded. saveSession runs inside ApiClient.setTokens (the
+ *  rotation hook), so a throwing write (a full quota, storage disabled) used to escape from a lock's
+ *  `setTokens(null)` and skip the rest of the lock, leaving the vault open. A failed write leaves the
+ *  pair unpersisted (a reload then asks to sign in), never the lock half-done. */
 export function saveSession(s: Session): void {
   if (tokensKeptAcrossLock(s.userId)) {
-    localStorage.setItem(KEY, JSON.stringify(s));
+    lsSet(KEY, JSON.stringify(s));
     clearTabTokens();
     return;
   }
-  localStorage.setItem(KEY, JSON.stringify({ ...s, tokens: null }));
+  lsSet(KEY, JSON.stringify({ ...s, tokens: null }));
   if (s.tokens) ssSet(TAB_TOKENS_KEY, JSON.stringify({ tabId: ownTabId(), userId: s.userId, tokens: s.tokens } satisfies TabSlot));
   else clearTabTokens();
 }
 
 export function clearSession(): void {
-  localStorage.removeItem(KEY);
+  lsRemove(KEY);
   clearTabTokens();
 }
 
@@ -611,28 +620,32 @@ export function installId(): string {
 }
 
 export function makeClient(session: Session | null, baseUrl: string): ApiClient {
-  // SAME-USER guard: capture WHO this client was created for. On a shared browser the
-  // persisted session can come to belong to a DIFFERENT account (user X's frozen tab
-  // wakes after user Y signed in) — X's client must neither adopt Y's token pair nor
-  // write X's rotations into Y's persisted session. A client created without a session
-  // (fresh sign-in form) never adopts; its post-login rotations still persist because
-  // by then the persisted session is its own (sign-in replaces it atomically).
-  const userId = session?.userId ?? null;
-  return new ApiClient(
+  // SAME-USER guard: WHO this client's pair belongs to ([ApiClient.boundUserId]). On a shared
+  // browser the persisted session can come to belong to a DIFFERENT account (user X's frozen tab
+  // wakes after user Y signed in) — X's client must neither adopt Y's token pair nor write X's
+  // rotations into Y's persisted session. A client created without a session (fresh sign-in form)
+  // never adopts. A14 review W3: the bound account is no longer fixed at creation — the one client
+  // lives for the whole tab, so a sign-in or register rebinds it to the account the server answered
+  // for (Welcome), and until that account's own saveSession lands, its rotations are written nowhere.
+  const client: ApiClient = new ApiClient(
     baseUrl,
     session?.tokens ?? null,
     (tokens) => {
       const cur = loadSession();
-      if (cur && (userId === null || cur.userId === userId)) saveSession({ ...cur, tokens });
+      const bound = client.boundUserId;
+      if (cur && (bound === null || cur.userId === bound)) saveSession({ ...cur, tokens });
     },
     // F25 cross-tab refresh dedup: lets the client re-read, inside the Web Lock, a
     // pair another tab already rotated and adopt it instead of replaying ours —
-    // only when that pair belongs to the SAME user this client was created for.
+    // only when that pair belongs to the SAME user this client is bound to.
     () => {
       const cur = loadSession();
-      return userId !== null && cur?.userId === userId ? cur.tokens : null;
+      const bound = client.boundUserId;
+      return bound !== null && cur?.userId === bound ? cur.tokens : null;
     },
   );
+  client.boundUserId = session?.userId ?? null;
+  return client;
 }
 
 /**
@@ -656,6 +669,11 @@ export function makeClient(session: Session | null, baseUrl: string): ApiClient 
  *  be live, and a password change from another device is what ends every session. */
 export const REVOKE_UNCONFIRMED =
   "Signed out of this browser, but the server didn't confirm it ended the session. If this was a shared computer, change your master password from another device to end every session.";
+
+/** A14 review W1: shown on the unlock card when the lock's own revocation of this tab's pair was not
+ *  confirmed — the pair is gone from this browser either way, but a copy of it may still be live. */
+export const LOCK_REVOKE_UNCONFIRMED =
+  "The server didn't confirm it ended this tab's session. If this was a shared computer, change your master password from another device to end every session.";
 
 export async function revokeSessionBestEffort(client: Pick<ApiClient, "logout"> | null): Promise<boolean> {
   if (!client) return false;

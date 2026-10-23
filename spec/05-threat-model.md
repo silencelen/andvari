@@ -561,16 +561,20 @@ same row raises the notice again on each pull (it is never silent). (e) a captur
 an item's home was recorded on this device (an upgrade mid-session) binds to the vault the item showed then,
 which is the item's recorded home from that point on.
 
-**A14 (security review 2026-10, whole-repository scan of 0.28.1).** (a) **The escrow ceremony keeps the seed out
-of docker's logs** (F1): `bringup.sh` and every documented `docker run … recovery-cli` pass `--log-driver none`
-before the image, because docker copies an attached container's stdout to its log driver (json-file on disk, which
-`--rm` only unlinks; the journal; a log shipper). What stays: the sheet in the terminal's scrollback (the script says
-to clear it) and the air-gapped keygen as the by-the-book ceremony. A dated design record that sketched the ceremony
-as `docker compose run` is left as written; nothing ships that form. (b) **`/data` is owner-only** (F10): the
-entrypoint makes it 0700 after its chown, tightens existing database files to 0600 and starts the server under umask
-077; `bringup.sh` creates `./data` 0700. The server is the only reader of the database; a host-side backup runs as
-root. Residual accepted: `users.totpSecret` is stored in plaintext in the database (encrypting it at rest is not
-built), so anyone who reads the file, now root or the container's user only, reads every member's TOTP seed.
+**A14 (security review 2026-10, whole-repository scan of 0.28.1).** (a) **The escrow ceremony keeps the seed out of
+docker's logs** (F1): `bringup.sh` and every documented `docker run … recovery-cli` pass `--log-driver none` before the
+image, because docker copies an attached container's stdout to its log driver (json-file on disk, which `--rm` only
+unlinks; the journal; a log shipper). What stays: the sheet in the terminal's scrollback (the script says to clear it)
+and the air-gapped keygen as the by-the-book ceremony. A dated design record that sketched the ceremony as `docker
+compose run` is left as written; nothing ships that form. The deploy test scans `deploy/`, `docs/`, the `Dockerfile`,
+`.github/` and every other repo-root file for the command (the Dockerfile's own header example had missed the flag until
+the A14 review, W6). (b) **`/data` is owner-only** (F10): the entrypoint makes it 0700 after its chown, tightens
+existing database files to 0600 and starts the server under umask 077; `bringup.sh` creates `./data` 0700. A chmod that
+fails (a read-only or root-squashed mount) warns and the server still starts, as root or not (A14 review Wd). The server
+is the only reader of the database; a host-side backup runs as root, and under rootless docker as real root or the
+subordinate uid the container's user maps to. Residual accepted: `users.totpSecret` is stored in plaintext in the
+database (encrypting it at rest is not built), so anyone who reads the file, now root or the container's user only,
+reads every member's TOTP seed.
 (c) **One sender gate in the extension's service worker** (F3/F4/F11): every message type is classified as sent by
 content scripts (the 17 types `content.ts` sends) or extension-page-only; the other 27 are answered with their own
 refusal shape unless `sender.url` is one of this extension's pages (`chrome.runtime.getURL("")`, either engine; a
@@ -608,17 +612,35 @@ as a line break or a reordering, in core `TerminalText` and in web's CSV-cell la
 relies on JSON escaping, which leaves C1 and the bidi controls raw.
 (h) **A browser without the offline copy keeps no token once locked** (F5, owner decision): unless the offline copy is
 on for the user on this browser, the token pair lives in sessionStorage per tab (localStorage keeps the non-secret
-metadata, whose removal is the cross-tab sign-out signal); a lock (manual, idle, or announced by another tab) awaits
-the vault's usage flush, revokes the tab's pair and drops it, and unlocking is then a full sign-in (email filled in,
-master password, one-time code when enrolled); a pre-A14 pair on disk moves into the tab at load; turning the
-offline copy on or off moves the pair between the stores at once. With the offline copy on, nothing changes. Tabs: a
-tab with no pair signs in as its own device session, so tabs never share a rotating refresh token and no token
-hand-off channel is added; a duplicated tab (which inherits a copy of sessionStorage) is detected by a per-tab Web
-Lock and drops the copy; a tab riding the shared pair when another tab turns the offline copy off locks without
-revoking. Residuals: a reload keeps the tab's pair (sessionStorage survives it), so a reload of an UNLOCKED tab is a
-master-password unlock, not a sign-in; without Web Locks a duplicated tab cannot be told from a reload and keeps the
-copy (and the first refresh of the pair by both then revokes the device, the failure the guard exists to stop);
-script on the origin can still read the open tab's pair. (i) **Package-only app fills are gated** (F7, owner decision,
+metadata, whose removal is the cross-tab sign-out signal); a lock (manual, idle, or announced by another tab) awaits the
+vault's usage flush, revokes the tab's pair and drops it, and unlocking is then a full sign-in (email filled in, master
+password, one-time code when enrolled); a pre-A14 pair on disk moves into the tab at load; turning the offline copy on
+or off moves the pair between the stores at once. With the offline copy on, nothing changes. Tabs: a tab with no pair
+signs in as its own device session, so tabs never share a rotating refresh token and no token hand-off channel is added;
+a duplicated tab (which inherits a copy of sessionStorage) is detected by a per-tab Web Lock and drops the copy; a tab
+riding the shared pair when another tab turns the offline copy off locks without revoking. Since the A14 review: a
+per-tab lock records its own revocation of the pair it dropped, and a later sign-out with no pair left in the client
+reports that result instead of POSTing a logout with no token (which 401'd and raised "the server didn't confirm" on
+every sign-out after a lock); a lock whose revocation the server did not confirm says so on the unlock card (W1). A
+refresh already in flight when the pair is dropped or replaced adopts nothing (a generation counter in the client), so a
+lock is never undone by a rotation landing after it (W2). A login or register pair is held in memory and written only by
+the caller's saveSession, with the new account's metadata: the client is rebound to the account the server answered for,
+so a tab that booted to Welcome for X never writes Y's pair under X's metadata, even if Y's sign-in then fails or the
+pair rotates first (W3). A sign-out in another tab, without the offline copy, revokes this tab's own pair before
+dropping it (W4). An unlock card that still holds this tab's pair (a reload of an unlocked tab) runs the policy idle
+timer and takes the per-tab lock when it fires (W5). The lock's phase change runs in a finally and the session's storage
+writes are guarded, so a write that throws can no longer leave the vault open (W7). Turning the offline copy ON in one
+tab revokes another tab's own per-tab pair before that tab adopts the shared one (We). Residuals: a reload keeps the
+tab's pair (sessionStorage survives it), so a reload of an UNLOCKED tab is a master-password unlock, not a sign-in, now
+bounded by the idle timer; sessionStorage is not guaranteed off disk — Chrome and Firefox write it into the profile's
+session-restore data for crash restore, "continue where you left off" and reopen-closed-tab, so an unlocked tab's pair
+(a locked tab holds none) can sit in those files while it is valid and comes back with a restored tab, and anyone who
+can read the profile can read it then (Wb, the "never on disk" comment corrected); the transition from a pre-A14 bundle:
+a tab still running the old bundle keeps writing the pair back to localStorage until it is reloaded, and an old tab and
+a migrated tab that spend the same refresh token trip the server's reuse check and revoke the device once (We); without
+Web Locks a duplicated tab cannot be told from a reload and keeps the copy (and the first refresh of the pair by both
+then revokes the device, the failure the guard exists to stop); script on the origin can still read the open tab's pair.
+(i) **Package-only app fills are gated** (F7, owner decision,
 Android): an `androidapp://` login fills silently only into a system app, a Play-installed app (`installingPackageName`,
 `getInstallerPackageName` on API 29), or a (package, signer) this device confirmed; anything else, or any failed lookup,
 gets a one-tap confirm naming the app, package, installer and signer (short form), and a changed signer confirms again
