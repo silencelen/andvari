@@ -760,9 +760,17 @@ A15 review (F2) storage.local is read only when the browser attested an upgrade 
 `runtime.onInstalled` with reason `update` and a `previousVersion` no newer than 0.28.1, the last release without the
 store (`LAST_PRE_A15_VERSION`, to be raised should another release without A15 ship first). That event is recorded in
 the store as "owed" before anything is read; the flag and the owed mark are swapped in one write when the copy has been
-read back and compared, so a migration cut short finishes at the next start (owed alone, no event needed). Every other
-start without the flag (a fresh install, an update from an A15 build, a browser update, or a start with no install
-event at all) sets the flag WITHOUT reading storage.local. Before F2 any flagless start migrated, so a store that was
+read back and compared, so a migration cut short once "owed" is recorded finishes at the next start (owed alone, no
+event needed). That first write is the one thing a later start cannot redo, since the event exists only in that worker
+life: when the store refuses it or does not answer, nothing is recorded, so the worker retries it within the same life
+(at once, then after 2, 10 and 30 s), and the block stays `unsettled` meanwhile (A16 review R3: before, the next start
+then skipped the migration and dialed the default while storage.local still named the self-hoster's server). Every
+other start without the flag (a fresh install, an update from an A15 build, a browser update, or a start with no install
+event at all) sets the flag WITHOUT reading storage.local, and in the same write a mark that it did so; while that mark
+stands and the store holds no server choice, each start reads storage.local's `serverUrl` ONLY to block, decline-only as
+in (e): when it names another server, the worker signs in nowhere, the address is never offered for connecting (the
+user enters their server in Options, or chooses "Not mine", which removes the old value and the mark), so a planted
+value is only a denial of service; the mark goes once storage.local names no other server or a server is chosen. Before F2 any flagless start migrated, so a store that was
 unavailable at the upgrade and available later (Firefox's "Never remember history" turned off), or that lost its data
 while storage.local kept its own, moved whatever a content script had written there in the meantime (a planted server
 suggestion, homes, an older wrap, an email, a credential id); the Options copy "Before an update, this browser was set
@@ -795,7 +803,9 @@ it chose (an offline-guessable verifier at the KDF floor). The update channel po
 must-change buttons opened it, and the self-host vault UI lost its autofill exclusion. Now, while a server is pending
 (`serverstate.ts`): every sign-in lane and the connection test (`unlock`, `unlockTotp`, `unlockWithPin`,
 `unlockWithBio`, `ping`) are answered `confirm_server` right after the sender gate, before any handler; the update
-check returns before it fetches; the pending origin's match pattern joins the autofill exclusions, and an origin that
+check returns before it fetches; and since the A16 review (R4) nothing else dials either: the worker's api refuses
+every request (a hydrated session's sync and saves, a token refresh, the socket's ticket), the resync and the socket do
+not start, and a sign-out wipes locally without its revoke; the pending origin's match pattern joins the autofill exclusions, and an origin that
 cannot be written as one (a bracketed IPv6 literal) means no autofill at all (excluding a planted origin is harmless);
 the popup shows the confirm route INSTEAD of any sign-in form ("Before this update, andvari was set to use: …",
 "Confirm in Options" first, "Not mine — use <default host> instead" second), its header names no server, and no server
@@ -803,7 +813,9 @@ page opens. Only the Trust Gate's Connect (`setServerUrl`, after the choice was 
 (`forgetLegacyServer`) lifts the block; the pending state is read from the store at every start, so it survives
 restarts. The same block, `unsettled`, stands when the store did not answer in time or an owed migration did not
 complete: the worker cannot tell which server the user chose, so it signs in nowhere, registers no autofill (the
-user's vault origin is unknown) and says so (the next worker start retries). A page that gets no answer from the worker
+user's vault origin is unknown) and says so (the next worker start retries). A later re-read of the store in the same
+worker life (a late install event, the retried owed write) never moves the dialed origin, so when it names another
+origin than the one the worker dials, the block stays `unsettled`. A page that gets no answer from the worker
 opens nothing and shows no origin (S3: before, it fell back to the default, and a click opened the reference instance).
 Checked in a headless Chrome 149 over the pre-A15 build's profile: after the update, the five dials were refused with
 no request to any server (an update poll and a prelogin to the default on the build before the review), the pending
@@ -832,9 +844,14 @@ storage.local there blocks sign-in until "Not mine" (a denial of service, never 
 lands on the default server with nothing migrated and no pending server, so a self-hoster must re-enter the address
 (the popup's header shows the default's origin, and the earlier block told them to). (5) `LAST_PRE_A15_VERSION` is a
 release fact: if a release without A15 ships after 0.28.1, an update from it to A15 attests nothing and migrates
-nothing (the fail-safe direction: no read, the default with no pending server). (6) A session already open in this
-browser session when a block appears (possible only in the no-store mode, where the block is recomputed at each start)
-keeps its own origin's sync until it locks; the block stops new sign-ins.
+nothing (the fail-safe direction: no read, the default with no pending server). (6) A session that hydrates in a
+worker life where a block stands — from a sealed snapshot of the dialed origin, when the trusted store did not answer
+but the seal's key did (`unsettled`), or in the no-store mode, where the block is recomputed at each start — stays
+unlocked on this device and serves what it holds, but dials nothing until the block is lifted (no sync, save, refresh,
+socket or revoke); signed out meanwhile, it is wiped locally only, and its refresh token stays valid server-side until
+it expires or the device is revoked. (7) The unattested mark (d) is written with the flag; if that write fails, the
+next start still skips without reading and writes it again, so the block holds; a plant in storage.local at a start
+that skips the migration is a denial of service until "Not mine".
 
 **A16 (security review 2026-10, sealed custody in storage.session).** The extension keeps unlocked custody in
 `storage.session` on both engines, because the worker is stopped when idle: the session snapshot (tokens, unwrapped
@@ -849,11 +866,20 @@ names as the origin-bound storage to use (https://bugzilla.mozilla.org/show_bug.
 was not an option: Firefox stops the event page after about 30 s idle, and the vault would lock every time. The seal
 is not a lock (spec 01 §8.4 rejects a key-beside-ciphertext lock): a lock still erases; the seal keeps what
 `storage.session` holds from anything that can reach that area but not the extension's IndexedDB.
-(a) **One sealing key per browser session** (`sessionseal.ts`): a non-extractable AES-GCM 256 key in its own IndexedDB
-database (`andvari-session-seal`, apart from the quick-unlock co-key and the A15 trusted store), every operation bounded
-like the trusted store's (4 s). At worker start, when `storage.session` holds no sealed record (a browser restart, an
-extension reload or update), a fresh key replaces the old one, so a key never outlives the records it seals; sealed
-records with no usable key are dropped, since nothing can open them.
+(a) **One sealing key per browser session, replaced on the browser's word** (`sessionseal.ts`): a non-extractable
+AES-GCM 256 key in its own IndexedDB database (`andvari-session-seal`, apart from the quick-unlock co-key and the A15
+trusted store), every operation bounded like the trusted store's (4 s). When the browser reports a new browser session
+to the worker — `runtime.onStartup` (a browser start) or `runtime.onInstalled` (an install, an update, a reload, a
+browser update), events a web page cannot raise — every sealed record is dropped and a fresh key replaces the old one.
+No session can exist at that point, so whatever the worker hydrated, read or was writing before the report in that
+worker life is dropped too, never armed: a load in flight installs nothing, a write issued before it is not written, a
+read reads absent, a quick-unlock record read before it is not written back. At any other worker start the stored key
+is kept only if a record in `storage.session` opens under it (in its own slot, for its origin, under the stored epoch);
+otherwise — no record, garbage of the right shape, another key's records, copies from before a lock — every sealed
+record is dropped and a fresh key replaces the old one. Before the A16 review a record's shape was enough to keep the
+key, so a planted `{v:1, iv, ct}` kept it and, with it, a copy of the previous browser session's records openable (R1).
+What holds: once the worker has handled a browser session's report, nothing sealed before it opens again; a start with
+no report keeps the key only for records sealed under it. What does not: residual (7).
 (b) **Every secret-bearing record is sealed, through one helper**, and stored as `{v:1, iv, ct}`. The AAD binds the
 record kind and the origin namespace, so a record copied into another record's slot, or into another origin's slot,
 does not open. The session snapshot and the tab records are also bound to a custody epoch that every lock advances and
@@ -876,24 +902,52 @@ andvari. The next worker start tries the store again.
 (e) **The quick-unlock compartment verdict** (`quCompartmentTrusted`) now means that the sealing key is available,
 and, on Chrome, that `setAccessLevel(TRUSTED_CONTEXTS)` on `storage.session` resolved (kept as a second layer). It gates
 arming, enrolling, and keeping the known-logins digest across a lock.
-(f) **A lock never waits on IndexedDB to erase.** It removes the snapshot and the tab records, and advances the epoch,
-before anything in it can wait on IndexedDB (the arm's sealed write, the quick-unlock co-key delete) or on the network
-(the usage flush); the new epoch is written beside the key without the lock waiting for it, and a sealed write still in
-flight for a removed record is dropped. A lock that does not get the origin and the key within 1.5 s (A15 review S1)
-reads the tab records only if the key is already in hand, and otherwise erases them whole.
+(f) **A lock never waits to erase.** Its first act, before it awaits anything, removes the snapshot and the tab
+records, advances the epoch in memory and drops the in-memory session, keeping in the same step a copy of the two
+records as they stood (ciphertext); a sealed write still in flight for them is dropped, and a load in flight installs
+nothing it read. Only then does the lock wait, at most 1.5 s, for the origin and the key (A15 review S1), and it decides
+the quick-unlock arm from what stood at the lock: the live token pair or, in a worker that had not loaded the session
+yet, its own copy, opened under the epoch it was sealed in (it keeps the tab records' page-known half the same way).
+Without the origin and the key in time it arms nothing, wipes no quick-unlock record and keeps no tab record. Before
+the A16 review a cold lock waited up to those 1.5 s before it erased (R4). A sign-out is that lock, then the server
+revoke on the pair the lock saw (before, it waited on a load and on the network, up to 7 s, before erasing). After the
+erase the lock waits, at most 1.5 s more, for the new epoch to reach the key store; a write that failed is retried by
+every later seal operation in that worker life; and the snapshot and the tab records are written only under an epoch
+the key store holds (held until it does, and not written at all while it refuses, so custody stays in memory), so no
+later start reads them under an older epoch and opens a copy from before the lock. A lock in a worker life with no key
+store is recorded against the stored key if the store answers later in that life. Before the review a failed epoch
+write was never retried, and a lock that ran before a failed start lost its advance (R2).
 Checked in a headless Chrome 149 against a local server: after a full unlock `storage.session` held only sealed
 records (no item name, email or password in it); a worker stopped and restarted stayed unlocked; quick unlock armed at
 the lock, survived a restart and redeemed with the PIN; the snapshot copied before a lock and put back after it did not
 open (the restarted worker stayed locked and dropped it); a plaintext snapshot planted while locked was dropped at the
-next start.
+next start. After the A16 review, also: a lock sent to a stopped worker (nothing had loaded the session) erased at once
+and still armed, from its own copy; with only a sealed-shaped garbage record left in `storage.session`, a restarted
+worker replaced the key, and a copy of the armed quick-unlock record planted after it did not open (on the build before
+the review it armed again); and a browser restarted while unlocked came back locked, its IndexedDB intact, and the
+previous browser session's sealed snapshot planted afterwards was dropped unopened.
 Residuals: (1) custody in worker memory is still exposed to a compromised extension process: the worker holds the
 unlocked vault and the key's handle. (2) Chrome's browser-side enforcement of the `storage.session` access level is
 now a second layer, not the only one. (3) The quick-unlock record and the known-logins digest survive a lock by design,
 so they are not bound to the epoch: a party that can both read and write `storage.session` can put back an older sealed
 copy of either, which restores an earlier attempt count (already accepted, A7-extension (b)) or an earlier digest. (4)
-The new epoch is written after the lock; if the worker stops before that write lands, or the write fails, a copy of the
-snapshot from before the lock can still open at the next start. (5) A sealed record is about a third larger than the
-plain one (base64), against the area's quota.
+The epoch lives only in the key store. If the worker stops, or the store keeps refusing, before a lock's epoch lands —
+or a worker life has no key store at all and the store does not answer later in it — a copy of the snapshot from
+before that lock still opens at the next start. (5) A sealed record is about a third larger than the plain one
+(base64), against the area's quota. (6) Replay within one epoch: with no lock in between, a party that can read and
+write `storage.session` can put back an older copy of a record sealed under the current key and epoch — the snapshot
+(with a refresh token since spent, which the server takes for token reuse and answers by revoking the device: a
+denial of service), the tab records (a pending save already resolved, a stale top origin for a tab's badge), and at
+any time the records of (3). Nothing opens that was not sealed under the current key and epoch, and no secret leaves;
+binding a per-write counter would need a key-store write beside every `storage.session` write. (7) A browser session
+the worker is not told about: the extension does not rely on `runtime.onStartup` reaching its background (it may not,
+for an event page), and a message can wake the worker before the report is handled. Until the report is handled, or
+for the whole browser session where none comes, the key is kept on the start rule alone, so a party that can write
+`storage.session` before the worker's first read in the new browser session can put back a copy sealed in the
+previous one, and it opens: a snapshot from a session that ended unlocked (the vault opens without the password, until
+the report drops it), or an armed quick-unlock record (the PIN and the co-key are still needed, within its 24 h). A key
+store that refuses the replacement at a report leaves the old key in place (the worker deletes it where it can) until
+the next report, or a start where nothing opens under it.
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
