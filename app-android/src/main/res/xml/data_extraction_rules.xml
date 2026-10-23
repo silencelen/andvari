@@ -5,13 +5,17 @@
   prefs — refresh token + cached accountKeys ciphertext (offline unlock,
   spec 02 §8) — must be excluded here explicitly. The durable vault cache
   (vault-<userId>.db) lives in noBackupFilesDir, which sits outside every
-  backup/transfer domain by construction, so it needs no rule.
+  backup/transfer domain by construction, so it needs no rule. The app-fill
+  signer bindings (andvari_app_signer_bindings.xml, A14 review N5) are a
+  device-local record of what THIS device confirmed, so they never travel either.
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="andvari.xml" />
+        <exclude domain="sharedpref" path="andvari_app_signer_bindings.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="andvari.xml" />
+        <exclude domain="sharedpref" path="andvari_app_signer_bindings.xml" />
     </device-transfer>
 </data-extraction-rules>

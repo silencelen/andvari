@@ -106,13 +106,21 @@ const COLUMN_LABEL: Record<CsvColumn, string> = {
   totp: "One-time code",
 };
 
-/** C0 (tab and newlines included), DEL and C1 as a visible `\u001B`-style escape — byte-twin of
- *  core `TerminalText.escape`, so a label is one line on every client. */
+/** The line and paragraph separators and the bidi controls (A14 review Wc/N9): a renderer takes the
+ *  first two as a line break and the rest as a reordering of what follows them. */
+const BIDI_AND_SEPARATORS = new Set([
+  0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+]);
+
+/** C0 (tab and newlines included), DEL, C1, U+2028/U+2029 and the bidi controls as a visible
+ *  `\u001B`-style escape — byte-twin of core `TerminalText.escape`, so a label is one line, in its
+ *  own order, on every client. */
 function escapeControls(s: string): string {
   let out = "";
   for (const ch of s) {
     const c = ch.codePointAt(0)!;
-    out += c < 0x20 || (c >= 0x7f && c <= 0x9f) ? "\\u" + c.toString(16).toUpperCase().padStart(4, "0") : ch;
+    const control = c < 0x20 || (c >= 0x7f && c <= 0x9f) || BIDI_AND_SEPARATORS.has(c);
+    out += control ? "\\u" + c.toString(16).toUpperCase().padStart(4, "0") : ch;
   }
   return out;
 }

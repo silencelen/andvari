@@ -591,10 +591,12 @@ migration now signs in again once. (f) **Desktop secret copies are marked sensit
 `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` (DWORD
 0), KDE `x-kde-passwordManagerHint` = `secret`; the auto-clear stays. Residual: a clipboard manager that ignores these
 hints still records the copy (owner device check: Win+V and Klipper on a real desktop). (g) **The offline tools escape
-what they print** (F12): `backup-cli verify` and `recovery-cli verify` replace every C0 (tab and newlines included),
-DEL and C1 character in payload-authored strings with a visible `\u001B`-style escape, the drill receipt line by
-line (JSON's own escape, so it still decodes the same). Residual: bidi controls (U+202A–U+202E, U+2066–U+2069) are
-printed as they are and can reorder a line visually; `backup-cli dump` relies on JSON escaping, which leaves C1 raw.
+what they print** (F12): `backup-cli verify` and `recovery-cli verify` replace every C0 (tab and newlines included), DEL
+and C1 character in payload-authored strings with a visible `\u001B`-style escape, the drill receipt line by line
+(JSON's own escape, so it still decodes the same). Since the A14 review (Wc/N9) the same escape also covers
+U+2028/U+2029 and the bidi controls (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), which a renderer would take
+as a line break or a reordering, in core `TerminalText` and in web's CSV-cell labels alike. Residual: `backup-cli dump`
+relies on JSON escaping, which leaves C1 and the bidi controls raw.
 (h) **A browser without the offline copy keeps no token once locked** (F5, owner decision): unless the offline copy is
 on for the user on this browser, the token pair lives in sessionStorage per tab (localStorage keeps the non-secret
 metadata, whose removal is the cross-tab sign-out signal); a lock (manual, idle, or announced by another tab) awaits
@@ -607,17 +609,30 @@ Lock and drops the copy; a tab riding the shared pair when another tab turns the
 revoking. Residuals: a reload keeps the tab's pair (sessionStorage survives it), so a reload of an UNLOCKED tab is a
 master-password unlock, not a sign-in; without Web Locks a duplicated tab cannot be told from a reload and keeps the
 copy (and the first refresh of the pair by both then revokes the device, the failure the guard exists to stop);
-script on the origin can still read the open tab's pair. (i) **Package-only app fills are gated** (F7, owner
-decision, Android): an `androidapp://` login fills silently only into a system app, a Play-installed app
-(`installingPackageName`, `getInstallerPackageName` on API 29), or a (package, signer) this device confirmed; anything
-else, or any failed lookup, gets a one-tap confirm naming the app, package, installer and signer (short form), and a
-changed signer confirms again with a warning. Identity is read from PackageManager in andvari's process and baked
-into the confirm's PendingIntent; the live signer is re-read before release. Bindings are device-local, never
-synced, and sign-out clears them. Residuals: the installer field is what PackageManager recorded, so an installer
-able to record another package (a privileged shell, `adb install -i`) can pass as Play, and `initiatingPackageName`
-is not consulted; if API 30+ package visibility hides the requesting app from andvari, every app fill takes the
-confirm path and nothing can be remembered (owner device check); card datasets are not app-gated (wallet posture,
-unchanged).
+script on the origin can still read the open tab's pair. (i) **Package-only app fills are gated** (F7, owner decision,
+Android): an `androidapp://` login fills silently only into a system app, a Play-installed app (`installingPackageName`,
+`getInstallerPackageName` on API 29), or a (package, signer) this device confirmed; anything else, or any failed lookup,
+gets a one-tap confirm naming the app, package, installer and signer (short form), and a changed signer confirms again
+with a warning. Identity is read from PackageManager in andvari's process and baked into the confirm's PendingIntent.
+Since the A14 review: the manifest queries every launcher app (`MAIN`/`LAUNCHER`) and the Play package by name, because
+the autofill framework gives a service no visibility of the requesting app and on API 30+ every lookup used to throw
+(lead finding); "Play-installed" means the recorded installer is named `com.android.vending` AND is itself a system app,
+so a sideloaded app that took that name on a device without real Play does not count (N1; no Play signing-digest pin,
+because no authoritative public digest was found to pin, and a guessed one would only push real Play installs to the
+confirm); the confirm shows the app label and the installer label as one escaped, bounded, single-line text after the
+platform's `makeSafeForPresentation`, names the installer's package and whether it is a system app, and names the login
+(item and username) it would release (N2); touches through another window are dropped (`filterTouchesWhenObscured`),
+other apps' overlays are hidden on API 31+, and the button accepts a tap only half a second after the window gained
+focus (N6); the live signer, installer, installer kind and system flag are re-read at the tap and a change refuses the
+fill, and the (package, signer) is remembered only when a fill was delivered (N7). Bindings are device-local, never
+synced, excluded from cloud backup and device-to-device transfer (N5), and cleared on every path that ends the session
+(sign-out, a definitive 401, a revocation purge, a refused refresh, a server switch, another account saved over this
+one). Residuals: the installer field is what PackageManager recorded, so an installer able to record another package (a
+privileged shell, `adb install -i`) can pass as Play while the real system Play is present, and `initiatingPackageName`
+is not consulted; on a device where Play is a user app (sandboxed Play on GrapheneOS) every Play install takes the
+confirm; an app with no launcher activity stays invisible to andvari, so its fills always confirm and are never
+remembered (owner device check); the host app holds each confirm row's IntentSender and can fire it again, which only
+reopens the confirm; card datasets are not app-gated (wallet posture, unchanged).
 
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 

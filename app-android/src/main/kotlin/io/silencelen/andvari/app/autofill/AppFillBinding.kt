@@ -19,6 +19,7 @@ object AppFillBinding {
     private const val K_SYSTEM = "system"
     private const val K_INSTALLER = "installer"
     private const val K_INSTALLER_LABEL = "installerLabel"
+    private const val K_INSTALLER_SYSTEM = "installerSystem"
     private const val K_SIGNER = "signer"
     private const val K_FAILED = "failed"
     private const val K_VERDICT = "verdict"
@@ -39,6 +40,7 @@ object AppFillBinding {
             id.system?.let { putBoolean(K_SYSTEM, it) }
             putString(K_INSTALLER, id.installer)
             putString(K_INSTALLER_LABEL, gate.installerLabel)
+            id.installerSystem?.let { putBoolean(K_INSTALLER_SYSTEM, it) }
             putString(K_SIGNER, id.signerDigest)
             putBoolean(K_FAILED, id.lookupFailed)
             putString(K_VERDICT, gate.verdict.name)
@@ -59,6 +61,7 @@ object AppFillBinding {
             installer = b.getString(K_INSTALLER),
             signerDigest = b.getString(K_SIGNER),
             lookupFailed = b.getBoolean(K_FAILED),
+            installerSystem = if (b.containsKey(K_INSTALLER_SYSTEM)) b.getBoolean(K_INSTALLER_SYSTEM) else null,
         )
         Bake(identity, verdict, b.getString(K_INSTALLER_LABEL), item)
     }.getOrNull()

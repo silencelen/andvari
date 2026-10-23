@@ -393,6 +393,19 @@ describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => 
     expect(label.includes("\n")).toBe(false);
   });
 
+  it("formulaCellLabel also escapes the line separators and the bidi controls (A14 review Wc/N9)", () => {
+    // U+2028/U+2029 break a line in many renderers; the bidi controls reorder what follows them, so "gnp.<RLO>exe"
+    // would read as "exe.png". Same class as core TerminalText.
+    const codes = [0x2028, 0x2029, 0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
+    for (const c of codes) {
+      const label = formulaCellLabel({ item: "a" + String.fromCodePoint(c) + "b", column: "note" });
+      expect(label).toBe("Note of \u201Ca\\u" + c.toString(16).toUpperCase().padStart(4, "0") + "b\u201D");
+    }
+    expect(formulaCellLabel({ item: "gnp.\u202Eexe", column: "password" })).toBe("Password of \u201Cgnp.\\u202Eexe\u201D");
+    // Not controls: ordinary text, the zero-width joiner inside an emoji sequence, a no-break space.
+    expect(formulaCellLabel({ item: "Caf\u00E9 \u4E2D \u00A0x\u200D", column: "name" })).toBe("Name of \u201CCaf\u00E9 \u4E2D \u00A0x\u200D\u201D");
+  });
+
   it("the formula acknowledgement is required and bound to the cells shown", () => {
     const one = [{ item: "x", column: "password" as const }];
     expect(formulaAckSatisfied([], null)).toBe(true);

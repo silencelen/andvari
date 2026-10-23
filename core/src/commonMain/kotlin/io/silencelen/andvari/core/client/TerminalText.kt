@@ -11,9 +11,14 @@ package io.silencelen.andvari.core.client
  * [escape] before it is printed. The same class also drives backup-cli's file-name sanitizer.
  */
 object TerminalText {
-    /** C0 (tab, LF and CR included — a name is one line), DEL, and C1 0x80–0x9F (0x9B is the
-     *  one-byte CSI some terminals honour). */
-    fun isControl(c: Char): Boolean = c.code < 0x20 || c.code in 0x7F..0x9F
+    /** C0 (tab, LF and CR included — a name is one line), DEL, C1 0x80–0x9F (0x9B is the one-byte
+     *  CSI some terminals honour), and since the A14 review (Wc/N9) the line and paragraph separators
+     *  U+2028/U+2029, which break a line in many renderers, and the bidi controls (U+061C, U+200E,
+     *  U+200F, U+202A–U+202E, U+2066–U+2069), which reorder what follows them on screen. */
+    fun isControl(c: Char): Boolean = c.code < 0x20 || c.code in 0x7F..0x9F || c.code in BIDI_AND_SEPARATORS
+
+    private val BIDI_AND_SEPARATORS: Set<Int> =
+        setOf(0x061C, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069)
 
     /** Every [isControl] character as a visible `\u001B`-style escape; everything else verbatim.
      *  The form is JSON's own escape, so applying it inside a JSON string literal is lossless. */
