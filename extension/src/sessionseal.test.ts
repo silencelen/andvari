@@ -192,7 +192,7 @@ test("a copy of the session snapshot or the tab records taken before a lock neve
   await seal.set("quickUnlock", OK_A, secretValue("armed"));
   const snapCopy = structuredClone(s.data.get("session"));
   const tabsCopy = structuredClone(s.data.get("tabs"));
-  await seal.lockErase();
+  await seal.lockErase().erased;
   assert.equal(s.data.has("session"), false, "the lock removed the snapshot");
   assert.equal(s.data.has("tabs"), false, "…and the tab records");
   s.data.set("session", snapCopy);
@@ -247,7 +247,7 @@ test("the key belongs to the browser session: fresh when storage.session holds n
   await before.ready;
   await before.set("quickUnlock", OK_A, secretValue("last session"));
   const lastSessionRecord = structuredClone(prev.data.get(nsKey(OK_A, "quickUnlock")));
-  await before.lockErase();
+  await before.lockErase().erased;
   await tick(5);
   assert.equal((k.data.get(SEAL_KEY_RECORD) as { epoch: number }).epoch, 1);
   // A browser restart (or a reload, or an update): storage.session is empty → a fresh key replaces the old one.
@@ -311,8 +311,9 @@ test("the lock's erase never waits on IndexedDB: removed at once, and a write st
   const seal = new SessionSeal({ session: s.area, keys: k.area });
   const pending = seal.set("session", OK_A, secretValue("written before the lock"));
   s.log.length = 0;
-  const erased = seal.lockErase();
-  assert.deepEqual(s.log, ["remove session,tabs"], "dispatched synchronously, before any await");
+  const erased = seal.lockErase().erased;
+  // A16 review R4: the lock's copy (for the arm, opened later) and the removal, both dispatched before any await.
+  assert.deepEqual(s.log, ["get session,tabs", "remove session,tabs"], "dispatched synchronously, before any await");
   const done = await Promise.race([erased.then(() => "erased"), tick(200).then(() => "waited")]);
   assert.equal(done, "erased", "the erase resolves while the key store still has not answered");
   assert.equal(s.data.has("session"), false);
