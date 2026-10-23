@@ -561,7 +561,9 @@ private fun Welcome(state: DesktopState) {
                 "Signed-in accounts stay on $prev — finish or cancel this invite first.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            TextButton(onClick = { state.cancelPendingSwitch() }) { Text("Cancel and return to $prev") }
+            // A14 (F8): disabled while an op (the enroll's register at the pending origin) is in
+            // flight — the state layer refuses it too (DesktopState.switchLockedByOp).
+            TextButton(onClick = { state.cancelPendingSwitch() }, enabled = !state.switchLockedByOp) { Text("Cancel and return to $prev") }
         }
     }
 }
@@ -720,7 +722,7 @@ private fun Enroll(state: DesktopState) {
                 invite = raw
                 linkOrigin = null // hand-edits after a link are a NEW entry — drop the stale confirmation
             }
-        }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06: focus first field on open
+        }, mono = true, onEnter = submit, autoFocus = true, enabled = !state.switchLockedByOp) // a11ydesk-06; A14 (F8): no re-point mid-enroll
         // Confirmation only while the applied origin still IS the live server (a later manual
         // ServerField change must not keep claiming the link's server); helper line otherwise.
         if (linkOrigin != null && linkOrigin == state.baseUrl) {
@@ -864,7 +866,7 @@ private fun TrustGateInline(model: TrustGateModel, busy: Boolean, onConnect: () 
         Spacer(Modifier.height(16.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (onCancel != null) {
-                TextButton(onClick = onCancel, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") }
+                TextButton(onClick = onCancel, enabled = !busy, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") } // A14 (F8)
                 Spacer(Modifier.width(8.dp))
             }
             Primary("Connect", !busy, busy, onConnect)
@@ -3755,7 +3757,7 @@ private fun Modifier.dismissOnEscape(dismiss: () -> Unit): Modifier =
     }
 
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false) {
+private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false, enabled: Boolean = true) {
     // F72 multi-line guard: onEnter is dropped (not just unused) when singleLine=false.
     // a11ydesk-06 (AM-9): optional initial focus — desktop had zero FocusRequester, so auth screens
     // opened focused on nothing. runCatching guards the composition race (requestFocus throws
@@ -3764,7 +3766,7 @@ private fun Field(label: String, value: String, onChange: (String) -> Unit, mono
     // field per screen — multiple requesters race, last wins.
     val fr = remember { FocusRequester() }
     LaunchedEffect(autoFocus) { if (autoFocus) runCatching { fr.requestFocus() } }
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter.takeIf { singleLine }), label = { Text(label) }, singleLine = singleLine,
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter.takeIf { singleLine }), enabled = enabled, label = { Text(label) }, singleLine = singleLine,
         textStyle = if (mono) MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyMedium)
 }
 
