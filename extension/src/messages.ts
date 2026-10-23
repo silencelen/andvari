@@ -251,8 +251,10 @@ export type PinUnlockCode =
 /** Why the PIN entropy floor rejected an enrollment PIN (breaker A2⊕B8) — the popup renders a nudge. */
 export type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
 
-/** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. */
-export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
+/** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. `unavailable` (A16): nothing here
+ *  can keep the record — no session sealing key (no IndexedDB in this browser mode), or on Chrome the storage.session
+ *  access level could not be confirmed — so nothing would ever arm. */
+export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin" | "unavailable";
 
 /** Biometric quick-unlock redeem failure (0.17.0). No `wrong_pin`/`exhausted` — a hardware-held
  *  full-entropy PRF secret has no offline oracle, so there is no attempt budget. `bio_cancelled` =
@@ -275,7 +277,7 @@ export type BioUnlockCode =
 
 /** Biometric enrollment refusal (0.17.0). `bio_unsupported` = no platform authenticator / no PRF;
  *  `bio_cancelled` = the enroll ceremony threw (nothing written — amendment 3). */
-export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
+export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled" | "unavailable";
 
 export type Req =
   | { type: "status" }

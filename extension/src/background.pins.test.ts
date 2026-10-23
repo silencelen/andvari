@@ -119,7 +119,7 @@ test("H90 — the TOTP challenge stays MEMORY-ONLY: no part of it reaches the se
   // locked compartment — breaker B1 territory, and the exact change ("persist the challenge so a
   // popup reopen survives SW death") that would look harmless in review. The comment at the
   // pendingTotp declaration argues against it; this is the tripwire that argues back in CI.
-  const snap = spanOf(bg, "function persistSession(): Promise<void> {", "return chrome.storage.session.set({ [SKEY]: snap });");
+  const snap = spanOf(bg, "function persistSession(): Promise<void> {", 'return sessionSeal.set("session", currentOriginKey, snap)');
   for (const forbidden of ["pendingTotp", "authKey", "wrapKey"]) {
     assert.ok(!snap.includes(forbidden), `the session snapshot must never carry ${forbidden}`);
   }
@@ -331,7 +331,8 @@ test("A15: worker start awaits the storage access levels, then settles the migra
     assert.ok(i > at, `serverReady must run "${step}" after the step before it`);
     at = i;
   }
-  assert.match(bg, /const storageAccess: Promise<void> = restrictStorageAccess\(chrome\.storage as unknown as StorageAccessAreas\)\.then\(/);
+  // A16: the verdict is combined with the seal's key in custodyReady (quickUnlockCompartment).
+  assert.match(bg, /const storageAccess: Promise<StorageAccessVerdict> = restrictStorageAccess\(chrome\.storage as unknown as StorageAccessAreas\);/);
   assert.match(bg, /const trusted = trustedStore\(\);/);
 });
 
@@ -364,13 +365,14 @@ test("A15: the update offer is re-checked on read, its link built only by the of
   assert.ok(check.includes("storedSeq = (await trusted.get(kSeq))[kSeq];"), "the anti-rollback seq is read from the trusted store");
   assert.ok(check.includes("await trusted.set({ [kInfo]: info, [kSeq]: decision.seq });"), "…and written there with the offer");
   assert.ok(!bg.includes("function downloadUrl("), "the old absolutizer (any https URL passed) is gone");
-  // The throttle and the quiet marker are not trust state: storage.session (re-derived by the forced start check).
-  assert.ok(check.includes("const seen = (await chrome.storage.session.get(kLast))[kLast];"));
+  // The throttle and the quiet marker are not trust state: storage.session (re-derived by the forced start check), as
+  // two of the plain inventory's three records (A16: sessionseal.ts).
+  assert.ok(check.includes("const seen = (await plainSession.get(kLast))[kLast];"));
 });
 
 test("A15: the purge clears every record of that origin in the trusted store, storage.local and storage.session", () => {
   const purge = spanOf(bg, "export async function purgeOriginNamespace(", "// Re-offer a pending save once");
-  assert.ok(purge.includes("await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionArea]);"));
+  assert.ok(purge.includes("await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()]);"));
 });
 
 test("A15: the remembered email is recorded by the worker, from the popup's own unlock, never by a page", () => {
@@ -469,15 +471,84 @@ test("A15 review F3: a failed seq read aborts the update check before anything i
 
 test("A15 review S1: a lock waits for the trusted store only within its bound, and a cold lock erases the snapshot first", () => {
   const lock = spanOf(bg, 'async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {', "redeemGen++;");
-  const race = lock.indexOf("const originKnown = await Promise.race([serverReady.then(() => true), delay(LOCK_STORE_WAIT_MS).then(() => false)]);");
+  // A16: the bound covers the sealing key as well as the origin (custodyLoaded = serverReady + custodyReady).
+  const race = lock.indexOf("const custodyKnown = await Promise.race([custodyLoaded.then(() => true), delay(LOCK_STORE_WAIT_MS).then(() => false)]);");
   assert.ok(race > -1 && race < lock.indexOf("armGate("), "bounded, before the arm gate");
-  const cold = lock.slice(lock.indexOf("if (!originKnown) {"));
-  assert.ok(cold.indexOf("lockedBeforeOrigin = true;") < cold.indexOf("await chrome.storage.session.remove(SKEY);"));
-  assert.ok(cold.indexOf("await chrome.storage.session.remove(SKEY);") < cold.indexOf("await chrome.storage.session.get(TKEY)"), "the snapshot goes before anything else is awaited");
+  assert.ok(bg.includes("const custodyLoaded: Promise<unknown> = Promise.all([serverReady, custodyReady]);"));
+  const cold = lock.slice(lock.indexOf("if (!custodyKnown) {"));
+  const erase = cold.indexOf('const first = sessionSeal.remove("session", currentOriginKey);');
+  assert.ok(cold.indexOf("lockedBeforeOrigin = true;") < erase && erase > -1);
+  assert.ok(erase < cold.indexOf('await sessionSeal.peek("tabs", currentOriginKey)'), "the snapshot goes before anything else is awaited");
+  assert.ok(!cold.slice(0, cold.indexOf("armGate(")).includes("sessionSeal.get("), "the cold path never waits for the sealing key (peek, not get)");
   assert.ok(lock.includes(": { tokens: { access: null, refresh: null }, attempt: false };"), "no arm without the origin");
   assert.ok(bg.includes("if (msg.type !== \"lock\") await ensureLoaded();"), "handle() does not make a lock wait on serverReady");
   const load = spanOf(bg, "function ensureLoaded(): Promise<void> {", "\nfunction ");
   assert.ok(load.includes("if (lockedBeforeOrigin) snap = undefined;"), "a snapshot read before a cold lock's erase never hydrates");
   assert.ok(load.includes("const t = lockedBeforeOrigin ? undefined :"), "nor do the tab records' sensitive half");
   assert.ok(bg.includes("return openBoundedIdb(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, IDB_NAME, IDB_STORE);"), "the co-key DB opens bounded too");
+});
+
+// ---- security review 2026-10, branch A16: secret-bearing storage.session records are sealed ----
+// The leaf (sessionseal.ts: the key, the seal, the epoch, the start sweep, the plain area) is behaviour-tested in
+// sessionseal.test.ts, and storagefence.test.ts holds every storage.session write to the seal or the plain inventory.
+// These pins hold the worker's custody paths and its lock to them.
+
+test("A16: the sealing key lives in its own IndexedDB database, opened bounded, and is set up at worker start", () => {
+  assert.ok(bg.includes("const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME) });"));
+  const ready = spanOf(bg, "const custodyReady: Promise<void> = Promise.all([storageAccess, sessionSeal.ready]).then(", "});");
+  assert.ok(ready.includes("quCompartmentTrusted = quickUnlockCompartment(verdict, sealed);"), "the verdict needs the key; the access level is the belt");
+  assert.equal((bg.match(/^\s*quCompartmentTrusted = /gm) ?? []).length, 1, "set in one place only");
+});
+
+test("A16: every custody record is read and written through the seal", () => {
+  const persist = spanOf(bg, "function persistSession(): Promise<void> {", "let knownLoginsKey");
+  assert.ok(persist.includes('return sessionSeal.set("session", currentOriginKey, snap).then(() => {});'));
+  assert.ok(bg.includes('void sessionSeal.set("tabs", currentOriginKey, Object.fromEntries([...tabs].map(([id, st]) => [String(id), st]))).catch(() => {});'));
+  const load = spanOf(bg, "function ensureLoaded(): Promise<void> {", "\nfunction ");
+  assert.ok(load.includes('let snap = (await sessionSeal.get("session", currentOriginKey)) as SessionSnapshot | undefined;'));
+  assert.ok(load.includes('(await sessionSeal.get("tabs", currentOriginKey)) as Record<string, TabState> | undefined'));
+  const qu = spanOf(bg, "const quStore: QuStore = {", "\n};\n");
+  assert.ok(qu.includes('await sessionSeal.get("quickUnlock", currentOriginKey)'));
+  assert.ok(qu.includes('if (!(await sessionSeal.set("quickUnlock", currentOriginKey, rec))) throw new Error("the quick-unlock record was not kept");'), "an unkept arm or reserve fails closed");
+  assert.ok(qu.includes('remove: () => sessionSeal.remove("quickUnlock", currentOriginKey),'));
+  const kl = spanOf(bg, "async function refreshKnownLogins(): Promise<void> {", "/** The locked capture path's membership test.");
+  assert.ok(kl.includes('const rec = (await sessionSeal.get("knownLogins", ok)) as KnownLoginsRecord | undefined;'));
+  assert.ok(kl.indexOf("if (session !== s) return;") > kl.indexOf('await sessionSeal.get("knownLogins", ok)'), "a lock during the read does not re-mint a wiped digest");
+  assert.ok(kl.includes('await sessionSeal.set("knownLogins", ok, { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord);'));
+  const known = spanOf(bg, "async function isKnownLoginWhileLocked(", "/** One gate for every locked-state RE-offer surface");
+  assert.ok(known.includes('const rec = (await sessionSeal.get("knownLogins", currentOriginKey)) as KnownLoginsRecord | undefined;'));
+  // The pre-namespacing bare quick-unlock record is never adopted: the seal's start sweep drops it (plaintext).
+  const adopt = spanOf(bg, "async function adoptLegacyNamespaceOnce(): Promise<void> {", "/** One-shot enroll bench");
+  assert.ok(!adopt.includes("sessionSeal.") && !adopt.includes("plainSession"), "no storage.session adoption any more");
+});
+
+test("A16: the lock erases the session records before anything in it can wait on IndexedDB", () => {
+  const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
+  const erase = lock.indexOf("const erased = sessionSeal.lockErase();");
+  assert.ok(erase > -1, "the erase");
+  const kl = lock.indexOf('if (reason === "signout" || !quCompartmentTrusted) {');
+  assert.ok(kl > erase, "the known-logins wipe right after it");
+  assert.ok(lock.slice(kl, lock.indexOf("if (attemptArm) {")).includes('await sessionSeal.remove("knownLogins", currentOriginKey);'));
+  // Everything that can wait on IndexedDB (the quick-unlock co-key delete inside wipe(), the arm) or on the network
+  // (the teardown flush) comes after the erase.
+  for (const later of ["quickUnlock.arm(", "await quickUnlock.wipe();", "await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);"]) {
+    const at = lock.indexOf(later);
+    assert.ok(at > kl, `"${later}" comes after the erase`);
+  }
+  assert.ok(lock.indexOf("session = null;") < erase, "the in-memory session is dropped first");
+  assert.ok(lock.indexOf("await erased;") > lock.indexOf("api.setTokens(null, null);"), "awaited only at the end");
+  // The allow-listed tab remainder is re-persisted after the erase (under the new epoch).
+  assert.ok(lock.indexOf("if (tabs.size > 0) persistTabs();") > erase);
+});
+
+test("A16: quick unlock cannot be enrolled where it cannot arm", () => {
+  for (const [from, to] of [
+    ["async function enrollQuickUnlock(pin: string): Promise<Res<\"enrollQuickUnlock\">> {", "async function enrollQuickUnlockBio("],
+    ["async function enrollQuickUnlockBio(): Promise<Res<\"enrollQuickUnlockBio\">> {", "/** Quick-unlock redeem (spec 01 §8.4)."],
+  ] as const) {
+    const fn = spanOf(bg, from, to);
+    const gate = fn.indexOf('if (!quCompartmentTrusted) return { ok: false, code: "unavailable" };');
+    assert.ok(gate > fn.indexOf("await custodyReady;") && fn.indexOf("await custodyReady;") > -1, "the verdict is settled first");
+    assert.ok(gate > -1 && gate < fn.indexOf("quickUnlock.enroll"), "refused before anything is wiped, prompted or written");
+  }
 });

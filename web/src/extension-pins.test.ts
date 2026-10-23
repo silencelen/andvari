@@ -1317,44 +1317,43 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
     return src.slice(a, b);
   };
 
-  it("the known-logins digest record (KLKEY) lives in storage.session ONLY — every storage touch names the session area", () => {
+  it("the known-logins digest record (KLKEY) lives in storage.session ONLY — sealed, and every touch goes through the seal", () => {
     // storage.local would survive a browser exit with the (site, username) digests AND the HMAC
-    // key beside them. Sweep every storage call that names KLKEY rather than pinning one line —
-    // a NEW non-session touch must fail here too.
-    const touches = [...bg.matchAll(/chrome\.storage\.(\w+)\.(?:get|set|remove)\([^)]*KLKEY/g)];
+    // key beside them. Since A16 (security review 2026-10) the record is also SEALED in
+    // storage.session (sessionseal.ts: AES-GCM under a non-extractable key in the extension
+    // origin's IndexedDB), so every touch goes through the seal's "knownLogins" kind — the seal
+    // owns the slot key, and the storagefence test holds every storage.session write to it.
+    const touches = [...bg.matchAll(/sessionSeal\.(?:get|set|remove)\("knownLogins"/g)];
     expect(touches.length, "the KLKEY read/rebuild/wipe sites must exist").toBeGreaterThanOrEqual(4);
-    for (const t of touches) expect(t[1], "KLKEY must never touch a non-session storage area").toBe("session");
-    // The rebuild writes the whole record (key + digests) under the namespaced key, typed.
-    expect(bg).toContain("await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord });");
+    expect(bg).not.toMatch(/chrome\.storage\.\w+\.(?:get|set|remove)\([^)]*KLKEY/);
+    // The rebuild writes the whole record (key + digests), typed.
+    expect(bg).toContain('await sessionSeal.set("knownLogins", ok, { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord);');
 
-    // H91 (2026-09-13 audit): the sweep above claims more than it performs. It only sees the
-    // INLINE spelling `chrome.storage.<area>.<op>(… KLKEY …)`, so
-    // `const area = chrome.storage.local; await area.set({ [nsk(KLKEY)]: … })` — or a small
-    // `persist(key, value)` helper — adds a non-session touch the regex never matches while the
-    // four session touches keep the count at >= 4, and the pin stays green while the digests
-    // move to disk. Account for EVERY mention of KLKEY instead of counting matches: strip the
-    // prose (the routes.test.ts code() idiom — the comments legitimately name the key to state
-    // the rule) and require each remaining line to be one of the shapes deliberately approved.
+    // H91 (2026-09-13 audit): count EVERY mention, not regex matches — a helper or an alias
+    // (`const area = chrome.storage.local; await area.set({ [nsk(KLKEY)]: … })`) adds a touch the
+    // sweep above never sees. Strip the prose (the routes.test.ts code() idiom — the comments
+    // legitimately name the key to state the rule) and require each remaining line that names the
+    // record, by its constant or by its seal kind, to be one of the shapes deliberately approved.
     const code = bg
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .split("\n")
       .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"));
-    const klLines = code.filter((l) => l.includes("KLKEY"));
+    const klLines = code.filter((l) => l.includes("KLKEY") || l.includes('"knownLogins"'));
     expect(klLines.length, "the constant plus its touches").toBeGreaterThanOrEqual(touches.length + 1);
     for (const l of klLines) {
       const approved =
         /^const KLKEY = /.test(l.trim()) || // the constant itself
-        /chrome\.storage\.session\.(?:get|set|remove)\(/.test(l) || // an inline session touch
-        l.includes("= got[nsk(KLKEY)] as KnownLoginsRecord") || // reading the record a session get returned
+        /sessionSeal\.(?:get|set|remove)\("knownLogins", /.test(l) || // a touch through the seal
         l.includes("const keys = [QKEY, KLKEY,"); // purgeOriginNamespace's single key list, below
       expect(approved, `KLKEY reached code this pin has not approved: ${l.trim()}`).toBe(true);
+      expect(l, `KLKEY must never touch a chrome.storage area by name: ${l.trim()}`).not.toMatch(/chrome\.storage\./);
     }
-    // R07: the second half of the H91 sweep — the RAW KEY, not just the storage key name. A
+    // R07: the second half of the H91 sweep — the RAW KEY, not just the record's name. A
     // `chrome.storage.local.set({ k: toB64(knownLoginsKey) })` names no KLKEY and passed the loop
     // above. Every code line that names the key must be one of the approved shapes, and none may
-    // touch a non-session area.
+    // touch a chrome.storage area.
     const keyLines = code.filter((l) => l.includes("knownLoginsKey"));
-    expect(keyLines.length, "the declaration, the guard, the mint, the digest build, the session set and the two wipes").toBeGreaterThanOrEqual(7);
+    expect(keyLines.length, "the declaration, the guard, the mint, the digest build, the sealed set and the two wipes").toBeGreaterThanOrEqual(7);
     for (const l of keyLines) {
       const t = l.trim();
       const approvedKey =
@@ -1362,20 +1361,18 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
         t === "knownLoginsKey = null;" || // the sign-out / untrusted-compartment wipe
         t === "if (originKey === currentOriginKey) knownLoginsKey = null;" || // the per-origin purge wipe
         t === "if (!knownLoginsKey) {" || // the rebuild's reuse-or-mint guard
-        t === "knownLoginsKey = rec?.key ? fromB64(rec.key) : crypto.getRandomValues(new Uint8Array(16));" || // the mint, from a SESSION get
-        t === "const digests = buildKnownLoginDigests(knownLoginsKey, session.items, pslResolve);" || // the digest build
-        t.startsWith("await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests }"); // the single persist, session-only
+        t === "knownLoginsKey = rec?.key ? fromB64(rec.key) : crypto.getRandomValues(new Uint8Array(16));" || // the mint, from a SEALED get
+        t === "const digests = buildKnownLoginDigests(knownLoginsKey, s.items, pslResolve);" || // the digest build
+        t.startsWith('await sessionSeal.set("knownLogins", ok, { key: toB64(knownLoginsKey), digests }'); // the single persist, sealed
       expect(approvedKey, `knownLoginsKey reached code this pin has not approved: ${t}`).toBe(true);
-      expect(l, `knownLoginsKey must never be near a non-session storage area: ${t}`).not.toMatch(/chrome\.storage\.(?:local|sync)\b/);
+      expect(l, `knownLoginsKey must never be near a chrome.storage area: ${t}`).not.toMatch(/chrome\.storage\./);
     }
-    // The one non-session line is the purge list, and it is safe only because that path REMOVES
-    // from both areas (the same list is swept from local and session on purpose, so a future
-    // namespaced key cannot be erased from one area and forgotten in the other). A get or a set
-    // against local/sync there would be a real residency break, not a no-op.
+    // The one line beside other areas is the purge list, and it is safe only because that path
+    // REMOVES (through the seal for storage.session, and from storage.local's pre-A15 leftovers).
     const purge = spanOf(bg, "export async function purgeOriginNamespace(", "// Removing the record is only half the wipe");
     expect(purge).toContain("await chrome.storage.local.remove(keys);");
-    expect(purge).toContain("await chrome.storage.session.remove(keys);");
-    expect(purge).not.toMatch(/chrome\.storage\.(?:local|sync)\.(?:get|set)\(/);
+    expect(purge).toContain("await sessionSeal.removeKeys(keys);");
+    expect(purge).not.toMatch(/chrome\.storage\.(?:local|sync|session)\.(?:get|set)\(/);
   });
 
   /**
@@ -1403,7 +1400,7 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
     // absent from the SessionSnapshot today and nothing asserted that, so a future "persist the
     // challenge so a popup reopen survives SW death" change would put wrapKey into storage.session
     // with no tripwire — exactly what the declaration's comment argues against. Pin the absence.
-    const snap = spanOf(bg, "function persistSession(", "return chrome.storage.session.set({ [SKEY]: snap });");
+    const snap = spanOf(bg, "function persistSession(", 'return sessionSeal.set("session", currentOriginKey, snap)');
     for (const secret of ["pendingTotp", "authKey", "wrapKey"]) {
       expect(snap, `${secret} must never be written into the session snapshot`).not.toContain(secret);
     }
@@ -1415,7 +1412,7 @@ describe("2026-08-30 audit pins (extension lane) — KLKEY residency/wipe, pendi
     // and its key standing after sign-out, for the next account on this profile.
     const wipe = spanOf(bg, 'if (reason === "signout" || !quCompartmentTrusted) {', "if (tabs.size > 0) persistTabs();");
     expect(wipe).toContain("knownLoginsKey = null;");
-    expect(wipe).toContain("await chrome.storage.session.remove(nsk(KLKEY));");
+    expect(wipe).toContain('await sessionSeal.remove("knownLogins", currentOriginKey);');
   });
 
   it("every locked re-offer routes through reofferDecision, and an expired pending is DROPPED, not offered", () => {

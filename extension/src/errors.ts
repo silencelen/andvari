@@ -48,7 +48,7 @@ type PinUnlockCode =
   | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
-type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
+type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin" | "unavailable";
 // Biometric quick-unlock (0.17.0) twins — literal-identical to messages.ts BioUnlockCode / EnrollBioCode.
 type BioUnlockCode =
   | "bio_cancelled"
@@ -64,7 +64,12 @@ type BioUnlockCode =
   | "kdf_policy"
   | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
-type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
+type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled" | "unavailable";
+
+/** A16: quick unlock cannot be kept here (no session sealing key: Firefox's "Never remember history" gives the extension
+ *  no IndexedDB), so enrolling is refused rather than pretend. Shared by the PIN and the biometric enroll. */
+const QUICK_UNLOCK_UNAVAILABLE =
+  "Quick unlock isn't available in this browser mode — andvari has no private storage here to keep it in (Firefox does this when it never remembers history).";
 
 /** A15 review F1: the refusal while a server is pending. The popup shows the confirm route instead of any sign-in
  *  form, so this is the fallback line only (a sign-in raced the update, or a stale popup). */
@@ -305,6 +310,8 @@ export function enrollErrorCopy(code: EnrollCode | undefined, reason?: PinWeakRe
       return "Set a new master password in the web vault before turning on quick unlock.";
     case "need_full_unlock":
       return "Enter your master password once more to set up quick unlock.";
+    case "unavailable":
+      return QUICK_UNLOCK_UNAVAILABLE;
     case "weak_pin":
       switch (reason) {
         case "too_short":
@@ -368,6 +375,8 @@ export function enrollBioErrorCopy(code: EnrollBioCode | undefined): string {
       return "This device can't do biometric quick unlock — set up a PIN instead.";
     case "bio_cancelled":
       return "Setup was cancelled — try again when you're ready.";
+    case "unavailable":
+      return QUICK_UNLOCK_UNAVAILABLE;
     default:
       return "Couldn't turn on device quick unlock — try again.";
   }
