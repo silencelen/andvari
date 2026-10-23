@@ -4,11 +4,13 @@
 #   signandvari 0.24.0 -Commit <sha> -DryRun    # preflight, seq arithmetic and manifest preview only
 #   signandvari 0.24.0 -Commit <sha> -SkipDrop  # produce the bundle, deliver it by hand
 #   signandvari 0.24.0 -Commit <sha> -SkipReadBack  # ... and do not assert the channel afterwards (rare)
-#   signandvari 0.24.0 -Commit <sha> -Baseline <sha> # FIRST RUN ONLY, when no older release tag is held
+#   signandvari 0.24.0 -Commit <sha> -Baseline <sha> # FIRST RUN ONLY, when this box holds no signed bundle
 #
 # -Commit is REQUIRED: the full 40-hex commit the build host cut the tag at, copied from the
 # handover line the build host prints. See "THE TAG IS NOT TRUSTED" and "THE LAST SIGNED COMMIT"
-# below. Every run, -DryRun included, stops for one typed confirmation before the tree's code runs.
+# below. Every run, -DryRun included, stops for one typed confirmation before the tree's code runs,
+# and once confirmed every run, -DryRun included, runs the tree's prestige-release.ps1 on this
+# account, beside the key: a dry run signs nothing, but it is not a run in which no tree code runs.
 #
 # WHY THIS EXISTS. scripts\prestige-release.ps1 already does the signing correctly. What it does
 # NOT do is the handling around it: fetching tags, checking out the ref it then asserts you are on,
@@ -48,22 +50,36 @@
 # record of the commit its last SUCCESSFUL ceremony signed, outside the repo and out of the tree's
 # reach before it runs: %LOCALAPPDATA%\andvari\signandvari-last-signed.json. Before any of the
 # tree's code runs, the release commit must DESCEND from that commit (git merge-base
-# --is-ancestor), the commits since it and a diff --stat of every path whose code runs during the
-# ceremony are printed, and the operator types the version to confirm. A run with no human at a
-# console (-NonInteractive, redirected input, a service) fails closed at that prompt. The record
-# moves only after prestige-release.ps1 succeeded AND bundle.json records the pinned commit; a
-# dry run, a refused run or a failed ceremony leaves it where it was. This is a review aid that
-# rests on the operator reading the diff, not a proof: a compromised build host can still cut a
-# descendant commit, but it can no longer swap the tree silently, rewrite history under the last
-# release, or skip the moment a human looks at what changed in the build.
+# --is-ancestor), a diff --stat of the code that runs beside the key and the commits since it are
+# printed, and the operator types the version to confirm. A run with no human at a console
+# (-NonInteractive, redirected input, a service) fails closed before anything is checked out. The
+# record moves only after prestige-release.ps1 succeeded AND bundle.json records the pinned
+# commit; a dry run, a refused run or a failed ceremony leaves it where it was. This is a review
+# aid that rests on the operator reading the diff, not a proof: a compromised build host can still
+# cut a descendant commit, but it can no longer swap the tree silently, rewrite history under the
+# last release, or skip the moment a human looks at what changed in the build.
 #
-# FIRST RUN (no record yet): the baseline is the newest local tag v<x.y.z> BELOW -Version that this
-# checkout already held before this run's fetch (the fetch only ever adds v<Version>, and never
-# moves an existing tag, so nothing this run fetches can choose the baseline). With no such tag the
-# run stops and asks for -Baseline <40-hex>, a commit the operator has reviewed (it may also be
-# passed on any first run to choose the comparison: a checkout cloned just before the run holds
-# the remote's tags as they were at clone time); -Baseline is refused once a record exists. Deleting the record is the deliberate reset (history rewritten on
-# purpose, a new checkout): the next run is a first run again.
+# WHAT THE STAT COVERS (A14 review R2-1; see $ReviewPaths in step 3). The tree's scripts, its
+# whole gradle build (wrapper, catalog, properties, every build script, buildSrc) and the
+# update-signer, which is handed the key's path and is a shadowJar of tools/update-signer plus ALL
+# of :core - not only core's crypto, which is all an earlier version listed. It does NOT cover the
+# third-party artifacts gradle downloads (only the catalog that names them), the JDK, or the
+# sources compiled into the MSI and never run here (app-desktop's, whose changes the commit list
+# names). Every printed line from git is escaped (A14 review R2-2), the paths are matched
+# case-insensitively, and a tree with two paths that are equal on a case-insensitive disk is
+# refused before checkout (NTFS would write one over the other).
+#
+# FIRST RUN (no record yet, A14 review R2-3): the baseline is the commit in this box's OWN most
+# recent signed bundle - dist\release-bundle-<version>\bundle.json beside its manifest.json.sig,
+# which prestige-release.ps1 writes only after a signature it verified; the highest seq wins, and a
+# bundle.json git tracks is skipped (that is the tree's content, not this box's). With no such
+# bundle the run stops and asks for -Baseline <40-hex>, a commit the operator has reviewed (the last
+# release they signed); -Baseline may also be passed on any first run to choose the comparison, it
+# must be a STRICT ancestor of -Commit (never -Commit itself), and it is refused once a record
+# exists. Tags are never the seed: a plain `git fetch` or `git pull` auto-follows new tags, so a
+# planted intermediate tag would become the baseline and hide every change up to it. Deleting the
+# record is the deliberate reset (history rewritten on purpose, a new checkout): the next run is a
+# first run again.
 #
 # THE KEYS ARE NEVER TOUCHED. The update-signing key and the Authenticode cert live on this machine
 # and only on this machine. This tool never reads, prints, copies, exports or relocates either, and
@@ -87,8 +103,9 @@ param(
     [string]$Commit,
 
     # FIRST RUN ONLY: the commit to compare this release against when this workstation has no
-    # last-signed record AND holds no release tag below -Version. A commit the operator reviewed
-    # (the last release they signed), never one read off the build host. Refused once a record exists.
+    # last-signed record (required when it also holds no signed bundle under dist\). A commit the
+    # operator reviewed (the last release they signed), never one read off the build host. It must
+    # be a strict ancestor of -Commit. Refused once a record exists.
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$Baseline,
 
@@ -141,6 +158,29 @@ function Invoke-Native {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & $Body } finally { $ErrorActionPreference = $prev }
+}
+
+# EVERY LINE PRINTED FROM GIT GOES THROUGH HERE (A14 review R2-2): commit subjects, paths, a
+# refusal's git output. git passes a subject's bytes through untouched, ESC included, and on a VT
+# console (Windows Terminal is the Windows 11 default) a subject can move the cursor and erase or
+# redraw the lines above it - hide the stat, or draw a fake "(no changes)". Every C0 control (tab,
+# CR and LF too: one line stays one line), DEL, every C1 control (0x80-0x9F, which holds the 8-bit
+# CSI), the line and paragraph separators and the bidi controls become a visible \uXXXX. The
+# pattern is spelled with \u escapes so this file stays pure ASCII, and the replacement is a
+# MatchEvaluator, which Windows PowerShell 5.1 runs.
+$script:UnsafeTextPattern = '[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]'
+function ConvertTo-Printable {
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if ($null -eq $Text) { return '' }
+    return [regex]::Replace($Text, $script:UnsafeTextPattern, [System.Text.RegularExpressions.MatchEvaluator] {
+        param($m)
+        '\u{0:X4}' -f [int][char]$m.Value
+    })
+}
+function Write-GitText {
+    param([AllowNull()][AllowEmptyString()][string]$Text, [string]$Indent = '   ')
+    if ($null -eq $Text) { return }
+    foreach ($line in ($Text -split "`r?`n")) { Write-Host ($Indent + (ConvertTo-Printable $line)) }
 }
 
 # ============================================================ 1. ENVIRONMENT ====================
@@ -197,7 +237,7 @@ function Invoke-Git {
     $out  = Invoke-Native { & git -C $Repo @Arguments 2>&1 }
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFailure) {
-        Write-Host ($out | Out-String)
+        Write-GitText ($out | Out-String)
         Die "git $($Arguments -join ' ') failed (exit $code)"
     }
     [pscustomobject]@{ ExitCode = $code; Output = ($out | Out-String) }
@@ -228,29 +268,44 @@ function Read-LastSigned {
     return [pscustomobject]@{ Commit = $c; Version = $v }
 }
 
-# FIRST RUN: the newest local release tag BELOW -Version that this checkout already holds. Called
-# before the fetch, and the fetch below only ever adds v<Version> and never moves an existing tag,
-# so nothing this run fetches can pick the baseline it is compared against.
-function Get-SeedTag {
-    $r = Invoke-Git -Arguments @('for-each-ref', '--format=%(refname:strip=2)', 'refs/tags/') -AllowFailure
-    if ($r.ExitCode -ne 0) { return $null }
-    $want = [version]$Version
-    $best = $null; $bestVer = $null
-    foreach ($line in ($r.Output -split "`r?`n")) {
-        $name = $line.Trim()
-        if ($name -notmatch '^v(\d+)\.(\d+)\.(\d+)$') { continue }
-        $ver = [version]('{0}.{1}.{2}' -f $matches[1], $matches[2], $matches[3])
-        if ($ver -ge $want) { continue }
-        if ($null -eq $bestVer -or $ver -gt $bestVer) { $best = $name; $bestVer = $ver }
+# FIRST RUN: the commit in this box's OWN most recent signed bundle (A14 review R2-3), never a tag.
+# prestige-release.ps1 writes dist\release-bundle-<version>\ (dist\ is gitignored, so no checkout
+# replaces it), records the commit it built (H103) and the seq it minted in bundle.json, and
+# renames manifest.json.sig into place LAST, after the signature verified. So a directory holding
+# both files is a ceremony this box completed, and the highest seq is the most recent one. A
+# bundle.json that git TRACKS is the tree's content, not this box's, and is skipped. A tag is never
+# a seed: a plain `git fetch` or `git pull` auto-follows new tags, so a planted intermediate tag
+# would become the baseline and hide every change up to it.
+function Get-SeedBundle {
+    $dist = Join-Path $Repo 'dist'
+    if (-not (Test-Path -LiteralPath $dist -PathType Container)) { return $null }
+    $best = $null
+    foreach ($dir in @(Get-ChildItem -LiteralPath $dist -Directory -Filter 'release-bundle-*' -ErrorAction SilentlyContinue)) {
+        $meta = Join-Path $dir.FullName 'bundle.json'
+        $sig  = Join-Path $dir.FullName 'manifest.json.sig'
+        if (-not (Test-Path -LiteralPath $meta -PathType Leaf) -or -not (Test-Path -LiteralPath $sig -PathType Leaf)) { continue }
+        $rel = 'dist/' + $dir.Name + '/bundle.json'
+        $tracked = Invoke-Git -Arguments @('ls-files', '--error-unmatch', '--', $rel) -AllowFailure
+        if ($tracked.ExitCode -eq 0) {
+            Write-Warn2 ("not a seed: {0} is tracked by git, so it is the tree's content, not this box's" -f (ConvertTo-Printable $rel))
+            continue
+        }
+        $raw = [string](Get-Content -LiteralPath $meta -Raw)
+        if ($raw -notmatch '"commit"\s*:\s*"([0-9a-fA-F]{40})"') { continue }
+        $c = $matches[1].ToLowerInvariant()
+        if ($raw -notmatch '"seq"\s*:\s*(\d{1,18})\b') { continue }
+        $s = [long]$matches[1]
+        $v = if ($raw -match '"version"\s*:\s*"(\d+\.\d+\.\d+)"') { $matches[1] } else { 'version not recorded' }
+        $when = (Get-Item -LiteralPath $sig).LastWriteTimeUtc
+        if ($null -eq $best -or $s -gt $best.Seq -or ($s -eq $best.Seq -and $when -gt $best.When)) {
+            $best = [pscustomobject]@{ Commit = $c; Seq = $s; Version = $v; When = $when; Path = $meta }
+        }
     }
-    if (-not $best) { return $null }
-    $c = Invoke-Git -Arguments @('rev-parse', '-q', '--verify', "refs/tags/$best^{commit}") -AllowFailure
-    if ($c.ExitCode -ne 0) { return $null }
-    return [pscustomobject]@{ Tag = $best; Commit = $c.Output.Trim().ToLowerInvariant() }
+    return $best
 }
 
 $LastSigned = Read-LastSigned
-$Seed = $null
+$SeedBundle = $null
 if ($LastSigned) {
     if ($Baseline) {
         Die "-Baseline is for the first run only, and $RecordPath already records $($LastSigned.Commit). Nothing was fetched or checked out. To re-bootstrap on purpose, delete that record first."
@@ -260,17 +315,25 @@ if ($LastSigned) {
 }
 elseif ($Baseline) {
     $BaseCommit = $Baseline.ToLowerInvariant()
+    # A14 review R2-4: the release compared against itself shows no commit and no change at all.
+    if ($BaseCommit -eq $Commit) {
+        Die "-Baseline is -Commit itself ($Commit): that compares the release with itself and shows nothing. Pass the last release you signed. Nothing was fetched or checked out."
+    }
     $BaseWhat   = "-Baseline $BaseCommit (FIRST RUN: no record at $RecordPath yet)"
 }
 else {
-    $Seed = Get-SeedTag
-    if (-not $Seed) {
-        Die "FIRST RUN and nothing to compare against: there is no record at $RecordPath and this checkout holds no release tag below $Tag. Nothing was fetched or checked out. Re-run with -Baseline <40-hex>, a commit you have reviewed (the last release you signed), never one read off the build host."
+    $SeedBundle = Get-SeedBundle
+    if (-not $SeedBundle) {
+        Die "FIRST RUN and nothing to compare against: there is no record at $RecordPath and no signed bundle (bundle.json beside manifest.json.sig) under $(Join-Path $Repo 'dist'). Nothing was fetched or checked out. Re-run with -Baseline <40-hex>, a commit you have reviewed (the last release you signed), never one read off the build host. A tag is never used as the baseline."
     }
-    $BaseCommit = $Seed.Commit
-    $BaseWhat   = "local tag $($Seed.Tag) at $BaseCommit, which this checkout held before this run's fetch (FIRST RUN: no record at $RecordPath yet)"
+    $BaseCommit = $SeedBundle.Commit
+    $BaseWhat   = "the commit this box's most recent signed bundle records, $($SeedBundle.Path) (seq $($SeedBundle.Seq), $($SeedBundle.Version)) (FIRST RUN: no record at $RecordPath yet)"
 }
 Write-Ok "baseline: $BaseWhat"
+# The baseline's own date and subject, so the operator can tell it is the release they last signed.
+$baseShow = Invoke-Git -Arguments @('log', '-1', '--no-color', '--no-show-signature', '--format=%ci  %s', $BaseCommit, '--') -AllowFailure
+if ($baseShow.ExitCode -eq 0) { Write-GitText $baseShow.Output.Trim() -Indent '        ' }
+else { Write-Info "     ($BaseCommit is not in this checkout)" }
 
 # --- fetch ONLY the release tag, never forced ---------------------------------------------------
 # NO --force: git refuses to replace an existing local tag with a different remote one ("would
@@ -280,7 +343,7 @@ Write-Ok "baseline: $BaseWhat"
 # other tag that moved on the remote, so one unrelated re-tag used to block every ceremony.
 $fetch = Invoke-Git -Arguments @('fetch', '--no-tags', 'origin', "refs/tags/${Tag}:refs/tags/${Tag}") -AllowFailure
 if ($fetch.ExitCode -ne 0) {
-    Write-Host $fetch.Output
+    Write-GitText $fetch.Output
     # Name both commits, so the operator can tell a moved tag from a network failure.
     $remoteLine = (Invoke-Git -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$Tag", "refs/tags/$Tag^{}") -AllowFailure).Output
     $remoteCommit = ''
@@ -330,33 +393,44 @@ foreach ($leftover in @('manifest.json', 'manifest.json.sig')) {
 
 $status = (Invoke-Git -Arguments @('status', '--porcelain')).Output.Trim()
 if ($status.Length -gt 0) {
-    Write-Host $status
+    Write-GitText $status
     Die 'working tree is not clean - commit, stash or clean before cutting a release.'
 }
 Write-Ok 'working tree clean'
 
-# ============================================================ 3. REVIEW, THEN CHECKOUT THE TAG ==
+# ============================================================ 3. REVIEW, CHECKOUT, CONFIRM ======
 
-Write-Step "Changes since the last signed release, then checkout $Tag"
+Write-Step "Changes since the last signed release, checkout $Tag, confirm"
 
-# Every path whose code runs on this box during the ceremony, worked out from what
-# prestige-release.ps1 invokes: itself and build-windows.ps1 (scripts/); gradlew.bat and the gradle
-# wrapper, version catalog and properties (gradle/, gradle.properties - which can also set JVM
-# flags); every build script (*.gradle.kts, settings included) and buildSrc/ should one appear;
-# the update-signer, which is handed the key's path (tools/update-signer/), and the core crypto it
-# links. The app's own sources are compiled into the MSI, not run here; the commit log covers them.
-$CeremonyPaths = @(
-    'scripts/', 'gradlew.bat', 'gradlew', 'gradle/', 'gradle.properties', '*.gradle.kts', 'buildSrc/',
-    'tools/update-signer/',
-    'core/src/commonMain/kotlin/io/silencelen/andvari/core/crypto/',
-    'core/src/jvmMain/kotlin/io/silencelen/andvari/core/crypto/',
-    'core/src/jvmShared/kotlin/io/silencelen/andvari/core/crypto/'
+# WHAT THE STAT COVERS (A14 review R2-1). Worked out from what prestige-release.ps1 builds and runs
+# on this account beside the key:
+#   * its scripts: itself and build-windows.ps1 (scripts/);
+#   * a gradle build: gradlew.bat and the wrapper jar and properties, the version catalog and
+#     daemon settings (gradle/), gradle.properties (which can also set JVM flags and agents),
+#     settings.gradle.kts and every other build script, buildSrc/ and build-logic/ should one
+#     appear, and the project caches and machine-local files gradle would read if a tree ever
+#     tracked them (.gradle/, .kotlin/, local.properties);
+#   * the update-signer, which is handed the key's path: a shadowJar of tools/update-signer/ plus
+#     ALL of :core. ALL of it, not core's crypto: Kotlin resolves an unqualified call to a
+#     declaration in the caller's own package ahead of its default imports, from any module on the
+#     classpath, so one core file that declares the signer's package and a same-named function (an
+#     extension File.readText, say) replaces the signer's own call. A stat over core's crypto
+#     directories alone printed "(no changes)" over exactly that.
+# Not covered: the third-party artifacts gradle downloads (only the catalog that names them), the
+# JDK, and the sources compiled into the MSI but never run here (app-desktop/src); the commit list
+# names those. A new module the signer links shows here through the build scripts that add it.
+# Matched case-insensitively (:(icase)), as NTFS matches names.
+$ReviewPaths = @(
+    'core/', 'tools/update-signer/',
+    'scripts/', 'gradlew*', 'gradle/', '*gradle.properties', 'settings.gradle.kts', '*.gradle.kts', '*.gradle',
+    'buildSrc/', 'build-logic/', '.gradle/', '.kotlin/', 'local.properties'
 )
+$ReviewSpecs = @($ReviewPaths | ForEach-Object { ":(icase)$_" })
 
-# The confirmation. Fail closed on every unattended path: with no human at a console nobody reads
-# the lines above, so the run stops instead of skipping the question. Piped input counts as
+# Unattended runs fail closed BEFORE anything is checked out: with no human at a console nobody
+# reads the lines below, so the run stops instead of skipping the question. Piped input counts as
 # unattended too - a pipe that types the version is an automation that never looked.
-function Confirm-Release {
+function Assert-Attended {
     $why = $null
     if (-not [Environment]::UserInteractive) { $why = 'this session is not interactive' }
     elseif ([Console]::IsInputRedirected) { $why = 'standard input is redirected (a pipe or a file cannot confirm a release)' }
@@ -364,18 +438,66 @@ function Confirm-Release {
     if ($why) {
         Die "this release needs a human confirmation and $why - nothing was checked out. Run signandvari from an interactive console."
     }
-    Write-Host ''
-    $answer = $null
-    try {
-        $answer = Read-Host ("   Type the version you are releasing ({0}) to run this tree beside the signing key; anything else stops" -f $Version)
+}
+
+# git prints a path with an unusual byte as a C-quoted string ("a\303\244b", octal per byte) under
+# core.quotePath=true, which keeps its output pure ASCII whatever the console's code page. Undo the
+# quoting so the case comparison below sees the real name.
+function ConvertFrom-GitQuotedPath {
+    param([string]$Text)
+    if ($Text.Length -lt 2 -or $Text[0] -ne '"' -or $Text[$Text.Length - 1] -ne '"') { return $Text }
+    $bytes = New-Object System.Collections.Generic.List[byte]
+    $i = 1; $end = $Text.Length - 1
+    while ($i -lt $end) {
+        $code = [int]$Text[$i]
+        if ($code -eq 92 -and ($i + 1) -lt $end) {
+            $n = [int]$Text[$i + 1]
+            if ($n -ge 48 -and $n -le 55 -and ($i + 3) -lt ($end + 1)) {
+                $bytes.Add([byte]([Convert]::ToInt32($Text.Substring($i + 1, 3), 8) -band 0xFF)); $i += 4; continue
+            }
+            $esc = switch ($n) { 97 { 7 } 98 { 8 } 116 { 9 } 110 { 10 } 118 { 11 } 102 { 12 } 114 { 13 } default { $n } }
+            $bytes.Add([byte]($esc -band 0xFF)); $i += 2; continue
+        }
+        if ($code -lt 128) { $bytes.Add([byte]$code) }
+        else { foreach ($b in [System.Text.Encoding]::UTF8.GetBytes([string]$Text[$i])) { $bytes.Add($b) } }
+        $i++
     }
-    catch {
-        Die "this release needs a human confirmation and it could not be read ($($_.Exception.Message)) - nothing was checked out."
+    return [System.Text.Encoding]::UTF8.GetString($bytes.ToArray())
+}
+
+# NTFS CASE COLLISIONS (A14 review 2). NTFS compares names case-insensitively, and ignores a
+# trailing dot or space, so two tree paths that differ only that way are ONE file on this disk:
+# the checkout writes one over the other, and a case-sensitive pathspec in the review would not
+# have shown the second (Scripts/prestige-release.ps1 beside scripts/prestige-release.ps1). The
+# release tree is refused when any two of its paths - files or the directories above them - are
+# equal once folded both ways.
+function Find-CaseCollisions {
+    param([string]$At)
+    $r = Invoke-Git -Arguments @('-c', 'core.quotePath=true', 'ls-tree', '-r', '--name-only', '--full-tree', $At)
+    $byUpper = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    $byLower = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    $seen    = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    $hits    = New-Object System.Collections.ArrayList
+    $trim    = [char[]]@('.', ' ')
+    foreach ($line in ($r.Output -split "`r?`n")) {
+        if (-not $line) { continue }
+        $parts = (ConvertFrom-GitQuotedPath $line).Split('/')
+        $acc = ''; $norm = ''
+        for ($j = 0; $j -lt $parts.Length; $j++) {
+            if ($j -eq 0) { $acc = $parts[0]; $norm = $parts[0].TrimEnd($trim) }
+            else { $acc = $acc + '/' + $parts[$j]; $norm = $norm + '/' + $parts[$j].TrimEnd($trim) }
+            if (-not $seen.Add($acc)) { continue }
+            foreach ($pair in @(@($byUpper, $norm.ToUpperInvariant()), @($byLower, $norm.ToLowerInvariant()))) {
+                $map = $pair[0]; $key = $pair[1]
+                $other = $null
+                if ($map.TryGetValue($key, [ref]$other)) {
+                    if ($other -cne $acc) { [void]$hits.Add(('{0}  <->  {1}' -f $other, $acc)) }
+                }
+                else { $map[$key] = $acc }
+            }
+        }
     }
-    if ($null -eq $answer -or $answer.Trim() -ne $Version) {
-        Die "not confirmed (typed '$answer', expected '$Version') - nothing was checked out."
-    }
-    Write-Ok "confirmed by the operator: $Version"
+    return @($hits | Select-Object -Unique)
 }
 
 # Ancestry first: a release that does not descend from the last one signed here is not built on
@@ -385,29 +507,52 @@ if ($anc.ExitCode -eq 1) {
     Die "$Tag ($Commit) does not descend from $BaseCommit, $BaseWhat. A release that is not a descendant of the last one signed here is refused - nothing was checked out. Merge the release line into the history the last release came from; if history was rewritten on purpose, see the runbook's reset step."
 }
 if ($anc.ExitCode -ne 0) {
-    Write-Host $anc.Output
+    Write-GitText $anc.Output
     Die "could not test whether $Commit descends from $BaseCommit (git exit $($anc.ExitCode)) - is that commit in this checkout? Nothing was checked out."
 }
 Write-Ok "$Commit descends from $BaseCommit"
 Write-Info "compared against $BaseWhat"
 
-$log  = (Invoke-Git -Arguments @('log', '--oneline', "$BaseCommit..$Commit")).Output.TrimEnd()
-$stat = (Invoke-Git -Arguments (@('diff', '--stat=200', "$BaseCommit..$Commit", '--') + $CeremonyPaths)).Output.TrimEnd()
+$collisions = Find-CaseCollisions -At $Commit
+if ($collisions.Count -gt 0) {
+    foreach ($c in $collisions) { Write-GitText $c -Indent '   COLLIDES ' }
+    Die "$Tag ($Commit) has paths that are the same file on a case-insensitive disk (above): the checkout would write one over the other, and the review could miss one. Refused - nothing was checked out."
+}
+Write-Ok 'no two paths in the release tree collide on a case-insensitive disk'
+
+# The stat FIRST, then the commits (A14 review R2-2): a hostile subject printed above the stat is
+# escaped anyway, but the code that runs beside the key is the part to read before anything else.
+$stat = (Invoke-Git -Arguments (@('-c', 'core.quotePath=true', 'diff', '--stat=4000,3900', '--stat-graph-width=40',
+    '--no-renames', '--no-color', '--no-ext-diff', '--no-textconv', "$BaseCommit..$Commit", '--') + $ReviewSpecs)).Output.TrimEnd()
+$log  = (Invoke-Git -Arguments @('log', '--no-color', '--no-show-signature', '--format=%h %s', "$BaseCommit..$Commit", '--')).Output.TrimEnd()
+Write-Host ''
+Write-Host ("   ---- changed code that runs beside the key, {0}..{1} (git diff --stat) ----" -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12))
+Write-Host ("   paths (any case): {0}" -f ($ReviewPaths -join ' '))
+if ($stat) { Write-GitText $stat } else { Write-Host '   (no changes in those paths)' }
+Write-Host ("   read it in full in another window: git -C `"{0}`" diff {1}..{2} -- {3}" -f $Repo, $BaseCommit, $Commit, (($ReviewSpecs | ForEach-Object { "'$_'" }) -join ' '))
 Write-Host ''
 Write-Host ("   ---- commits {0}..{1} ----" -f $BaseCommit.Substring(0, 12), $Commit.Substring(0, 12))
-if ($log) { $log -split "`r?`n" | ForEach-Object { Write-Host "   $_" } } else { Write-Host '   (none: -Commit is the baseline commit itself)' }
-Write-Host ''
-Write-Host '   ---- changed code that runs on this box during the ceremony (git diff --stat) ----'
-Write-Host ("   paths: {0}" -f ($CeremonyPaths -join ' '))
-if ($stat) { $stat -split "`r?`n" | ForEach-Object { Write-Host "   $_" } } else { Write-Host '   (no changes in those paths)' }
-Write-Host ''
-Write-Host '   Read the lines above. The next step checks out this tree and runs its scripts and its gradle' -ForegroundColor Yellow
-Write-Host '   build on this account, beside update-signing.key. A change you did not expect is a reason to stop.' -ForegroundColor Yellow
-Confirm-Release
+if ($log) { Write-GitText $log } else { Write-Host '   (none: -Commit is the baseline commit itself)' }
+
+Assert-Attended
 
 # prestige-release.ps1 ASSERTS HEAD == -Ref and dies otherwise; it does not check out for you.
-# Detached HEAD at the tag is the expected state for the rest of this run.
-$head = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
+# Detached HEAD at the tag is the expected state for the rest of this run. The checkout comes
+# BEFORE the confirmation so the tree it leaves can be checked first (below); it runs none of the
+# tree's code. Where HEAD was is remembered, so a run that stops here puts it back.
+$origBranch = (Invoke-Git -Arguments @('symbolic-ref', '-q', '--short', 'HEAD') -AllowFailure)
+$OrigHead   = (Invoke-Git -Arguments @('rev-parse', 'HEAD')).Output.Trim().ToLowerInvariant()
+$OrigName   = if ($origBranch.ExitCode -eq 0 -and $origBranch.Output.Trim()) { $origBranch.Output.Trim() } else { $null }
+function Restore-OriginalHead {
+    $back = if ($OrigName) { @('checkout', '-q', $OrigName) } else { @('checkout', '-q', '--detach', $OrigHead) }
+    $r = Invoke-Git -Arguments $back -AllowFailure
+    $where = if ($OrigName) { ConvertTo-Printable $OrigName } else { $OrigHead }
+    if ($r.ExitCode -eq 0) { return "HEAD is back at $where" }
+    Write-GitText $r.Output
+    return "HEAD could NOT be put back at $where (above): this checkout holds the unconfirmed tree, so do not open it in an IDE that runs gradle"
+}
+
+$head = $OrigHead
 if ($head -eq $Commit) {
     Write-Ok "already at $Tag ($($head.Substring(0, 12)))"
 }
@@ -419,6 +564,35 @@ else {
     if ($head -ne $Commit) { Die "checkout of $Commit left HEAD at $head - aborting." }
     Write-Ok "detached HEAD at $Tag ($($head.Substring(0, 12)))"
 }
+
+# The checked-out tree must be exactly the commit (A14 review 2, the NTFS case): a file written over
+# another, or anything else that left the tree differing from what git holds, is a hard stop
+# before the confirmation, because what would run is then not what was reviewed.
+$after = (Invoke-Git -Arguments @('status', '--porcelain')).Output.Trim()
+if ($after.Length -gt 0) {
+    Write-GitText $after
+    $put = Restore-OriginalHead
+    Die "after the checkout of $Commit the working tree is NOT clean (above), so the tree on disk is not the commit that was reviewed. None of its code ran; $put. Investigate by hand."
+}
+Write-Ok 'working tree clean after the checkout'
+
+Write-Host ''
+Write-Host '   Read the lines above. The next step runs this tree''s scripts and its gradle build on this' -ForegroundColor Yellow
+Write-Host '   account, beside update-signing.key (a dry run too). A change you did not expect is a reason to stop.' -ForegroundColor Yellow
+Write-Host ''
+$answer = $null
+try {
+    $answer = Read-Host ("   Type the version you are releasing ({0}) to run this tree beside the signing key; anything else stops" -f $Version)
+}
+catch {
+    $put = Restore-OriginalHead
+    Die "this release needs a human confirmation and it could not be read ($($_.Exception.Message)) - none of the tree's code ran; $put."
+}
+if ($null -eq $answer -or $answer.Trim() -ne $Version) {
+    $put = Restore-OriginalHead
+    Die "not confirmed (typed '$(ConvertTo-Printable $answer)', expected '$Version') - none of the tree's code ran; $put."
+}
+Write-Ok "confirmed by the operator: $Version"
 
 # ============================================================ 4. RESOLVE SIGNTOOL ===============
 
@@ -650,7 +824,7 @@ function Confirm-Remote {
     $remote = "$DropPath$Name"
     $out    = Invoke-Native { & ssh @sshOpts -- $DropHost "sha256sum -- '$remote'" 2>&1 }
     if ($LASTEXITCODE -ne 0) {
-        Write-Host ($out | Out-String)
+        Write-GitText ($out | Out-String)
         Die "could not sha256sum $Name on the drop host (exit $LASTEXITCODE) - ABORTING BEFORE THE SIGNATURE."
     }
     $got = ((($out | Out-String).Trim()) -split '\s+')[0].ToLowerInvariant()

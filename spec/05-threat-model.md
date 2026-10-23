@@ -334,10 +334,25 @@ handover line, which reads the build host's own tag, so it closes a tag moved by
 tag moved after the handover line was printed, and an accidental re-tag, while a compromised build host chooses both
 the tag and the pin. The layer aimed at that is held by the workstation: the commit its last successful ceremony
 signed, recorded outside the repo and moved only after `prestige-release.ps1` succeeded and `bundle.json` records the
-pin. Before any of the tree's code runs, the release commit must descend from it, the commits since it and a `diff
---stat` of every path whose code runs during the ceremony are printed, and the operator types the version; a run with
-no human at a console fails closed there. A first run compares against the newest older release tag the checkout held
-before the run's fetch, or an operator-chosen `-Baseline` when it holds none. Residual accepted: this rests on the
+pin. Before any of the tree's code runs, the release commit must descend from it, a `diff --stat` of the code that
+runs beside the key and then the commits since it are printed, every line taken from git escaped (C0, DEL, C1, the line
+separators and the bidi controls; A14 review R2-2), the tree is checked out and must then be clean, and the operator
+types the version; a run with no human at a console fails closed before anything is checked out. The stat covers the
+tree's scripts, its whole gradle build (wrapper, catalog, properties, every build script, `buildSrc/`) and ALL of
+`:core` and `tools/update-signer/`, matched in any case: the update-signer is handed the key's path and is a shadowJar
+of both, and Kotlin resolves an unqualified call to a same-package declaration from any module on the classpath ahead of
+the default imports (A14 review R2-1 corrected an earlier list of core's crypto directories, under which a core file
+outside them replaced the signer's key read while the stat printed no change). It does not cover the third-party
+artifacts gradle downloads (only the catalog that names them), the JDK, or the sources compiled into the MSI but never
+run on the box. A release tree with two paths that are one file on a case-insensitive disk is refused before checkout
+(NTFS). A first run compares against the commit in the workstation's own most recent signed bundle (`dist/` beside its
+signature, highest seq, never a bundle git tracks), or an operator-chosen `-Baseline`, which must be a strict ancestor of
+the release, when there is none; a tag is never the seed, because a plain fetch or pull brings in new tags and a
+planted intermediate one would hide every change up to it (A14 review R2-3, R2-4). The commit values the owner types
+come from GitHub's own pages (the merge they approved, the tag's commit), compared with the build host's handoff: that
+catches a mistyped, altered or never-published value, not a build host that pushed and tagged its own commit, against
+which only the review stands. A dry run is not tree-free: once confirmed it runs the tree's `prestige-release.ps1` with
+`-DryRun` on that account. Residual accepted: this rests on the
 operator reading the diff, and a compromised build host can still cut a descendant commit that changes the build; the
 tree still runs its own scripts and gradle on the account that can open `update-signing.key`, and keeping the build
 off that account is the longer-term fix and is not built. Separately, the Linux, Arch and extension digests the
