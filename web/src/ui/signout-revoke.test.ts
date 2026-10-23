@@ -32,7 +32,7 @@ describe("App.signOut — revokes before the local teardown, and only for a USER
   it("routes the user sign-out through revokeForSignOut (revokeSessionBestEffort when a pair is held)", () => {
     // A14 review W1: with no pair left (a per-tab lock dropped it) the lock's own result is reported, and
     // nothing is POSTed unauthenticated — behaviour-tested in tabsession.test.ts.
-    expect(signOut).toContain("revokeForSignOut(clientRef.current, lockRevokeRef.current)");
+    expect(signOut).toContain("revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid))");
   });
 
   it("gates it on kind === \"user\" — an expired/revoked session is already dead server-side", () => {

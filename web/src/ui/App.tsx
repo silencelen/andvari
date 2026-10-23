@@ -23,16 +23,19 @@ import {
 import {
   applyOrgOfflineCachePolicy,
   claimTabTokens,
+  clearLockRevoke,
   clearSession,
   clearTabTokens,
   declineCacheNudge,
   defaultBaseUrl,
   loadSession,
   LOCK_REVOKE_UNCONFIRMED,
+  lockRevokeUnconfirmed,
   makeClient,
   migrateCacheConsentOnce,
   migrateLegacySessionTokens,
   pendingSyncCount,
+  recordLockRevoke,
   REVOKE_UNCONFIRMED,
   setOfflineCopyEnabled,
   shouldOfferCacheNudge,
@@ -172,6 +175,7 @@ export function App() {
 
   const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) => {
     lockRevokeRef.current = null; // A14 review W1: this tab holds a new pair; an older lock's record is moot
+    clearLockRevoke(); // ...and so is the copy of it in the tab's sessionStorage (A14 review 3, W-b)
     setPhase({ kind: "vault", account, store, meta });
     setCacheNudge(shouldOfferCacheNudge(account.userId) ? { userId: account.userId, state: "offered" } : null);
     // Refresh policy at unlock so the auto-lock/clipboard windows reflect the CURRENT
@@ -226,7 +230,8 @@ export function App() {
     // the wipe below still happens, but the member is told (REVOKE_UNCONFIRMED). A14 review W1: with
     // no pair left in the client (a per-tab lock dropped it, or this tab never had one) nothing is
     // POSTed; the lock's own revocation result is what is reported.
-    const revoked = kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current) : true;
+    // A14 review 3 (W-b): after a reload there is no in-memory lock record; the tab's sessionStorage one answers.
+    const revoked = kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid)) : true;
     lockRevokeRef.current = null;
     clearSession();
     clientRef.current?.setTokens(null);
@@ -261,8 +266,13 @@ export function App() {
       const { revoked } = await lockTabTokens(clientRef.current, { flush: usageFlushRef.current, flushWaitMs: LOCK_USAGE_FLUSH_WAIT_MS, revoke });
       if (revoked) {
         lockRevokeRef.current = revoked;
+        // A14 review 3 (W-b): the result is also kept in the tab's sessionStorage, so a reload before a sign-out still
+        // knows it; until the server answers it is "pending", which a reload reads as unconfirmed.
+        recordLockRevoke(meta.userId, "pending");
         void revoked.then((ok) => {
-          if (ok || lockRevokeRef.current !== revoked) return;
+          if (lockRevokeRef.current !== revoked) return;
+          recordLockRevoke(meta.userId, ok ? "confirmed" : "unconfirmed");
+          if (ok) return;
           setPhase((p) => (p.kind === "unlock" && p.session.userId === meta.userId ? { ...p, notice: [p.notice, LOCK_REVOKE_UNCONFIRMED].filter(Boolean).join(" ") } : p));
         });
       }

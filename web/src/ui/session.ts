@@ -204,6 +204,41 @@ export function saveSession(s: Session): void {
 export function clearSession(): void {
   lsRemove(KEY);
   clearTabTokens();
+  clearLockRevoke();
+}
+
+/**
+ * A14 review 3 (W-b): this tab's record of its last per-tab lock's revocation of the pair it dropped, kept in the
+ * tab's sessionStorage so that a reload or a new App instance still knows it. App's in-memory record (W1) died with
+ * the document, and a sign-out after a reload then reported "confirmed" for a lock whose revocation the server had
+ * refused. `pending` until the server answers — a document that reloads first never learns the answer, so pending
+ * counts as unconfirmed; `unconfirmed` when the server did not confirm it; removed once it did. Same lifetime and
+ * same tab scope as the token slot; it names the account, so another account's sign-out never reads it.
+ */
+export const TAB_LOCK_REVOKE_KEY = "andvari.tabLockRevoke";
+
+export function recordLockRevoke(userId: string, state: "pending" | "unconfirmed" | "confirmed"): void {
+  if (state === "confirmed") ssRemove(TAB_LOCK_REVOKE_KEY);
+  else ssSet(TAB_LOCK_REVOKE_KEY, JSON.stringify({ userId, state }));
+}
+
+/** True when this tab's last lock of [userId]'s session may have left its pair live (pending or unconfirmed). An
+ *  unreadable record counts as unconfirmed: the warning is the safe side. */
+export function lockRevokeUnconfirmed(userId: string | null): boolean {
+  if (userId === null) return false;
+  const raw = ssGet(TAB_LOCK_REVOKE_KEY);
+  if (!raw) return false;
+  try {
+    const r = JSON.parse(raw) as { userId?: unknown; state?: unknown };
+    if (typeof r.userId !== "string") return true;
+    return r.userId === userId && r.state !== "confirmed";
+  } catch {
+    return true;
+  }
+}
+
+export function clearLockRevoke(): void {
+  ssRemove(TAB_LOCK_REVOKE_KEY);
 }
 
 /**

@@ -95,7 +95,14 @@ class A14AppFillGateTest {
         val activity = src("autofill/AppFillConfirmActivity.kt")
         val card = activity.substring(activity.indexOf("private fun ConfirmCard("))
         assertTrue(card.contains("AppFillGate.oneLine(id.label)"), "the label is escaped onto one bounded line")
-        assertTrue(card.contains("AppFillGate.installerLine(id.installer, bake.installerLabel, id.installerSystem)"), "the installer's package and system flag")
+        assertTrue(card.contains("AppFillGate.installerLine(id.installer, id.installerSystem)"), "the installer's package and system flag")
+        // A14 review 3 (A1): the package and kind are a line that carries no label and is never ellipsized, so no label
+        // length can push "NOT a system app" off-screen; the installer's label is a single line of its own.
+        val pkgLine = card.substring(card.indexOf("AppFillGate.installerLine(id.installer, id.installerSystem)"))
+        val pkgText = pkgLine.substring(0, pkgLine.indexOf(")\n") + 1)
+        assertTrue(!pkgText.contains("maxLines"), "the installer's package line wraps rather than ellipsizes: $pkgText")
+        assertTrue(card.contains("AppFillGate.installerLabelLine(id.installer, bake.installerLabel)"), "the installer's label, on its own line")
+        assertTrue(card.indexOf("AppFillGate.installerLine(") < card.indexOf("AppFillGate.installerLabelLine("), "package and kind first, then the label")
         assertTrue(card.contains("AppFillGate.oneLine(login.name)") && card.contains("AppFillGate.oneLine(login.username)"), "the login it would release")
         val singleLine = Regex("maxLines = 1, overflow = TextOverflow.Ellipsis").findAll(card).count()
         assertTrue(singleLine >= 4, "label, installer label, item name and username are single-line ($singleLine)")
