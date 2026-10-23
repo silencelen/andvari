@@ -310,35 +310,74 @@ replay after a re-add is. Residual accepted: that time is another of the user's 
 whose clock was far ahead when it consumed the nonce can make a later replay look in-window here (wording only;
 the data handling is the same either way), and an N−1 device's v1 record is as good as its clock.
 
+**R16 addendum (A13 review RF3).** A repeated consumed nonce keeps the EARLIEST time any device recorded for it, in
+the account-state merge and in each device's fold of its own records, on both engines (vector
+`a13-nonce-repeat-keeps-the-earliest-consumption`; the cap vector is now `nonce-union-earliest-and-cap-256`). Before,
+the larger time won, so a device that consumed the same v1 nonce later (its own `valid_legacy`, or an N−1 build's
+`already_recorded` at its own `now`) moved the record forward, and a proof replayed after a re-add could fall inside
+that later window as a calm `already_recorded` instead of the anomaly. For v2 every device records the proof's own
+`issuedAt`, so the rule changes nothing there. Residual accepted (N−1): while a device on an earlier build still
+writes the account state, its merge keeps the larger time and its `already_recorded` writes `now`, so the served copy
+can still carry a later time; a device that already merged the earlier record keeps it (the merge takes the minimum
+of its copy and the served one), and a device that never saw it adopts the later one. That closes once every device
+runs this build. In the other direction, a device whose clock was far BEHIND when it consumed a nonce now pulls the
+record earlier, which can only turn a later genuine `already_recorded` into the anomaly (wording only), and the
+per-vault cap of 256 now ranks a nonce by its first consumption.
+
 **A13 (security review 2026-10, third API review: release scripts and the remaining LOWs).** (a) **The signing
-workstation pins the release commit** (c03): `signandvari <ver> -Commit <sha>` refuses a tag that does not resolve
-to the pin before anything is checked out, never force-fetches tags (a moved remote tag stops the run, naming both
-commits), re-checks HEAD after the checkout and before the ceremony, and `prestige-release.ps1` records the pin in
-`bundle.json`. Residual accepted: the pinned tree still runs its own scripts and gradle on the account that can open
-`update-signing.key`, so the pin narrows the exposure to "the tree the build host said it cut", read out of band by
-the operator; keeping the build off that account is the longer-term fix and is not built. (b) **Build-host scripts**
-(c02, c06, c07, q22, q50, q21): root-owned Arch packages from any builder, a whole-image same-build proof,
-SHA256SUMS signed by the pinned release key with every uploaded `.asc` verified against it, the Web Store token off
-argv, a live release's signatures kept by the downloads prune, and a recovery drill that fails when it ran nothing.
-Release-script hygiene; none of it is a client trust decision. (c) **The extension save/update banner's height**
-(q36) is NOT fixed in A13 and stays a residual: its painted height still varies with the verdict (Save vs Update)
-and with the vault-derived name lengths, so a page that drives a capture and hit-tests the banner learns whether
-andvari holds a login for this host and username, and whether the vault is unlocked. It is not a small, contained
-change: since A11 (q14) the Update sentence names the destination vault and warns that every holder can read it, up
-to about five lines, and a fixed box must either clip that warning (refused) or reserve that height in every state,
-a visible design change that needs the owner's review. (d) **The popup login-fill grant** (q39) is bound to the
-tab's top origin at mint and voided by a top-level navigation; a SAME-origin navigation keeps it, by design (the
-grant's origin is the one the user picked the login for). (e) **Android editor secrets** (q27) live in the
-ViewModel's editor session rather than in saved-instance state, so they survive rotation but not process death;
-after process death the vault relocks anyway and the editor reopens from the stored item. (f) **Closed without a
-new residual:** a kept row applied when its key arrives (native `reevaluateGrants`, the invitation path) now homes
-the item as R17 states (c05); a contact unpin or re-pin wins the account-state merge under clock skew (q01/q23,
-spec 01, the contact-pin merge); the desktop update manifest and signature are size-capped while read (q19); a malformed served
-`encryptedIdentitySeed` on the extension's quick-unlock redeem is the terminal `keys_damaged` refusal with the
-enrolled blob kept (q38); vault purge also blanks the v14 `signedGrant` (q43); backup-cli's never-overwrite guard
-folds names as a case-insensitive filesystem does (q45); a seal refusal after web's offline-put fold restores the
-folded rows (q54); and the Android Autofill-status screen, which clears FLAG_SECURE, no longer composes the
-attention area (q30).
+workstation pins the release commit and checks it against its own record** (c03; A13 review RF1, RF7): `signandvari
+<ver> -Commit <sha>` refuses a tag that does not resolve to the pin before anything is checked out, fetches only the
+release tag and never forces it (a moved release tag stops the run, naming both commits; another tag that moved on the
+remote is not fetched and cannot block a ceremony), re-checks HEAD after the checkout and before the ceremony, and
+`prestige-release.ps1` records the pin in `bundle.json`. The pin is NOT out of band: it comes from the build host's
+handover line, which reads the build host's own tag, so it closes a tag moved by anyone other than the build host, a
+tag moved after the handover line was printed, and an accidental re-tag, while a compromised build host chooses both
+the tag and the pin. The layer aimed at that is held by the workstation: the commit its last successful ceremony
+signed, recorded outside the repo and moved only after `prestige-release.ps1` succeeded and `bundle.json` records the
+pin. Before any of the tree's code runs, the release commit must descend from it, the commits since it and a `diff
+--stat` of every path whose code runs during the ceremony are printed, and the operator types the version; a run with
+no human at a console fails closed there. A first run compares against the newest older release tag the checkout held
+before the run's fetch, or an operator-chosen `-Baseline` when it holds none. Residual accepted: this rests on the
+operator reading the diff, and a compromised build host can still cut a descendant commit that changes the build; the
+tree still runs its own scripts and gradle on the account that can open `update-signing.key`, and keeping the build
+off that account is the longer-term fix and is not built. Separately, the Linux, Arch and extension digests the
+ceremony signs come from `release-spec.json`, which the download origin serves unsigned, so a substituted spec and
+artifact pair that agree with each other pass the workstation's checks (q15, open; the build-host watcher's
+byte-compare of the spec is the remaining guard). Keeping the key off the build host therefore does not, on its own,
+mean a build-host compromise cannot forge a signed update. (b) **Build-host scripts** (c02, c06, c07, q22, q50, q21):
+root-owned Arch packages from any builder, a whole-image same-build proof, SHA256SUMS signed by the pinned release key
+with every uploaded `.asc` verified against it, the Web Store token off argv, a live release's signatures kept by the
+downloads prune, and a recovery drill that fails when it ran nothing. Release-script hygiene; none of it is a client
+trust decision. (c) **The extension save/update banner's height** (q36) is NOT fixed in A13 and stays a residual: its
+painted height still varies with the verdict (Save vs Update) and with the vault-derived name lengths, so a page that
+drives a capture and hit-tests the banner learns whether andvari holds a login for this host and username, and whether
+the vault is unlocked. It is not a small, contained change: since A11 (q14) the Update sentence names the destination
+vault and warns that every holder can read it, up to about five lines, and a fixed box must either clip that warning
+(refused) or reserve that height in every state, a visible design change that needs the owner's review. (d) **The
+popup login-fill grant** (q39) is bound to the tab's top origin at mint, as the card grant is, redeemed only when the
+browser-set `sender.origin` equals that origin, and voided whenever the tab reports a navigation starting (`status:
+loading`), which every cross-document navigation does, same-origin ones included (A13 review I2 corrected this
+sentence, which said a same-origin navigation kept it). The origin is bound at mint either way, so a document of
+another origin can never redeem it. (e) **Android editor secrets** (q27: password, TOTP seed, card number and security
+code; since the A13 review, RF5, also the notes and the attachment list, whose every reference carries its file key)
+live in the ViewModel's editor session rather than in saved-instance state, so they survive rotation but not process
+death; after process death the vault relocks anyway and the editor reopens from the stored item. (f) **Closed without
+a new residual:** a kept row applied when its key arrives (native `reevaluateGrants`, the invitation path) now homes
+the item as R17 states (c05); a contact unpin or re-pin wins the account-state merge under clock skew (q01/q23, spec
+01, the contact-pin merge); the desktop update manifest and signature are size-capped while read (q19), and so, since
+the A13 review (RF6), are the extension's (256 KiB / 1 KiB, a declared length over the cap refused before reading); a
+malformed served `encryptedIdentitySeed` on the extension's quick-unlock redeem is the terminal `keys_damaged` refusal
+with the enrolled blob kept (q38; it gates MALFORMED seeds only: a well-formed seed the server substituted still fails
+to open and takes the `stale_uvk` wipe of the enrolled quick-unlock blob, which a 401 could already force, so the cost
+is a re-enrolment, never a secret — A13 review I3); vault purge also blanks the v14 `signedGrant` (q43); backup-cli's
+never-overwrite guard folds names as a case-insensitive filesystem does (q45); a seal refusal after web's offline-put
+fold restores the folded rows (q54), and core folds them only once the new put is sealed (A13 review RF4); and the
+Android Autofill-status screen, which clears FLAG_SECURE, no longer composes the attention area (q30). (g) **Not built
+(A13 review I4):** `personal_wrap.wrappedVk` is not blanked when the vault it names is purged. The wrap is sealed to
+the account's own UVK, so only that user can open it and they held that key already, and the items, versions and
+attachments it protected are gone with the purge. Blanking it in place would make the served wrap unreadable or
+absent, which every engine reads as the server damaging or withholding the personal wrap (a warning or a proposal for
+the human), so it is not a small, contained server change; no reachable exposure is shown.
 
 **R18 (server-supplied ids and the device-local trust records — security review 2026-10, plugin scan F1/F2;
 branch A10).** Every id a server supplies (vaultId, userId, itemId, deviceId, the user ids riding a transfer)
