@@ -30,11 +30,14 @@ trap 'rm -rf "$W"' EXIT
 echo "==> deploy: every docker run of recovery-cli in deploy/ and docs/ passes --log-driver none"
 
 # logical_lines <file> — the file with backslash-continued lines joined, each prefixed "<line>:".
+# Only lines that mention both docker and recovery-cli are printed: the scan forks per printed
+# line, and docs/ holds tens of thousands of lines that can never match.
 logical_lines() {
   awk '{ if (buf == "") start = NR
          if (sub(/\\[[:space:]]*$/, "")) { buf = buf $0 " "; next }
-         print start ":" buf $0; buf = "" }
-       END { if (buf != "") print start ":" buf }' "$1"
+         l = buf $0; buf = ""
+         if (l ~ /docker/ && l ~ /recovery-cli/) print start ":" l }
+       END { if (buf != "" && buf ~ /docker/ && buf ~ /recovery-cli/) print start ":" buf }' "$1"
 }
 
 # A run of recovery-cli: `docker run` or `docker container run`, any options, then recovery-cli.
