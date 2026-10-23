@@ -50,6 +50,47 @@ export const UPDATE_MAX_SIGNED_AGE_MS = 30 * 24 * 60 * 60 * 1000;
  *  the two in SEMANTIC lockstep (§D8: each release's signer derives seq as max(published)+1). */
 export const MIN_SEQ = 0;
 
+/** A13 review RF6 (desktop q19's caps): the signed downloads manifest is a few KiB, 256 KiB leaves room for growth. */
+export const UPDATE_MANIFEST_MAX_BYTES = 256 * 1024;
+/** The detached signature is 64 bytes, i.e. 86 base64url characters plus a newline. */
+export const UPDATE_SIG_MAX_BYTES = 1024;
+
+/**
+ * Read [resp]'s body only while it stays within [limit] bytes; null otherwise (A13 review RF6). Both update-channel
+ * bodies are UNVERIFIED server bytes, so they are never buffered whole first: a declared Content-Length over the limit
+ * (or one that is not a plain number) is refused before reading, and the body itself is read as a stream that is
+ * cancelled the moment it passes the limit, whatever the header said. Desktop twin: Platform.kt `fetchBounded`.
+ */
+export async function readCappedBody(resp: Response, limit: number): Promise<Uint8Array | null> {
+  const declared = resp.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/.test(declared.trim()) || Number(declared.trim()) > limit)) {
+    await resp.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const body = resp.body;
+  if (body === null) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.byteLength;
+  }
+  return out;
+}
+
 /** §M-D3 — true iff at least one pinned key is a REAL key (not the placeholder). A build pinning
  *  only the sentinel offers no updates at all (no path executes), never verifies against a test key. */
 export function updatesEnabled(pinned: readonly string[] = PINNED_UPDATE_KEYS): boolean {
