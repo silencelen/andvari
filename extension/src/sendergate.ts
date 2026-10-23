@@ -81,6 +81,10 @@ export const SENDER_CLASS = {
   updateStatus: "extension",
   cardFillOffers: "extension",
   fillCardFromPopup: "extension",
+  // A15: the server choice is a message now, not a storage write a content script could also make.
+  serverInfo: "extension",
+  setServerUrl: "extension",
+  forgetLegacyServer: "extension",
 } as const satisfies Record<ReqType, SenderClass>;
 
 type ExtensionOnly = { [K in ReqType]: (typeof SENDER_CLASS)[K] extends "extension" ? K : never }[ReqType];
@@ -105,6 +109,7 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
     personalProposal: false,
     waitingGrants: 0,
     wrongVault: 0,
+    rememberedEmail: null,
   },
   personalAcceptChange: { ok: false, code: "not_allowed" },
   personalDescribeChange: { ok: false, code: "not_allowed" },
@@ -133,6 +138,9 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
   updateStatus: { current: "", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null },
   cardFillOffers: { fillable: false, origin: null, crossOriginFormsOnly: false },
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
+  serverInfo: { url: "", legacy: null, trustedStore: false },
+  setServerUrl: { ok: false, code: "not_allowed" },
+  forgetLegacyServer: { ok: false },
 };
 
 /** The two halves of [SENDER_CLASS], for the tests and for readers. */

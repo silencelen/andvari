@@ -44,6 +44,7 @@ const EXPECTED_REFUSAL: Record<string, unknown> = {
     personalProposal: false,
     waitingGrants: 0,
     wrongVault: 0,
+    rememberedEmail: null,
   },
   personalAcceptChange: { ok: false, code: "not_allowed" },
   personalDescribeChange: { ok: false, code: "not_allowed" },
@@ -71,6 +72,9 @@ const EXPECTED_REFUSAL: Record<string, unknown> = {
   updateStatus: { current: "", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null },
   cardFillOffers: { fillable: false, origin: null, crossOriginFormsOnly: false },
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
+  serverInfo: { url: "", legacy: null, trustedStore: false },
+  setServerUrl: { ok: false, code: "not_allowed" },
+  forgetLegacyServer: { ok: false },
 };
 
 test("every extension-page-only type is refused from a content script, with its own refusal shape", () => {
@@ -94,6 +98,26 @@ test("the gated set includes every session, quick-unlock and card-inventory mess
   ]) {
     assert.equal(SENDER_CLASS[type as keyof typeof SENDER_CLASS], "extension", `${type} must be extension-page-only`);
   }
+});
+
+// A15: the server choice used to be written to chrome.storage.local by the options page and adopted by the worker
+// through storage.onChanged, so a content script that wrote that key repointed the extension past this gate. The
+// worker now takes the choice only as a message, and only from our own pages.
+test("A15: setServerUrl (and the server-info pair) are extension-page-only — a content script is refused", () => {
+  for (const type of ["setServerUrl", "serverInfo", "forgetLegacyServer"]) {
+    assert.equal(SENDER_CLASS[type as keyof typeof SENDER_CLASS], "extension", `${type} must be extension-page-only`);
+    for (const base of [CHROME_BASE, FIREFOX_BASE]) assert.equal(senderMaySend(type, contentSender, base), false, type);
+  }
+  assert.deepEqual(answerFor("setServerUrl", contentSender, CHROME_BASE), { ok: false, code: "not_allowed" });
+  assert.deepEqual(answerFor("setServerUrl", contentSender, FIREFOX_BASE), { ok: false, code: "not_allowed" });
+  // Even a content script inside a frame of our own vault origin, or claiming an extension-looking origin, is a page.
+  for (const sender of [
+    { url: "https://andvari.monahanhosting.com/#/options", tab: { id: 3 } },
+    { url: `https://x.example/${CHROME_BASE}options.html`, tab: { id: 3 } },
+  ]) {
+    assert.deepEqual(answerFor("setServerUrl", sender, CHROME_BASE), { ok: false, code: "not_allowed" }, sender.url);
+  }
+  assert.equal(answerFor("setServerUrl", { url: `${CHROME_BASE}options.html`, tab: { id: 12 } }, CHROME_BASE), PASS, "the options tab passes");
 });
 
 test("a sender with no url, another extension's url or a look-alike prefix is not an extension page", () => {

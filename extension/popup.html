@@ -35,6 +35,13 @@
       Finish setup — allow andvari to reach your server in Options.
     </button>
 
+    <!-- A15 (security review 2026-10): this browser had another server chosen before an update. That value sat where a
+         web page could have written it, so it is not reconnected silently; this strip routes to Options, where the user
+         reviews that address through the Trust Gate, or drops it. Hidden unless the worker reports one. -->
+    <button id="legacy-server-cta" class="host-grant-cta" type="button" hidden>
+      Confirm your server in Options — andvari asks once after this update.
+    </button>
+
     <!-- F3 fresh-install broad-grant banner (card autofill Tier 1 §10): with no all-sites host
          permission the dynamic autofill script injects NOWHERE — dropdown, save banner, and card
          fill are all silently dormant. The button calls chrome.permissions.request directly (a

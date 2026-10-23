@@ -305,13 +305,24 @@ export type Req =
   | { type: "enrollQuickUnlockBio" }
   /** Popup: turn quick unlock off — a full wipe, no auth gate (§8.1 parity). */
   | { type: "disableQuickUnlock" }
-  /** Popup: the one-time post-unlock offer card was dismissed (durable, storage.local — breaker B7). */
+  /** Popup: the one-time post-unlock offer card was dismissed (durable, the worker's trusted store — breaker B7). */
   | { type: "dismissQuickUnlockOffer" }
   /** Options page ONLY: the explicit "Remove data for this server" action (design §4.2/B2-7 — the
    *  ONLY destructive per-origin path; a server switch PRESERVES the old origin's namespace). Purges
    *  exactly `origin`'s namespaced keys (quick-unlock/PIN co-key + cached channel state) everywhere,
    *  touching no other origin. `origin` is a raw/canonical origin string; the SW re-canonicalizes it. */
   | { type: "purgeServerData"; origin: string }
+  /** Options page + popup (security review 2026-10, A15): the origin the worker dials, a pre-A15 server choice
+   *  awaiting re-confirmation through the Trust Gate (display only — never dialed), and whether this browser can
+   *  keep a server choice at all (false when IndexedDB is unavailable, e.g. Firefox's permanent private browsing).
+   *  Pages never read the trusted store themselves; they ask here. Extension pages only. */
+  | { type: "serverInfo" }
+  /** Options page ONLY (A15): commit a server origin after the Trust Gate's Connect (the grant gesture). The worker
+   *  canonicalizes, writes its trusted store and runs the origin-clean switch (§4.1) before answering. This message
+   *  is the ONLY way the server choice changes; a storage write is no longer a switch. */
+  | { type: "setServerUrl"; url: string }
+  /** Options page (A15): drop the pre-A15 server suggestion without connecting to it ("not mine"). */
+  | { type: "forgetLegacyServer" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
@@ -504,6 +515,9 @@ export type Res<T extends Req["type"]> = T extends "status"
       waitingGrants: number;
       /** Root cause A §5.1 INV-HOME (A1b): rows the last snapshot sent under the wrong vault (not applied). */
       wrongVault: number;
+      /** A15: while LOCKED, the email this browser last signed in with (non-secret; prefills the form). Kept by the
+       *  worker in its trusted store — the popup no longer writes storage.local. Null while unlocked. */
+      rememberedEmail: string | null;
     }
   : T extends "personalAcceptChange"
     ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" | "coholders_not_loaded" }
@@ -607,6 +621,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                                             : T extends "revealCardForFill"
                                               ? { ok: boolean; fields?: CardFillFields; error?: string }
                                               : T extends "purgeServerData"
+                                                ? { ok: boolean }
+                                              : T extends "serverInfo"
+                                                ? { url: string; legacy: string | null; trustedStore: boolean }
+                                              : T extends "setServerUrl"
+                                                ? { ok: boolean; url?: string; code?: "invalid" | "storage" | "not_allowed" }
+                                              : T extends "forgetLegacyServer"
                                                 ? { ok: boolean }
                                                 : /** C1 §C2 [S7]: the branch matches ONLY these two booleans — no `string` type is
                                                    *  admitted here, so an "origin"/"name"/"subtitle" field can never be added to the

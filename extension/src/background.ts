@@ -60,11 +60,15 @@ import { captureBinding, requestHost } from "./senderorigin";
 import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
-import { DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, SERVER_URL_KEY } from "./serverurl";
+import { canonicalizeServerUrl, DEFAULT_SERVER_URL, getServerUrl, nsKey, originKeyFor, originMatchPattern, setServerUrl } from "./serverurl";
+import { trustedStore, type KvArea } from "./trustedkv";
+import { LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail } from "./trustmigrate";
+import { offerDownloadUrl, readUpdateOffer } from "./updateoffer";
+import { restrictStorageAccess, type StorageAccessAreas } from "./storageaccess";
 import { armGate, withRedeemInFlight } from "./locksequence";
 import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
-import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
+import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -72,8 +76,10 @@ import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
  * never disk, cleared on browser exit, trusted extension contexts only — lazily restored on wake.
  * ZK holds: the master password and mk exist only transiently inside unlock(); what persists is
  * session-scoped custody (tokens, unwrapped vault keys b64, decrypted docs) — the same posture as
- * SW RAM. chrome.storage.local NEVER holds secrets. (storage.session: Chrome 102+/Firefox 115+,
- * where `chrome` aliases `browser`.)
+ * SW RAM. chrome.storage.local NEVER holds secrets, and since A15 no trust state either: content scripts can read and
+ * write that area (Chrome before 140, Firefox always), so durable trust state lives in the extension origin's
+ * IndexedDB (`trusted`, trustedkv.ts), which this worker alone reads and writes. (storage.session: Chrome
+ * 102+/Firefox 115+, where `chrome` aliases `browser`.)
  *
  * Message protocol = src/messages.ts (THE CONTRACT). Secret egress is `reveal` only, gated on
  * host-match ∨ a one-shot popup fill grant ∨ the popup's own explicit reveal (never a page's —
@@ -86,9 +92,9 @@ import { applyServerSwitch, purgeServerDataFor } from "./serverswitch";
  * from accountKeys → sync → unwrap each vault key from its grant → decrypt items under the VK.
  */
 // ---- server endpoint + per-origin namespace (design 2026-07-15 §5.1/§4.2) ----
-// The baked tailnet constant is GONE: the origin is a per-device choice in storage.local
+// The baked tailnet constant is GONE: the origin is a per-device choice in the trusted store
 // (serverurl.ts), preconfigured for DEFAULT_SERVER_URL. `serverReady` below loads it before any
-// network/namespace use; a storage change of SERVER_URL_KEY is an origin-clean switch (§4.1).
+// network/namespace use; the `setServerUrl` message (commitServerUrl) is the only switch (§4.1, A15).
 let serverUrl = DEFAULT_SERVER_URL;
 let currentOriginKey = originKeyFor(DEFAULT_SERVER_URL);
 /** A storage key under the CURRENT origin's namespace (§4.2/B2-7): quick-unlock/PIN co-key
@@ -96,6 +102,23 @@ let currentOriginKey = originKeyFor(DEFAULT_SERVER_URL);
  *  never read, mint, or wipe another origin's material. Computed at CALL time — the switch path
  *  locks under the OLD key, then flips `currentOriginKey`. */
 const nsk = (key: string): string => nsKey(currentOriginKey, key);
+
+/** A15: the trusted store (the extension origin's IndexedDB — trustedkv.ts). Every durable trust record and every
+ *  convenience below lives here; a call that fails (no IndexedDB: Firefox private browsing) reads as "no record". */
+const trusted = trustedStore();
+/** A15: chrome.storage.local, by name, for exactly two jobs: the one-time migration's input and the purge's sweep of
+ *  pre-A15 leftovers. Nothing else reads it (storagefence.test.ts). */
+const legacyLocal = chrome.storage.local as unknown as KvArea;
+/** storage.session as a KvArea, for the purge's prefix sweep. */
+const sessionArea = chrome.storage.session as unknown as KvArea;
+/** A read where a failure means "absent" (the safe default for every value read this way). */
+async function trustedGet(key: string): Promise<unknown> {
+  try {
+    return (await trusted.get(key))[key];
+  } catch {
+    return undefined;
+  }
+}
 
 const SKEY = "session"; // storage.session: SessionSnapshot
 const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
@@ -118,12 +141,15 @@ const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + cou
 // on an untrusted compartment, and by purgeOriginNamespace (H59 — it is per-origin namespaced
 // state, so "remove data for this server" has to take it too).
 const KLKEY = "knownLogins"; // storage.session, namespaced: KnownLoginsRecord
-const DKEY = "quOfferDismissed"; // storage.local, namespaced (non-secret): the offer card was dismissed once
-const BKEY = "quBioCred"; // storage.local, namespaced (non-secret, 0.17.0 amendment 4): { credentialId, prfSalt, userId } — reuse a passkey on re-enroll (avoid TPM/SEP litter). NOT secret: the PRF *output* needs the hardware + OS user-verification; salt/id/userId are public inputs (like a KDF salt).
-const UKEY = "updateInfo"; // storage.local, namespaced (non-secret): UpdateInfo while a newer build is live
-const ULAST = "updateCheckedAt"; // storage.local, namespaced: epoch ms of the last COMPLETED update fetch
-const USEQ = "updateAcceptedSeq"; // storage.local, namespaced: highest signed-manifest seq ever accepted (§B anti-rollback)
-const UQUIET = "updateChannelQuiet"; // storage.local, namespaced: { reason } — H2 fail-closed-QUIET (§M-D5), never a nag
+const DKEY = "quOfferDismissed"; // trusted store, namespaced (non-secret): the offer card was dismissed once
+const BKEY = "quBioCred"; // trusted store, namespaced (non-secret, 0.17.0 amendment 4): { credentialId, prfSalt, userId } — reuse a passkey on re-enroll (avoid TPM/SEP litter). NOT secret: the PRF *output* needs the hardware + OS user-verification; salt/id/userId are public inputs (like a KDF salt).
+// A15: the verified offer and the anti-rollback seq are trust state (trusted store); the throttle stamp and the quiet
+// marker are not (storage.session — the forced start check re-derives them, and a throttle that works without
+// IndexedDB keeps a private-browsing Firefox from re-fetching on every wake). None is migrated from storage.local.
+const UKEY = "updateInfo"; // trusted store, namespaced (non-secret): UpdateInfo while a newer build is live
+const ULAST = "updateCheckedAt"; // storage.session, namespaced: epoch ms of the last COMPLETED update fetch
+const USEQ = "updateAcceptedSeq"; // trusted store, namespaced: highest signed-manifest seq ever accepted (§B anti-rollback)
+const UQUIET = "updateChannelQuiet"; // storage.session, namespaced: { reason } — H2 fail-closed-QUIET (§M-D5), never a nag
 // M-D4b: ONLY these quiet reasons are ACTIONABLE and may surface a muted popup line. `seq_regression`
 // (already-accepted manifest re-polled — the normal steady state) and `disabled` are benign and must
 // NEVER render as "couldn't be verified" (permanent false alarm = the alert-fatigue failure M-D4b exists
@@ -191,6 +217,7 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "pendingSave",
   "capturedCredential",
   "passwordReuse",
+  "serverInfo", // A15: the popup header / options render — not user activity
 ]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
@@ -438,20 +465,41 @@ function makeApi(url: string): AndvariApi {
 }
 let api = makeApi(serverUrl);
 
-/** Resolves once the persisted server origin is loaded and `serverUrl`/`currentOriginKey`/`api`
- *  reflect it (plus the §4.2 one-shot legacy-key adoption). EVERY path that touches the api, the
- *  per-origin namespace, or the network awaits this first (ensureLoaded, doLock, checkForUpdate) —
- *  the module-eval placeholders above exist only so the symbols are never undefined. */
+// A9⊕B5: storage.session TRUSTED_CONTEXTS is the precondition for quick unlock — the armed record is a crackable
+// UVK blob + a LIVE refresh token, so content scripts must not be able to read it. `quCompartmentTrusted` gates arm
+// (doLock → armGate); enroll is IMPLICITLY gated (it requires an unlocked `session`, which only exists when
+// storage.session does). If the compartment is not trusted nothing arms and every lock is the full erase — NEVER a
+// storage.local fallback for the blob (that is the rejected durable Tier C, breaker A9).
+// What the code actually verifies (A15; storageaccess.ts): on Chrome, that `storage.session.setAccessLevel(
+// TRUSTED_CONTEXTS)` RESOLVED — awaited here, before any lock samples the verdict; a call that exists and fails
+// leaves the compartment untrusted. On Firefox, which has no setAccessLevel, only that storage.session exists: the
+// trusted-only property then rests on Firefox's API schema, which does not offer storage.session to content scripts
+// (an assumption this code cannot check). The same call restricts storage.local on Chrome 140+ (defense in depth:
+// since A15 storage.local holds no trust state).
+let quCompartmentTrusted = false;
+const storageAccess: Promise<void> = restrictStorageAccess(chrome.storage as unknown as StorageAccessAreas).then((v) => {
+  quCompartmentTrusted = v.sessionTrusted;
+});
+
+/** Resolves once the storage access levels settled, the one-time A15 migration ran, the persisted server
+ *  origin is loaded and `serverUrl`/`currentOriginKey`/`api` reflect it (plus the §4.2 one-shot legacy-key
+ *  adoption). EVERY path that touches the api, the per-origin namespace, or the network awaits this first
+ *  (ensureLoaded, doLock, checkForUpdate) — the module-eval placeholders above exist only so the symbols are
+ *  never undefined. */
 const serverReady: Promise<void> = (async () => {
+  await storageAccess;
+  // A15: move the trust state out of storage.local once (trustmigrate.ts). A planted pre-A15 serverUrl is NEVER
+  // adopted: a non-default one only becomes a suggestion the options page re-confirms through the Trust Gate.
+  await migrateTrustState(legacyLocal, trusted);
   try {
-    const url = await getServerUrl();
+    const url = await getServerUrl(trusted);
     if (url !== serverUrl) {
       serverUrl = url;
       currentOriginKey = originKeyFor(url);
       api = makeApi(url);
     }
   } catch {
-    /* storage unavailable — stay on the baked default (getServerUrl already folds most failures) */
+    /* unreachable in practice (getServerUrl folds every store failure into the default) — stay on the default */
   }
   await adoptLegacyNamespaceOnce();
 })();
@@ -537,18 +585,14 @@ const quStore: QuStore = {
  *  the CURRENT origin's namespace once — for every fielded install the current origin IS the new
  *  default, and the tailnet front + the public origin are two fronts of the SAME instance (§6.4),
  *  so the adopted quick-unlock blob/co-key stay redeemable. Idempotent + retried: the flag is
- *  stamped only after all moves succeed; a partial move re-runs and no-ops the already-moved keys. */
+ *  stamped only after all moves succeed; a partial move re-runs and no-ops the already-moved keys.
+ *  A15: the bare storage.local keys (the offer flag, the update channel) are no longer adopted — the A15 migration
+ *  drops them — and the flag lives in the trusted store (a content script could reset a storage.local one). Without a
+ *  trusted store the adoption simply runs again at each start; every step is idempotent. */
 const NS_ADOPTED_KEY = "nsAdoptedOnce";
 async function adoptLegacyNamespaceOnce(): Promise<void> {
   try {
-    if ((await chrome.storage.local.get(NS_ADOPTED_KEY))[NS_ADOPTED_KEY] === true) return;
-    // storage.local: the offer-dismissed flag + the update-channel state.
-    const legacyLocal = [DKEY, UKEY, ULAST, USEQ, UQUIET];
-    const got = await chrome.storage.local.get(legacyLocal);
-    const moved: Record<string, unknown> = {};
-    for (const k of legacyLocal) if (got[k] !== undefined) moved[nsk(k)] = got[k];
-    if (Object.keys(moved).length > 0) await chrome.storage.local.set(moved);
-    await chrome.storage.local.remove(legacyLocal);
+    if ((await trustedGet(NS_ADOPTED_KEY)) === true) return;
     // storage.session: a quick-unlock record armed by the pre-update build (present only if the
     // browser session survived the update).
     try {
@@ -570,7 +614,7 @@ async function adoptLegacyNamespaceOnce(): Promise<void> {
     } catch {
       /* IDB unavailable — a missing co-key reads as a corrupt blob at redeem and self-wipes */
     }
-    await chrome.storage.local.set({ [NS_ADOPTED_KEY]: true });
+    await trusted.set({ [NS_ADOPTED_KEY]: true });
   } catch {
     /* best-effort: legacy keys + unset flag remain, so the next SW start retries the adoption */
   }
@@ -749,12 +793,11 @@ const biometricDep: QuBiometric = {
   },
 };
 
-// ---- amendment-4 reuse record (namespaced storage.local; non-secret — see BKEY) ----
+// ---- amendment-4 reuse record (namespaced, trusted store since A15; non-secret — see BKEY) ----
 type BioCred = { credentialId: string; prfSalt: string; userId: string };
 async function readBioCred(userId: string): Promise<BioCred | null> {
   try {
-    const k = nsk(BKEY);
-    const rec = (await chrome.storage.local.get(k))[k] as BioCred | undefined;
+    const rec = (await trustedGet(nsk(BKEY))) as BioCred | undefined;
     return rec && rec.userId === userId && typeof rec.credentialId === "string" && typeof rec.prfSalt === "string" ? rec : null;
   } catch {
     return null; // reuse is best-effort — a miss just mints a fresh passkey
@@ -762,14 +805,14 @@ async function readBioCred(userId: string): Promise<BioCred | null> {
 }
 async function writeBioCred(rec: BioCred): Promise<void> {
   try {
-    await chrome.storage.local.set({ [nsk(BKEY)]: rec });
+    await trusted.set({ [nsk(BKEY)]: rec });
   } catch {
     /* best-effort litter reduction */
   }
 }
 async function clearBioCred(): Promise<void> {
   try {
-    await chrome.storage.local.remove(nsk(BKEY));
+    await trusted.remove(nsk(BKEY));
   } catch {
     /* */
   }
@@ -871,23 +914,8 @@ try {
 } catch {
   /* contextMenus unavailable on this engine */
 }
-// A9⊕B5: storage.session TRUSTED_CONTEXTS is a HARD precondition for quick unlock — the armed record
-// is a crackable UVK blob + a LIVE refresh token, so content scripts MUST NOT be able to read it. Both
-// Chrome and Firefox MV3 DEFAULT storage.session to TRUSTED_CONTEXTS (content scripts excluded); this
-// call re-affirms it. `quCompartmentTrusted` explicitly gates arm below; enroll is IMPLICITLY gated
-// (it requires an unlocked `session`, which only exists when storage.session does — the same condition
-// that makes quCompartmentTrusted true), and if we can neither call setAccessLevel NOR even see
-// storage.session we refuse to arm and fall back to full erase — NEVER a storage.local fallback for the
-// blob (that is the rejected durable Tier C, breaker A9).
-let quCompartmentTrusted = false;
-try {
-  void chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
-  quCompartmentTrusted = true;
-} catch {
-  // setAccessLevel unimplemented here — the documented default for storage.session is still
-  // TRUSTED_CONTEXTS on both engines, so the compartment is trusted-only as long as it EXISTS.
-  quCompartmentTrusted = typeof chrome.storage.session?.get === "function";
-}
+// (The storage.session TRUSTED_CONTEXTS precondition for quick unlock is set up beside serverReady, above: A15 awaits
+// it, and serverReady/doLock wait for it.)
 
 chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
   // 0.17.0 biometric connector RPC — a PRIVATE protocol (not part of Req), handled before the normal
@@ -1020,24 +1048,54 @@ try {
 }
 
 // ---- server switch (§4.1 origin-clean rules) ----
-// The ONLY writer of SERVER_URL_KEY is serverurl.setServerUrl (the wave-3 options page commits
-// through the Trust Gate); the SW reacts to the persisted change so the api/WS/namespace/autofill
-// all rebuild no matter which surface wrote it. Serialized: two rapid switches apply in order,
-// each locking under ITS old namespace first.
+// A15: the ONLY writer of the server choice is the `setServerUrl` message (commitServerUrl below), which the sender
+// gate admits from our own pages only and the options page sends after the Trust Gate's Connect. Before A15 the
+// worker switched on any storage.local write of the key (storage.onChanged), and a content script could make that
+// write too. Serialized: two rapid switches apply in order, each locking under ITS old namespace first.
 let switchChain: Promise<void> = Promise.resolve();
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || !(SERVER_URL_KEY in changes)) return;
-  switchChain = switchChain.then(applyServerChange).catch(() => {});
-});
 
-/** Apply a persisted serverUrl change. Order is the whole story (§4.1): lock under the OLD origin
+/**
+ * A15: commit a server origin (the options page's Trust-Gate Connect). Canonicalize (anything that is not a plain
+ * http(s) origin is refused), persist to the trusted store FIRST — a choice that cannot be kept (no IndexedDB: Firefox
+ * private browsing) changes nothing — then retire the pre-A15 suggestion and run the origin-clean switch on the chain,
+ * answering only once it applied, so the page's next serverInfo shows the new origin.
+ */
+async function commitServerUrl(raw: unknown): Promise<Res<"setServerUrl">> {
+  const canonical = typeof raw === "string" ? canonicalizeServerUrl(raw) : null;
+  if (canonical === null) return { ok: false, code: "invalid" };
+  try {
+    await setServerUrl(canonical, trusted);
+  } catch {
+    return { ok: false, code: "storage" };
+  }
+  await trusted.remove(LEGACY_SERVER_KEY).catch(() => {});
+  switchChain = switchChain.then(() => applyServerChange(canonical)).catch(() => {});
+  await switchChain;
+  return { ok: true, url: canonical };
+}
+
+/** A15: what the pages show — the origin this worker dials (not a store read: what is in effect), a pre-A15 choice
+ *  awaiting re-confirmation (display only), and whether a server choice can be kept here at all. */
+async function serverInfo(): Promise<Res<"serverInfo">> {
+  let legacy: string | null = null;
+  let trustedStoreOk = true;
+  try {
+    const v = (await trusted.get(LEGACY_SERVER_KEY))[LEGACY_SERVER_KEY];
+    legacy = typeof v === "string" ? canonicalizeServerUrl(v) : null;
+  } catch {
+    trustedStoreOk = false;
+  }
+  return { url: serverUrl, legacy: legacy === serverUrl ? null : legacy, trustedStore: trustedStoreOk };
+}
+
+/** Apply a server change. Order is the whole story (§4.1): lock under the OLD origin
  *  first — the armed branch stashes the live token pair into the OLD origin's quick-unlock record
  *  (PRESERVED per B2-7, never wiped: an A→B→A round trip keeps A's PIN, bounded by the staleness
  *  ceiling) — then swap in a FRESH api (a new instance carries no tokens, so no Authorization
  *  header can cross the change) + the new namespace key, then recompute the autofill exclusions.
  *  Old-origin namespaces are wiped ONLY via that origin's own policy-forbid or the explicit
  *  wave-3 "remove data for this server" action (purgeOriginNamespace). */
-async function applyServerChange(): Promise<void> {
+async function applyServerChange(nextUrl: string): Promise<void> {
   await ensureLoaded();
   clearPendingTotp(); // a challenge belongs to the OLD origin — never carry its authKey across a switch
   // The §4.1 origin-clean swap ORDER (bump redeemGen → lock-under-OLD → adopt new origin → swap in a
@@ -1045,7 +1103,7 @@ async function applyServerChange(): Promise<void> {
   // drives it with a real AndvariApi and proves no Authorization header crosses the change (B1-5).
   // background wires the chrome-coupled dependencies; the no-op-when-unchanged check is inside the leaf.
   await applyServerSwitch<AndvariApi>({
-    nextUrl: await getServerUrl(),
+    nextUrl,
     currentUrl: serverUrl,
     hasSession: session !== null,
     bumpRedeemGen: () => {
@@ -1066,8 +1124,10 @@ async function applyServerChange(): Promise<void> {
 
 /** Wave-3 hook (§4.2): the ONLY destructive per-origin path. The options page's explicit "remove
  *  data for this server" action — and an origin's own policy-forbid — call this with THAT origin's
- *  key. Removes that origin's namespaced keys everywhere (storage.local + storage.session + the
- *  IDB co-key) and touches nothing else; safe for current and non-current origins alike. */
+ *  key. Removes that origin's namespaced keys everywhere (the trusted store + storage.local's pre-A15
+ *  leftovers + storage.session + the IDB co-key) and touches nothing else; safe for current and
+ *  non-current origins alike. A15: by prefix as well as by the fixed list, so the per-user records
+ *  (item homes, the personal wrap, a pending change) go too — the fixed list never had them. */
 export async function purgeOriginNamespace(originKey: string): Promise<void> {
   // H59 (2026-09-13 audit): KLKEY belongs on this list and was missing from it — the classic
   // "control written for the set of keys that existed at the time, reopened by an addition"
@@ -1098,6 +1158,9 @@ export async function purgeOriginNamespace(originKey: string): Promise<void> {
   // pairing doLock's sign-out branch already does (wipe + `knownLoginsKey = null` together).
   // Guarded on the current origin because the cache only ever holds THAT origin's key.
   if (originKey === currentOriginKey) knownLoginsKey = null;
+  // A15: every `ns.<originKey>.` record in every store, per-user ones included (serverswitch.purgeOriginRecords).
+  await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionArea]);
+  if (originKey === currentOriginKey) stagedChangeFallback = null;
   try {
     await idbRun<void>("readwrite", (s) => s.delete(nsKey(originKey, IDB_KEY)));
   } catch {
@@ -1231,7 +1294,7 @@ function ensureLoaded(): Promise<void> {
         // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         waitingGrants: typeof snap.waitingGrants === "number" ? snap.waitingGrants : 0,
-        // A1b item homes: a snapshot persisted before they existed carries none; the durable record in storage.local
+        // A1b item homes: a snapshot persisted before they existed carries none; the durable record (trusted store)
         // is reloaded then (A9: an empty map here would have been taken as authoritative and overwritten it).
         homes: snap.homes ? new Map(Object.entries(snap.homes)) : await loadHomes(snap.userId),
         wrongVault: typeof snap.wrongVault === "number" ? snap.wrongVault : 0,
@@ -1378,6 +1441,9 @@ function persistTabs(): void {
  *  a PIN. `signout` (an explicit user action / revocation) NEVER arms and full-wipes the blob + co-key.
  *  When quick unlock is not enrolled, an idle/manual lock stays byte-identical to today's full erase. */
 async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {
+  // A15: the compartment verdict below is sampled now, so the awaited access-level calls must have settled (a lock
+  // fired into a cold SW would otherwise read the initial `false` and wipe an enrolled quick unlock).
+  await storageAccess;
   // D3: armGate AWAITS ensureLoaded (hydrates the persisted token pair) BEFORE it samples api.getTokens()
   // for the arm decision, returning both the sampled pair (the armed branch stashes it) and the verdict.
   // An idle-autolock alarm can fire into a COLD SW whose `api` holds no tokens yet; sampling before
@@ -1627,13 +1693,9 @@ interface UpdateInfo {
   firefoxUrl: string | null;
 }
 
-/** Absolute a downloads URL. The manifest stores relative paths ("/downloads/…"); the popup is a
- *  chrome-extension:// page, so a relative href would resolve against the EXTENSION origin. Prefix
- *  the server origin unless the manifest already gave an absolute URL. */
-function downloadUrl(u: unknown): string | null {
-  if (typeof u !== "string" || !u) return null;
-  return /^https?:\/\//i.test(u) ? u : serverUrl + u;
-}
+// The manifest's relative "/downloads/<basename>" paths become absolute links in updateoffer.offerDownloadUrl (A15
+// step 0): ONLY `${DEFAULT_SERVER_URL}/downloads/<basename>`, only while the current server is the default. The
+// popup is a chrome-extension:// page, so a relative href would resolve against the EXTENSION origin.
 
 /**
  * H2 signed-update check (design 2026-07-13-signed-updates §D/§M). Fetch the manifest as RAW BYTES
@@ -1656,7 +1718,7 @@ async function checkForUpdate(force = false): Promise<void> {
     const kSeq = nsk(USEQ);
     const kQuiet = nsk(UQUIET);
     if (!force) {
-      const seen = (await chrome.storage.local.get(kLast))[kLast];
+      const seen = (await chrome.storage.session.get(kLast))[kLast];
       if (typeof seen === "number" && Date.now() - seen < UPDATE_MIN_GAP_MS) return;
     }
     // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
@@ -1682,7 +1744,7 @@ async function checkForUpdate(force = false): Promise<void> {
       // (§M-D5): otherwise, once ULAST ages past UPDATE_MIN_GAP_MS, every SW wake (content message,
       // popup, alarm) would re-hammer two no-store fetches indefinitely. A genuine network reject is
       // caught above and left un-stamped for prompt retry when connectivity returns.
-      await chrome.storage.local.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
+      await chrome.storage.session.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
       return;
     }
 
@@ -1692,11 +1754,13 @@ async function checkForUpdate(force = false): Promise<void> {
     const sigBytes = raw === null ? null : await readCappedBody(sResp, UPDATE_SIG_MAX_BYTES);
     if (raw === null || sigBytes === null) {
       await sResp.body?.cancel().catch(() => undefined);
-      await chrome.storage.local.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
+      await chrome.storage.session.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
       return;
     }
     const sigText = new TextDecoder().decode(sigBytes);
-    const storedSeq = (await chrome.storage.local.get(kSeq))[kSeq];
+    // A15: the seq lives in the trusted store and was NOT migrated (a planted storage.local seq could only suppress
+    // genuine offers); no trusted store reads as "none" — the MIN_SEQ floor below.
+    const storedSeq = await trustedGet(kSeq);
     // §M-D4(a) anti-rollback FLOOR: a fresh install (or a wiped USEQ) starts at MIN_SEQ, not 0, so a
     // T1 server can't steer it to any validly-signed-but-older (known-vuln) manifest below the floor.
     const lastAcceptedSeq = Math.max(typeof storedSeq === "number" ? storedSeq : 0, MIN_SEQ);
@@ -1711,13 +1775,13 @@ async function checkForUpdate(force = false): Promise<void> {
         // Treat it like a clean verified read — CLEAR any prior quiet marker (healthy channel) and stamp
         // ULAST. Surfacing this as "couldn't be verified" would be a permanent false alarm, and stamping
         // it would also clobber a real prior `unverified`/`stale` signal (fail-open). Leave [UKEY] alone.
-        await chrome.storage.local.remove(kQuiet);
-        await chrome.storage.local.set({ [kLast]: Date.now() });
+        await chrome.storage.session.remove(kQuiet);
+        await chrome.storage.session.set({ [kLast]: Date.now() });
         return;
       }
       // Fail-closed QUIET (unverified/malformed/stale): record the distinct ACTIONABLE reason; leave any
       // prior VERIFIED [UKEY] signal alone.
-      await chrome.storage.local.set({ [kQuiet]: { reason: decision.reason }, [kLast]: Date.now() });
+      await chrome.storage.session.set({ [kQuiet]: { reason: decision.reason }, [kLast]: Date.now() });
       return;
     }
 
@@ -1725,13 +1789,17 @@ async function checkForUpdate(force = false): Promise<void> {
     const ext = decision.ext;
     const latest = typeof ext.version === "string" ? ext.version : null;
     const current = chrome.runtime.getManifest().version;
-    await chrome.storage.local.remove(kQuiet); // a clean verified read clears the quiet marker
+    await chrome.storage.session.remove(kQuiet); // a clean verified read clears the quiet marker
+    // Stamp the throttle first, in storage.session: a trusted store that cannot be written (Firefox private browsing)
+    // must not turn every wake into another fetch.
+    await chrome.storage.session.set({ [kLast]: Date.now() });
     if (latest && isNewerVersion(latest, current)) {
-      const info: UpdateInfo = { latest, chromeUrl: downloadUrl(ext.chromeUrl), firefoxUrl: downloadUrl(ext.firefoxUrl) };
-      await chrome.storage.local.set({ [kInfo]: info, [kSeq]: decision.seq, [kLast]: Date.now() });
+      // A15 step 0: the links are built by the offer leaf only — `${DEFAULT_SERVER_URL}/downloads/<basename>` or none.
+      const info: UpdateInfo = { latest, chromeUrl: offerDownloadUrl(ext.chromeUrl, serverUrl), firefoxUrl: offerDownloadUrl(ext.firefoxUrl, serverUrl) };
+      await trusted.set({ [kInfo]: info, [kSeq]: decision.seq });
     } else {
-      await chrome.storage.local.remove(kInfo); // up to date (or unreadable version) → no signal
-      await chrome.storage.local.set({ [kSeq]: decision.seq, [kLast]: Date.now() });
+      await trusted.remove(kInfo); // up to date (or unreadable version) → no signal
+      await trusted.set({ [kSeq]: decision.seq });
     }
   } catch {
     /* unexpected — any existing signal stands until a clean verified read supersedes it */
@@ -1747,11 +1815,16 @@ async function updateStatus(): Promise<Res<"updateStatus">> {
   const current = chrome.runtime.getManifest().version;
   const kInfo = nsk(UKEY);
   const kQuiet = nsk(UQUIET);
-  const info = (await chrome.storage.local.get(kInfo))[kInfo] as UpdateInfo | undefined;
-  if (info && typeof info.latest === "string" && isNewerVersion(info.latest, current)) {
-    return { current, latest: info.latest, chromeUrl: info.chromeUrl ?? null, firefoxUrl: info.firefoxUrl ?? null, quietReason: null };
+  // A15 step 0: the stored offer is re-checked on EVERY read, not only when it was fetched — the current server is
+  // the default, the version is strictly newer, and each link is `${DEFAULT_SERVER_URL}/downloads/<basename>` again.
+  const offer = readUpdateOffer(await trustedGet(kInfo), current, serverUrl);
+  if (offer) return { current, latest: offer.latest, chromeUrl: offer.chromeUrl, firefoxUrl: offer.firefoxUrl, quietReason: null };
+  let quiet: { reason?: unknown } | undefined;
+  try {
+    quiet = (await chrome.storage.session.get(kQuiet))[kQuiet] as { reason?: unknown } | undefined;
+  } catch {
+    quiet = undefined; // storage.session unavailable — no quiet line
   }
-  const quiet = (await chrome.storage.local.get(kQuiet))[kQuiet] as { reason?: unknown } | undefined;
   // Surface ONLY actionable reasons (M-D4b): a benign seq_regression — or any marker a pre-fix build
   // may have persisted — must never render as a scary "couldn't be verified" line.
   const rawReason = quiet && typeof quiet.reason === "string" ? quiet.reason : null;
@@ -1806,6 +1879,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         personalProposal: session ? !session.personalVaultId && (await readPersonalChange(session.userId)) !== null : false,
         waitingGrants: session?.waitingGrants ?? 0,
         wrongVault: session?.wrongVault ?? 0,
+        rememberedEmail: session ? null : await readRememberedEmail(),
       } satisfies Res<"status">;
     }
     case "lock": {
@@ -1848,6 +1922,19 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
         !(sender.url ?? "").startsWith(chrome.runtime.getURL("")),
         purgeOriginNamespace,
       ) satisfies Promise<Res<"purgeServerData">>;
+    case "serverInfo":
+      return serverInfo();
+    case "setServerUrl":
+      // A15: the ONLY way the server choice changes (the options page, after the Trust Gate). The sender gate above
+      // already refused any sender that is not one of our pages; commitServerUrl canonicalizes and persists first.
+      return commitServerUrl(msg.url);
+    case "forgetLegacyServer":
+      try {
+        await trusted.remove(LEGACY_SERVER_KEY);
+        return { ok: true } satisfies Res<"forgetLegacyServer">;
+      } catch {
+        return { ok: false } satisfies Res<"forgetLegacyServer">;
+      }
     case "personalAcceptChange":
       // A5b: only our own extension pages (the popup) may confirm a personal-vault change; a content
       // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).
@@ -2129,17 +2216,18 @@ export async function pickPersonalVaultId(
   let cached: PersonalWrapWire | null = null;
   try {
     // A10: a strict decode (a UUID vault id and nothing else); a damaged record reads as absent and is cleared.
-    const d = decodePersonalWrap((await chrome.storage.local.get(key))[key]);
+    const d = decodePersonalWrap((await trusted.get(key))[key]);
     cached = d.value;
-    if (d.rewrite) await chrome.storage.local.remove(key).catch(() => {});
+    if (d.rewrite) await trusted.remove(key).catch(() => {});
   } catch {
-    cached = null; // storage unavailable: behaves like a device that never saw a wrap (no personal vault)
+    cached = null; // no trusted store: behaves like a device that never saw a wrap (a served wrap is a proposal)
   }
   const pick = pickPersonal(wrap, uvk, userId, vaultKeys, { cached });
   const changeKey = nsk(`personalChange:${userId}`);
+  stagedChangeFallback = null;
   try {
     if (pick.source === "wrap" && wrap) {
-      await chrome.storage.local.set({ [key]: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } }); // ciphertext only
+      await trusted.set({ [key]: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } }); // ciphertext only
     }
     // A5b M-2 / L-2: a served wrap naming another vault waits for the human (popup notice); the cache keeps
     // the vault this device had. Anything else clears a stale pending change.
@@ -2153,9 +2241,15 @@ export async function pickPersonalVaultId(
         currentMetaBlob: metaOf(pick.vaultId), // ciphertext only
         servedMetaBlob: metaOf(pick.served.vaultId),
       };
-      await chrome.storage.local.set({ [changeKey]: record });
+      try {
+        await trusted.set({ [changeKey]: record });
+      } catch {
+        // No trusted store (Firefox private browsing): stage it in memory for this worker's life, so the popup can
+        // still ask the human. It is re-staged at every unlock, and accept re-opens it under the UVK either way.
+        stagedChangeFallback = { key: changeKey, record };
+      }
     }
-    else await chrome.storage.local.remove(changeKey);
+    else await trusted.remove(changeKey);
   } catch {
     /* best effort */
   }
@@ -2175,16 +2269,20 @@ interface PersonalChangeRecord extends PersonalWrapWire {
   servedMetaBlob?: string;
 }
 
+/** A15: a pending change staged while the trusted store could not be written (Firefox private browsing). Memory
+ *  only, keyed by its namespaced record key (origin + user); cleared by every re-stage, an accept, and the purge. */
+let stagedChangeFallback: { key: string; record: PersonalChangeRecord } | null = null;
+
 /** A5b M-2: the pending personal-vault change for the signed-in user, or null. */
 async function readPersonalChange(userId: string): Promise<PersonalChangeRecord | null> {
+  const k = nsk(`personalChange:${userId}`);
   try {
-    const k = nsk(`personalChange:${userId}`);
     // A10: a strict decode (UUID served vault, UUID-or-empty current vault); a damaged record reads as none and is cleared.
-    const d = decodePersonalChange((await chrome.storage.local.get(k))[k]);
-    if (d.rewrite) await chrome.storage.local.remove(k).catch(() => {});
-    return d.value;
+    const d = decodePersonalChange((await trusted.get(k))[k]);
+    if (d.rewrite) await trusted.remove(k).catch(() => {});
+    return d.value ?? (stagedChangeFallback?.key === k ? stagedChangeFallback.record : null);
   } catch {
-    return null;
+    return stagedChangeFallback?.key === k ? stagedChangeFallback.record : null;
   }
 }
 
@@ -2245,7 +2343,7 @@ async function describePersonalChange(): Promise<Res<"personalDescribeChange">> 
  * A5b M-2: the human confirmed, in the popup, that the personal vault changed. Mints nothing. (Keeping the current
  * vault instead is a re-designation in a full client.)
  *
- * A5b review LOW-4 (closed in A6): the staged record sat in storage.local, which is not authenticated, so it is
+ * A5b review LOW-4 (closed in A6): the staged record sat in storage.local (since A15 the trusted store, or memory), which is not authenticated, so it is
  * RE-OPENED here under the session UVK with the vk-personal AD (reopenStagedPersonalWrap) and the key installed
  * is the one that re-open yields; a key merely present in the session map proves nothing about the blob. A
  * session restored after an MV3 eviction holds no UVK (breaker B1: memory-only custody), so it answers
@@ -2263,11 +2361,14 @@ async function acceptPersonalChange(): Promise<Res<"personalAcceptChange">> {
   if (!r.ok) return { ok: false, code: r.code };
   const served: PersonalWrapWire = { vaultId: staged.vaultId, wrappedVk: staged.wrappedVk };
   try {
-    await chrome.storage.local.set({ [nsk(`personalWrap:${userId}`)]: served });
-    await chrome.storage.local.remove(nsk(`personalChange:${userId}`));
+    await trusted.set({ [nsk(`personalWrap:${userId}`)]: served });
+    await trusted.remove(nsk(`personalChange:${userId}`));
   } catch {
-    return { ok: false, code: "storage" };
+    // A15: no trusted store (Firefox private browsing). The cache is only what spares a LATER unlock this confirmation;
+    // the human confirmed this one and the wrap re-opened under the UVK above, so it is adopted for this session.
+    console.warn("andvari: this browser cannot keep the personal-vault choice (no extension storage here); it applies to this session only");
   }
+  stagedChangeFallback = null;
   personalChangeDescribed = null;
   session.vaultKeys.set(served.vaultId, r.vk);
   session.personalVaultId = served.vaultId;
@@ -2551,11 +2652,26 @@ async function doUnlockTotp(code: string): Promise<Res<"unlockTotp">> {
  *  never ships user-facing sentences — the popup renders copy from errors.ts keyed on `code`. The
  *  raw String(e) rides `error` as debug detail the surfaces never render. */
 async function unlockWithMapping(email: string, password: string): Promise<Res<"unlock">> {
+  let r: Res<"unlock">;
   try {
-    return await unlock(email, password);
+    r = await unlock(email, password);
   } catch (e) {
-    return { ok: false, code: mapUnlockError(e), error: String(e) };
+    r = { ok: false, code: mapUnlockError(e), error: String(e) };
   }
+  // A15: the worker remembers the email (the popup used to write it to storage.local, which content scripts can read
+  // on Firefox): once the server accepted it — a sign-in, or a password accepted pending the one-time code (else
+  // TOTP-enrolled accounts never get it stored). The email only, never the password.
+  if (r.ok || r.code === "totp_required") await rememberEmail(email);
+  return r;
+}
+
+/** A15: the remembered email (non-secret), in the trusted store. Best effort. */
+async function rememberEmail(email: unknown): Promise<void> {
+  const e = rememberableEmail(typeof email === "string" ? email.trim() : email);
+  if (e !== null) await trusted.set({ [LAST_EMAIL_KEY]: e }).catch(() => {});
+}
+async function readRememberedEmail(): Promise<string | null> {
+  return rememberableEmail(await trustedGet(LAST_EMAIL_KEY));
 }
 
 function mapUnlockError(e: unknown): UnlockCode {
@@ -2797,20 +2913,15 @@ async function disableQuickUnlock(): Promise<Res<"disableQuickUnlock">> {
  *  the one-time offer card). Every read is fail-closed. */
 async function quStateForStatus(): Promise<{ enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean; kind: "pin" | "biometric" | null }> {
   const st = await quickUnlock.status();
-  let offerDismissed = false;
-  try {
-    const dk = nsk(DKEY);
-    offerDismissed = (await chrome.storage.local.get(dk))[dk] === true;
-  } catch {
-    /* storage.local unavailable — treat as not-dismissed (the offer is best-effort chrome) */
-  }
+  // No trusted store reads as not-dismissed (the offer is best-effort chrome).
+  const offerDismissed = (await trustedGet(nsk(DKEY))) === true;
   return { enrolled: st.enrolled, armed: st.armed, attemptsRemaining: st.attemptsRemaining, offerDismissed, kind: st.kind };
 }
 
-/** Remember the offer card was dismissed once (breaker B7 — durable, storage.local, NON-secret). */
+/** Remember the offer card was dismissed once (breaker B7 — durable, the trusted store, NON-secret). */
 async function dismissQuickUnlockOffer(): Promise<Res<"dismissQuickUnlockOffer">> {
   try {
-    await chrome.storage.local.set({ [nsk(DKEY)]: true });
+    await trusted.set({ [nsk(DKEY)]: true });
   } catch {
     /* best-effort */
   }
@@ -2899,23 +3010,24 @@ async function closeOffscreenIfPresent(): Promise<void> {
   }
 }
 
-/** storage.local key of this user's item homes (ids only, non-secret: the server sees every (itemId, vaultId)). */
+/** Trusted-store key of this user's item homes (ids only, non-secret: the server sees every (itemId, vaultId)).
+ *  A15: moved out of storage.local, where a content script could plant homes that hid items from fill. */
 const homesKey = (userId: string): string => nsk(`itemHomes:${userId}`);
 
 async function loadHomes(userId: string): Promise<Map<string, string>> {
   try {
     const k = homesKey(userId);
     // A10: a strict decode (UUID itemId → UUID vaultId); a cleaned record is re-persisted once.
-    const d = decodeItemHomes((await chrome.storage.local.get(k))[k]);
-    if (d.rewrite) await chrome.storage.local.set({ [k]: encodeItemHomes(d.value) }).catch(() => {});
+    const d = decodeItemHomes((await trusted.get(k))[k]);
+    if (d.rewrite) await trusted.set({ [k]: encodeItemHomes(d.value) }).catch(() => {});
     return d.value;
   } catch {
-    return new Map(); // storage unavailable: a fresh browser's posture (the residual), never a failed unlock
+    return new Map(); // no trusted store: a fresh browser's posture (the residual), never a failed unlock
   }
 }
 
 function saveHomes(userId: string, homes: Map<string, string>): Promise<void> {
-  return chrome.storage.local.set({ [homesKey(userId)]: encodeItemHomes(homes) }).catch(() => {});
+  return trusted.set({ [homesKey(userId)]: encodeItemHomes(homes) }).catch(() => {});
 }
 
 /**
