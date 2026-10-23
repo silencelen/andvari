@@ -96,9 +96,11 @@ param(
     # pass this - deliberately - to skip that one gate. It warns loudly; never routine.
     [switch]$AllowUnsignedBase,
 
-    # Everything except signing and emitting: preflight, fetch, seq arithmetic, spec validation and
-    # a full manifest preview. Skips the gradle MSI build, Authenticode signing, manifest signing
-    # and the bundle. Safe to run any time.
+    # Everything except building, signing and emitting: preflight, fetch, seq arithmetic, spec
+    # validation and a full manifest preview. Skips the update-signer build (and with it the live
+    # manifest's signature check, which needs the signer this run would build), the gradle MSI
+    # build, Authenticode signing, manifest signing and the bundle. Signs nothing; it is still this
+    # tree's code running on this account (signandvari's review and confirmation come first).
     [switch]$DryRun
 )
 
@@ -583,7 +585,7 @@ if ($specHasStore) {
 # andvari_<ver>-<rev>_amd64.deb; /downloads serves andvari-<ver>.deb) and the one with no
 # SHA256SUMS cross-check on the build host: the spec's sha256 was hashed from the LOCAL build
 # output and the served URL is constructed by convention. So the agreement is PROVEN here, not
-# assumed: GET the served deb and require it to hash to .linux.sha256 — before the multi-minute
+# assumed: GET the served deb and require it to hash to .linux.sha256 - before the multi-minute
 # MSI build, and long before a signed manifest can point every Linux client at bytes that do not
 # match their pinned digest. (The deb is already published when this ceremony runs; the spec is
 # emitted alongside the uploaded artifacts.)
@@ -616,21 +618,29 @@ if ($servedPkgSha -ne $prePkgSha) {
 }
 Write-Ok "served Arch package $prePkgUrl hashes to the spec's sha256 - rename/upload agreement proven"
 
-# --- update-signer jar (built here so a missing jar fails before the MSI build, not after) -------
+# --- update-signer jar: deleted and rebuilt from THIS tree on every real run (A14 review 3) -------
+# It is the program handed the key's path. A jar an earlier build left in build\libs (another
+# commit, another branch, anything else that wrote there) is not provably -Commit's, and reusing it
+# made the reviewed diff describe the tree but not necessarily the signer that ran. So a real run
+# deletes it and builds it here, from the checked-out tree, before the MSI build (a build failure
+# still costs seconds, not a multi-minute MSI build); a dry run runs no jar it did not build, so it
+# also skips the live manifest's signature check below, which the real run makes before the MSI.
 $SignerJar = Join-Path $RepoRoot 'tools\update-signer\build\libs\andvari-update-signer.jar'
-if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) {
-    if ($DryRun) {
-        Write-Would "build the update-signer: gradlew.bat :tools:update-signer:shadowJar"
-    }
-    else {
-        Write-Info 'update-signer jar missing - building it (gradlew :tools:update-signer:shadowJar)'
-        Push-Location $RepoRoot
-        try { Invoke-Native -Exe (Join-Path $RepoRoot 'gradlew.bat') -Arguments @(':tools:update-signer:shadowJar', '--console=plain') -What 'gradle :tools:update-signer:shadowJar' | Out-Null }
-        finally { Pop-Location }
-        if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) { Die "update-signer jar still missing at $SignerJar" }
-    }
+if ($DryRun) {
+    Write-Would "delete and rebuild the update-signer from this tree: gradlew.bat :tools:update-signer:shadowJar"
 }
-if (Test-Path -LiteralPath $SignerJar -PathType Leaf) { Write-Ok "update-signer $SignerJar" }
+else {
+    if (Test-Path -LiteralPath $SignerJar) {
+        Remove-Item -LiteralPath $SignerJar -Force
+        Write-Info 'removed the update-signer jar an earlier build left'
+    }
+    Write-Info 'building the update-signer from this tree (gradlew :tools:update-signer:shadowJar)'
+    Push-Location $RepoRoot
+    try { Invoke-Native -Exe (Join-Path $RepoRoot 'gradlew.bat') -Arguments @(':tools:update-signer:shadowJar', '--console=plain') -What 'gradle :tools:update-signer:shadowJar' | Out-Null }
+    finally { Pop-Location }
+    if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) { Die "the update-signer build produced no jar at $SignerJar" }
+    Write-Ok "update-signer built from this tree: $SignerJar"
+}
 
 # --- the signing base must itself be signed ------------------------------------------------------
 # The live manifest is about to become the BASE of the next signed manifest: every field outside
@@ -643,7 +653,11 @@ if ($AllowUnsignedBase) {
     Write-Warn2 'the SIGNING BASE is unverified - every carried-over field is being taken on trust.'
     Write-Warn2 'this switch is for the first-ever release or a knowingly-broken channel ONLY.'
 }
-elseif (Test-Path -LiteralPath $SignerJar -PathType Leaf) {
+elseif ($DryRun) {
+    # A dry run builds no signer and runs none it did not build (above).
+    Write-Would 'verify the live manifest signature against the pinned key, with the update-signer this run builds'
+}
+else {
     $baseVer = Invoke-Native -Exe $JavaExe -What 'update-signer verify (live manifest)' -Capture -AllowFailure -Arguments @(
         '-jar', $SignerJar, 'verify', $live.TempPath, $LiveSigPath, $PinnedPubKey
     )
@@ -652,10 +666,6 @@ elseif (Test-Path -LiteralPath $SignerJar -PathType Leaf) {
         Die "the LIVE manifest's signature does NOT verify against the pinned key - refusing to use it as the signing base. Investigate the channel before anything else; if this is a genuine bootstrap, re-run with -AllowUnsignedBase, deliberately."
     }
     Write-Ok 'live manifest signature verifies against the pinned key - safe to use as the base'
-}
-else {
-    # Only reachable under -DryRun: a real run either found the jar above or just built it (or died).
-    Write-Would 'verify the live manifest signature against the pinned key (update-signer jar not built yet)'
 }
 
 # --- paths --------------------------------------------------------------------------------------

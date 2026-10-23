@@ -53,16 +53,36 @@ class AppFillGateTest {
     @Test
     fun theInstallerLineNamesThePackageAndWhetherItIsASystemApp() {
         // A14 review N2: a label is the installer's own choice ("Google Play Store" from any store), so the line names
-        // the installer's PACKAGE and whether it is a system app, not only its label.
-        assertEquals("installed by Google Play Store (com.android.vending, a system app)", AppFillGate.installerLine(play, "Google Play Store", true))
-        assertEquals("installed by Google Play Store (com.android.vending, NOT a system app)", AppFillGate.installerLine(play, "Google Play Store", false))
-        assertEquals("installed by com.android.vending (could not check whether it is a system app)", AppFillGate.installerLine(play, null, null))
-        assertEquals("installed by org.example.store (NOT a system app)", AppFillGate.installerLine("org.example.store", "org.example.store", false))
-        assertEquals("installer unknown", AppFillGate.installerLine(null, null, null))
-        assertEquals("installer unknown", AppFillGate.installerLine("  ", "Store", true))
+        // the installer's PACKAGE and whether it is a system app, not only its label. A14 review 3 (A1): the line LEADS
+        // with the package and kind and carries no label at all, so no label length can push them off a one-line row;
+        // the label is its own line ([AppFillGate.installerLabelLine]).
+        assertEquals("installed by com.android.vending (a system app)", AppFillGate.installerLine(play, true))
+        assertEquals("installed by com.android.vending (NOT a system app)", AppFillGate.installerLine(play, false))
+        assertEquals("installed by com.android.vending (could not check whether it is a system app)", AppFillGate.installerLine(play, null))
+        assertEquals("installed by org.example.store (NOT a system app)", AppFillGate.installerLine("org.example.store", false))
+        assertEquals("installer unknown", AppFillGate.installerLine(null, null))
+        assertEquals("installer unknown", AppFillGate.installerLine("  ", true))
+    }
+
+    @Test
+    fun theInstallerLabelIsItsOwnEscapedBoundedLine() {
+        // A14 review 3 (A1): an 80-character installer label used to share the package's line, rendered maxLines=1, and
+        // pushed the package and "NOT a system app" off-screen. The label is now a line of its own; the package line is
+        // the same whatever the label says.
+        val long = "Google Play Store " + "x".repeat(200)
+        assertEquals("installed by org.example.store (NOT a system app)", AppFillGate.installerLine("org.example.store", false))
+        val labelLine = AppFillGate.installerLabelLine("org.example.store", long)!!
+        assertTrue(labelLine.startsWith("which calls itself Google Play Store "), labelLine)
+        assertTrue(labelLine.length <= "which calls itself ".length + AppFillGate.ONE_LINE_MAX + 1 && labelLine.endsWith("\u2026"), labelLine)
+        assertEquals("which calls itself Google Play Store", AppFillGate.installerLabelLine(play, "Google Play Store"))
+        assertEquals(null, AppFillGate.installerLabelLine("org.example.store", "org.example.store"), "a label that is the package says nothing new")
+        assertEquals(null, AppFillGate.installerLabelLine("org.example.store", "  "))
+        assertEquals(null, AppFillGate.installerLabelLine(null, "Store"), "no installer, no label line")
         // An installer label with a newline or a bidi override cannot draw a second, fake line.
-        val fake = AppFillGate.installerLine("org.example.store", "Shop\u000A(com.android.vending, a system app)", false)
-        assertEquals("installed by Shop\\u000A(com.android.vending, a system app) (org.example.store, NOT a system app)", fake)
+        assertEquals(
+            "which calls itself Shop\\u000A(com.android.vending, a system app)",
+            AppFillGate.installerLabelLine("org.example.store", "Shop\u000A(com.android.vending, a system app)"),
+        )
     }
 
     @Test

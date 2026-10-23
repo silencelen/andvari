@@ -185,11 +185,15 @@ private fun ConfirmCard(bake: AppFillBinding.Bake, login: LoginLine, armed: Bool
                 Text(app, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 // The package is what the login was matched on: shown whole (package names are plain identifiers).
                 Text(id.pkg, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+                // A14 review 3 (A1): the installer's package and kind first, never ellipsized (it wraps), so no label
+                // can push "NOT a system app" off-screen; its self-chosen label is a single line of its own below.
                 Text(
-                    AppFillGate.installerLine(id.installer, bake.installerLabel, id.installerSystem),
+                    AppFillGate.installerLine(id.installer, id.installerSystem),
                     style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
+                AppFillGate.installerLabelLine(id.installer, bake.installerLabel)?.let { label ->
+                    Text(label, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Spacer(Modifier.height(8.dp))
                 Text("Signer (SHA-256)", style = MaterialTheme.typography.labelMedium)
                 Text(AppFillGate.signerLine(id.signerDigest), style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))

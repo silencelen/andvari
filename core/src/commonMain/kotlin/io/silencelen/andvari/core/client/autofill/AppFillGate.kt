@@ -72,18 +72,28 @@ object AppFillGate {
     /**
      * The confirm's installer line (A14 review N2). A label is the installer's own choice (any store can
      * call itself "Google Play Store"), so the line names the installer's PACKAGE and whether it is a
-     * system app; the label, when there is one, is one escaped line ([oneLine]).
+     * system app. It carries no label (A14 review 3, A1): the package and kind LEAD, and the card never
+     * ellipsizes this line, so an 80-character label can no longer push "NOT a system app" off-screen.
+     * The label, when there is one, is [installerLabelLine], a line of its own.
      */
-    fun installerLine(installer: String?, installerLabel: String?, installerSystem: Boolean?): String {
+    fun installerLine(installer: String?, installerSystem: Boolean?): String {
         val pkg = installer?.trim()?.takeIf { it.isNotEmpty() } ?: return "installer unknown"
-        val shownPkg = TerminalText.escape(pkg)
         val kind = when (installerSystem) {
             true -> "a system app"
             false -> "NOT a system app"
             null -> "could not check whether it is a system app"
         }
-        val label = oneLine(installerLabel)?.takeIf { it != shownPkg }
-        return if (label == null) "installed by $shownPkg ($kind)" else "installed by $label ($shownPkg, $kind)"
+        return "installed by ${TerminalText.escape(pkg)} ($kind)"
+    }
+
+    /**
+     * The installer's label as its own line under [installerLine] (A14 review 3, A1): one escaped, bounded
+     * line ([oneLine]), or null when there is no installer, no label, or the label is just the package.
+     */
+    fun installerLabelLine(installer: String?, installerLabel: String?): String? {
+        val pkg = installer?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val label = oneLine(installerLabel)?.takeIf { it != TerminalText.escape(pkg) } ?: return null
+        return "which calls itself $label"
     }
 
     /** The most characters of app- or member-authored text the confirm shows on one line. */
