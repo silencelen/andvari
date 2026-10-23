@@ -49,7 +49,7 @@ import { assertServerKdfParams } from "../crypto/keys";
 import { SAFE_ID } from "../vault/itemdoc-shape";
 import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
 
-export const CLIENT_VERSION = "0.28.1";
+export const CLIENT_VERSION = "0.29.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
 
 /** A request body that is ALREADY JSON text and must not be re-serialized (see adminRecovery). */
