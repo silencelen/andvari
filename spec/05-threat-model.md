@@ -507,6 +507,64 @@ same row raises the notice again on each pull (it is never silent). (e) a captur
 an item's home was recorded on this device (an upgrade mid-session) binds to the vault the item showed then,
 which is the item's recorded home from that point on.
 
+**A14 (security review 2026-10, whole-repository scan of 0.28.1).** (a) **The escrow ceremony keeps the seed out
+of docker's logs** (F1): `bringup.sh` and every documented `docker run … recovery-cli` pass `--log-driver none`
+before the image, because docker copies an attached container's stdout to its log driver (json-file on disk, which
+`--rm` only unlinks; the journal; a log shipper). What stays: the sheet in the terminal's scrollback (the script says
+to clear it) and the air-gapped keygen as the by-the-book ceremony. A dated design record that sketched the ceremony
+as `docker compose run` is left as written; nothing ships that form. (b) **`/data` is owner-only** (F10): the
+entrypoint makes it 0700 after its chown, tightens existing database files to 0600 and starts the server under umask
+077; `bringup.sh` creates `./data` 0700. The server is the only reader of the database; a host-side backup runs as
+root. Residual accepted: `users.totpSecret` is stored in plaintext in the database (encrypting it at rest is not
+built), so anyone who reads the file, now root or the container's user only, reads every member's TOTP seed.
+(c) **One sender gate in the extension's service worker** (F3/F4/F11): every message type is classified as sent by
+content scripts (the 17 types `content.ts` sends) or extension-page-only; the other 27 are answered with their own
+refusal shape unless `sender.url` is one of this extension's pages (`chrome.runtime.getURL("")`, either engine; a
+malformed base fails closed), before the handler runs, and a refused message does not re-arm the idle lock.
+`status`, `ping`, `updateStatus` and `linkUri` are gated too: no content script sends them. Unknown types are
+refused. The per-handler checks stay. Residual: a compromised RENDERER of one of our own extension pages is outside
+this gate (it is the extension). (d) **The CSV formula warning is an acknowledgement** (F6) on web, desktop and
+Android: it names each risky cell by field and item ("Password of “…”", the name escaped onto one line after our
+label), and the save stays disabled until it is ticked for exactly those cells. Values are written verbatim, by
+decision: a CSV export is input for another password manager, and a `'` prefix would corrupt a real password that
+starts with `=`, `+`, `-` or `@`. (e) **An enroll is bound to the origin its client dialed** (F8, desktop and the
+reachable Android twin): while it runs, Cancel, a re-pasted invite and Connect are refused and disabled; the session
+is saved under the client's own origin, and if the app was moved anyway the commit is aborted and the tokens revoked
+at the issuer; a stored session's tokens go only to its own origin (unlock refuses another; a locked sign-out revokes
+at the session's origin and still wipes locally). Residuals: a session a pre-A14 build already saved under the wrong
+origin cannot be told apart from a correct one; an install whose saved session predates the one-time default-URL
+migration now signs in again once. (f) **Desktop secret copies are marked sensitive** (F9): Windows
+`ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` (DWORD
+0), KDE `x-kde-passwordManagerHint` = `secret`; the auto-clear stays. Residual: a clipboard manager that ignores these
+hints still records the copy (owner device check: Win+V and Klipper on a real desktop). (g) **The offline tools escape
+what they print** (F12): `backup-cli verify` and `recovery-cli verify` replace every C0 (tab and newlines included),
+DEL and C1 character in payload-authored strings with a visible `\u001B`-style escape, the drill receipt line by
+line (JSON's own escape, so it still decodes the same). Residual: bidi controls (U+202A–U+202E, U+2066–U+2069) are
+printed as they are and can reorder a line visually; `backup-cli dump` relies on JSON escaping, which leaves C1 raw.
+(h) **A browser without the offline copy keeps no token once locked** (F5, owner decision): unless the offline copy is
+on for the user on this browser, the token pair lives in sessionStorage per tab (localStorage keeps the non-secret
+metadata, whose removal is the cross-tab sign-out signal); a lock (manual, idle, or announced by another tab) awaits
+the vault's usage flush, revokes the tab's pair and drops it, and unlocking is then a full sign-in (email filled in,
+master password, one-time code when enrolled); a pre-A14 pair on disk moves into the tab at load; turning the
+offline copy on or off moves the pair between the stores at once. With the offline copy on, nothing changes. Tabs: a
+tab with no pair signs in as its own device session, so tabs never share a rotating refresh token and no token
+hand-off channel is added; a duplicated tab (which inherits a copy of sessionStorage) is detected by a per-tab Web
+Lock and drops the copy; a tab riding the shared pair when another tab turns the offline copy off locks without
+revoking. Residuals: a reload keeps the tab's pair (sessionStorage survives it), so a reload of an UNLOCKED tab is a
+master-password unlock, not a sign-in; without Web Locks a duplicated tab cannot be told from a reload and keeps the
+copy (and the first refresh of the pair by both then revokes the device, the failure the guard exists to stop);
+script on the origin can still read the open tab's pair. (i) **Package-only app fills are gated** (F7, owner
+decision, Android): an `androidapp://` login fills silently only into a system app, a Play-installed app
+(`installingPackageName`, `getInstallerPackageName` on API 29), or a (package, signer) this device confirmed; anything
+else, or any failed lookup, gets a one-tap confirm naming the app, package, installer and signer (short form), and a
+changed signer confirms again with a warning. Identity is read from PackageManager in andvari's process and baked
+into the confirm's PendingIntent; the live signer is re-read before release. Bindings are device-local, never
+synced, and sign-out clears them. Residuals: the installer field is what PackageManager recorded, so an installer
+able to record another package (a privileged shell, `adb install -i`) can pass as Play, and `initiatingPackageName`
+is not consulted; if API 30+ package visibility hides the requesting app from andvari, every app fill takes the
+confirm path and nothing can be remembered (owner device check); card datasets are not app-gated (wallet posture,
+unchanged).
+
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
 Enabling quick unlock changes the at-rest story of exactly one asset: a
