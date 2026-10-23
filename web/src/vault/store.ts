@@ -3252,7 +3252,7 @@ export class VaultStore {
   }
 
   /**
-   * H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"; core SyncEngine.coalesceQueuedPuts
+   * H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"; core SyncEngine.queuedPutsToFold / dequeueFolded
    * twin): fold this item's UNSENT queued puts into the one save() is about to enqueue, and
    * answer the base rev — and the pre-edit truth — that one must carry.
    *
