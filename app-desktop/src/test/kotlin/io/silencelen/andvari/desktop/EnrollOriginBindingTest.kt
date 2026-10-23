@@ -69,10 +69,18 @@ class EnrollOriginBindingTest {
 
     /** A fake andvari origin. Policy answers at once; register (when [registerHold] is given) parks
      *  until released and then answers a session built from the client's own request, with the
-     *  tokens "<name>-access" / "<name>-refresh"; every request is recorded in [hits]. */
-    private inner class Origin(val name: String, private val registerHold: CountDownLatch? = null) {
+     *  tokens "<name>-access" / "<name>-refresh"; every request is recorded in [hits]. With an
+     *  [account] (A14 review N4) it also answers prelogin and login for that account, login parked
+     *  on [loginHold] when given. */
+    private inner class Origin(
+        val name: String,
+        private val registerHold: CountDownLatch? = null,
+        private val account: JsonObject? = null,
+        private val loginHold: CountDownLatch? = null,
+    ) {
         val hits: MutableList<Hit> = Collections.synchronizedList(mutableListOf())
         val registerArrived = CountDownLatch(1)
+        val loginArrived = CountDownLatch(1)
         val url: String
 
         init {
@@ -96,6 +104,13 @@ class EnrollOriginBindingTest {
                     respond(ex, 200, sessionFor(Json.parseToJsonElement(body).jsonObject))
                 }
                 "/api/v1/auth/logout" -> respond(ex, 204, null)
+                "/api/v1/auth/prelogin" -> if (account == null) respond(ex, 404, """{"error":"not_found","message":"not here"}""") else
+                    respond(ex, 200, buildJsonObject { put("kdfSalt", account["kdfSalt"]!!); put("kdfParams", account["kdfParams"]!!) }.toString())
+                "/api/v1/auth/login" -> if (account == null) respond(ex, 404, """{"error":"not_found","message":"not here"}""") else {
+                    loginArrived.countDown()
+                    loginHold?.await(30, TimeUnit.SECONDS)
+                    respond(ex, 200, sessionFor(account))
+                }
                 else -> respond(ex, 404, """{"error":"not_found","message":"not here"}""")
             }
         }
@@ -171,13 +186,30 @@ class EnrollOriginBindingTest {
         assertTrue(!e.home.sawToken("b-access") && !e.home.sawToken("b-refresh"), "A never sees B's tokens")
     }
 
+    @Test
+    fun aManualRepointIsRefusedAtTheStateLayerWhileAnOpRuns() {
+        // A14 review N4: updateServer / manualSwitchConnect were guarded only by the dialog's enabled = !busy.
+        val e = enrollingAtB()
+
+        e.state.updateServer(e.home.url)
+        e.state.beginManualSwitch(e.home.url)
+        e.state.manualSwitchConnect()
+
+        assertEquals(e.invite.url, e.state.baseUrl, "a repoint must not move the origin under the enroll's client")
+        e.hold.countDown()
+        awaitUntil("the session to be saved") { e.store.load() != null }
+        assertEquals(e.invite.url, e.store.load()?.baseUrl, "B's tokens are saved under B")
+    }
+
     // ---- layer 2: an origin change that lands anyway aborts the commit ----
 
     @Test
     fun aRepointThatLandsMidEnrollAbortsTheCommitAndRevokesAtTheIssuer() {
         val e = enrollingAtB()
 
-        e.state.updateServer(e.home.url) // a deliberate manual repoint — not refused, so the fence must hold
+        // Every public repoint is refused while the op runs (above); the ungated commit stands in for any future
+        // path that moves the origin anyway, so the fence must hold.
+        e.state.commitServer(e.home.url)
         e.hold.countDown()
 
         awaitUntil("the enroll to finish") { !e.state.busy && e.state.error != null }
@@ -220,5 +252,52 @@ class EnrollOriginBindingTest {
         assertTrue(home.hits.none { it.bearer != null }, "no token reaches the live origin: ${home.hits}")
         assertEquals(listOf("b-access"), issuer.hits.filter { it.path == "/api/v1/auth/logout" }.map { it.bearer }, "revoked where it was issued")
         assertNull(store.load(), "sign-out still wipes locally")
+    }
+
+    // ---- A14 review N4: a sign-in is bound to the origin its client dialed ----
+
+    /** A real account's register request (so the fake origin can answer prelogin and login for it). */
+    private fun accountFor(email: String): JsonObject {
+        val enrolled = io.silencelen.andvari.core.client.Account.enroll(
+            inviteToken = "t", email = email, displayName = "M", password = password,
+            params = io.silencelen.andvari.core.crypto.KdfParams(), recoveryPublicKey = null, recoveryFingerprint = null,
+            deviceName = "test", platform = "linux",
+        )
+        return Json.encodeToJsonElement(io.silencelen.andvari.core.model.RegisterRequest.serializer(), enrolled.request).jsonObject
+    }
+
+    @Test
+    fun aSignInSavesItsSessionUnderTheOriginItsClientDialed() {
+        val home = Origin("a", account = accountFor("m@x.example"))
+        val store = DesktopSessionStore(root).also { it.baseUrl = home.url }
+        val state = DesktopState(liveScope, store)
+
+        state.signIn("m@x.example", password)
+        awaitUntil("the session to be saved") { store.load() != null }
+        assertEquals(home.url, store.load()?.baseUrl, "saved under the client's own origin")
+        assertEquals("a-access", store.load()?.accessToken)
+    }
+
+    @Test
+    fun aRepointThatLandsMidSignInAbortsTheCommitAndRevokesAtTheIssuer() {
+        val hold = CountDownLatch(1)
+        val home = Origin("a", account = accountFor("m@x.example"), loginHold = hold)
+        val other = Origin("b")
+        val store = DesktopSessionStore(root).also { it.baseUrl = home.url }
+        val state = DesktopState(liveScope, store)
+
+        state.signIn("m@x.example", password)
+        assertTrue(home.loginArrived.await(30, TimeUnit.SECONDS), "login is in flight at A")
+        state.updateServer(other.url)
+        assertEquals(home.url, state.baseUrl, "layer 1: the public repoint is refused while the sign-in runs")
+        state.commitServer(other.url) // any future path that moves the origin anyway
+        hold.countDown()
+
+        awaitUntil("the sign-in to finish") { !state.busy && state.error != null }
+        awaitUntil("the revocation at A") { home.hits.any { it.path == "/api/v1/auth/logout" } }
+        assertNull(store.load(), "no session may be saved: A's tokens under B is the bug")
+        assertEquals("a-access", home.hits.last { it.path == "/api/v1/auth/logout" }.bearer, "revoked at the origin that issued them")
+        assertTrue(!other.sawToken("a-access") && !other.sawToken("a-refresh"), "B never sees A's tokens")
+        assertEquals(DesktopState.signInOriginMoved(home.url), state.error)
     }
 }

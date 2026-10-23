@@ -42,7 +42,11 @@ class SensitiveClipboardTest {
     fun theHintBytesAreExact() {
         val t = SensitiveTextSelection(secret)
         val byNative = SensitiveClipboard.hints.associateBy { it.native }
-        assertContentEquals(ByteArray(0), bytesOf(t, byNative.getValue("ExcludeClipboardContentFromMonitorProcessing").flavor), "any data; empty")
+        // A14 review N8: never EMPTY. Windows takes any data for this format, but AWT publishes an empty payload as
+        // GlobalAlloc(GMEM_MOVEABLE, 0), which may hand the clipboard a discarded handle; a DWORD 0 is a real block.
+        val exclude = bytesOf(t, byNative.getValue("ExcludeClipboardContentFromMonitorProcessing").flavor)
+        assertContentEquals(byteArrayOf(0, 0, 0, 0), exclude, "a DWORD 0, 4 bytes")
+        assertTrue(exclude.isNotEmpty())
         // DWORD 0, 4 bytes little-endian: "do not keep in history" / "do not sync".
         assertContentEquals(byteArrayOf(0, 0, 0, 0), bytesOf(t, byNative.getValue("CanIncludeInClipboardHistory").flavor))
         assertContentEquals(byteArrayOf(0, 0, 0, 0), bytesOf(t, byNative.getValue("CanUploadToCloudClipboard").flavor))

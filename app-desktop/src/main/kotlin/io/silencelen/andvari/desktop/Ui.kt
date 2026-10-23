@@ -3394,14 +3394,14 @@ private fun ExportDialogs(state: DesktopState) {
     }
     state.backupResult?.let { BackupResultDialog(it, state::backupResultDismiss) }
     state.csvPreflight?.let { pre ->
-        CsvPreflightDialog(state, pre) { selected ->
+        CsvPreflightDialog(state, pre) { selected, acked ->
             val dialog = FileDialog(null as Frame?, "Save CSV export", FileDialog.SAVE)
             dialog.file = "andvari-export-${exportDateSuffix()}.csv"
             dialog.isVisible = true
             val dir = dialog.directory; val file = dialog.file
             if (dir != null && file != null) {
                 val dest = File(dir, file)
-                overwrite.request(dest) { state.csvRun(dest, selected) }
+                overwrite.request(dest) { state.csvRun(dest, selected, acked) }
             }
         }
     }
@@ -3553,9 +3553,10 @@ private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
  * ([DesktopState.csvPreflightFor]) so the dialog never promises what the file won't hold.
  */
 @Composable
-private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChooseDestination: (Set<String>) -> Unit) {
+private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChooseDestination: (Set<String>, List<ExportCsv.FormulaCell>?) -> Unit) {
     val vaults = state.csvPreflightVaults
-    var selected by remember(synced) { mutableStateOf(vaults.map { it.vaultId }.toSet()) }
+    // A14 review N3: a dialog re-presented by the write keeps the selection it was confirmed with.
+    var selected by remember(synced) { mutableStateOf(synced.selection ?: vaults.map { it.vaultId }.toSet()) }
     // `pre` is the LIVE preflight for the current selection; [synced] (computed over every held
     // vault at sync time) is the fallback only while the engine is unbound (a lock mid-dialog —
     // the dialog dies with the session anyway).
@@ -3568,12 +3569,18 @@ private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChoo
     AlertDialog(
         onDismissRequest = dismiss,
         confirmButton = {
-            TextButton(onClick = { if (canSave) onChooseDestination(selected) }, enabled = canSave) { Text("Choose where to save") }
+            TextButton(onClick = { if (canSave) onChooseDestination(selected, formulaAcked) }, enabled = canSave) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = state::csvDismiss, enabled = !state.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()).dismissOnEscape(dismiss)) {
+                // A14 review N3: why the dialog came back (the vault changed after the tick). Read off
+                // [synced], the re-presented preflight: [pre] is recomputed for the selection.
+                synced.notice?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
                 pre.offlineNote?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))

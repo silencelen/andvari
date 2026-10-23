@@ -574,23 +574,32 @@ built), so anyone who reads the file, now root or the container's user only, rea
 (c) **One sender gate in the extension's service worker** (F3/F4/F11): every message type is classified as sent by
 content scripts (the 17 types `content.ts` sends) or extension-page-only; the other 27 are answered with their own
 refusal shape unless `sender.url` is one of this extension's pages (`chrome.runtime.getURL("")`, either engine; a
-malformed base fails closed), before the handler runs, and a refused message does not re-arm the idle lock.
-`status`, `ping`, `updateStatus` and `linkUri` are gated too: no content script sends them. Unknown types are
-refused. The per-handler checks stay. Residual: a compromised RENDERER of one of our own extension pages is outside
-this gate (it is the extension). (d) **The CSV formula warning is an acknowledgement** (F6) on web, desktop and
-Android: it names each risky cell by field and item ("Password of “…”", the name escaped onto one line after our
-label), and the save stays disabled until it is ticked for exactly those cells. Values are written verbatim, by
-decision: a CSV export is input for another password manager, and a `'` prefix would corrupt a real password that
-starts with `=`, `+`, `-` or `@`. (e) **An enroll is bound to the origin its client dialed** (F8, desktop and the
-reachable Android twin): while it runs, Cancel, a re-pasted invite and Connect are refused and disabled; the session
-is saved under the client's own origin, and if the app was moved anyway the commit is aborted and the tokens revoked
-at the issuer; a stored session's tokens go only to its own origin (unlock refuses another; a locked sign-out revokes
-at the session's origin and still wipes locally). Residuals: a session a pre-A14 build already saved under the wrong
-origin cannot be told apart from a correct one; an install whose saved session predates the one-time default-URL
-migration now signs in again once. (f) **Desktop secret copies are marked sensitive** (F9): Windows
-`ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` and `CanUploadToCloudClipboard` (DWORD
-0), KDE `x-kde-passwordManagerHint` = `secret`; the auto-clear stays. Residual: a clipboard manager that ignores these
-hints still records the copy (owner device check: Win+V and Klipper on a real desktop). (g) **The offline tools escape
+malformed base fails closed), before the handler runs, and a refused message does not re-arm the idle lock. `status`,
+`ping`, `updateStatus` and `linkUri` are gated too: no content script sends them. Unknown types are refused. The
+per-handler checks stay. Residual: a compromised RENDERER of one of our own extension pages is outside this gate (it is
+the extension). (d) **The CSV formula warning is an acknowledgement** (F6) on web, desktop and Android: it names each
+risky cell by field and item ("Password of “…”", the name escaped onto one line after our label), and the save stays
+disabled until it is ticked for exactly those cells. Values are written verbatim, by decision: a CSV export is input for
+another password manager, and a `'` prefix would corrupt a real password that starts with `=`, `+`, `-` or `@`. Since
+the A14 review (N3) the native writes re-check it against what they write: the vault is re-read after the file chooser
+and a sync can land in between, so desktop and Android recompute the cells from the docs actually written
+(`ExportCsv.gatedWrite`) and write only when the tick covers exactly them; otherwise nothing is written and the dialog
+comes back with the new list, the same vault selection and an empty tick (web writes the very items the render that
+enabled its button computed). (e) **An enroll is bound to the origin its client dialed** (F8, desktop and the reachable
+Android twin): while it runs, Cancel, a re-pasted invite and Connect are refused and disabled; the session is saved
+under the client's own origin, and if the app was moved anyway the commit is aborted and the tokens revoked at the
+issuer; a stored session's tokens go only to its own origin (unlock refuses another; a locked sign-out revokes at the
+session's origin and still wipes locally). Since the A14 review (N4), a sign-in is bound the same way on both apps: its
+client's origin is captured when the client is built, the session is saved under it, and a move during the login and KDF
+aborts the commit with a revoke at the issuer; and desktop's manual repoint (`updateServer`, the gate's Connect) is
+refused at the state layer while any op holds a client, not only by the dialog's disabled button. Residuals: a session a
+pre-A14 build already saved under the wrong origin cannot be told apart from a correct one; an install whose saved
+session predates the one-time default-URL migration now signs in again once. (f) **Desktop secret copies are marked
+sensitive** (F9): Windows `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` and
+`CanUploadToCloudClipboard` (each a DWORD 0; the first was an empty payload until the A14 review, N8, which AWT
+publishes as a zero-size global block that may be a discarded handle), KDE `x-kde-passwordManagerHint` = `secret`; the
+auto-clear stays. Residual: a clipboard manager that ignores these hints still records the copy (owner device check:
+Win+V and Klipper on a real desktop). (g) **The offline tools escape
 what they print** (F12): `backup-cli verify` and `recovery-cli verify` replace every C0 (tab and newlines included), DEL
 and C1 character in payload-authored strings with a visible `\u001B`-style escape, the drill receipt line by line
 (JSON's own escape, so it still decodes the same). Since the A14 review (Wc/N9) the same escape also covers

@@ -39,6 +39,7 @@ import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
+import io.silencelen.andvari.core.client.CSV_CHANGED_NOTICE
 import io.silencelen.andvari.core.client.ExportVault
 import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.ExportPlanner
@@ -1069,6 +1070,16 @@ class DesktopState(
      * the new origin (§4.1 rule 1, B1-5) — no bearer token may cross a baseUrl change.
      */
     fun updateServer(url: String) {
+        // A14 review N4: refused at the state layer while an op holds a client (sign-in, enroll,
+        // recovery). The dialog's enabled = !busy was the only guard, and a sign-in that saved after
+        // its awaits would have paired the old origin's tokens with the new one.
+        if (switchLockedByOp) return
+        commitServer(url)
+    }
+
+    /** The ungated commit [updateServer] runs once the op lock allows it. Internal for the fence tests,
+     *  where it stands in for any future path that moves the origin under an op anyway. */
+    internal fun commitServer(url: String) {
         val clean = url.trim().removeSuffix("/")
         // §4.1 rule 1: token isolation FIRST, before any request to the new origin.
         clearSessionForSwitch()
@@ -1245,6 +1256,7 @@ class DesktopState(
     /** §4.4 Desktop: the manual baseline gate's Connect — commit + re-probe via [updateServer] (which
      *  carries the §4.1 token drop). The gate IS the gesture (§4.1 rule 3). */
     fun manualSwitchConnect() {
+        if (switchLockedByOp) return // A14 review N4: keep the gate open; Connect again once the op ends
         val target = manualSwitchTarget ?: return
         manualSwitchTarget = null
         updateServer(target)
@@ -1370,7 +1382,12 @@ class DesktopState(
     }
 
     private fun signInOp(email: String, password: String, totp: String?) = op(map = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
-        val a = newApi()
+        // A14 review N4: the origin and probe generation this sign-in's client is bound to, captured
+        // with the client (as enrollOp does). login() answers whoever this client dialed; the session
+        // is saved under THAT origin, and only if nothing moved the app away from it meanwhile.
+        val opOrigin = baseUrl
+        val opTag = probeFence.tag(originKey(opOrigin))
+        val a = newApi(origin = opOrigin)
         try {
             val pre = a.prelogin(email)
             // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on the UI thread.
@@ -1387,11 +1404,21 @@ class DesktopState(
             }
             val acct = withContext(Dispatchers.Default) {
                 // A11 (q08): the pin is found by the email the user TYPED, not only the server's userId.
-                Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPubFor(originKey(baseUrl), email, s.userId))
+                Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPubFor(originKey(opOrigin), email, s.userId))
             }
-            store.recordSelfIdentityPub(originKey(baseUrl), s.userId, email, acct)
+            // A14 review N4, second layer: the repoint is frozen while this op runs, but if the app was
+            // moved anyway these tokens are not for the origin it now dials. Do not commit: revoke them
+            // at the origin that issued them (this client's own), drop them, and say so.
+            if (baseUrl != opOrigin || !probeFence.isCurrent(opTag, originKey(baseUrl))) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+                error = signInOriginMoved(opOrigin) // before busy drops: a reader of !busy sees the refusal
+                busy = false
+                return@op
+            }
+            store.recordSelfIdentityPub(originKey(opOrigin), s.userId, email, acct)
             syncTokenPersistence() // A12 (row 81): memory-only when at-rest storage was declined
-            store.save(DesktopSession(baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(DesktopSession(opOrigin, s.userId, email, s.accessToken, s.refreshToken)) // A14 review N4: the client's own origin
             persistAccountKeys(s.userId, s.accountKeys)
             bind(a, acct); syncNow(engine!!)
             escrowStale = s.accountKeys.escrowStale; escrowFingerprint = s.accountKeys.escrowFingerprint
@@ -3307,22 +3334,44 @@ class DesktopState(
     // `orderForExport(allItems, includedVaults)`, which feeds writeCsv exactly as it feeds the
     // backup). Filtered against the preflight's OWN vault lines, never re-read from the engine, so
     // the file holds exactly what the dialog named.
-    fun csvRun(dest: File, selectedVaults: Set<String>) {
+    // A14 review N3: [acknowledged] is the formula-cell list the dialog's tick was given for. The write
+    // re-reads the vault (a sync can land while the file chooser is open), so the cells are recomputed
+    // from the docs actually written and the file is written only when the tick covers exactly them;
+    // otherwise nothing is written and the dialog comes back with the new list, the same selection and
+    // an empty tick.
+    fun csvRun(dest: File, selectedVaults: Set<String>, acknowledged: List<ExportCsv.FormulaCell>?) {
         val e = engine ?: return
         if (account == null) return
-        val order = csvPreflightVaults.map { it.vaultId }.filter { it in selectedVaults }
+        val vaults = csvPreflightVaults
+        val offline = csvPreflight?.offlineNote
+        val order = vaults.map { it.vaultId }.filter { it in selectedVaults }
         busy = true; error = null; csvPreflight = null; csvPreflightVaults = emptyList()
         scope.launch {
             try {
-                val count = withContext(Dispatchers.IO) {
+                val outcome = withContext(Dispatchers.IO) {
                     val docs = orderedDocs(e, order)
-                    val bytes = ExportCsv.write(docs).encodeToByteArray()
-                    try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // plaintext passwords — wipe our copy
-                    docs.count { it.type == "login" }
+                    when (val gated = ExportCsv.gatedWrite(docs, acknowledged)) {
+                        is ExportCsv.GatedWrite.NeedsAcknowledgement -> gated
+                        is ExportCsv.GatedWrite.Ready -> {
+                            val bytes = gated.csv.encodeToByteArray()
+                            try { writeVerifiedAtomically(dest, bytes) } finally { bytes.fill(0) } // plaintext passwords — wipe our copy
+                            gated
+                        }
+                    }
                 }
-                touch()
-                busy = false
-                notice = "Exported $count logins to ${dest.absolutePath}. Delete the CSV once the other manager has imported it."
+                when (outcome) {
+                    is ExportCsv.GatedWrite.NeedsAcknowledgement -> {
+                        csvPreflightVaults = vaults
+                        csvPreflight = CsvPreflight(outcome.warnings, outcome.loginCount, offline, selection = selectedVaults, notice = CSV_CHANGED_NOTICE)
+                        busy = false
+                        return@launch
+                    }
+                    is ExportCsv.GatedWrite.Ready -> {
+                        touch()
+                        busy = false
+                        notice = "Exported ${outcome.loginCount} logins to ${dest.absolutePath}. Delete the CSV once the other manager has imported it."
+                    }
+                }
             } catch (t: Throwable) {
                 busy = false; error = exportError(t) // #23 carve-out: app-minted ISE sentences pass; wire text never
             }
@@ -3850,6 +3899,10 @@ class DesktopState(
         /** A14 (F8): unlock refuses a stored session saved for another origin than the one dialed. */
         fun sessionElsewhere(sessionOrigin: String): String =
             "This saved sign-in belongs to $sessionOrigin, not this server. Sign out, then sign in here."
+
+        /** A14 review N4: a sign-in whose origin moved while login was in flight is not committed. */
+        fun signInOriginMoved(origin: String): String =
+            "The server changed while you were signing in at $origin, so that sign-in was not saved and was ended there. Sign in again."
 
         /** A14 (F8): an enroll whose origin moved while register was in flight is not committed. */
         fun enrollOriginMoved(origin: String): String =
