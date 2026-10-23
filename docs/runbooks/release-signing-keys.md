@@ -13,29 +13,64 @@ plus a `$PROFILE` function) because step 3 checks out the release tag and would 
 the script underneath its own execution.
 
 ```powershell
-signandvari 0.25.0 -Commit <sha> -DryRun     # preflight, seq arithmetic and manifest preview; signs nothing
-signandvari 0.25.0 -Commit <sha>             # verify tag -> review + confirm -> checkout -> ceremony -> ordered drop
+signandvari 0.25.0 -Commit <sha> -DryRun     # signs nothing; still stops at the typed confirm, then runs the tree's prestige-release.ps1
+signandvari 0.25.0 -Commit <sha>             # verify tag -> review -> checkout -> typed confirm -> ceremony -> ordered drop
 signandvari 0.25.0 -Commit <sha> -SkipDrop   # produce the bundle, deliver it by hand
 ```
+
+**`-DryRun` is not a run in which no tree code runs** (A14 review R2-6). It signs nothing and
+drops nothing, but it goes through the same review and typed confirmation, and once you confirm it
+runs the release tree's own `prestige-release.ps1` on this account, beside `update-signing.key`
+(with `-DryRun`, which that tree's script is trusted to honour). Confirm a dry run only for a tree
+you would confirm a real run for.
 
 **One-time, before the first ceremony that uses `-Commit`** (security review 2026-10). The box runs
 the INSTALLED copy, so the reviewed script has to be installed before it can protect anything. An
 older copy rejects `-Commit` ("A parameter cannot be found that matches parameter name 'Commit'").
 **If it does, STOP and install first; never drop `-Commit`**: the old script force-fetches tags and
 then runs whatever tree the tag names, and the pin checks inside that tree's own
-`prestige-release.ps1` are that tree's code. Install from the commit you reviewed, read the diff,
-then replace:
+`prestige-release.ps1` are that tree's code. It is two separate steps, and the second is never
+pasted together with the first (A14 review R2-5).
+
+*Step 1 - fetch the reviewed copy beside the installed one and read the diff.* This replaces
+nothing:
 
 ```powershell
 git -C $env:ANDVARI_REPO fetch origin main
 git -C $env:ANDVARI_REPO show <reviewed-sha>:scripts/signandvari.ps1 | Set-Content -Encoding Ascii "$HOME\bin\signandvari.new.ps1"
 git diff --no-index --ignore-cr-at-eol -- "$HOME\bin\signandvari.ps1" "$HOME\bin\signandvari.new.ps1"
+```
+
+*Step 2 - only once you have read that diff and it is the change you reviewed,* install it:
+
+```powershell
 Move-Item -Force "$HOME\bin\signandvari.new.ps1" "$HOME\bin\signandvari.ps1"
 ```
 
-(`signandvari.ps1` is pure ASCII, which the PowerShell gate enforces, so `Set-Content -Encoding Ascii`
-is byte-faithful apart from line endings.) Repeat this whenever a release changes
+If the diff is not what you reviewed, delete `signandvari.new.ps1` and stop. (`signandvari.ps1`
+is pure ASCII, which the PowerShell gate enforces, so `Set-Content -Encoding Ascii` is
+byte-faithful apart from line endings.) Repeat both steps whenever a release changes
 `scripts/signandvari.ps1`: the tree never updates the installed copy, by design.
+
+**Where `<reviewed-sha>` and `<sha>` come from** (A14 review R2-5). Not from the handoff alone:
+the handoff is written by the build host, and a value it supplies would become the installed
+verifier or the release pin. Read each one off GitHub's web UI yourself and compare it with the
+handoff value; stop if they differ. `<reviewed-sha>` is the merge commit (or pull request head)
+you approved there; `<sha>` is the commit GitHub's page for the release tag `v<ver>` names. What
+that does: GitHub is a second view of what was pushed, served by a party the build host does not
+control, so it catches a handoff value that was mistyped, altered on its way to you, or names a
+commit that was never published, and it ties `<reviewed-sha>` to the review you actually did rather
+than to whatever the build host says you reviewed. What it does not do: the build host can push to
+that repository, so a commit it pushed and tagged there itself appears on GitHub exactly as it
+handed it over. Against that, what remains is your own review of the merge, the stat and commit
+list `signandvari` prints since the last release you signed (below), and GitHub's record of who
+pushed what.
+
+**Do not `git pull` or run a plain `git fetch` in the signing checkout before the first ceremony
+on this version of `signandvari`** (A14 review R2-3). Step 1's `git fetch origin main` is the only
+fetch it needs (a fetch that names a branch does not pull tags in with it), and `signandvari`
+fetches the release tag itself. A pull checks an unreviewed tree out into the very checkout the
+ceremony runs in, and a plain fetch brings in every new tag on the remote.
 
 **`-Commit <sha>` is required** (security review 2026-10): the full 40-hex commit the release tag
 was cut at, copied from the handover line the build host prints
@@ -62,13 +97,32 @@ code runs (dry runs included) it:
 1. refuses unless the release commit **descends** from that commit
    (`git merge-base --is-ancestor <last> <commit>`) — merge a release branch back before the next
    ceremony;
-2. prints `git log --oneline <last>..<commit>` and a `git diff --stat` of every path whose code runs
-   during the ceremony: `scripts/`, `gradlew.bat`, `gradlew`, `gradle/`, `gradle.properties`,
-   `*.gradle.kts`, `buildSrc/`, `tools/update-signer/` and the core crypto directories the signer
-   links;
-3. asks the operator to **type the version** being released. Anything else stops the run. A run with
-   no human at a console — `-NonInteractive`, piped or redirected input, a service — stops at that
-   prompt; there is no flag that skips it.
+2. refuses a release tree in which two paths are **one file on a case-insensitive disk** (NTFS
+   compares names case-insensitively and ignores a trailing dot or space, so
+   `Scripts/prestige-release.ps1` beside `scripts/prestige-release.ps1` would be written one over
+   the other);
+3. prints a `git diff --stat <last>..<commit>` of the code that runs beside the key, **first**, and
+   then `git log` of the commits in that range, every line taken from git escaped (C0, DEL, C1 and the
+   bidi controls print as `\u001B`-style text, so a commit subject cannot move the cursor or redraw
+   the stat on a VT console; A14 review R2-2). The stat matches these paths in any case:
+   `core/` (ALL of it), `tools/update-signer/`, `scripts/`, `gradlew*`, `gradle/`,
+   `*gradle.properties`, `settings.gradle.kts`, every `*.gradle.kts` and `*.gradle`, `buildSrc/`,
+   `build-logic/`, and `.gradle/`, `.kotlin/`, `local.properties` should a tree ever track them. That
+   is what the ceremony builds and runs here: its scripts, the whole gradle build, and the
+   update-signer, which is handed the key's path and is a shadowJar of `tools/update-signer` plus
+   all of `:core`. **All** of core, not its crypto (A14 review R2-1): Kotlin resolves an
+   unqualified call to a declaration in the caller's own package ahead of its default imports, from
+   any module on the classpath, so one core file that declares the signer's package and a
+   same-named function replaces the signer's own key read, and a stat over core's crypto
+   directories printed "(no changes)" over exactly that. Not covered: the third-party artifacts
+   gradle downloads (only the catalog that names them), the JDK, and the sources compiled into the
+   MSI but never run here (`app-desktop/src`), which the commit list names. The stat is names and
+   counts; the line under it gives the `git diff` command to read the change in full;
+4. checks the tree out, and refuses unless `git status --porcelain` is then empty (what is on disk
+   must be exactly the commit that was reviewed);
+5. asks the operator to **type the version** being released. Anything else stops the run and puts
+   HEAD back where it was. A run with no human at a console — `-NonInteractive`, piped or redirected
+   input, a service — stops before anything is checked out; there is no flag that skips it.
 
 The record moves only after `prestige-release.ps1` exited 0 **and** `bundle.json` records the
 pinned commit. A dry run, a refused run or a failed ceremony leaves it where it was. This is a review
@@ -76,16 +130,21 @@ aid that rests on the operator reading the diff, not a proof: a compromised buil
 a descendant commit, but it can no longer swap the tree silently or rewrite history under the last
 release, and a change to the build is in front of a human before it runs.
 
-**First run** (no record yet, e.g. the first ceremony after this change): the baseline is the newest
-local tag `v<x.y.z>` *below* the version being released that the checkout already held **before**
-this run's fetch. The fetch only ever adds `v<ver>` and never moves an existing tag, so nothing it
-brings in can choose the baseline. The output says it is a first run and which tag it compared
-against. With no such tag (a checkout that holds no older release tags) the run stops and asks
-for `-Baseline <40-hex>`: a commit you reviewed yourself, such as the last release you signed —
-never one read off the build host. A checkout cloned just before the run holds the remote's tags as
-they were at clone time, so the seed is only as good as that; pass `-Baseline` on a first run to
-choose the comparison yourself. `-Baseline` is refused once a record exists. **Reset:** deleting
-the record on purpose (history rewritten, a new checkout) makes the next run a first run again.
+**First run** (no record yet, e.g. the first ceremony after this change; A14 review R2-3): the
+baseline is the commit in **this box's own most recent signed bundle**:
+`dist\release-bundle-<version>\bundle.json` in the checkout, beside its `manifest.json.sig`.
+`prestige-release.ps1` writes both only after a signature it verified (the `.sig` last), `dist\` is
+gitignored so no checkout replaces it, and the highest `seq` wins; a `bundle.json` that git tracks
+is the tree's content, not this box's, and is skipped. The output says FIRST RUN, names the bundle,
+and prints the baseline commit's date and subject — check that it is the release you last signed.
+**A tag is never the seed**: a plain `git fetch` or `git pull` brings in new tags, so a planted
+intermediate tag would become the baseline and hide every change up to it. With no signed bundle
+(a new checkout, a cleaned `dist\`) the run stops and asks for `-Baseline <40-hex>`: a commit you
+reviewed yourself, such as the last release you signed — never one read off the build host. It may
+also be passed on any first run to choose the comparison, it must be a **strict** ancestor of
+`-Commit` (`-Baseline` equal to `-Commit` would compare the release with itself and show nothing;
+A14 review R2-4), and it is refused once a record exists. **Reset:** deleting the record on purpose
+(history rewritten, a new checkout) makes the next run a first run again.
 
 Configuration is **environment-only**, so nothing instance-specific lives in this public repo:
 `ANDVARI_REPO` (the checkout), `ANDVARI_RELEASE_DROP` (`user@host:/path/`), optionally

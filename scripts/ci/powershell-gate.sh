@@ -29,7 +29,11 @@
 #      release tag and never forces it, both scripts take -Commit, the release must descend from the
 #      workstation's last signed commit and be confirmed by a human (A13 review RF1/RF7), and
 #      scripts/ci/signandvari-pin.test.sh drives signandvari against a scratch repo (wrong pin, moved
-#      tag, missing pin, non-descendant, unattended run, record only on success, first-run seed).
+#      tag, missing pin, non-descendant, unattended run, record only on success, first-run seed). Since
+#      the A14 review: the review stat covers every module the update-signer links and every build input
+#      (R2-1, checked here against the signer's own project dependencies), git output is escaped and the
+#      stat printed first (R2-2), the first-run seed is this box's own signed bundle, never a tag (R2-3),
+#      -Baseline is a strict ancestor (R2-4), and the NTFS case-collision belt.
 #
 # Skips (green, loudly) when pwsh is absent, because a contributor without PowerShell must still
 # be able to run the release gate; CI and the maintainer's box have it.
@@ -121,6 +125,54 @@ write_pos=$(grep -n 'Move-Item -LiteralPath \$recordTmp -Destination \$RecordPat
 # The one-time install recipe (release-signing-keys.md §0) writes this file through PowerShell 5.1,
 # which also reads a BOM-less .ps1 in the ANSI code page: it stays pure ASCII.
 LC_ALL=C grep -nP '[^\x00-\x7F]' "$S" >&2 && fail "$S contains non-ASCII characters (lines above) — keep it pure ASCII."
+# A14 review R2-1: the review stat covers everything that runs beside the key. The update-signer is a shadowJar of
+# tools/update-signer plus every module it links, ALL of each (an unqualified call resolves to a same-package
+# declaration in any module on the classpath), so walk its project(":...") dependencies transitively and require each
+# module's directory - or a directory above it - in $ReviewPaths. Plus the root build inputs the prompt for A14 named.
+review_block=$(sed -n '/^\$ReviewPaths = @(/,/^)/p' "$S")
+[ -n "$review_block" ] || fail "$S has no \$ReviewPaths block - what does the review stat cover?"
+for need in core/ tools/update-signer/ scripts/ 'gradlew*' gradle/ '*gradle.properties' settings.gradle.kts '*.gradle.kts' buildSrc/; do
+  printf '%s\n' "$review_block" | grep -qF "'$need'" || fail "$S \$ReviewPaths lost '$need' (A14 review R2-1)."
+done
+seen=" tools/update-signer "; queue=(tools/update-signer)
+while [ "${#queue[@]}" -gt 0 ]; do
+  m="${queue[0]}"; queue=("${queue[@]:1}")
+  [ -f "$m/build.gradle.kts" ] || fail "module $m (linked by the update-signer) has no build.gradle.kts"
+  for dep in $(grep -oE 'project\("(:[A-Za-z0-9_.-]+)+"\)' "$m/build.gradle.kts" | grep -oE '(:[A-Za-z0-9_.-]+)+'); do
+    d="${dep#:}"; d="${d//://}"
+    case "$seen" in *" $d "*) continue ;; esac
+    seen="$seen$d "; queue+=("$d")
+  done
+done
+for d in $seen; do
+  covered=""; prefix=""
+  IFS=/ read -ra segs <<< "$d"
+  for seg in "${segs[@]}"; do
+    prefix="${prefix:+$prefix/}$seg"
+    printf '%s\n' "$review_block" | grep -qF "'$prefix/'" && covered=1
+  done
+  [ -n "$covered" ] || fail "the update-signer links $d, which \$ReviewPaths in $S does not cover (A14 review R2-1)."
+done
+grep -qF '":(icase)$_"' "$S" || fail "$S no longer matches the review paths case-insensitively."
+# A14 review R2-2: git output is escaped before it is printed, and the stat comes before the commit list.
+grep -qF '[System.Text.RegularExpressions.MatchEvaluator]' "$S" || fail "$S lost the MatchEvaluator escape of git output."
+grep -nE 'Write-Host .*\$(log|stat|status|after)\b|Write-Host \$fetch|Write-Host \$anc|\| ForEach-Object \{ Write-Host "   \$_" \}' "$S" >&2 \
+  && fail "$S prints git output raw (lines above): route it through Write-GitText."
+stat_pos=$(grep -n 'if (\$stat) { Write-GitText \$stat }' "$S" | head -1 | cut -d: -f1)
+log_pos=$(grep -n 'if (\$log) { Write-GitText \$log }' "$S" | head -1 | cut -d: -f1)
+{ [ -n "$stat_pos" ] && [ -n "$log_pos" ] && [ "$stat_pos" -lt "$log_pos" ]; } \
+  || fail "$S must print the escaped stat BEFORE the escaped commit list."
+# A14 review R2-3: never a tag as the first-run seed.
+grep -qE "for-each-ref.*refs/tags|Get-SeedTag" "$S" && fail "$S seeds the first-run baseline from tags again (A14 review R2-3)."
+# The NTFS case: collisions refused before checkout; the tree checked clean after it and before the confirmation.
+coll_pos=$(grep -n '^\$collisions = Find-CaseCollisions' "$S" | head -1 | cut -d: -f1)
+co_pos=$(grep -n "Invoke-Git -Arguments @('checkout', '--detach', \$Commit)" "$S" | head -1 | cut -d: -f1)
+clean_pos=$(grep -n "^\$after = (Invoke-Git -Arguments @('status', '--porcelain'))" "$S" | head -1 | cut -d: -f1)
+ask_pos=$(grep -n 'Read-Host' "$S" | head -1 | cut -d: -f1)
+{ [ -n "$coll_pos" ] && [ -n "$co_pos" ] && [ -n "$clean_pos" ] && [ -n "$ask_pos" ] \
+  && [ "$coll_pos" -lt "$co_pos" ] && [ "$co_pos" -lt "$clean_pos" ] && [ "$clean_pos" -lt "$ask_pos" ]; } \
+  || fail "$S must refuse case collisions before the checkout and check the tree clean after it, before the confirmation."
 bash scripts/ci/signandvari-pin.test.sh || fail "the signandvari tag-pin scratch-repo test failed."
 echo "    signandvari.ps1 + prestige-release.ps1 verify the tag against -Commit; release tag fetched alone, unforced;"
-echo "    the release descends from the workstation's last signed commit and is confirmed by a human"
+echo "    the release descends from the workstation's last signed commit and is confirmed by a human;"
+echo "    the review covers all of :core and the build, escaped, stat first; case collisions refused"
