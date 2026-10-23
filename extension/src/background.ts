@@ -27,7 +27,9 @@ import {
 import { startEvents, type EventsHandle, type WsLike } from "./events";
 import { CARD_FORMAT_VERSION, LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "./format";
 import { isNewerVersion } from "./version";
-import { evaluateSignedManifest, MIN_SEQ, updatesEnabled } from "./updateverify";
+import { evaluateSignedManifest, MIN_SEQ, readCappedBody, UPDATE_MANIFEST_MAX_BYTES, UPDATE_SIG_MAX_BYTES, updatesEnabled } from "./updateverify";
+import { loginGrantRedeemable, type LoginGrant } from "./fillgrant";
+import { gateServedEnvelope } from "./servedblob";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardFieldKind } from "./detect";
 import { chooseCardTarget } from "./messages";
@@ -377,7 +379,7 @@ let tabs = new Map<number, TabState>();
  *  top-level ORIGIN at mint, redemption requires the browser-set `sender.origin` to equal it, and a
  *  top-level navigation (status "loading") voids it — so a document that replaced the one the user
  *  picked the login for can never redeem it. */
-const grants = new Map<number, { itemId: string; origin: string; expiresMs: number }>();
+const grants = new Map<number, LoginGrant>();
 /** S3 CARD fill grants — a store SEPARATE from login `grants` ([A5]). `grants` is single-slot per
  *  tab, so sharing it would let a card grant clobber a live login grant (and let one path's
  *  redemption consume the other's). A card grant carries the two extra bindings the contract needs
@@ -1684,8 +1686,16 @@ async function checkForUpdate(force = false): Promise<void> {
       return;
     }
 
-    const raw = new Uint8Array(await mResp.arrayBuffer()); // EXACT bytes — never resp.json() (§M-D6)
-    const sigText = await sResp.text();
+    // EXACT bytes — never resp.json() (§M-D6) — and CAPPED while read (A13 review RF6, desktop q19): both bodies are
+    // unverified server bytes. An oversized answer is a misbehaving server, the same stamped quiet as a non-OK one.
+    const raw = await readCappedBody(mResp, UPDATE_MANIFEST_MAX_BYTES);
+    const sigBytes = raw === null ? null : await readCappedBody(sResp, UPDATE_SIG_MAX_BYTES);
+    if (raw === null || sigBytes === null) {
+      await sResp.body?.cancel().catch(() => undefined);
+      await chrome.storage.local.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
+      return;
+    }
+    const sigText = new TextDecoder().decode(sigBytes);
     const storedSeq = (await chrome.storage.local.get(kSeq))[kSeq];
     // §M-D4(a) anti-rollback FLOOR: a fresh install (or a wiped USEQ) starts at MIN_SEQ, not 0, so a
     // T1 server can't steer it to any validly-signed-but-older (known-vuln) manifest below the floor.
@@ -2700,14 +2710,9 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           // opened. A blob that is not base64url or not a readable envelope is a damaged/foreign account row — the
           // server's doing, never the device's key — so it is the terminal keys_damaged refusal with the enrolled blob
           // KEPT, not a wipe blamed on a stale UVK.
-          let seedEnvelope: Uint8Array;
-          try {
-            seedEnvelope = fromB64(keys.encryptedIdentitySeed);
-          } catch {
-            throw new VaultKeyDamagedError("encryptedIdentitySeed is not valid base64url");
-          }
-          const seedRefusal = envelopeStructuralRefusal(seedEnvelope);
-          if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
+          const seedGate = gateServedEnvelope(keys.encryptedIdentitySeed);
+          if (!seedGate.ok) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedGate.why}`);
+          const seedEnvelope = seedGate.envelope;
           // The seed open throwing = stale/foreign UVK (→ wipe); the compare failing = IdentityMismatchError
           // (→ HARD FAIL, blob KEPT). Same strictness as the full unlock (verifyServerIdentity).
           const identity = boxKeypairFromSeed(open(begin.uvk, seedEnvelope, adIdkey(begin.userId)));
@@ -3204,9 +3209,8 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
   // sub-frame — which reveal() would otherwise NOT host-match — claims the secret from it.
   const isTopFrame = sender.frameId === undefined || sender.frameId === 0;
   if (!allowed && tabId !== undefined && isTopFrame) {
-    const g = grants.get(tabId);
     // q39: the redeeming document must be the origin the grant was minted for (fail closed on an undefined origin).
-    if (g && g.itemId === msg.itemId && g.expiresMs > Date.now() && typeof sender.origin === "string" && sender.origin === g.origin) {
+    if (loginGrantRedeemable(grants.get(tabId), msg.itemId, sender.origin, Date.now())) {
       grants.delete(tabId); // one-shot
       allowed = true;
     }

@@ -12,6 +12,8 @@
 #                             stale image that differs only in a non-app-desktop jar is refused, a
 #                             --skip-gradle image of another version is refused, and two copies of
 #                             one build whose jars were re-packed with fresh timestamps still pass.
+#                             (A13 review I1) The jar comparison holds under an awk without interval
+#                             expressions, and a jar unzip cannot list is a refusal, not a match.
 #   gh-release.sh       (c07) SHA256SUMS is signed by the PINNED release key even when gpg's default
 #                             key is another one, and every .asc is verified against that key
 #                             BEFORE the release is created: a stale .asc, or one by another key,
@@ -144,6 +146,39 @@ image "$BIN/app/andvari" core-v1 2025 72be21dd83d18946fd6e9b8e1e9bbe6; jpstate 9
 out="$(bl)" && fail "build-linux.sh --skip-gradle accepted an app-image that declares version 9.9.8"
 printf '%s\n' "$out" | grep -q 'stale app-image' || fail "the stale-version refusal does not say why:
 $out"
+# (d) A13 review I1: under an awk WITHOUT interval expressions (mawk before 20200717 reads `{8}`
+# literally) the stale core jar of (b) must still be caught. The shim below is that awk: it escapes
+# every `{n}` / `{n,m}` that follows a bracket expression or a group, so it matches literally, and
+# runs everything else on the real awk. Before I1 the CRC filter matched nothing there, every jar
+# hashed the same empty list, and the stale image passed.
+REAL_AWK="$(command -v awk)"
+mkdir -p "$W/oldawk"
+cat > "$W/oldawk/awk" <<'SHIM'
+#!/usr/bin/env python3
+import os, re, sys
+real = os.environ["REAL_AWK"]
+args = [re.sub(r'([\])])\{([0-9]+(,[0-9]*)?)\}', r'\1\\{\2\\}', a) for a in sys.argv[1:]]
+os.execv(real, [real] + args)
+SHIM
+chmod 755 "$W/oldawk/awk"
+bl_oldawk() { (cd "$BL" && PATH="$W/oldawk:$PATH" REAL_AWK="$REAL_AWK" HOME="$W/home" ANDVARI_GRADLE_LOCK="$W/gradle.lock" \
+        bash scripts/build-linux.sh --skip-gradle --no-sign --stage "$W/bl-stage" 2>&1); }
+image "$BIN/app/andvari" core-v0-STALE 2025 72be21dd83d18946fd6e9b8e1e9bbe6; jpstate 9.9.9
+out="$(bl_oldawk)" && fail "under an awk without interval expressions, build-linux.sh packaged a stale app-image (the jar comparison went vacuous)"
+printf '%s\n' "$out" | grep -q 'DIFFERENT builds' || fail "the stale-core refusal under the interval-less awk does not say why:
+$out"
+image "$BIN/app/andvari" core-v1 2025 72be21dd83d18946fd6e9b8e1e9bbe6; jpstate 9.9.9
+out="$(bl_oldawk)" || fail "under an awk without interval expressions, build-linux.sh refused two copies of ONE build:
+$out"
+# (e) I1: a jar that unzip cannot list, identical in BOTH copies, is a refusal, never a vacuous match.
+image "$W/img-deb" core-v1 2026 a3100d18fbdbed5ddfea8111cbc29d7
+printf 'not a zip\n' > "$W/img-deb/lib/app/core-jvm-fedcba9876543210fedcba9876543210.jar"
+mkdeb "$W/img-deb"
+image "$BIN/app/andvari" core-v1 2025 72be21dd83d18946fd6e9b8e1e9bbe6; jpstate 9.9.9
+printf 'not a zip\n' > "$BIN/app/andvari/lib/app/core-jvm-fedcba9876543210fedcba9876543210.jar"
+out="$(bl)" && fail "build-linux.sh accepted a same-build proof over a jar unzip cannot read (both copies hashed an empty entry list)"
+printf '%s\n' "$out" | grep -q 'could not list' || fail "the unreadable-jar refusal does not say why:
+$out"
 
 # ============================================================== gh-release.sh (c07) ===========
 echo "==> release scripts: gh-release.sh signs with the pinned key and verifies every .asc first"
@@ -197,6 +232,8 @@ $out"
   fi
   printf '%s\n' "$out" | grep -q "signandvari 9.9.9 -Commit $GR_COMMIT" \
     || fail "gh-release.sh did not print the ceremony line 'signandvari 9.9.9 -Commit $GR_COMMIT'"
+  printf '%s\n' "$out" | grep -q "if signandvari rejects -Commit, STOP and install the reviewed scripts/signandvari.ps1 first.*never drop -Commit" \
+    || fail "gh-release.sh's handover does not say to install the reviewed signandvari when -Commit is rejected"
 
   # (b) a stale .asc: the package bytes changed after it was signed (a --skip-gradle --no-sign re-run).
   printf 'pkg bytes, rebuilt\n' > "$GBIN/arch/andvari-9.9.9-1-x86_64.pkg.tar.zst"
