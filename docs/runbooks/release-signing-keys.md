@@ -6,17 +6,36 @@ Sibling to the escrow/recovery-ceremony record (`docs/drills/escrow-genesis-cere
 
 ## 0. The ceremony is one command (`signandvari`, 2026-08-20)
 
-Everything the signing box does for a release — fetch tags, check out the tag, find `signtool`,
-build and sign the MSI, mint the manifest at the next `seq`, sign it, and deliver the bundle —
-runs as **`scripts/signandvari.ps1`**, installed *outside* the repo (`%USERPROFILE%\bin` plus a
-`$PROFILE` function) because step 3 checks out the release tag and would otherwise replace the
-script underneath its own execution.
+Everything the signing box does for a release — fetch the release tag, check out the tag, find
+`signtool`, build and sign the MSI, mint the manifest at the next `seq`, sign it, and deliver the
+bundle — runs as **`scripts/signandvari.ps1`**, installed *outside* the repo (`%USERPROFILE%\bin`
+plus a `$PROFILE` function) because step 3 checks out the release tag and would otherwise replace
+the script underneath its own execution.
 
 ```powershell
 signandvari 0.25.0 -Commit <sha> -DryRun     # preflight, seq arithmetic and manifest preview; signs nothing
-signandvari 0.25.0 -Commit <sha>             # verify tag -> checkout -> ceremony -> ordered drop
+signandvari 0.25.0 -Commit <sha>             # verify tag -> review + confirm -> checkout -> ceremony -> ordered drop
 signandvari 0.25.0 -Commit <sha> -SkipDrop   # produce the bundle, deliver it by hand
 ```
+
+**One-time, before the first ceremony that uses `-Commit`** (security review 2026-10). The box runs
+the INSTALLED copy, so the reviewed script has to be installed before it can protect anything. An
+older copy rejects `-Commit` ("A parameter cannot be found that matches parameter name 'Commit'").
+**If it does, STOP and install first; never drop `-Commit`**: the old script force-fetches tags and
+then runs whatever tree the tag names, and the pin checks inside that tree's own
+`prestige-release.ps1` are that tree's code. Install from the commit you reviewed, read the diff,
+then replace:
+
+```powershell
+git -C $env:ANDVARI_REPO fetch origin main
+git -C $env:ANDVARI_REPO show <reviewed-sha>:scripts/signandvari.ps1 | Set-Content -Encoding Ascii "$HOME\bin\signandvari.new.ps1"
+git diff --no-index --ignore-cr-at-eol -- "$HOME\bin\signandvari.ps1" "$HOME\bin\signandvari.new.ps1"
+Move-Item -Force "$HOME\bin\signandvari.new.ps1" "$HOME\bin\signandvari.ps1"
+```
+
+(`signandvari.ps1` is pure ASCII, which the PowerShell gate enforces, so `Set-Content -Encoding Ascii`
+is byte-faithful apart from line endings.) Repeat this whenever a release changes
+`scripts/signandvari.ps1`: the tree never updates the installed copy, by design.
 
 **`-Commit <sha>` is required** (security review 2026-10): the full 40-hex commit the release tag
 was cut at, copied from the handover line the build host prints
@@ -25,9 +44,48 @@ tag's tree — its scripts and its gradle build — with the update-signing key 
 account, and a tag is a mutable ref on a remote the build host can write to. So before anything is
 checked out, the tag must resolve to exactly that commit; HEAD must equal it after the checkout and
 again right before `prestige-release.ps1` starts (which takes the same `-Commit` and records it as
-`bundle.json.commit`). Tags are fetched **without `--force`**: a remote tag that differs from the
-local one stops the run and names both commits, instead of silently replacing it. A mismatch is a
-reason to ask the build host what happened, never to re-run with the tag's commit.
+`bundle.json.commit`). Only the release tag is fetched (`refs/tags/v<ver>`, `--no-tags`), and
+**never with `--force`**: a remote release tag that differs from the local one stops the run and
+names both commits, instead of silently replacing it, and any *other* tag that moved on the remote
+is not fetched, so it cannot block a ceremony. A mismatch is a reason to ask the build host what
+happened, never to re-run with the tag's commit.
+
+**What the pin does and does not do.** The handover line reads the build host's own local tag, so
+the pin closes a tag moved by anyone other than the build host, a tag moved after the handover line
+was printed, and an accidental re-tag. It does **not** close a compromised build host: that host
+chooses both the tag and the pin. The layer aimed at that is the workstation's own record:
+
+**The last signed commit.** `signandvari` keeps the commit of its last *successful* ceremony in
+`%LOCALAPPDATA%\andvari\signandvari-last-signed.json`, outside the repo. Before any of the tree's
+code runs (dry runs included) it:
+
+1. refuses unless the release commit **descends** from that commit
+   (`git merge-base --is-ancestor <last> <commit>`) — merge a release branch back before the next
+   ceremony;
+2. prints `git log --oneline <last>..<commit>` and a `git diff --stat` of every path whose code runs
+   during the ceremony: `scripts/`, `gradlew.bat`, `gradlew`, `gradle/`, `gradle.properties`,
+   `*.gradle.kts`, `buildSrc/`, `tools/update-signer/` and the core crypto directories the signer
+   links;
+3. asks the operator to **type the version** being released. Anything else stops the run. A run with
+   no human at a console — `-NonInteractive`, piped or redirected input, a service — stops at that
+   prompt; there is no flag that skips it.
+
+The record moves only after `prestige-release.ps1` exited 0 **and** `bundle.json` records the
+pinned commit. A dry run, a refused run or a failed ceremony leaves it where it was. This is a review
+aid that rests on the operator reading the diff, not a proof: a compromised build host can still cut
+a descendant commit, but it can no longer swap the tree silently or rewrite history under the last
+release, and a change to the build is in front of a human before it runs.
+
+**First run** (no record yet, e.g. the first ceremony after this change): the baseline is the newest
+local tag `v<x.y.z>` *below* the version being released that the checkout already held **before**
+this run's fetch. The fetch only ever adds `v<ver>` and never moves an existing tag, so nothing it
+brings in can choose the baseline. The output says it is a first run and which tag it compared
+against. With no such tag (a checkout that holds no older release tags) the run stops and asks
+for `-Baseline <40-hex>`: a commit you reviewed yourself, such as the last release you signed —
+never one read off the build host. A checkout cloned just before the run holds the remote's tags as
+they were at clone time, so the seed is only as good as that; pass `-Baseline` on a first run to
+choose the comparison yourself. `-Baseline` is refused once a record exists. **Reset:** deleting
+the record on purpose (history rewritten, a new checkout) makes the next run a first run again.
 
 Configuration is **environment-only**, so nothing instance-specific lives in this public repo:
 `ANDVARI_REPO` (the checkout), `ANDVARI_RELEASE_DROP` (`user@host:/path/`), optionally

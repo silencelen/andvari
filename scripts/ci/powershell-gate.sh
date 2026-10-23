@@ -25,9 +25,11 @@
 #      published channel to read — and they are deliberately anchored on the *decisions* (Die on
 #      mismatch, Die on overtaken seq, Die on timeout) rather than on wording.
 #
-#   3. Assert the release-commit pin (security review 2026-10): signandvari.ps1 never force-fetches
-#      tags, both scripts take -Commit, and scripts/ci/signandvari-pin.test.sh drives signandvari
-#      against a scratch repo (wrong pin, moved tag, missing pin).
+#   3. Assert the release-commit pin (security review 2026-10): signandvari.ps1 fetches only the
+#      release tag and never forces it, both scripts take -Commit, the release must descend from the
+#      workstation's last signed commit and be confirmed by a human (A13 review RF1/RF7), and
+#      scripts/ci/signandvari-pin.test.sh drives signandvari against a scratch repo (wrong pin, moved
+#      tag, missing pin, non-descendant, unattended run, record only on success, first-run seed).
 #
 # Skips (green, loudly) when pwsh is absent, because a contributor without PowerShell must still
 # be able to run the release gate; CI and the maintainer's box have it.
@@ -101,5 +103,24 @@ done
 grep -q "'-Commit', \$Commit" "$S" || fail "$S no longer hands the -Commit pin to prestige-release.ps1."
 grep -q 'commit    = \$CommitPin' scripts/prestige-release.ps1 \
   || fail "prestige-release.ps1 no longer records the pinned commit in bundle.json."
+# A13 review RF7: only the release tag is fetched. `fetch --tags` refuses on ANY moved tag, so one
+# unrelated re-tag blocked every ceremony; and it must stay non-forced.
+grep -qE "'fetch', '--tags'" "$S" && fail "$S fetches every tag again — an unrelated moved tag blocks the ceremony; fetch refs/tags/<tag> only."
+grep -qF "'fetch', '--no-tags', 'origin', \"refs/tags/\${Tag}:refs/tags/\${Tag}\"" "$S" \
+  || fail "$S no longer fetches exactly the release tag (refs/tags/<tag>:refs/tags/<tag>, --no-tags, no force)."
+# A13 review RF1: the workstation-held baseline. The scratch-repo test below drives it; these keep the
+# decisions from being edited out: ancestry from the last signed commit, a typed confirmation that
+# fails closed, and a record written only after the bundle's commit check.
+grep -qF "'merge-base', '--is-ancestor', \$BaseCommit, \$Commit" "$S" || fail "$S lost the ancestry check against the last signed commit."
+grep -qF 'Read-Host' "$S" || fail "$S lost the typed confirmation."
+grep -qF '[Console]::IsInputRedirected' "$S" || fail "$S no longer fails closed on redirected input at the confirmation."
+check_pos=$(grep -n "bundle.json records commit" "$S" | head -1 | cut -d: -f1)
+write_pos=$(grep -n 'Move-Item -LiteralPath \$recordTmp -Destination \$RecordPath' "$S" | head -1 | cut -d: -f1)
+{ [ -n "$check_pos" ] && [ -n "$write_pos" ] && [ "$write_pos" -gt "$check_pos" ]; } \
+  || fail "$S must write the last-signed record only AFTER the bundle.json commit check."
+# The one-time install recipe (release-signing-keys.md §0) writes this file through PowerShell 5.1,
+# which also reads a BOM-less .ps1 in the ANSI code page: it stays pure ASCII.
+LC_ALL=C grep -nP '[^\x00-\x7F]' "$S" >&2 && fail "$S contains non-ASCII characters (lines above) — keep it pure ASCII."
 bash scripts/ci/signandvari-pin.test.sh || fail "the signandvari tag-pin scratch-repo test failed."
-echo "    signandvari.ps1 + prestige-release.ps1 verify the tag against -Commit; no forced tag fetch"
+echo "    signandvari.ps1 + prestige-release.ps1 verify the tag against -Commit; release tag fetched alone, unforced;"
+echo "    the release descends from the workstation's last signed commit and is confirmed by a human"
