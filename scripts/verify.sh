@@ -147,6 +147,11 @@ echo "==> CI tripwires: CodeQL Kotlin-emptiness + doc-leak scanner self-tests (f
 # store token off argv, and recovery-drill.sh's banner needs a passing test. Each runs the real
 # script in a scratch tree with stubbed tools — no network, no real keys, no gradle.
 (cd "$REPO_DIR" && bash scripts/ci/release-scripts.test.sh)
+# The self-host deploy kit (security review 2026-10): every documented `docker run … recovery-cli`
+# keeps the seed out of docker's log driver, and the entrypoint leaves /data owner-only (0700 dir,
+# 0600 database, umask 077 for the server). Reads the live tree and runs the real entrypoint's
+# functions against a scratch directory — no docker.
+(cd "$REPO_DIR" && bash scripts/ci/deploy-hardening.test.sh)
 
 echo "==> Brand icons match a fresh render of the source mark"
 # H138 / R49: every tile in the fleet is derived from assets/brand/andvari-mark.svg by
