@@ -180,7 +180,7 @@ class EnrollOriginBindingTest {
         e.state.updateServer(e.home.url) // a deliberate manual repoint — not refused, so the fence must hold
         e.hold.countDown()
 
-        awaitUntil("the enroll to finish") { !e.state.busy }
+        awaitUntil("the enroll to finish") { !e.state.busy && e.state.error != null }
         awaitUntil("the revocation at B") { e.invite.hits.any { it.path == "/api/v1/auth/logout" } }
         assertNull(e.store.load(), "no session may be saved: B's tokens under A is the bug")
         assertEquals("b-access", e.invite.hits.last { it.path == "/api/v1/auth/logout" }.bearer, "the tokens are revoked at the origin that issued them")
@@ -199,7 +199,7 @@ class EnrollOriginBindingTest {
         val state = DesktopState(liveScope, store)
 
         state.unlock("m@x.example", password)
-        awaitUntil("unlock to finish") { !state.busy }
+        awaitUntil("unlock to be refused") { !state.busy && state.error != null }
 
         assertTrue(home.hits.none { it.bearer != null }, "no token reaches the live origin: ${home.hits}")
         assertNotNull(state.error)

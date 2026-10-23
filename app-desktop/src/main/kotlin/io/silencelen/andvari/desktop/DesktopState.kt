@@ -1426,8 +1426,8 @@ class DesktopState(
         // session saved under another origin than the one the app dials is refused, not "repaired":
         // Sign out (which revokes at the session's origin and wipes it) and sign in again here.
         if (!sameOrigin(session.baseUrl, baseUrl)) {
+            error = sessionElsewhere(session.baseUrl) // before busy drops: a reader of !busy sees the refusal
             busy = false
-            error = sessionElsewhere(session.baseUrl)
             return@op
         }
         val a = newApi(session.tokens())
@@ -1583,8 +1583,8 @@ class DesktopState(
                 runCatching { withTimeoutOrNull(5_000) { a.logout() } }
                 a.close()
                 recoverySecret.fill(0)
+                error = enrollOriginMoved(opOrigin) // before busy drops, as above
                 busy = false
-                error = enrollOriginMoved(opOrigin)
                 return@op
             }
             // §4.1 rule 3 / §4.4 Desktop: register SUCCEEDED ⇒ ENROLL SUCCESS. Commit the persisted
