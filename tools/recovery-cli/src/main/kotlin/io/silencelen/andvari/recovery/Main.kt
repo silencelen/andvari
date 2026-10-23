@@ -75,7 +75,8 @@ fun main(args: Array<String>) {
             )
         }
     } catch (e: Exception) {
-        die("error: ${e.message}")
+        // A14 (F12): a dump's decode error quotes the dump, which is the server's data.
+        die("error: ${io.silencelen.andvari.core.client.TerminalText.escape(e.message.orEmpty())}")
     }
 }
 
@@ -193,8 +194,7 @@ private fun verifyDump(seedFile: String, dumpFile: String) {
     println("Escrow fleet verify — recovery key ${Fingerprint.shortForm(Escrow.fingerprint(crypto, kp.publicKey))} (${rows.size} blob(s))")
     println()
     val results = EscrowVerify.verify(crypto, seed, rows)
-    println("%-38s %-6s %s".format("userId", "result", "detail"))
-    for (r in results) println("%-38s %-6s %s".format(r.userId, if (r.pass) "PASS" else "FAIL", r.detail))
+    EscrowVerify.tableLines(results).forEach(::println) // A14 (F12): userId + detail escaped
     val fails = results.count { !it.pass }
     println()
     println("${results.size - fails}/${results.size} PASS")
@@ -203,7 +203,7 @@ private fun verifyDump(seedFile: String, dumpFile: String) {
     println()
     println("Drill receipt — upload in the web admin panel (Admin → \"Record a fleet drill\") or POST it to")
     println("/api/v1/admin/escrow/drill as admin; it holds only userIds and blob hashes:")
-    println(EscrowVerify.receipt(results))
+    println(EscrowVerify.receiptForTerminal(results))
     if (fails > 0) die("$fails escrow blob(s) FAILED — those accounts are NOT recoverable with this key (spec 04 §4: P1 incident, re-ceremony + re-escrow)")
     println("All escrowed accounts are recoverable with this sheet.")
 }
