@@ -894,7 +894,12 @@ refresh token**, so it may sit in `chrome.storage.session` only where a content
 script cannot read it, and since A16 (spec 05) that rests on sealing, not on the
 area's access level: the record is AES-GCM sealed, its AAD binding the record kind
 and the origin, under a **non-extractable session sealing key held in the extension
-origin's IndexedDB** and made fresh for each browser session. The client MUST NOT arm
+origin's IndexedDB**. The key is replaced, and every sealed record dropped, when the
+browser reports a new browser session (`runtime.onStartup`, `runtime.onInstalled`); at
+any other worker start it is kept only if a record sealed under it opens. Where the
+report does not reach the worker, a record sealed in an earlier browser session can
+open again (spec 05 A16(a) and its residual (7) say exactly what holds). Whatever
+the worker held before such a report is dropped, never armed. The client MUST NOT arm
 and MUST NOT retain tokens unless that key is available (it falls back to today's
 full erase); where `setAccessLevel` exists (Chrome) its awaited call on
 `storage.session` must also have resolved, as a second layer. That content scripts
