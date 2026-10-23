@@ -17,7 +17,8 @@ import { strict as assert } from "node:assert";
 import { afterEach, test } from "node:test";
 import { AndvariApi } from "./api.ts";
 import { originKeyFor } from "./serverurl.ts";
-import { applyServerSwitch, purgeServerDataFor } from "./serverswitch.ts";
+import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch.ts";
+import type { KvArea } from "./trustedkv.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -139,4 +140,70 @@ test("purgeServerData — a non-origin string is a no-op (ok:false), never a thr
   const r = await purgeServerDataFor("not a url", false, async (k) => void purged.push(k));
   assert.deepEqual(r, { ok: false });
   assert.deepEqual(purged, []);
+});
+
+// ---- A15: "Remove data for this server" removes ALL of that origin's records, in every store ----
+// The options copy promises "this browser's PIN / quick-unlock and cached state for that server" is removed. Before A15
+// the purge removed a fixed key list and missed the per-user records (`itemHomes:<userId>`, `personalWrap:<userId>`,
+// `personalChange:<userId>`); since A15 those live in the trusted store (IndexedDB), which the purge must clear too.
+
+function mapArea(entries: Record<string, unknown>): KvArea & { map: Map<string, unknown> } {
+  const map = new Map(Object.entries(entries));
+  return {
+    map,
+    async get(keys) {
+      const list = keys === null ? [...map.keys()] : typeof keys === "string" ? [keys] : [...keys];
+      return Object.fromEntries(list.filter((k) => map.has(k)).map((k) => [k, map.get(k)]));
+    },
+    async set(items) {
+      for (const [k, v] of Object.entries(items)) map.set(k, v);
+    },
+    async remove(keys) {
+      for (const k of typeof keys === "string" ? [keys] : keys) map.delete(k);
+    },
+  };
+}
+
+test("A15 purge: every per-origin record goes — per-user homes/wrap/change included — in the trusted store, local and session", async () => {
+  const A = originKeyFor("https://self.example");
+  const B = originKeyFor("https://other.example");
+  const U1 = "11111111-1111-4111-8111-111111111111";
+  const U2 = "55555555-5555-4555-8555-555555555555";
+  const perOrigin = (ok: string) => ({
+    [`ns.${ok}.itemHomes:${U1}`]: {},
+    [`ns.${ok}.itemHomes:${U2}`]: {},
+    [`ns.${ok}.personalWrap:${U1}`]: {},
+    [`ns.${ok}.personalChange:${U1}`]: {},
+    [`ns.${ok}.quBioCred`]: {},
+    [`ns.${ok}.quOfferDismissed`]: true,
+    [`ns.${ok}.updateInfo`]: {},
+    [`ns.${ok}.updateAcceptedSeq`]: 3,
+  });
+  const global = { serverUrl: "https://self.example", lastEmail: "me@example.org", a15Migrated: true };
+  const trusted = mapArea({ ...perOrigin(A), ...perOrigin(B), ...global });
+  const local = mapArea({ ...perOrigin(A), ...perOrigin(B) }); // pre-A15 leftovers (or planted later)
+  const session = mapArea({ [`ns.${A}.quickUnlock`]: {}, [`ns.${A}.knownLogins`]: {}, [`ns.${A}.updateCheckedAt`]: 1, [`ns.${B}.quickUnlock`]: {} });
+  await purgeOriginRecords(A, [trusted, local, session]);
+  for (const [name, a] of [["trusted", trusted], ["local", local], ["session", session]] as const) {
+    for (const k of a.map.keys()) assert.ok(!k.startsWith(`ns.${A}.`), `${name} still holds ${k}`);
+  }
+  // Another origin's records and the global ones are untouched.
+  assert.deepEqual([...trusted.map.keys()].sort(), [...Object.keys(perOrigin(B)), ...Object.keys(global)].sort());
+  assert.deepEqual([...local.map.keys()].sort(), Object.keys(perOrigin(B)).sort());
+  assert.deepEqual([...session.map.keys()], [`ns.${B}.quickUnlock`]);
+});
+
+test("A15 purge: one store failing does not stop the others; a malformed origin key purges nothing", async () => {
+  const A = originKeyFor("https://self.example");
+  const broken: KvArea = {
+    get: async () => Promise.reject(new Error("IndexedDB unavailable")),
+    set: async () => {},
+    remove: async () => {},
+  };
+  const local = mapArea({ [`ns.${A}.itemHomes:u`]: {} });
+  await purgeOriginRecords(A, [broken, local]);
+  assert.equal(local.map.size, 0, "the next store is still purged");
+  const keep = mapArea({ [`ns.${A}.itemHomes:u`]: {}, "ns..x": 1, serverUrl: "x" });
+  for (const bad of ["", "XYZ", A.toUpperCase(), `${A}0`, "../"]) await purgeOriginRecords(bad, [keep]);
+  assert.equal(keep.map.size, 3, "only a 16-hex origin key ever names a namespace");
 });

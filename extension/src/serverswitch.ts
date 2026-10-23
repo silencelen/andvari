@@ -1,6 +1,7 @@
 // Runtime (value) imports carry the .ts extension so this leaf resolves under `node --test`
 // (serverswitch.test.ts imports it); esbuild + tsc (allowImportingTsExtensions) accept the suffix.
-import { canonicalizeServerUrl, originKeyFor } from "./serverurl.ts";
+import { canonicalizeServerUrl, nsKey, originKeyFor } from "./serverurl.ts";
+import { removeByPrefix, type KvArea } from "./trustedkv.ts";
 
 /**
  * Chrome-free seams for the two origin-lifecycle paths in background.ts, extracted so `node --test`
@@ -81,4 +82,24 @@ export async function purgeServerDataFor(
   const canonical = canonicalizeServerUrl(origin);
   if (canonical) await purge(originKeyFor(canonical));
   return { ok: canonical !== null };
+}
+
+/**
+ * A15: the store half of "remove data for this server" — every record under that origin's namespace
+ * (`ns.<originKey>.`) in each of [areas] (background: the trusted store, storage.local's pre-A15 leftovers,
+ * storage.session). By PREFIX, not a fixed key list: the per-user records (`itemHomes:<userId>`,
+ * `personalWrap:<userId>`, `personalChange:<userId>`) were missed by the fixed list before A15, although the options
+ * copy promises "cached state for that server" is removed. One store failing (IndexedDB unavailable) does not stop the
+ * others. Only a 16-hex origin key names a namespace; anything else purges nothing.
+ */
+export async function purgeOriginRecords(originKey: string, areas: readonly KvArea[]): Promise<void> {
+  if (!/^[0-9a-f]{16}$/.test(originKey)) return;
+  const prefix = nsKey(originKey, "");
+  for (const area of areas) {
+    try {
+      await removeByPrefix(area, prefix);
+    } catch {
+      /* this store is unavailable — the others are still purged */
+    }
+  }
 }
