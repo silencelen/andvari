@@ -10,8 +10,12 @@ import {
   type AttachmentSection,
   BackupError,
   type BackupPayload,
+  CSV_FORMULA_ACK,
   CSV_FORMULA_WARNING,
   MAX_SECTIONS,
+  csvDownloadAllowed,
+  formulaAckSatisfied,
+  formulaCellLabel,
   buildBackup,
   buildBackupWithPayloadBytes,
   csvWarnings,
@@ -351,6 +355,75 @@ describe("csvWarnings (spec 07 §1 — by NAME, independent categories)", () => 
       { type: "login", name: "Fine", login: { username: "u", password: "p", totp: "otpauth://totp/x?secret=AAAA" } },
     ] as unknown as ItemDoc[];
     expect(csvWarnings(docs).formulaRisk).toEqual(["Shared bank", "Shared mail"]);
+  });
+
+  // ---- Security review 2026-10, A14 (F6): the warning names CELLS and must be acknowledged ----
+  // Twins: core ExportTest csv_formulaCells_* / csv_formulaAck_* (labels byte-equal).
+
+  it("formulaCells names each risky cell by field, then item", () => {
+    const docs = [
+      { type: "login", name: "=Name", login: { username: "u", password: "=pw", totp: "@x" } },
+      { type: "login", name: "Fine", login: { username: "u", password: "p", uris: ["https://a.test"] } },
+      { type: "login", name: "Shared bank", notes: "=1", login: { username: "+1555", password: "p", uris: ["-evil.test"] } },
+      { type: "note", name: "=NotWritten", notes: "=1" },
+    ] as unknown as ItemDoc[];
+    const w = csvWarnings(docs);
+    expect(w.formulaCells).toEqual([
+      { item: "=Name", column: "name" },
+      { item: "=Name", column: "password" },
+      { item: "=Name", column: "totp" },
+      { item: "Shared bank", column: "url" },
+      { item: "Shared bank", column: "username" },
+      { item: "Shared bank", column: "note" },
+    ]);
+    expect(w.formulaCells.map(formulaCellLabel)).toEqual([
+      "Name of \u201C=Name\u201D",
+      "Password of \u201C=Name\u201D",
+      "One-time code of \u201C=Name\u201D",
+      "Website of \u201CShared bank\u201D",
+      "Username of \u201CShared bank\u201D",
+      "Note of \u201CShared bank\u201D",
+    ]);
+    expect(w.formulaRisk).toEqual(["=Name", "Shared bank"]);
+  });
+
+  it("formulaCellLabel keeps an attacker-chosen name on one line after our field label", () => {
+    const label = formulaCellLabel({ item: "Bank\u201D\n(no risky cells)\u001B[8m", column: "password" });
+    expect(label).toBe("Password of \u201CBank\u201D\\u000A(no risky cells)\\u001B[8m\u201D");
+    expect(label.includes("\n")).toBe(false);
+  });
+
+  it("formulaCellLabel also escapes the line separators and the bidi controls (A14 review Wc/N9)", () => {
+    // U+2028/U+2029 break a line in many renderers; the bidi controls reorder what follows them, so "gnp.<RLO>exe"
+    // would read as "exe.png". Same class as core TerminalText.
+    const codes = [0x2028, 0x2029, 0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
+    for (const c of codes) {
+      const label = formulaCellLabel({ item: "a" + String.fromCodePoint(c) + "b", column: "note" });
+      expect(label).toBe("Note of \u201Ca\\u" + c.toString(16).toUpperCase().padStart(4, "0") + "b\u201D");
+    }
+    expect(formulaCellLabel({ item: "gnp.\u202Eexe", column: "password" })).toBe("Password of \u201Cgnp.\\u202Eexe\u201D");
+    // Not controls: ordinary text, the zero-width joiner inside an emoji sequence, a no-break space.
+    expect(formulaCellLabel({ item: "Caf\u00E9 \u4E2D \u00A0x\u200D", column: "name" })).toBe("Name of \u201CCaf\u00E9 \u4E2D \u00A0x\u200D\u201D");
+  });
+
+  it("the formula acknowledgement is required and bound to the cells shown", () => {
+    const one = [{ item: "x", column: "password" as const }];
+    expect(formulaAckSatisfied([], null)).toBe(true);
+    expect(formulaAckSatisfied(one, null)).toBe(false);
+    expect(formulaAckSatisfied(one, [...one])).toBe(true);
+    expect(formulaAckSatisfied([...one, { item: "y", column: "name" as const }], one)).toBe(false);
+    expect(CSV_FORMULA_ACK.length).toBeGreaterThan(0);
+    // The Download gate: plaintext acknowledged AND (no risky cell, or these cells acknowledged) AND a login to write.
+    expect(csvDownloadAllowed({ plaintextAck: true, loginCount: 2, cells: [], formulaAcked: null })).toBe(true);
+    expect(csvDownloadAllowed({ plaintextAck: true, loginCount: 2, cells: one, formulaAcked: null })).toBe(false);
+    expect(csvDownloadAllowed({ plaintextAck: true, loginCount: 2, cells: one, formulaAcked: one })).toBe(true);
+    expect(csvDownloadAllowed({ plaintextAck: false, loginCount: 2, cells: one, formulaAcked: one })).toBe(false);
+    expect(csvDownloadAllowed({ plaintextAck: true, loginCount: 0, cells: [], formulaAcked: null })).toBe(false);
+  });
+
+  it("the writer still emits risky cells verbatim (a ' prefix would corrupt real passwords)", () => {
+    const docs = [{ type: "login", name: "=Name", login: { username: "u", password: "=HYPERLINK(1)" } }] as unknown as ItemDoc[];
+    expect(writeCsv(docs).split("\r\n")[1]).toBe("=Name,,u,=HYPERLINK(1),,");
   });
 
   it("startsWithFormulaChar matches what a spreadsheet parses", () => {

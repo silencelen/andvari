@@ -274,7 +274,8 @@ export interface MergedAccountState {
  * Root cause A §4.2 merge (core `AccountState.merge` twin): contacts union by userId, newest verifiedAt
  * wins (tie: the smaller identityPub string); tombstones union (max), a tombstone not older than a pin
  * removes it; orgRecoveryFp from the higher-seq document (local on a tie or a rollback); nonces union per
- * vault, newest {@link NONCE_CAP} kept; seq = max(local, served, highWater). A served seq below the
+ * vault keeping the EARLIEST time of a repeated nonce (A13 review RF3, see {@link withConsumedNonces}), newest
+ * {@link NONCE_CAP} kept; seq = max(local, served, highWater). A served seq below the
  * high-water mark, or a withheld blob once one was seen, is a ROLLBACK: the flag changes ONE field,
  * `orgRecoveryFp`, which then comes from the local copy; contacts, tombstones and nonces are still the
  * union of both (UVK-authenticated) copies, and seq stays at the high-water mark.
@@ -301,7 +302,8 @@ export function mergeAccountState(
   for (const d of docs) {
     for (const [vaultId, list] of Object.entries(d.consumedNonces)) {
       const m = nonceMaps.get(vaultId) ?? new Map<string, number>();
-      for (const [n, t] of list) m.set(n, Math.max(m.get(n) ?? t, t));
+      // A13 review RF3: the EARLIEST time wins for a repeated nonce (see withConsumedNonces).
+      for (const [n, t] of list) m.set(n, Math.min(m.get(n) ?? t, t));
       nonceMaps.set(vaultId, m);
     }
   }
@@ -406,14 +408,19 @@ export function withoutOwned(doc: AccountStateDoc, vaultId: string, at: number):
 
 /**
  * Fold this device's consumed removal nonces (root cause A §6.2, branch A7) into `doc` by the merge rule (union per
- * vault, the larger issuedAt for a repeated nonce, newest NONCE_CAP kept). Core `AccountState.withConsumed` twin.
+ * vault, the EARLIER time for a repeated nonce, newest NONCE_CAP kept). Core `AccountState.withConsumed` twin.
+ *
+ * Earliest, not latest (A13 review RF3): for a v1 removal the record's time is the only time the proof has (c10), and
+ * a device that consumes the same nonce later (its own valid_legacy, or an N-1 build's already_recorded at `now`)
+ * would otherwise drag the account's record forward into a later window, so a replay after a re-add reads as a calm
+ * already_recorded instead of the anomaly. For v2 every device records the proof's own issuedAt, so min and max agree.
  */
 export function withConsumedNonces(doc: AccountStateDoc, extra: Record<string, ConsumedNonce[]>): AccountStateDoc {
   const maps = new Map<string, Map<string, number>>();
   for (const src of [doc.consumedNonces, extra]) {
     for (const [vaultId, list] of Object.entries(src)) {
       const m = maps.get(vaultId) ?? new Map<string, number>();
-      for (const [n, t] of list) m.set(n, Math.max(m.get(n) ?? t, t));
+      for (const [n, t] of list) m.set(n, Math.min(m.get(n) ?? t, t));
       maps.set(vaultId, m);
     }
   }
@@ -433,16 +440,30 @@ export function sameAccountStateContent(a: AccountStateDoc | null, b: AccountSta
   return encodeAccountState({ ...a, seq: 0 }) === encodeAccountState({ ...b, seq: 0 });
 }
 
-export function withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
-  const tomb = { ...doc.contactTombstones };
-  delete tomb[c.userId];
-  return { ...doc, contacts: [...doc.contacts.filter((x) => x.userId !== c.userId), c].sort((a, b) => (a.userId < b.userId ? -1 : 1)), contactTombstones: tomb };
+/** Contacts equal in everything but `verifiedAt` (the same pin re-saved). */
+function samePin(a: Contact, b: Contact): boolean {
+  return a.userId === b.userId && a.identityPub === b.identityPub && a.label === b.label && a.method === b.method && (a.email ?? null) === (b.email ?? null);
 }
 
+export function withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
+  // A13 (q23; core AccountState.withContact twin): the newest HUMAN act wins the merge whatever this device's clock
+  // says. A pin replacing a different pin, or a tombstone, is pushed past it; the same pin re-saved keeps its time.
+  const prev = doc.contacts.find((x) => x.userId === c.userId);
+  let at = c.verifiedAt;
+  const t = doc.contactTombstones[c.userId];
+  if (t !== undefined) at = Math.max(at, t + 1);
+  if (prev) at = samePin(prev, c) ? Math.max(at, prev.verifiedAt) : Math.max(at, prev.verifiedAt + 1);
+  const tomb = { ...doc.contactTombstones };
+  delete tomb[c.userId];
+  return { ...doc, contacts: [...doc.contacts.filter((x) => x.userId !== c.userId), { ...c, verifiedAt: at }].sort((a, b) => (a.userId < b.userId ? -1 : 1)), contactTombstones: tomb };
+}
+
+/** A13 (q23): the tombstone is pushed to the removed pin's `verifiedAt` (a tie removes), so a slow-clock unpin wins. */
 export function withoutContact(doc: AccountStateDoc, userId: string, at: number): AccountStateDoc {
+  const pinnedAt = doc.contacts.find((x) => x.userId === userId)?.verifiedAt ?? Number.MIN_SAFE_INTEGER;
   return {
     ...doc,
     contacts: doc.contacts.filter((x) => x.userId !== userId),
-    contactTombstones: { ...doc.contactTombstones, [userId]: Math.max(at, doc.contactTombstones[userId] ?? at) },
+    contactTombstones: { ...doc.contactTombstones, [userId]: Math.max(at, pinnedAt, doc.contactTombstones[userId] ?? Number.MIN_SAFE_INTEGER) },
   };
 }

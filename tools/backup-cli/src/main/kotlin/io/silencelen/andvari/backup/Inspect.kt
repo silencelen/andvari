@@ -4,6 +4,7 @@ import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupAttachmentEntry
 import io.silencelen.andvari.core.client.BackupException
 import io.silencelen.andvari.core.client.BackupPayload
+import io.silencelen.andvari.core.client.TerminalText
 import io.silencelen.andvari.core.crypto.CryptoProvider
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -93,6 +94,55 @@ object BackupInspect {
     }
 
     /**
+     * `verify`'s printed report (A14, F12). Every string that came out of the payload — vault,
+     * item and attachment names, origin, userId, skipped ids, per-check detail — goes through
+     * [TerminalText.escape] first: co-members author those names, and a terminal would run their
+     * escape sequences (erase-line + cursor-up over the FAIL rows, OSC 52 into the clipboard). The
+     * only line breaks in the result are the renderer's own. [path] is the operator's argument.
+     */
+    fun renderVerify(path: String, report: VerifyReport): String = buildString {
+        val t = TerminalText::escape
+        val payload = report.opened.payload
+        appendLine("andvari backup — ${t(path)}")
+        appendLine("  fileId        ${t(report.opened.header.fileId)}")
+        appendLine("  exportedAt    ${java.time.Instant.ofEpochMilli(payload.exportedAt)} (authenticated)")
+        if (payload.origin.isNotEmpty()) appendLine("  origin        ${t(payload.origin)} (advisory)")
+        if (payload.userId.isNotEmpty()) appendLine("  userId        ${t(payload.userId)} (advisory)")
+        appendLine()
+
+        appendLine("Items per vault (${payload.items.size} total):")
+        for ((label, count) in report.itemsPerVault) appendLine("  %-52s %d".format(t(label), count))
+        appendLine()
+
+        if (report.checks.isEmpty()) {
+            appendLine("Attachments: none embedded (items-only backup)")
+        } else {
+            appendLine("Attachments (${report.checks.size} in manifest):")
+            appendLine("  %-44s %-6s %s".format("item-attachment", "result", "detail"))
+            for (c in report.checks) {
+                appendLine("  %-44s %-6s %s".format(t("${c.itemName}-${c.entry.name}"), if (c.pass) "OK" else "FAIL", t(c.detail)))
+            }
+        }
+        report.framingMismatch?.let { appendLine("  FRAMING FAIL: ${t(it)}") }
+        appendLine()
+
+        val s = payload.skipped
+        if (s.undecryptable.isEmpty() && s.attachmentsOverCap.isEmpty() && s.attachmentFetchFailed.isEmpty()) {
+            appendLine("Skips recorded in file: none")
+        } else {
+            appendLine("Skips recorded in file (by the exporting client — these are NOT in the backup):")
+            if (s.undecryptable.isNotEmpty()) appendLine("  undecryptable items:     ${s.undecryptable.joinToString { t(it.itemId) }}")
+            if (s.attachmentsOverCap.isNotEmpty()) appendLine("  attachments over cap:    ${s.attachmentsOverCap.joinToString { t(it) }}")
+            if (s.attachmentFetchFailed.isNotEmpty()) appendLine("  attachment fetch failed: ${s.attachmentFetchFailed.joinToString { t(it) }}")
+        }
+    }
+
+    /** The CLI's one-line error report: exception detail can quote payload text (a JSON decode
+     *  error shows the input), so it is escaped like everything else verify prints. */
+    fun errorLine(code: String?, message: String?): String =
+        if (code == null) "error: ${TerminalText.escape(message.orEmpty())}" else "error [${TerminalText.escape(code)}]: ${TerminalText.escape(message.orEmpty())}"
+
+    /**
      * `dump`: the authenticated payload as pretty JSON. Secrets are REDACTED unless
      * [secrets] — see [Redact] for exactly what masks (the file's owner may need the raw
      * values for actual recovery, hence the flag).
@@ -111,7 +161,10 @@ object BackupInspect {
      * (names sanitized — path separators and control chars become `_`, so nothing can
      * escape [outDir]). Targets are PRE-FLIGHTED before any byte is written: an existing
      * file or two entries mapping to the same name refuses the whole extract — this tool
-     * never overwrites anything.
+     * never overwrites anything. "The same name" is judged as a case-insensitive filesystem
+     * would (macOS by default, Windows): case-folded, NFC-normalised, trailing dots/spaces
+     * dropped (security review 2026-10, q45) — and each file is created with CREATE_NEW, so a
+     * name that appears between the pre-flight and the write is refused, not replaced.
      */
     fun extract(opened: Backup.OpenedBackup, outDir: File): List<ExtractedFile> {
         val entries = opened.payload.attachments
@@ -121,14 +174,16 @@ object BackupInspect {
         }
 
         // Pre-flight every target so a refusal happens before ANY write.
-        val seen = HashSet<String>()
+        val existing = outDir.list().orEmpty().mapTo(HashSet()) { foldName(it) }
+        val seen = HashMap<String, String>()
         val planned = entries.map { entry ->
             val name = sanitizeFileName("${itemName(opened.payload, entry.itemId)}-${entry.name}")
-            if (!seen.add(name)) {
-                throw IllegalStateException("two attachments map to the same output name '$name' — extract to an empty directory per run")
+            val folded = foldName(name)
+            seen.put(folded, name)?.let { prev ->
+                throw IllegalStateException("two attachments map to the same output name '$name' (and '$prev' — one file on a case-insensitive filesystem) — extract to an empty directory per run")
             }
             val target = File(outDir, name)
-            if (target.exists()) {
+            if (target.exists() || folded in existing) {
                 throw IllegalStateException("refusing to overwrite existing file $target")
             }
             // Belt-and-braces: sanitized names contain no separators, so this cannot fire.
@@ -139,7 +194,11 @@ object BackupInspect {
         return planned.map { (entry, target) ->
             val plain = opened.readAttachment(entry) // BackupException (spec code) propagates
             try {
-                target.writeBytes(plain)
+                // CREATE_NEW: fails (FileAlreadyExistsException) instead of truncating whatever is there now.
+                java.nio.file.Files.newOutputStream(target.toPath(), java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
+                    .use { it.write(plain) }
+            } catch (e: java.nio.file.FileAlreadyExistsException) {
+                throw IllegalStateException("refusing to overwrite existing file $target", e)
             } finally {
                 plain.fill(0)
             }
@@ -147,12 +206,17 @@ object BackupInspect {
         }
     }
 
-    /** `/`, `\` and control chars → `_`; blank or dots-only results get a safe stand-in.
-     *  Everything else (spaces, unicode, leading dots within a composite name) is kept —
-     *  the output must stay recognizable next to the item it came from. */
+    /** How a case-insensitive filesystem compares names: NFC, trailing dots/spaces dropped (Windows), case-folded. */
+    internal fun foldName(name: String): String =
+        java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC).trimEnd('.', ' ').lowercase(java.util.Locale.ROOT)
+
+    /** `/`, `\` and control chars ([TerminalText.isControl]: C0, DEL and, since A14, C1) → `_`;
+     *  blank or dots-only results get a safe stand-in. Everything else (spaces, unicode, leading
+     *  dots within a composite name) is kept — the output must stay recognizable next to the item
+     *  it came from. */
     fun sanitizeFileName(raw: String): String {
         val cleaned = buildString(raw.length) {
-            for (c in raw) append(if (c == '/' || c == '\\' || c.code < 0x20 || c.code == 0x7F) '_' else c)
+            for (c in raw) append(if (c == '/' || c == '\\' || TerminalText.isControl(c)) '_' else c)
         }
         return if (cleaned.isBlank() || cleaned.all { it == '.' }) "unnamed-attachment" else cleaned
     }

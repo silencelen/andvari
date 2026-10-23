@@ -739,6 +739,9 @@ class VaultLifecycleTest : LifecycleTestSupport() {
         client.addMember(owner, handle, carol, "writer")
         // carol removed pre-delete: her blanked sealedVk is the "previously-revoked" case.
         client.removeMember(owner, handle.vaultId, carol.userId)
+        // A13 (security review 2026-10, q43): every row also carries a v14 `signedGrant` — the sealed SignedStatement
+        // that holds the VK — as v2 grants do (the server stores it opaquely, so a DB stamp stands in for the client).
+        services.repo.db.tx { c -> c.exec("UPDATE grants SET signedGrant='sealed-statement-with-vk' WHERE vaultId=?", handle.vaultId) }
 
         // An item with an attachment + an archived version (overwrite) — all must purge.
         val itemId = owner.newItemId()
@@ -773,6 +776,9 @@ class VaultLifecycleTest : LifecycleTestSupport() {
             }
             assertEquals(3, grants.size, "grant rows retained forever")
             assertTrue(grants.all { it.first == "" && it.second == null })
+            // ...and the v14 signedGrant, the third VK carrier (A13, q43).
+            val signed = c.queryAll("SELECT signedGrant FROM grants WHERE vaultId=?", handle.vaultId) { rs -> rs.getString(1) }
+            assertTrue(signed.all { it == null }, "purge leaves a sealed VK in signedGrant: $signed")
             // Vault tombstone: metaBlob blanked, purgedAt stamped, row retained.
             val v = c.queryOne("SELECT metaBlob, purgedAt FROM vaults WHERE vaultId=?", handle.vaultId) { rs ->
                 rs.getString(1) to rs.getLong(2)

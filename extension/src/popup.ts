@@ -7,11 +7,12 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
-import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
-import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
+import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { displaySite, safeSiteUrl } from "./siteurl";
 import { reuseWarning } from "./reusealert";
@@ -116,11 +117,12 @@ function clearMsg(): void {
   clearLiveMsg(el("msg"));
 }
 
-function setConn(ok: boolean): void {
+function setConn(ok: boolean, noServer = false): void {
   const dot = el("conn");
   dot.className = `dot ${ok ? "on" : "off"}`;
-  dot.title = ok ? "server reachable" : "server unreachable";
-  el("conn-status").textContent = ok ? "Server reachable" : "Server unreachable"; // a11y 5a twin
+  // A15 review F1: while a server is pending nothing was dialed, so "unreachable" would be the wrong word.
+  dot.title = ok ? "server reachable" : noServer ? "no server confirmed" : "server unreachable";
+  el("conn-status").textContent = ok ? "Server reachable" : noServer ? "No server confirmed" : "Server unreachable"; // a11y 5a twin
 }
 
 /** a11y 2d — one polite announcer for copy confirmations. The visible feedback (button ✓, TOTP
@@ -169,6 +171,15 @@ function showView(unlocked: boolean): void {
 }
 
 async function refresh(): Promise<void> {
+  // A15 review F1: while a server is pending the worker signs in nowhere, so the popup leads with the confirm route
+  // INSTEAD of any sign-in form (and opens no server page). Asked first, on every render.
+  const info = await ask({ type: "serverInfo" });
+  if (info?.block) {
+    showConfirmServer(info.block, info.trustedStore === true);
+    return;
+  }
+  el("confirm-server").hidden = true;
+  el("open-vault").hidden = false;
   const s = await ask({ type: "status" });
   if (!s) {
     showView(false);
@@ -228,7 +239,7 @@ async function refresh(): Promise<void> {
   }
   const email = el<HTMLInputElement>("email");
   if (!email.value) {
-    const remembered = s.email ?? (await rememberedEmail());
+    const remembered = s.email ?? s.rememberedEmail ?? null; // A15: kept by the worker, not in storage.local
     if (remembered) email.value = remembered;
   }
   (email.value ? el("password") : email).focus();
@@ -261,8 +272,11 @@ async function renderUpdate(): Promise<void> {
   el("update-text").textContent = `Update available — andvari ${r.latest}. `;
   // Firefox gets the Firefox zip; everything else (Chrome/Edge/Brave) the Chrome zip. Fall back
   // to whichever URL exists so a single-target publish still links somewhere real.
+  // A15 step 0: the popup re-checks the link itself before it becomes an href — only
+  // `${DEFAULT_SERVER_URL}/downloads/<basename>`, and only while the current server is the default.
   const isFirefox = /firefox/i.test(navigator.userAgent);
-  const url = (isFirefox ? r.firefoxUrl : r.chromeUrl) ?? r.chromeUrl ?? r.firefoxUrl;
+  const server = (await currentServer()) ?? ""; // no answer / pending: no link (offerDownloadUrl needs the default)
+  const url = [isFirefox ? r.firefoxUrl : r.chromeUrl, r.chromeUrl, r.firefoxUrl].map((u) => offerDownloadUrl(u, server)).find((u) => u !== null) ?? null;
   if (url) {
     link.href = url;
     link.textContent = "Download & reload";
@@ -280,16 +294,54 @@ function updateQuietCopy(reason: string): string {
     : "Updates: the server’s update listing couldn’t be verified, so no update will be offered from it. Your vault and sync are unaffected.";
 }
 
-/** Email is deliberately non-secret (remembered for convenience) — the ZK line is the master
- *  password and keys, which never touch chrome.storage.local. */
-async function rememberedEmail(): Promise<string | null> {
-  try {
-    const st = (await chrome.storage.local.get("lastEmail")) as Record<string, unknown>;
-    const v = st["lastEmail"];
-    return typeof v === "string" && v ? v : null;
-  } catch {
-    return null;
+/** A15: the configured server origin, from the worker (the only reader of its trusted store) — asked on every use,
+ *  never cached in the popup. Null when there is no server to use: the worker did not answer (A15 review S3 — before,
+ *  that read as the default, and a click opened the reference instance), or a server is pending (F1). */
+async function currentServer(): Promise<string | null> {
+  const r = await ask({ type: "serverInfo" });
+  return r && typeof r.url === "string" && r.url && !r.block ? r.url : null;
+}
+
+/** A15 review F1: the pending-server card, shown instead of the sign-in form. The origin is the worker's (display
+ *  only — confirming it is the Trust Gate's job, in Options); every string here is textContent. A block that cannot be
+ *  confirmed (`keepable` false) is one of two cases: no store here at all ([storeKept] false), or (A16 review R3) the
+ *  update could not confirm the old setting although a choice can be kept — then the user enters the address. */
+function showConfirmServer(block: ServerBlockWire, storeKept: boolean): void {
+  showView(false); // drops any unlocked chrome (and the master form's state)
+  el("locked").hidden = true;
+  el("open-vault").hidden = true; // no server page opens while a server is pending
+  const box = el("confirm-server");
+  box.hidden = false;
+  const notMine = el<HTMLButtonElement>("confirm-server-not-mine");
+  const open = el<HTMLButtonElement>("confirm-server-open");
+  if (block.kind === "unsettled") {
+    el("confirm-server-h").textContent = "andvari couldn’t load its settings";
+    el("confirm-server-lead").hidden = true;
+    el("confirm-server-origin").hidden = true;
+    el("confirm-server-body").textContent =
+      "It can’t tell which server you use right now, so it won’t sign in anywhere. Close this window and open it again in a minute.";
+    open.hidden = true;
+    notMine.hidden = true;
+    return;
   }
+  el("confirm-server-h").textContent = "Confirm your server";
+  el("confirm-server-lead").hidden = false;
+  el("confirm-server-lead").textContent = block.keepable
+    ? "Before this update, andvari was set to use:"
+    : "This browser has a server address saved by an older version of andvari:";
+  const origin = el("confirm-server-origin");
+  origin.hidden = false;
+  origin.textContent = block.origin;
+  el("confirm-server-body").textContent = block.keepable
+    ? "andvari won’t sign in anywhere until you confirm it once, in Options. If it isn’t yours, choose “Not mine”."
+    : storeKept
+      ? "andvari couldn’t confirm it when it updated, and a web page could have changed it, so andvari won’t sign in anywhere until you decide. If it’s your own server, enter its address in Options and connect. If it isn’t yours, choose “Not mine”."
+      : "andvari can’t keep a server choice in this browser mode (Firefox’s “Never remember history”), so it won’t sign in to another server in its place. To keep using this one, turn that setting off, restart Firefox and enter the address in Options. If it isn’t yours, choose “Not mine”.";
+  open.hidden = false;
+  open.textContent = block.keepable ? "Confirm in Options" : "Open Options";
+  notMine.hidden = false;
+  notMine.textContent = `Not mine — use ${new URL(DEFAULT_SERVER_URL).host} instead`;
+  open.focus();
 }
 
 function relocked(): void {
@@ -1075,29 +1127,24 @@ async function unlock(): Promise<void> {
   try {
     const r = await ask({ type: "unlock", email, password: pw.value });
     if (r?.ok) {
-      pw.value = "";
-      try {
-        await chrome.storage.local.set({ lastEmail: email }); // the email only — never the password
-      } catch {
-        /* remembering is best-effort */
-      }
+      pw.value = ""; // (A15: the worker remembers the email itself — the popup writes no storage)
       await refresh();
     } else if (r?.code === "totp_required") {
       // 0.16.3: password verified server-side + keys derived (SW memory) — collect the code, no
       // second KDF. Clear the password field (a "start over" is a fresh full sign-in).
       pw.value = "";
       totpBadCount = 0;
-      // The email is proven correct here (server accepted the authKey, only the code is left) — remember
-      // it now, else TOTP-enrolled accounts (exactly this seam's users) never get it stored.
-      try {
-        await chrome.storage.local.set({ lastEmail: email });
-      } catch {
-        /* best-effort */
-      }
+      // The email is proven correct here (server accepted the authKey, only the code is left); the worker
+      // remembered it on this answer (A15), so TOTP-enrolled accounts get it stored too.
       enterTotpChallenge(true);
     } else if (r?.code === "aborted") {
       // A server switch / lock landed mid-sign-in — the SW installed nothing; just re-render silently.
       await refresh();
+    } else if (r?.code === "confirm_server") {
+      // A15 review F1: a server is pending — nothing was sent. Clear the password and show the confirm route.
+      pw.value = "";
+      await refresh();
+      showMsg("info", unlockErrorCopy(r.code));
     } else {
       // E1-3: render the coded ladder (errors.ts), never the SW's raw `error` debug detail.
       showMsg("err", unlockErrorCopy(r?.code));
@@ -1439,11 +1486,16 @@ el("lock").addEventListener("click", async () => {
   await refresh();
 });
 
-/** Open a page on the configured server (design §5.1 — the origin is read fresh from
- *  storage.local via serverurl.ts on every click, never cached in the popup). window.close() only
+/** Open a page on the configured server (design §5.1 — the origin is asked of the worker on
+ *  every click, never cached in the popup). window.close() only
  *  AFTER tabs.create resolves: a closed popup's pending promise continuations never run. */
 async function openServerPage(path = ""): Promise<void> {
-  const base = await getServerUrl();
+  const base = await currentServer();
+  if (base === null) {
+    // A15 review S3 / F1: no answer from the worker, or a server pending — open nothing (never a guessed default).
+    showMsg("err", "andvari can’t tell which server to open right now — close this window and try again.");
+    return;
+  }
   try {
     await chrome.tabs.create({ url: base + path });
   } catch {
@@ -1488,9 +1540,10 @@ el("personal-change-accept").addEventListener("click", async () => {
 el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
   const r = await ask({ type: "ping" });
-  setConn(r?.ok === true);
+  setConn(r?.ok === true, r?.code === "confirm_server");
   // #23: the conn-status twin's sentence — the old line leaked a raw epoch (`t=1752…`).
   if (r?.ok) showMsg("info", "Server reachable.");
+  else if (r?.code === "confirm_server") showMsg("err", CONFIRM_SERVER_FIRST); // A15 review F1: nothing was dialed
   // E1-3/extux-05: the one canonical unreachable sentence — never the raw exception text. (A
   // mid-restart SW → undefined shares this copy, mildly conflating SW death with the network;
   // accepted per design.)
@@ -1506,11 +1559,23 @@ document.addEventListener("keydown", (e) => {
 });
 
 /** Persistent anti-phishing origin display (design §5.1): render the RAW configured origin in the
- *  header, middle-truncated to fit, with the FULL origin on title + aria-label (hover/focus). Read
- *  fresh from storage.local every open — never cached — so it always reflects the real switch target. */
+ *  header, middle-truncated to fit, with the FULL origin on title + aria-label (hover/focus). Asked
+ *  of the worker every open — never cached — so it shows the origin the worker actually dials. */
 async function renderServerOrigin(): Promise<void> {
-  const origin = await getServerUrl();
+  const info = await ask({ type: "serverInfo" });
   const node = el("server-origin");
+  // A15 review F1 / S3: the header names the server in effect only when there is one. A pending server (the card below
+  // says why) or a worker that did not answer is said in words — never shown as the default, which would be a lie on
+  // an anti-phishing display.
+  const origin = info && typeof info.url === "string" && info.url && !info.block ? info.url : null;
+  if (origin === null) {
+    const why = info?.block?.kind === "confirm" ? "No server confirmed yet" : "Server unknown";
+    node.textContent = why;
+    node.title = why;
+    node.setAttribute("role", "note");
+    node.setAttribute("aria-label", why);
+    return;
+  }
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
   // a11y-webext--5: the element is a bare <span> (role=generic), and aria-label is PROHIBITED on a
@@ -1530,7 +1595,8 @@ async function renderServerOrigin(): Promise<void> {
 async function detectMissingHostGrant(): Promise<void> {
   let granted: boolean | null = null;
   try {
-    const pattern = originMatchPattern(await getServerUrl());
+    const server = await currentServer();
+    const pattern = server === null ? null : originMatchPattern(server);
     if (pattern) granted = await chrome.permissions.contains({ origins: [pattern] });
   } catch {
     /* permissions API unavailable — granted stays null (no detection, no false route) */
@@ -1538,6 +1604,23 @@ async function detectMissingHostGrant(): Promise<void> {
   document.body.dataset.missingHostGrant = granted === false ? "true" : "false";
   if (shouldRouteToOptions(granted)) el("host-grant-cta").hidden = false;
 }
+
+// A15 review F1: the confirm route. Confirming is the Trust Gate's job, in Options (Connect is the only commit);
+// "Not mine" drops the pending server, and the default (named on the button) is then the server.
+el("confirm-server-open").addEventListener("click", () => {
+  try {
+    chrome.runtime.openOptionsPage();
+  } catch {
+    void chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
+  }
+  window.close();
+});
+el("confirm-server-not-mine").addEventListener("click", async () => {
+  const r = await ask({ type: "forgetLegacyServer" });
+  if (!r?.ok) showMsg("err", "Couldn’t change the server — close this window and try again.");
+  await renderServerOrigin();
+  await refresh();
+});
 
 el("host-grant-cta").addEventListener("click", () => {
   try {
@@ -1582,6 +1665,6 @@ void renderServerOrigin();
 void probeBioCapable().finally(() => void refresh());
 void renderUpdate();
 // Passive connectivity dot — quiet ping on open, result only in the header dot.
-void ask({ type: "ping" }).then((r) => setConn(r?.ok === true));
+void ask({ type: "ping" }).then((r) => setConn(r?.ok === true, r?.code === "confirm_server"));
 void detectMissingHostGrant();
 void detectMissingBroadGrant();

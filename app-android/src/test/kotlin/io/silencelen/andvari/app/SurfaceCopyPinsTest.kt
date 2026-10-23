@@ -65,12 +65,42 @@ class SurfaceCopyPinsTest {
 
     @Test
     fun theCsvPreflightRendersTheFormulaRiskRow() {
-        // ExportCsv.warnings() computes formulaRisk for every export; the dialog is the ONLY
-        // place a user can ever learn about it (the writer deliberately mangles nothing).
+        // ExportCsv.warnings() computes the formula cells for every export; the dialog is the ONLY
+        // place a user can ever learn about them (the writer deliberately mangles nothing).
+        // A14 (F6): by CELL — "Password of “…”", our field label before the attacker-chosen name.
         assertTrue(
-            mainActivity.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)"),
-            "the CSV preflight must enumerate the formula-risk items beside its five sibling categories",
+            mainActivity.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))"),
+            "the CSV preflight must enumerate the formula-risk cells beside its five sibling categories",
         )
+    }
+
+    @Test
+    fun theFormulaWarningIsARequiredAcknowledgement() {
+        // A14 (F6): the warning used to be advisory, with "Choose where to save" enabled beside it.
+        // The button now waits for the acknowledgement, which is bound to the cells it was ticked for.
+        assertTrue(
+            mainActivity.contains("ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)"),
+            "the save button must be gated on the formula acknowledgement",
+        )
+        assertTrue(mainActivity.contains("formulaAcked = if (on) pre.warnings.formulaCells else null"), "the tick records exactly the cells shown")
+        assertTrue(mainActivity.contains("Text(ExportCsv.FORMULA_ACK"), "the acknowledgement sentence is the shared canon's")
+    }
+
+    @Test
+    fun theCsvWriteRechecksTheAcknowledgementAgainstWhatItWrites() {
+        // A14 review N3: the RESUMED sync loop can land while the SAF picker is up. The acknowledged cells live in the
+        // ViewModel (a configuration change during the picker must not drop them), the write recomputes the cells from
+        // the docs it actually writes (ExportCsv.gatedWrite, behaviour-tested in core ExportTest), and a mismatch
+        // writes nothing, discards the just-created document and shows the dialog again with the new list.
+        val dialog = mainActivity.substringAfter("private fun CsvPreflightDialog(").substringBefore("private fun NamedSkips(")
+        assertTrue(dialog.contains("onClick = { if (canSave) { vm.csvAcknowledge(formulaAcked); onChooseDestination() } }"), "the tick is handed to the ViewModel")
+        assertTrue(dialog.contains("pre.notice?.let"), "the dialog renders why it came back")
+        val run = viewModel.substringAfter("fun csvRun(").substringBefore("private fun orderedDocs(")
+        assertTrue(run.contains("val acknowledged = _ui.value.csvAcknowledged"), "read before the state is cleared")
+        assertTrue(run.contains("ExportCsv.gatedWrite(docs, acknowledged)"), "the cells are recomputed from the docs being written")
+        assertTrue(run.contains("is ExportCsv.GatedWrite.NeedsAcknowledgement ->"))
+        assertTrue(run.contains("csvSelectedVaults = selected") && run.contains("notice = CSV_CHANGED_NOTICE"), "re-presented for the same selection, saying why")
+        assertTrue(run.contains("runCatching { discard(false) }"), "the empty document the picker created is discarded")
     }
 
     // ---- H23 (audit 2026-09-13) ----

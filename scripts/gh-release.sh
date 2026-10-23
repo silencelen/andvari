@@ -31,7 +31,11 @@
 #     artifact, with no published digest anywhere.
 #   * SHA256SUMS itself is signed (`SHA256SUMS-<ver>.txt.asc`) with the same GPG release key that
 #     signs the deb, which is what makes the file worth reading at all. Unsigned checksums served
-#     from the same page as the artifacts prove nothing to a stranger.
+#     from the same page as the artifacts prove nothing to a stranger. The key is named by its
+#     PINNED fingerprint (`--local-user`), never left to gpg's default-key choice, and EVERY .asc
+#     on the upload list (SUMS, deb, Arch package, any --extra) is verified against that
+#     fingerprint before anything is created or uploaded: a leftover .asc from an earlier build, or
+#     one made by another key in the keyring, is refused (security review 2026-10).
 #   * Re-uploading DIFFERENT bytes under a filename that already exists on the release is
 #     refused. 0.26.2 published two byte-different MSIs under one name (manifest seq 10 → 11
 #     re-cut); clients were fine (they verify the signed manifest's hash) but anyone who had
@@ -110,6 +114,40 @@ command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 TAG="v$VERSION"
 STAGE="${STAGE:-$REPO_DIR/build/gh-release/$VERSION}"
 
+# The release key, by PINNED fingerprint (runbook §3). Same knob and same default as
+# build-linux.sh, so the two scripts cannot disagree about which key signs a release; the override
+# exists for a key-rotation rehearsal only and says so loudly.
+PINNED_RELEASE_KEY=741CF143A5E1EDF3B9CBE923D1CC699A598417FC
+RELEASE_KEY="$(printf '%s' "${ANDVARI_GPG_KEY:-$PINNED_RELEASE_KEY}" | tr '[:lower:]' '[:upper:]')"
+[[ "$RELEASE_KEY" =~ ^[0-9A-F]{40}$ ]] || die "the release key must be a full 40-hex fingerprint (got '$RELEASE_KEY')"
+[ "$RELEASE_KEY" = "$PINNED_RELEASE_KEY" ] || note "WARNING: ANDVARI_GPG_KEY overrides the pinned release key ($PINNED_RELEASE_KEY) with $RELEASE_KEY — a rotation rehearsal, never a release"
+
+# verify_release_sig <asc> <file> — the detached signature is good AND its primary key is the
+# release key. A bare `gpg --verify` accepts a good signature by ANY key in the keyring.
+verify_release_sig() {
+  local asc="$1" file="$2" status signer
+  status="$(gpg --batch --status-fd 1 --verify "$asc" "$file" 2>/dev/null)" \
+    || die "$(basename "$asc") does not verify against $(basename "$file") — a stale or foreign signature; re-sign with key $RELEASE_KEY"
+  # VALIDSIG <signing-key fpr> … <primary-key fpr>: the last field is the primary key.
+  signer="$(printf '%s\n' "$status" | awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $NF }' | head -1)"
+  [ "$signer" = "$RELEASE_KEY" ] \
+    || die "$(basename "$asc") is a good signature by ${signer:-<no VALIDSIG>}, NOT by the release key $RELEASE_KEY — refusing to publish it"
+}
+
+# The ceremony line the signing workstation needs: the version AND the commit the tag is at here.
+handover_line() {
+  local c
+  if c="$(git -C "$REPO_DIR" rev-parse -q --verify "refs/tags/$TAG^{commit}" 2>/dev/null)"; then
+    note "signing-workstation ceremony (hand this line over verbatim — the commit is the pin it checks the tag against):"
+    note "  signandvari $VERSION -Commit $c"
+    # An installed signandvari older than the pin rejects -Commit. Dropping the flag would run the old
+    # script, which force-fetches tags: the answer is to install the reviewed copy (release-signing-keys.md §0), never that.
+    note "  if signandvari rejects -Commit, STOP and install the reviewed scripts/signandvari.ps1 first (docs/runbooks/release-signing-keys.md §0); never drop -Commit"
+  else
+    note "no local tag $TAG — cut and push it first; the ceremony line is signandvari $VERSION -Commit <the tag's commit>"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 1. collect — build-output name in, SERVED name out
 # ---------------------------------------------------------------------------
@@ -158,7 +196,7 @@ for cand in "$STAGE/$DEB_SERVED.asc" "$DEB_LOCAL.asc" "$(dirname "$DEB_LOCAL")/$
   [ -f "$cand" ] && { DEB_ASC="$cand"; break; }
 done
 [ -n "$DEB_ASC" ] || die "no detached signature for the deb — sign it first:
-    gpg --armor --detach-sign --output $STAGE/$DEB_SERVED.asc $STAGE/$DEB_SERVED
+    gpg --local-user $RELEASE_KEY --armor --detach-sign --output $STAGE/$DEB_SERVED.asc $STAGE/$DEB_SERVED
   (key 741CF143…, docs/runbooks/release-signing-keys.md §3)"
 add "$(stage "$DEB_ASC" "$DEB_SERVED.asc")"
 
@@ -176,7 +214,7 @@ for cand in "$STAGE/$PKG_SERVED.asc" "$PKG_LOCAL.asc" "$(dirname "$PKG_LOCAL")/$
   [ -f "$cand" ] && { PKG_ASC="$cand"; break; }
 done
 [ -n "$PKG_ASC" ] || die "no detached signature for the Arch package — scripts/build-linux.sh signs it, or by hand:
-    gpg --armor --detach-sign --output $STAGE/$PKG_SERVED.asc $STAGE/$PKG_SERVED
+    gpg --local-user $RELEASE_KEY --armor --detach-sign --output $STAGE/$PKG_SERVED.asc $STAGE/$PKG_SERVED
   (key 741CF143…, docs/runbooks/release-signing-keys.md §3)"
 add "$(stage "$PKG_ASC" "$PKG_SERVED.asc")"
 
@@ -251,16 +289,30 @@ if [ "$DRY" = 1 ]; then
   note "--dry-run: staged and hashed, nothing signed, nothing uploaded. Planned $TAG assets:"
   (cd "$STAGE" && printf '  %s\n' "${ASSETS[@]}" "$SUMS" "$SUMS.asc") >&2
   [ "$NO_ANDROID" = 1 ] && note "--dry-run: would append to the $TAG release body: $ANDROID_NONE_MARKER"
+  handover_line
   exit 0
 fi
 
 command -v gpg >/dev/null 2>&1 || die "gpg is required to sign $SUMS"
 command -v gh  >/dev/null 2>&1 || die "gh is required to publish the release"
 rm -f "$STAGE/$SUMS.asc"
-gpg --armor --detach-sign --output "$STAGE/$SUMS.asc" "$STAGE/$SUMS" || die "signing $SUMS failed"
-gpg --verify "$STAGE/$SUMS.asc" "$STAGE/$SUMS" >/dev/null 2>&1 || die "the signature we just made does not verify — refusing to publish"
-note "signed $SUMS (detached, armored)"
+gpg --batch --yes --local-user "$RELEASE_KEY" --armor --detach-sign --output "$STAGE/$SUMS.asc" "$STAGE/$SUMS" \
+  || die "signing $SUMS with the release key $RELEASE_KEY failed (runbook §3)"
+note "signed $SUMS (detached, armored, key $RELEASE_KEY)"
 ASSETS+=("$SUMS" "$SUMS.asc")
+
+# Every signature on the upload list, verified against the release key BEFORE the release is
+# created or anything is uploaded. The deb/pkg .asc files are found by name, so a leftover from an
+# earlier build (a `--skip-gradle --no-sign` re-run leaves new package bytes beside the old .asc)
+# would otherwise be published as the signature of bytes it never signed.
+for name in "${ASSETS[@]}"; do
+  case "$name" in *.asc) ;; *) continue ;; esac
+  base="${name%.asc}"
+  printf '%s\n' "${ASSETS[@]}" | grep -qxF "$base" \
+    || die "$name is on the upload list but $base is not — a signature with nothing to verify against"
+  verify_release_sig "$STAGE/$name" "$STAGE/$base"
+done
+note "every .asc on the upload list verifies against the release key $RELEASE_KEY"
 
 # ---------------------------------------------------------------------------
 # 3. publish — create the release if it does not exist, then upload
@@ -322,3 +374,4 @@ note "verify as a stranger would:"
 note "  gh release download $TAG && sha256sum -c $SUMS && gpg --verify $SUMS.asc $SUMS"
 note "  gpg --verify $DEB_SERVED.asc $DEB_SERVED"
 note "  gpg --verify $PKG_SERVED.asc $PKG_SERVED"
+handover_line

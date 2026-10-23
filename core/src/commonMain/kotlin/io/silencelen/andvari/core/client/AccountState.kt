@@ -236,7 +236,8 @@ object AccountState {
      *  - tombstones union (max), and a tombstone not older than a pin removes it (a same-millisecond
      *    tie removes: the fail-safe direction is "unpinned");
      *  - `orgRecoveryFp` from the document with the higher seq (the local copy on a tie or rollback);
-     *  - nonces union per vault, newest [NONCE_CAP] kept;
+     *  - nonces union per vault keeping the EARLIEST time of a repeated nonce (A13 review RF3, see [withConsumed]),
+     *    newest [NONCE_CAP] kept;
      *  - `personal` (A9): the designation with the newest `at` (tie: the smaller vaultId);
      *  - seq = max(local, served, highWater).
      * Rollback: a served seq below this device's [highWater], or a withheld blob once one was seen,
@@ -269,7 +270,8 @@ object AccountState {
         val nonces = HashMap<String, HashMap<String, Long>>()
         for ((vaultId, list) in docs.flatMap { it.consumedNonces.entries }) {
             val m = nonces.getOrPut(vaultId) { HashMap() }
-            for (n in list) m[n.nonce] = maxOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
+            // A13 review RF3: the EARLIEST time wins for a repeated nonce (see [withConsumed]).
+            for (n in list) m[n.nonce] = minOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
         }
         val cappedNonces = nonces.mapValues { (_, m) ->
             m.entries.map { ConsumedNonce(it.key, it.value) }
@@ -387,14 +389,19 @@ object AccountState {
 
     /**
      * Fold this device's consumed removal nonces (root cause A §6.2, branch A7) into [doc]: the same rule as [merge]
-     * (union per vault, the larger issuedAt for a repeated nonce, newest [NONCE_CAP] kept). Nothing else changes.
+     * (union per vault, the EARLIER time for a repeated nonce, newest [NONCE_CAP] kept). Nothing else changes.
+     *
+     * Earliest, not latest (A13 review RF3): for a v1 removal the record's time is the only time the proof has (c10), and
+     * a device that consumes the same nonce later (its own valid_legacy, or an N-1 build's already_recorded at `now`)
+     * would otherwise drag the account's record forward into a later window, so a replay after a re-add reads as a calm
+     * already_recorded instead of the anomaly. For v2 every device records the proof's own issuedAt, so min and max agree.
      */
     fun withConsumed(doc: AccountStateDoc, extra: Map<String, List<ConsumedNonce>>): AccountStateDoc {
         if (extra.isEmpty()) return doc
         val nonces = HashMap<String, HashMap<String, Long>>()
         for ((vaultId, list) in doc.consumedNonces.entries + extra.entries) {
             val m = nonces.getOrPut(vaultId) { HashMap() }
-            for (n in list) m[n.nonce] = maxOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
+            for (n in list) m[n.nonce] = minOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
         }
         val capped = nonces.mapValues { (_, m) ->
             m.entries.map { ConsumedNonce(it.key, it.value) }
@@ -409,14 +416,30 @@ object AccountState {
         a != null && b != null && a.copy(seq = 0) == b.copy(seq = 0)
 
     /** A new pin, replacing any older one for the same user and clearing an older tombstone. */
-    fun withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc = doc.copy(
-        contacts = (doc.contacts.filter { it.userId != c.userId } + c).sortedBy { it.userId },
-        contactTombstones = doc.contactTombstones.filterKeys { it != c.userId }.toSortedMap(),
-    )
+    fun withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
+        // A13 (q01): the newest HUMAN act wins the merge whatever this device's clock says. A pin replacing a different
+        // pin, or a tombstone, is pushed past it (the withPersonal / withIssued rule); the same pin re-saved keeps its time.
+        val prev = doc.contacts.firstOrNull { it.userId == c.userId }
+        var at = c.verifiedAt
+        doc.contactTombstones[c.userId]?.let { at = maxOf(at, it + 1) }
+        if (prev != null) at = if (prev == c.copy(verifiedAt = prev.verifiedAt)) maxOf(at, prev.verifiedAt) else maxOf(at, prev.verifiedAt + 1)
+        return doc.copy(
+            contacts = (doc.contacts.filter { it.userId != c.userId } + c.copy(verifiedAt = at)).sortedBy { it.userId },
+            contactTombstones = doc.contactTombstones.filterKeys { it != c.userId }.toSortedMap(),
+        )
+    }
 
-    /** Remove a pin by tombstone, so the removal survives a merge with an older copy that still has it. */
-    fun withoutContact(doc: AccountStateDoc, userId: String, at: Long): AccountStateDoc = doc.copy(
-        contacts = doc.contacts.filter { it.userId != userId },
-        contactTombstones = (doc.contactTombstones + (userId to maxOf(at, doc.contactTombstones[userId] ?: at))).toSortedMap(),
-    )
+    /**
+     * Remove a pin by tombstone, so the removal survives a merge with an older copy that still has it. A13 (q01): the
+     * tombstone is pushed to the removed pin's `verifiedAt` (a tie removes), so an unpin on a device whose clock is
+     * behind the pinning device's still wins.
+     */
+    fun withoutContact(doc: AccountStateDoc, userId: String, at: Long): AccountStateDoc {
+        val pinnedAt = doc.contacts.firstOrNull { it.userId == userId }?.verifiedAt ?: Long.MIN_VALUE
+        val t = maxOf(at, pinnedAt, doc.contactTombstones[userId] ?: Long.MIN_VALUE)
+        return doc.copy(
+            contacts = doc.contacts.filter { it.userId != userId },
+            contactTombstones = (doc.contactTombstones + (userId to t)).toSortedMap(),
+        )
+    }
 }

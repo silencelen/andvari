@@ -1,26 +1,30 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { trustedStore, type KvArea } from "./trustedkv.ts";
 
 /**
  * Server endpoint selection (design 2026-07-15-multi-tenant-endpoints §5.1) — the extension is
  * endpoint-agnostic: every consumer (api construction, WS URL, downloads absolutization, the
  * popup's open-vault tabs, the dynamic content-script exclusions) derives from ONE per-device
- * choice stored in chrome.storage.local, preconfigured for the reference instance.
+ * choice, preconfigured for the reference instance.
  *
  * LEAF module by design (updateverify.ts discipline): no chrome import, no chrome types — the
- * storage area is resolved structurally from globalThis (or injected by tests), so `node --test`
- * loads it directly and the web pin suite can compile it.
+ * store is injected (tests pass a plain object), so `node --test` loads it directly and the web pin
+ * suite can compile it.
  *
- * `storage.local`, NEVER `storage.sync` (§5.1, binding): the server choice is a PER-DEVICE trust
- * decision. Syncing it would let one phished/compromised device silently repoint every synced
- * browser at a hostile server; keeping it local bounds the blast radius to the device that made
- * the choice. serverurl.test.ts pins this — the sync area is never touched.
+ * Where the choice lives (security review 2026-10, branch A15): the TRUSTED store (trustedkv.ts, the
+ * extension origin's IndexedDB), written only by the service worker on the options page's
+ * `setServerUrl` message after the Trust Gate. NEVER chrome.storage.local: content scripts can write
+ * that area (Chrome before 140, Firefox always), and before A15 a write of this key there repointed
+ * the extension with no Trust Gate. NEVER storage.sync either (§5.1, binding): the server choice is a
+ * PER-DEVICE trust decision, and syncing it would let one phished device repoint every synced browser.
+ * serverurl.test.ts pins both: a planted local or sync value is never read.
  */
 
 export const DEFAULT_SERVER_URL = "https://andvari.monahanhosting.com";
 
-/** The storage.local slot. Written only via setServerUrl (the wave-3 options page's Trust-Gate
- *  commit); background.ts treats ANY change of this key as an origin-clean server switch (§4.1). */
+/** The trusted-store slot. Written only via setServerUrl, by the service worker's `setServerUrl` message handler
+ *  (the options page's Trust-Gate commit), which then runs the origin-clean server switch (§4.1). */
 export const SERVER_URL_KEY = "serverUrl";
 
 /** Enroll-link origin rule — web/src/enroll/enrolllink.ts ORIGIN_RE, mirrored verbatim (design §3):
@@ -50,28 +54,18 @@ export function canonicalizeServerUrl(input: string): string | null {
   return ORIGIN_RE.test(origin) ? origin : null;
 }
 
-/** The minimal chrome.storage area surface used here — structural, so this leaf carries no chrome
- *  types and tests inject a plain object. */
-export interface ServerUrlArea {
-  get(keys: string): Promise<Record<string, unknown>>;
-  set(items: Record<string, unknown>): Promise<void>;
-}
-
-/** Resolve the REAL chrome.storage.local lazily and structurally (no top-level chrome reference —
- *  the module must evaluate under plain node). */
-function chromeLocal(): ServerUrlArea | null {
-  const g = globalThis as { chrome?: { storage?: { local?: ServerUrlArea } } };
-  return g.chrome?.storage?.local ?? null;
-}
+/** The store surface used here — structural (a [KvArea] subset), so tests inject a plain object. */
+export type ServerUrlArea = Pick<KvArea, "get" | "set">;
 
 /**
- * The configured server origin: `storage.local.serverUrl ?? DEFAULT_SERVER_URL` (§5.1). The stored
+ * The configured server origin: the trusted store's `serverUrl ?? DEFAULT_SERVER_URL` (§5.1). The stored
  * value is re-canonicalized defensively on every read so a hand-edited/legacy value resolves to
  * the same canonical form — and therefore the same originKey namespace — every time, or falls back
- * to the default. Storage failure also falls back to the default (the owner-run reference
- * instance): fail-safe against a wedged storage layer, never a crash loop.
+ * to the default. A store that cannot be opened (no IndexedDB: Firefox private browsing) also falls
+ * back to the default (the owner-run reference instance): fail-safe, never a crash loop, and never a
+ * read of chrome.storage.local instead.
  */
-export async function getServerUrl(area: ServerUrlArea | null = chromeLocal()): Promise<string> {
+export async function getServerUrl(area: ServerUrlArea | null = trustedStore()): Promise<string> {
   if (!area) return DEFAULT_SERVER_URL; // non-extension context (tests inject their own area)
   try {
     const v = (await area.get(SERVER_URL_KEY))[SERVER_URL_KEY];
@@ -83,14 +77,14 @@ export async function getServerUrl(area: ServerUrlArea | null = chromeLocal()): 
 
 /**
  * Persist a new server origin (canonicalized first — the stored value is ALWAYS canonical, so
- * every reader derives the same originKey). Throws on a non-origin input: the wave-3 options page
- * validates with canonicalizeServerUrl before ever reaching the Trust Gate, so a throw here is a
- * caller bug, not a user path. The write lands in storage.local only (per-device — see header).
+ * every reader derives the same originKey). Throws on a non-origin input (the worker's handler
+ * canonicalizes before calling, so a throw here is a caller bug), and rethrows a store failure
+ * (TrustedStoreUnavailable) so the options page can say the choice was not kept. Trusted store only.
  */
-export async function setServerUrl(url: string, area: ServerUrlArea | null = chromeLocal()): Promise<string> {
+export async function setServerUrl(url: string, area: ServerUrlArea | null = trustedStore()): Promise<string> {
   const canonical = canonicalizeServerUrl(url);
   if (canonical === null) throw new Error("not a valid server origin (need https://host[:port])");
-  if (!area) throw new Error("storage.local unavailable");
+  if (!area) throw new Error("trusted store unavailable");
   await area.set({ [SERVER_URL_KEY]: canonical });
   return canonical;
 }

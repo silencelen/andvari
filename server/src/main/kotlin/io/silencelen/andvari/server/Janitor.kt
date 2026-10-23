@@ -23,8 +23,9 @@ package io.silencelen.andvari.server
  * log-only for the first armed week.
  *
  * Retained forever: the vault tombstone row (metaBlob blanked, vaultId never recycled) and
- * ALL grant rows (key material blanked: wrappedVk='' — the NOT NULL sentinel — and
- * sealedVk=NULL, active and previously-revoked alike) — those two are what deny a push
+ * ALL grant rows (key material blanked: wrappedVk='' — the NOT NULL sentinel —, sealedVk=NULL
+ * and the v14 signedGrant=NULL (a sealed SignedStatement carrying the VK; security review
+ * 2026-10, q43), active and previously-revoked alike) — those two are what deny a push
  * against the purged vault itself for every stale client forever (role==null; the item row
  * is never read on that path, so the edit-over-tombstone fence never applies post-purge).
  * Item rows become ciphertext-free skeletal tombstones (deleted=1, blob=NULL, NO rev bump —
@@ -265,8 +266,10 @@ class Janitor(
                 nowMs, vaultId, vaultId, nowMs,
             )
             // Blanket wipe of ALL grants' key material — active AND previously-revoked
-            // (a removed member's sealedVk must not survive the purge).
-            c.exec("UPDATE grants SET wrappedVk='', sealedVk=NULL WHERE vaultId=? AND EXISTS($guard)", vaultId, vaultId, nowMs)
+            // (a removed member's sealedVk must not survive the purge). Every column that can carry
+            // the VK: wrappedVk, the v1 sealedVk, and the v14 signedGrant (q43 — it was added after
+            // this statement was written, and a new key-carrier column must be added HERE too).
+            c.exec("UPDATE grants SET wrappedVk='', sealedVk=NULL, signedGrant=NULL WHERE vaultId=? AND EXISTS($guard)", vaultId, vaultId, nowMs)
             val stamped = c.exec(
                 "UPDATE vaults SET metaBlob='', purgedAt=? WHERE vaultId=? AND deletedAt IS NOT NULL AND purgeAt<=? AND purgedAt IS NULL",
                 nowMs, vaultId, nowMs,

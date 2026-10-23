@@ -91,6 +91,8 @@ describe("lifecycle-proof vectors", () => {
         issuedAt: c.issuedAt as number | null,
         consumed: new Set(c.consumed as string[]),
         consumedAccount: new Set(c.consumedAccount as string[]),
+        // A13 (c10): optional — when each account-state nonce was consumed.
+        consumedAccountAt: new Map(Object.entries((c.consumedAccountAt as Record<string, number> | undefined) ?? {})),
         liveSince: c.liveSince as number | null,
         now: c.now as number,
       });

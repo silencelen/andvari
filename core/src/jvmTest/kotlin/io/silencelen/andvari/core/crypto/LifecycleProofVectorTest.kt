@@ -96,6 +96,9 @@ class LifecycleProofVectorTest {
                 consumed = c.getValue("consumed").jsonArray.map { it.jsonPrimitive.content }.toSet(),
                 consumedAccount = c.getValue("consumedAccount").jsonArray.map { it.jsonPrimitive.content }.toSet(),
                 liveSince = lng("liveSince"), now = lng("now")!!,
+                // A13 (c10): optional — when each account-state nonce was consumed.
+                consumedAccountAt = c["consumedAccountAt"]?.takeIf { it != JsonNull }?.jsonObject
+                    ?.mapValues { it.value.jsonPrimitive.long }.orEmpty(),
             )
             assertEquals(str("expect"), d.verdict.code, "verdict: $name")
             assertEquals(str("step"), d.step, "deciding step: $name")

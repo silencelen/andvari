@@ -7,4 +7,6 @@
 -->
 <full-backup-content>
     <exclude domain="sharedpref" path="andvari.xml" />
+    <!-- A14 review N5: the device-local app-fill signer bindings. -->
+    <exclude domain="sharedpref" path="andvari_app_signer_bindings.xml" />
 </full-backup-content>

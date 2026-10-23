@@ -37,3 +37,6 @@ internal fun canonicalOrigin(url: String): String = OriginCanon.canonicalOrigin(
  * threat). Null = refuse.
  */
 internal fun canonicalServerOrigin(input: String): String? = OriginCanon.canonicalServerOrigin(input)
+
+/** A14 (F8): true when two server addresses are the same origin under the pinned canonical form. */
+internal fun sameOrigin(a: String, b: String): Boolean = canonicalOrigin(a) == canonicalOrigin(b)

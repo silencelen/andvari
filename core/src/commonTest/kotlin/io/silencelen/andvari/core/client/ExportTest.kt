@@ -15,6 +15,7 @@ import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -149,6 +150,101 @@ class ExportTest {
             ),
         )
         assertEquals(listOf("Shared bank", "Shared mail"), w.formulaRisk)
+    }
+
+    // ---- Security review 2026-10, A14 (F6): the warning names CELLS and must be acknowledged ----
+    // Twins: web export.test.ts "formulaCells …". The labels are byte-equal across impls.
+
+    @Test
+    fun csv_formulaCells_nameEachRiskyCellByFieldThenItem() {
+        val w = ExportCsv.warnings(
+            listOf(
+                login("=Name", "u", "=pw", totp = "@x"),
+                login("Fine", "u", "p", uris = listOf("https://a.test")),
+                login("Shared bank", "+1555", "p", uris = listOf("-evil.test"), notes = "=1"),
+                ItemDoc(type = "note", name = "=NotWritten", notes = "=1"),
+            ),
+        )
+        assertEquals(
+            listOf(
+                ExportCsv.FormulaCell("=Name", ExportCsv.CsvColumn.NAME), ExportCsv.FormulaCell("=Name", ExportCsv.CsvColumn.PASSWORD), ExportCsv.FormulaCell("=Name", ExportCsv.CsvColumn.TOTP),
+                ExportCsv.FormulaCell("Shared bank", ExportCsv.CsvColumn.WEBSITE), ExportCsv.FormulaCell("Shared bank", ExportCsv.CsvColumn.USERNAME), ExportCsv.FormulaCell("Shared bank", ExportCsv.CsvColumn.NOTE),
+            ),
+            w.formulaCells,
+        )
+        assertEquals(
+            listOf(
+                "Name of \u201C=Name\u201D", "Password of \u201C=Name\u201D", "One-time code of \u201C=Name\u201D",
+                "Website of \u201CShared bank\u201D", "Username of \u201CShared bank\u201D", "Note of \u201CShared bank\u201D",
+            ),
+            w.formulaCells.map(ExportCsv::formulaCellLabel),
+        )
+        assertEquals(listOf("=Name", "Shared bank"), w.formulaRisk, "the by-name list is unchanged")
+    }
+
+    @Test
+    fun csv_formulaCellLabel_keepsAnAttackerChosenNameOnOneLineAfterOurFieldLabel() {
+        // The item name is the attacker's; the field label and the quotes are ours. A newline, a
+        // closing quote or an escape sequence in the name cannot start a line of its own.
+        val label = ExportCsv.formulaCellLabel(ExportCsv.FormulaCell("Bank\u201D\n(no risky cells)\u001B[8m", ExportCsv.CsvColumn.PASSWORD))
+        assertEquals("Password of \u201CBank\u201D\\u000A(no risky cells)\\u001B[8m\u201D", label)
+        assertFalse(label.contains('\n'))
+    }
+
+    @Test
+    fun csv_gatedWrite_aSyncBetweenThePreflightAndTheWriteNeedsAFreshAcknowledgement() {
+        // A14 review N3: the native apps preflight, then the user picks a file, then the write re-reads the vault. A
+        // sync in between (desktop's 5-minute poll runs during the file chooser; Android's RESUMED loop during the SAF
+        // picker) can bring a cell nobody acknowledged. The write recomputes the cells from the docs it actually writes.
+        val atPreflight = listOf(login("Bank", "alice", "=SUM(1)"), login("Mail", "a@x", "plain"))
+        val acked = ExportCsv.warnings(atPreflight).formulaCells
+        assertEquals(listOf(ExportCsv.FormulaCell("Bank", ExportCsv.CsvColumn.PASSWORD)), acked)
+
+        val ready = ExportCsv.gatedWrite(atPreflight, acked)
+        assertIs<ExportCsv.GatedWrite.Ready>(ready)
+        assertEquals(ExportCsv.write(atPreflight), ready.csv, "the bytes are exactly the docs checked")
+        assertEquals(2, ready.loginCount)
+
+        // The sync lands: a co-member adds an item whose note is a formula.
+        val atWrite = atPreflight + login("Shared", "bob", "x", notes = "=HYPERLINK(\"http://evil\")")
+        val refused = ExportCsv.gatedWrite(atWrite, acked)
+        assertIs<ExportCsv.GatedWrite.NeedsAcknowledgement>(refused)
+        assertEquals(
+            listOf(ExportCsv.FormulaCell("Bank", ExportCsv.CsvColumn.PASSWORD), ExportCsv.FormulaCell("Shared", ExportCsv.CsvColumn.NOTE)),
+            refused.warnings.formulaCells, "the refusal carries the NEW list, to show again",
+        )
+        assertEquals(3, refused.loginCount)
+        assertIs<ExportCsv.GatedWrite.Ready>(ExportCsv.gatedWrite(atWrite, refused.warnings.formulaCells), "acknowledged again: written")
+
+        // Same count, different cell: still refused (the acknowledgement names cells, not a number).
+        val swapped = listOf(login("Other", "alice", "=SUM(1)"), login("Mail", "a@x", "plain"))
+        assertIs<ExportCsv.GatedWrite.NeedsAcknowledgement>(ExportCsv.gatedWrite(swapped, acked))
+        // A sync that removed the only risky cell needs no acknowledgement; nothing risky ever needs one.
+        assertIs<ExportCsv.GatedWrite.Ready>(ExportCsv.gatedWrite(listOf(login("Mail", "a@x", "plain")), acked))
+        assertIs<ExportCsv.GatedWrite.Ready>(ExportCsv.gatedWrite(listOf(login("Mail", "a@x", "plain")), null))
+        // No acknowledgement at all with risky cells: refused.
+        assertIs<ExportCsv.GatedWrite.NeedsAcknowledgement>(ExportCsv.gatedWrite(atPreflight, null))
+    }
+
+    @Test
+    fun csv_formulaAck_isRequiredAndBoundToTheCellsShown() {
+        val one = listOf(ExportCsv.FormulaCell("x", ExportCsv.CsvColumn.PASSWORD))
+        assertTrue(ExportCsv.formulaAckSatisfied(emptyList(), null), "nothing risky: nothing to acknowledge")
+        assertFalse(ExportCsv.formulaAckSatisfied(one, null), "risky cells: the download waits for the acknowledgement")
+        assertTrue(ExportCsv.formulaAckSatisfied(one, one.toList()))
+        assertFalse(
+            ExportCsv.formulaAckSatisfied(one + ExportCsv.FormulaCell("y", ExportCsv.CsvColumn.NAME), one),
+            "a shared vault re-included after the acknowledgement brings new cells: acknowledge again",
+        )
+        assertTrue(ExportCsv.FORMULA_ACK.isNotBlank())
+    }
+
+    @Test
+    fun csv_writerStillEmitsRiskyCellsVerbatim() {
+        // A CSV export is input for another password manager: a ' prefix would corrupt a real
+        // password that starts with = + - or @. The acknowledgement is the control, not mangling.
+        val csv = ExportCsv.write(listOf(login("=Name", "u", "=HYPERLINK(1)")))
+        assertEquals("=Name,,u,=HYPERLINK(1),,", csv.split("\r\n")[1])
     }
 
     @Test

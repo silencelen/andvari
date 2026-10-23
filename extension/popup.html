@@ -35,6 +35,7 @@
       Finish setup — allow andvari to reach your server in Options.
     </button>
 
+
     <!-- F3 fresh-install broad-grant banner (card autofill Tier 1 §10): with no all-sites host
          permission the dynamic autofill script injects NOWHERE — dropdown, save banner, and card
          fill are all silently dormant. The button calls chrome.permissions.request directly (a
@@ -86,6 +87,23 @@
     <div id="grants-waiting" class="must-change-strip grants-waiting" role="status" hidden></div>
     <!-- Root cause A §5.1 INV-HOME (A1b): the server sent an item under the wrong vault; it was not applied. -->
     <div id="wrong-vault" class="must-change-strip grants-waiting" role="status" hidden></div>
+
+    <!-- A15 review F1 (security review 2026-10): a server is pending, so the worker signs in NOWHERE — not even to the
+         default server — until the user decides. Shown INSTEAD of the sign-in form. `confirm`: the server this browser
+         used before the update (its old setting sat where a web page could have written it, so it is not reconnected
+         silently): confirming goes through Options and the Trust Gate; "Not mine" is the clear second choice and names
+         the server it switches to. When this browser cannot keep a server choice (Firefox "Never remember history")
+         the copy says so. `unsettled`: the worker could not read its settings. Text is set by popup.ts (textContent). -->
+    <section id="confirm-server" class="locked confirm-server" aria-labelledby="confirm-server-h" hidden>
+      <h2 id="confirm-server-h" class="confirm-server-h">Confirm your server</h2>
+      <p id="confirm-server-lead" class="confirm-server-body">Before this update, andvari was set to use:</p>
+      <code id="confirm-server-origin" class="confirm-server-origin"></code>
+      <p id="confirm-server-body" class="confirm-server-body"></p>
+      <button id="confirm-server-open" class="primary" type="button">Confirm in Options</button>
+      <p style="margin: 10px 0 0; text-align: center;">
+        <button id="confirm-server-not-mine" class="link dim" type="button">Not mine</button>
+      </p>
+    </section>
 
     <section id="locked" class="locked" hidden>
       <div class="hero">

@@ -13,7 +13,7 @@ DB="$WORK/andvari.db"
 PORT=8098
 BASE="http://127.0.0.1:$PORT"
 BOOTSTRAP="drill-bootstrap-$$"
-LOCK=/tmp/andvari-gradle.lock
+LOCK="${ANDVARI_GRADLE_LOCK:-/tmp/andvari-gradle.lock}"
 
 cleanup() { [ -n "${SRV_PID:-}" ] && kill -9 "$SRV_PID" 2>/dev/null || true; rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -43,8 +43,27 @@ curl -sf "$BASE/healthz" >/dev/null 2>&1 || { echo "server did not become health
 echo "    healthy at $BASE"
 
 echo "==> running the account-recovery drill (real recovery-cli jar + real web client)"
+# The banner below is a claim that an escrow → recover → apply test RAN and passed, so it is gated
+# on vitest's own count, not on its exit code: a drill whose test body was skipped (a skipIf on a
+# missing env value, an it.skip, a rename) exits 0 having proved nothing. Same floor as e2e.sh's
+# run_phase (audit H96); the whole log is printed on failure, not the last 30 lines.
+DRILL_LOG="$WORK/drill.log"
+rc=0
 (cd "$REPO_DIR/web" && ANDVARI_DRILL="$BASE" ANDVARI_DRILL_BOOTSTRAP="$BOOTSTRAP" \
   ANDVARI_DRILL_SEED="$SEED" ANDVARI_DRILL_RECOVERY_JAR="$RECOVERY_JAR" ANDVARI_DRILL_WORK="$WORK" \
-  npx vitest run src/e2e/recovery-drill.e2e.test.ts 2>&1) | tail -30
+  npx vitest run src/e2e/recovery-drill.e2e.test.ts) >"$DRILL_LOG" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  cat "$DRILL_LOG" >&2
+  echo "==> RECOVERY DRILL FAILED (vitest exit $rc) — full output above" >&2
+  exit 1
+fi
+passed=$(grep -oE 'Tests[[:space:]]+[0-9]+ passed' "$DRILL_LOG" | head -1 | grep -oE '[0-9]+' | head -1) || true
+if [ "${passed:-0}" -lt 1 ]; then
+  cat "$DRILL_LOG" >&2
+  echo "==> RECOVERY DRILL COLLECTED NOTHING: vitest reported ${passed:-0} passing tests." >&2
+  echo "    A drill that runs no test is not a drill that passed — refusing the banner." >&2
+  exit 1
+fi
+tail -30 "$DRILL_LOG"
 
-echo "==> RECOVERY DRILL PASSED: escrow → recover → apply → temp login → forced change → data intact"
+echo "==> RECOVERY DRILL PASSED ($passed test(s)): escrow → recover → apply → temp login → forced change → data intact"

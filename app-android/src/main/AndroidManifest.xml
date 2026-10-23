@@ -4,13 +4,29 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- A14 review N6: the app-fill confirm hides other apps' overlay windows while it is shown
+         (Window.setHideOverlayWindows, API 31+). A normal permission, granted at install. -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
 
-    <!-- Package visibility (API 30+): without this, PackageManager.getPackageInfo throws
-         NameNotFound for every browser, so the autofill signing-cert check (TrustedBrowsers)
-         always fails closed and NOTHING ever fills. One <package> per key in
-         core BrowserCertPins.TABLE — keep the two lists in lockstep. A fixed allowlist, so
-         no QUERY_ALL_PACKAGES (that carries Play-policy weight and isn't needed here). -->
+    <!-- Package visibility (API 30+). Still no QUERY_ALL_PACKAGES (that carries Play-policy weight
+         and isn't needed here); three narrower grants instead:
+         * one <package> per key in core BrowserCertPins.TABLE — keep the two lists in lockstep.
+           Without it PackageManager.getPackageInfo throws NameNotFound for every browser, the
+           signing-cert check (TrustedBrowsers) fails closed and NOTHING ever fills in a browser;
+         * the MAIN/LAUNCHER intent (A14): the autofill framework grants a service no visibility of
+           the app that asked for a fill, so without this every installer and signer lookup for a
+           non-browser app threw, and every androidapp:// fill took the confirm with nothing it could
+           remember. Its limit: an app with no launcher activity stays invisible, its lookups still
+           fail, and its fills still take the confirm (never a silent fill);
+         * com.android.vending by name (A14 review N1): the gate counts an install as Play's only
+           when that installer is itself a system app, so its own ApplicationInfo must resolve. -->
     <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- The Play Store: the one installer the app-fill gate names (AppFillGate.PLAY_INSTALLER). -->
+        <package android:name="com.android.vending" />
         <!-- Chrome + channels -->
         <package android:name="com.android.chrome" />
         <package android:name="com.chrome.beta" />
@@ -94,6 +110,14 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Andvari.Translucent" />
+        <!-- Security review 2026-10, A14 (F7): the one-tap confirm before an androidapp:// login fills
+             an app that is neither a system app nor Play-installed. Result-returning dataset auth. -->
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.AppFillConfirmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
             android:theme="@style/Theme.Andvari.Translucent" />
         <!-- "Trust {browser} to fill here" confirm, launched from the autofill dropdown row. -->
         <activity

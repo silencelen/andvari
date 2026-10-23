@@ -303,6 +303,124 @@ minted and the vectors' base64url); any other nonce is the `fields` anomaly befo
 nonce the record could not represent was verified, never consumed, and so replayed on that device. The
 record encoders now throw on a malformed row rather than drop it, so no caller can repeat that shape.
 
+**R16 addendum (A13, c10).** A v1 `remove` proof whose nonce is only in the ACCOUNT-STATE set is no longer
+calm unconditionally: the time that account-state record was consumed (the consuming device's clock) stands in
+for the `issuedAt` a v1 proof lacks and must be inside this device's window, else the anomaly, exactly as a v2
+replay after a re-add is. Residual accepted: that time is another of the user's devices' wall clock, so a device
+whose clock was far ahead when it consumed the nonce can make a later replay look in-window here (wording only;
+the data handling is the same either way), and an N−1 device's v1 record is as good as its clock.
+
+**R16 addendum (A13 review RF3).** A repeated consumed nonce keeps the EARLIEST time any device recorded for it, in
+the account-state merge and in each device's fold of its own records, on both engines (vector
+`a13-nonce-repeat-keeps-the-earliest-consumption`; the cap vector is now `nonce-union-earliest-and-cap-256`). Before,
+the larger time won, so a device that consumed the same v1 nonce later (its own `valid_legacy`, or an N−1 build's
+`already_recorded` at its own `now`) moved the record forward, and a proof replayed after a re-add could fall inside
+that later window as a calm `already_recorded` instead of the anomaly. For v2 every device records the proof's own
+`issuedAt`, so the rule changes nothing there. Residual accepted (N−1): while a device on an earlier build still
+writes the account state, its merge keeps the larger time and its `already_recorded` writes `now`, so the served copy
+can still carry a later time; a device that already merged the earlier record keeps it (the merge takes the minimum
+of its copy and the served one), and a device that never saw it adopts the later one. That closes once every device
+runs this build. In the other direction, a device whose clock was far BEHIND when it consumed a nonce now pulls the
+record earlier, which can only turn a later genuine `already_recorded` into the anomaly (wording only), and the
+per-vault cap of 256 now ranks a nonce by its first consumption.
+
+**A13 (security review 2026-10, third API review: release scripts and the remaining LOWs).** (a) **The signing
+workstation pins the release commit and checks it against its own record** (c03; A13 review RF1, RF7): `signandvari
+<ver> -Commit <sha>` refuses a tag that does not resolve to the pin before anything is checked out, fetches only the
+release tag and never forces it (a moved release tag stops the run, naming both commits; another tag that moved on the
+remote is not fetched and cannot block a ceremony), re-checks HEAD after the checkout and before the ceremony, and
+`prestige-release.ps1` records the pin in `bundle.json`. The pin is NOT out of band: it comes from the build host's
+handover line, which reads the build host's own tag, so it closes a tag moved by anyone other than the build host, a
+tag moved after the handover line was printed, and an accidental re-tag, while a compromised build host chooses both
+the tag and the pin. The layer aimed at that is held by the workstation: the commit its last successful ceremony
+signed, recorded outside the repo and moved only after `prestige-release.ps1` succeeded and `bundle.json` records the
+pin. Before any of the tree's code runs, the release commit must descend from it; a stat, the commits and then the
+full diff since it are printed, every line taken from git escaped (C0, DEL, C1, the line separators and the bidi
+controls; A14 review R2-2; the invisible and space-like characters, a byte that is not UTF-8 as `\xNN`, and lines cut
+at 400 characters on screen, whole in a review copy; A14 review 5) and read as bytes split at LF alone, so a CR cannot fake a commit line or a diff header (A14
+review 3); the tree is checked out and must then be clean and byte-identical to the commit where the review covers it;
+and the operator types the version; a run with no human at a console fails closed before anything is checked out.
+**The review is default-include** (A14 review 3, C1): every changed path except a short explicit list of trees that
+never run on the signing box (`app-android/`, `web/`, `extension/`, `server/`, `deploy/`, `docs/`, `spec/`,
+`.github/`), whose changes are counted instead, and even inside those trees every build script, gradle property and
+wrapper file, jar, PowerShell or batch file and git attribute file (`.gitattributes`, `.lfsconfig`, `.gitmodules`) is
+shown. So ALL of `:core` and `tools/` are covered (the update-signer is handed the key's path and is a shadowJar of
+`tools/update-signer` and all of `:core`, and Kotlin resolves an unqualified call to a same-package declaration from
+any module on the classpath ahead of the default imports; A14 review R2-1), and so are the scripts, the whole gradle
+build, any new top-level directory, and `app-desktop/`, whose MSI is the household's Windows client and runs on the
+signing account once installed there. The earlier allowlist showed a newly linked module, source directory, classpath
+file or agent jar only as the build-script line that added it, and never its contents (A14 review 3, C1); now only a
+file linked from inside an excluded tree is out of the review, and the line that links it is shown and named as a
+reason to stop. Not covered: the third-party artifacts gradle downloads (only the catalog that names them) and the JDK.
+**The full diff** is printed by `signandvari` before checkout, paged by PowerShell and never by an external pager (Git
+for Windows pages through `less -R`, which passes SGR), with `--text --no-textconv --no-ext-diff --no-color`, so neither
+the box's diff settings nor any attribute file can hide, rewrite or recolour a change (C2). **The checkout** runs with
+`core.hooksPath` pointed at an empty directory, no fsmonitor hook and the LFS smudge off, and afterwards every file the
+review covers must hash with no filter to what the index holds (hashed by `signandvari` itself since A14 review 5, H1:
+`git hash-object --stdin-paths` read its paths from a pipeline, which a UTF-8 `$OutputEncoding` on Windows PowerShell
+5.1 starts with a byte-order mark), allowing only the CRLF git's own Windows checkout writes, and only for a blob git
+would convert (no NUL, no CR; S4); a symlink or submodule there is refused. That closes a system LFS filter writing
+unreviewed LFS content for a pointer while `git status` stays clean, and any other filter's output (C3). Every git
+command blanks the LFS clean, smudge and process filters, and from the checkout on reads no attributes from the release
+tree where git has `--attr-source` (2.42+). A reviewed PowerShell file with a byte above 0x7F and no byte-order mark
+(5.1 reads it in the ANSI code page, where 0x91-0x94 are quotes) and a reviewed text file with a CR that no LF follows
+(a line break to Kotlin, Java and PowerShell, not to the review) are refused (A14 review 5, S1, S2). Every way out
+between the checkout and the confirmation (a refusal, a failed git command, Ctrl+C) puts HEAD back, in a `finally`
+(C5); closing the window does not. `prestige-release.ps1` deletes and rebuilds the update-signer jar from the tree on
+every real run, so the jar handed the key is that commit's, not one an earlier build left (A14 review 3). What the
+build host sends back after signing (the drop's `sha256sum`, the read-back manifest's fields) prints escaped too (C6).
+A release tree with two paths that are one file on a case-insensitive disk is refused before checkout (NTFS). A first
+run compares against the commit in the workstation's own most recent signed bundle (`dist/` beside its signature,
+highest seq; no seed at all while git tracks anything under `dist/` in any case, because git matches that path by case
+and NTFS does not, A14 review 3, C4), or an operator-chosen `-Baseline`, which must be a strict ancestor of the release,
+when there is none; a tag is never the seed, because a plain fetch or pull brings in new tags and a planted
+intermediate one would hide every change up to it (A14 review R2-3, R2-4). The commit values the owner types come from
+GitHub's own pages (the merge they approved, the tag's commit), compared in all 40 hex characters with the build host's
+handoff (GitHub's tag and pull-request pages show 7; the commit page's address carries all 40): that catches a
+mistyped, altered or never-published value, not a build host that pushed and tagged its own commit, against which only
+the review stands. A dry run is not tree-free: once confirmed it runs the tree's `prestige-release.ps1` with `-DryRun`
+on that account (which builds no signer). Residual accepted: this rests on the
+operator reading the diff, and a compromised build host can still cut a descendant commit that changes the build; the
+tree still runs its own scripts and gradle on the account that can open `update-signing.key`, and keeping the build
+off that account is the longer-term fix and is not built. Separately, the Linux, Arch and extension digests the
+ceremony signs come from `release-spec.json`, which the download origin serves unsigned, so a substituted spec and
+artifact pair that agree with each other pass the workstation's checks (q15, open; the build-host watcher's
+byte-compare of the spec is the remaining guard). Keeping the key off the build host therefore does not, on its own,
+mean a build-host compromise cannot forge a signed update. (b) **Build-host scripts** (c02, c06, c07, q22, q50, q21):
+root-owned Arch packages from any builder, a whole-image same-build proof, SHA256SUMS signed by the pinned release key
+with every uploaded `.asc` verified against it, the Web Store token off argv, a live release's signatures kept by the
+downloads prune, and a recovery drill that fails when it ran nothing. Release-script hygiene; none of it is a client
+trust decision. (c) **The extension save/update banner's height** (q36) is NOT fixed in A13 and stays a residual: its
+painted height still varies with the verdict (Save vs Update) and with the vault-derived name lengths, so a page that
+drives a capture and hit-tests the banner learns whether andvari holds a login for this host and username, and whether
+the vault is unlocked. It is not a small, contained change: since A11 (q14) the Update sentence names the destination
+vault and warns that every holder can read it, up to about five lines, and a fixed box must either clip that warning
+(refused) or reserve that height in every state, a visible design change that needs the owner's review. (d) **The
+popup login-fill grant** (q39) is bound to the tab's top origin at mint, as the card grant is, redeemed only when the
+browser-set `sender.origin` equals that origin, and voided whenever the tab reports a navigation starting (`status:
+loading`), which every cross-document navigation does, same-origin ones included (A13 review I2 corrected this
+sentence, which said a same-origin navigation kept it). The origin is bound at mint either way, so a document of
+another origin can never redeem it. (e) **Android editor secrets** (q27: password, TOTP seed, card number and security
+code; since the A13 review, RF5, also the notes and the attachment list, whose every reference carries its file key)
+live in the ViewModel's editor session rather than in saved-instance state, so they survive rotation but not process
+death; after process death the vault relocks anyway and the editor reopens from the stored item. (f) **Closed without
+a new residual:** a kept row applied when its key arrives (native `reevaluateGrants`, the invitation path) now homes
+the item as R17 states (c05); a contact unpin or re-pin wins the account-state merge under clock skew (q01/q23, spec
+01, the contact-pin merge); the desktop update manifest and signature are size-capped while read (q19), and so, since
+the A13 review (RF6), are the extension's (256 KiB / 1 KiB, a declared length over the cap refused before reading); a
+malformed served `encryptedIdentitySeed` on the extension's quick-unlock redeem is the terminal `keys_damaged` refusal
+with the enrolled blob kept (q38; it gates MALFORMED seeds only: a well-formed seed the server substituted still fails
+to open and takes the `stale_uvk` wipe of the enrolled quick-unlock blob, which a 401 could already force, so the cost
+is a re-enrolment, never a secret — A13 review I3); vault purge also blanks the v14 `signedGrant` (q43); backup-cli's
+never-overwrite guard folds names as a case-insensitive filesystem does (q45); a seal refusal after web's offline-put
+fold restores the folded rows (q54), and core folds them only once the new put is sealed (A13 review RF4); and the
+Android Autofill-status screen, which clears FLAG_SECURE, no longer composes the attention area (q30). (g) **Not built
+(A13 review I4):** `personal_wrap.wrappedVk` is not blanked when the vault it names is purged. The wrap is sealed to
+the account's own UVK, so only that user can open it and they held that key already, and the items, versions and
+attachments it protected are gone with the purge. Blanking it in place would make the served wrap unreadable or
+absent, which every engine reads as the server damaging or withholding the personal wrap (a warning or a proposal for
+the human), so it is not a small, contained server change; no reachable exposure is shown.
+
 **R18 (server-supplied ids and the device-local trust records — security review 2026-10, plugin scan F1/F2;
 branch A10).** Every id a server supplies (vaultId, userId, itemId, deviceId, the user ids riding a transfer)
 is checked against the lowercase UUID grammar at the wire boundary on all three engines, in the API client,
@@ -310,8 +428,10 @@ before it can reach account state, a cache row or a device-local record; a row w
 dropped and surfaced as a `bad-id` anomaly, and a session or identity row with one is refused outright.
 The device-local trust records themselves (the §8.2 vouches, the held-key memory, member-received
 provenance, declined invitations, issued tombstones, confirmed pins, consumed removal nonces) are JSON
-records with a strict decode on core and web, and the extension's storage.local records are re-checked
-on read; a pre-A10 line record is migrated once, keeping only lines whose ids are UUIDs. Before this a
+records with a strict decode on core and web, and the extension's records are re-checked on read; a
+pre-A10 line record is migrated once, keeping only lines whose ids are UUIDs. Since A15 the extension's
+records live in the extension origin's IndexedDB, not storage.local: a strict decode checks shape, and
+storage.local, which content scripts can write, could not give the integrity the re-check assumed. Before this a
 server-chosen vault id carrying a line break could, through one human Accept on a decoy, write forged
 vouch and held-key lines for OTHER vaults (trust laundering through the record delimiter). Residual: the
 grammar is a shape check, not authentication — a well-formed id the server made up is still just a row,
@@ -470,6 +590,370 @@ same row raises the notice again on each pull (it is never silent). (e) a captur
 an item's home was recorded on this device (an upgrade mid-session) binds to the vault the item showed then,
 which is the item's recorded home from that point on.
 
+**A14 (security review 2026-10, whole-repository scan of 0.28.1).** (a) **The escrow ceremony keeps the seed out of
+docker's logs** (F1): `bringup.sh` and every documented `docker run … recovery-cli` pass `--log-driver none` before the
+image, because docker copies an attached container's stdout to its log driver (json-file on disk, which `--rm` only
+unlinks; the journal; a log shipper). What stays: the sheet in the terminal's scrollback (the script says to clear it)
+and the air-gapped keygen as the by-the-book ceremony. A dated design record that sketched the ceremony as `docker
+compose run` is left as written; nothing ships that form. The deploy test scans `deploy/`, `docs/`, the `Dockerfile`,
+`.github/` and every other repo-root file for the command (the Dockerfile's own header example had missed the flag until
+the A14 review, W6). (b) **`/data` is owner-only** (F10): the entrypoint makes it 0700 after its chown, tightens
+existing database files to 0600 and starts the server under umask 077; `bringup.sh` creates `./data` 0700. A chmod that
+fails (a read-only or root-squashed mount) warns and the server still starts, as root or not (A14 review Wd). The server
+is the only reader of the database; a host-side backup runs as root, and under rootless docker as real root or the
+subordinate uid the container's user maps to. Residual accepted: `users.totpSecret` is stored in plaintext in the
+database (encrypting it at rest is not built), so anyone who reads the file, now root or the container's user only,
+reads every member's TOTP seed.
+(c) **One sender gate in the extension's service worker** (F3/F4/F11): every message type is classified as sent by
+content scripts (the 17 types `content.ts` sends) or extension-page-only; the other 27 are answered with their own
+refusal shape unless `sender.url` is one of this extension's pages (`chrome.runtime.getURL("")`, either engine; a
+malformed base fails closed), before the handler runs, and a refused message does not re-arm the idle lock. `status`,
+`ping`, `updateStatus` and `linkUri` are gated too: no content script sends them. Unknown types are refused. The
+per-handler checks stay. Residual: a compromised RENDERER of one of our own extension pages is outside this gate (it is
+the extension). The gate covers messages only: until A15, storage.local was a second way in (the worker adopted a
+`serverUrl` written there and linked a stored update offer), which A15 closed. (d) **The CSV formula warning is an acknowledgement** (F6) on web, desktop and Android: it names each
+risky cell by field and item ("Password of “…”", the name escaped onto one line after our label), and the save stays
+disabled until it is ticked for exactly those cells. Values are written verbatim, by decision: a CSV export is input for
+another password manager, and a `'` prefix would corrupt a real password that starts with `=`, `+`, `-` or `@`. Since
+the A14 review (N3) the native writes re-check it against what they write: the vault is re-read after the file chooser
+and a sync can land in between, so desktop and Android recompute the cells from the docs actually written
+(`ExportCsv.gatedWrite`) and write only when the tick covers exactly them; otherwise nothing is written and the dialog
+comes back with the new list, the same vault selection and an empty tick (web writes the very items the render that
+enabled its button computed). (e) **An enroll is bound to the origin its client dialed** (F8, desktop and the reachable
+Android twin): while it runs, Cancel, a re-pasted invite and Connect are refused and disabled; the session is saved
+under the client's own origin, and if the app was moved anyway the commit is aborted and the tokens revoked at the
+issuer; a stored session's tokens go only to its own origin (unlock refuses another; a locked sign-out revokes at the
+session's origin and still wipes locally). Since the A14 review (N4), a sign-in is bound the same way on both apps: its
+client's origin is captured when the client is built, the session is saved under it, and a move during the login and KDF
+aborts the commit with a revoke at the issuer; and desktop's manual repoint (`updateServer`, the gate's Connect) is
+refused at the state layer while any op holds a client, not only by the dialog's disabled button. Residuals: a session a
+pre-A14 build already saved under the wrong origin cannot be told apart from a correct one; an install whose saved
+session predates the one-time default-URL migration now signs in again once. (f) **Desktop secret copies are marked
+sensitive** (F9): Windows `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` and
+`CanUploadToCloudClipboard` (each a DWORD 0; the first was an empty payload until the A14 review, N8, which AWT
+publishes as a zero-size global block that may be a discarded handle), KDE `x-kde-passwordManagerHint` = `secret`; the
+auto-clear stays. Residual: a clipboard manager that ignores these hints still records the copy (owner device check:
+Win+V and Klipper on a real desktop). (g) **The offline tools escape
+what they print** (F12): `backup-cli verify` and `recovery-cli verify` replace every C0 (tab and newlines included), DEL
+and C1 character in payload-authored strings with a visible `\u001B`-style escape, the drill receipt line by line
+(JSON's own escape, so it still decodes the same). Since the A14 review (Wc/N9) the same escape also covers
+U+2028/U+2029 and the bidi controls (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), which a renderer would take
+as a line break or a reordering, in core `TerminalText` and in web's CSV-cell labels alike. Residual: `backup-cli dump`
+relies on JSON escaping, which leaves C1 and the bidi controls raw.
+(h) **A browser without the offline copy keeps no token once locked** (F5, owner decision): unless the offline copy is
+on for the user on this browser, the token pair lives in sessionStorage per tab (localStorage keeps the non-secret
+metadata, whose removal is the cross-tab sign-out signal); a lock (manual, idle, or announced by another tab) awaits the
+vault's usage flush, revokes the tab's pair and drops it, and unlocking is then a full sign-in (email filled in, master
+password, one-time code when enrolled); a pre-A14 pair on disk moves into the tab at load; turning the offline copy on
+or off moves the pair between the stores at once. With the offline copy on, nothing changes. Tabs: a tab with no pair
+signs in as its own device session, so tabs never share a rotating refresh token and no token hand-off channel is added;
+a duplicated tab (which inherits a copy of sessionStorage) is detected by a per-tab Web Lock and drops the copy; a tab
+riding the shared pair when another tab turns the offline copy off locks without revoking. Since the A14 review: a
+per-tab lock records its own revocation of the pair it dropped, and a later sign-out with no pair left in the client
+reports that result instead of POSTing a logout with no token (which 401'd and raised "the server didn't confirm" on
+every sign-out after a lock); a lock whose revocation the server did not confirm says so on the unlock card (W1); since
+the third A14 review that result is also kept in the tab's sessionStorage (`pending` until the server answers, which a
+reload reads as unconfirmed), so a sign-out after a reload or in a new App instance still reports a refused lock-time
+revocation instead of "confirmed" (W-b). A
+refresh already in flight when the pair is dropped or replaced adopts nothing (a generation counter in the client), so a
+lock is never undone by a rotation landing after it (W2). A login or register pair is held in memory and written only by
+the caller's saveSession, with the new account's metadata: the client is rebound to the account the server answered for,
+so a tab that booted to Welcome for X never writes Y's pair under X's metadata, even if Y's sign-in then fails or the
+pair rotates first (W3). Since the third A14 review the client is bound to the server's userId only after
+`Account.unlock` has accepted the keys that came with it; between login and unlock it is bound to a fresh random
+placeholder no account has, so a rotation in that window is written nowhere and nothing persisted is adopted, even when
+the server names the account whose metadata the tab holds (W-a). A sign-in that fails after login() (unlock refused the
+keys, the first sync failed) revokes the new device session's pair and drops it, instead of keeping it live in the
+tab's memory until the next sign-in replaced it. A sign-out in another tab, without the offline copy, revokes this tab's own pair before
+dropping it (W4). An unlock card that still holds this tab's pair (a reload of an unlocked tab) runs the policy idle
+timer and takes the per-tab lock when it fires (W5). The lock's phase change runs in a finally and the session's storage
+writes are guarded, so a write that throws can no longer leave the vault open (W7). Turning the offline copy ON in one
+tab revokes another tab's own per-tab pair before that tab adopts the shared one (We). Residuals: a reload keeps the
+tab's pair (sessionStorage survives it), so a reload of an UNLOCKED tab is a master-password unlock, not a sign-in, now
+bounded by the idle timer; sessionStorage is not guaranteed off disk — Chrome and Firefox write it into the profile's
+session-restore data for crash restore, "continue where you left off" and reopen-closed-tab, so an unlocked tab's pair
+(a locked tab holds none) can sit in those files while it is valid and comes back with a restored tab, and anyone who
+can read the profile can read it then (Wb, the "never on disk" comment corrected); the transition from a pre-A14 bundle:
+a tab still running the old bundle keeps writing the pair back to localStorage until it is reloaded, and an old tab and
+a migrated tab that spend the same refresh token trip the server's reuse check and revoke the device once (We); without
+Web Locks a duplicated tab cannot be told from a reload and keeps the copy (and the first refresh of the pair by both
+then revokes the device, the failure the guard exists to stop); script on the origin can still read the open tab's pair.
+(i) **Package-only app fills are gated** (F7, owner decision,
+Android): an `androidapp://` login fills silently only into a system app, a Play-installed app (`installingPackageName`,
+`getInstallerPackageName` on API 29), or a (package, signer) this device confirmed; anything else, or any failed lookup,
+gets a one-tap confirm naming the app, package, installer and signer (short form), and a changed signer confirms again
+with a warning. Identity is read from PackageManager in andvari's process and baked into the confirm's PendingIntent.
+Since the A14 review: the manifest queries every launcher app (`MAIN`/`LAUNCHER`) and the Play package by name, because
+the autofill framework gives a service no visibility of the requesting app and on API 30+ every lookup used to throw
+(lead finding); "Play-installed" means the recorded installer is named `com.android.vending` AND is itself a system app,
+so a sideloaded app that took that name on a device without real Play does not count (N1; no Play signing-digest pin,
+because no authoritative public digest was found to pin, and a guessed one would only push real Play installs to the
+confirm); the confirm shows the app label and the installer label as one escaped, bounded, single-line text after the
+platform's `makeSafeForPresentation`, names the installer's package and whether it is a system app, and names the login
+(item and username) it would release (N2); the installer's package and kind are a line of their own that leads and is
+never ellipsized, and the installer's label is a separate line, so no label length can push "NOT a system app"
+off-screen (third A14 review, A1); touches through another window are dropped (`filterTouchesWhenObscured`),
+other apps' overlays are hidden on API 31+, and the button accepts a tap only half a second after the window gained
+focus (N6); the live signer, installer, installer kind and system flag are re-read at the tap and a change refuses the
+fill, and the (package, signer) is remembered only when a fill was delivered (N7). Bindings are device-local, never
+synced, excluded from cloud backup and device-to-device transfer (N5), and cleared on every path that ends the session
+(sign-out, a definitive 401, a revocation purge, a refused refresh, a server switch, another account saved over this
+one). Residuals: the installer field is what PackageManager recorded, so an installer able to record another package (a
+privileged shell, `adb install -i`) can pass as Play while the real system Play is present, and `initiatingPackageName`
+is not consulted; on a device where Play is a user app (sandboxed Play on GrapheneOS) every Play install takes the
+confirm; an app with no launcher activity stays invisible to andvari, so its fills always confirm and are never
+remembered (owner device check); the host app holds each confirm row's IntentSender and can fire it again, which only
+reopens the confirm; card datasets are not app-gated (wallet posture, unchanged).
+
+**A15 (security review 2026-10, the extension's storage, from the A14 review's Wa note).** Platform facts, which set
+the shape of the fix. Content scripts can read and write `chrome.storage.local` and receive its `onChanged` events. On
+Chrome that is the default: "By default, it's exposed to content scripts, but this behavior can be changed by calling
+`chrome.storage.local.setAccessLevel()`" (https://developer.chrome.com/docs/extensions/reference/api/storage), and
+`setAccessLevel` covers `local` only from Chrome 140; before that it exists for `session` alone
+(https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/storage/StorageArea/setAccessLevel). On
+Firefox it is by design: there is no `setAccessLevel` (bug 1724754), and "a compromised content process can read/write
+any extension's storage.local" was closed as invalid, with origin-bound storage such as IndexedDB as the advice
+(https://bugzilla.mozilla.org/show_bug.cgi?id=2018494). A compromised renderer cannot read or write another origin's
+storage, IndexedDB included, and a content script runs in the web page's origin, so the extension origin's IndexedDB is
+out of its reach on both engines
+(https://chromium.googlesource.com/chromium/src/+/main/docs/security/compromised-renderers.md). The precondition is
+A14's F11 (code with content-script privileges, i.e. a compromised renderer), and before A15 it got past the A14 sender
+gate through storage: a `serverUrl` written to storage.local repointed the extension with no Trust Gate (the worker
+switched on `onChanged` and adopted the value at every start), and a stored update offer put an unverified "Download &
+reload" link into the popup (MEDIUM each); planted item homes hid items from fill (LOW).
+(a) **The update link has one shape** (step 0): `${DEFAULT_SERVER_URL}/downloads/<basename>` (a plain file name: no
+slash, dot-dot, query, fragment or escape), only while the current server is the default, whose `/downloads` is what
+the pinned key signs. The worker builds it from the verified manifest, re-checks the stored offer on every read
+(version, server and both links; `updateoffer.ts`), and the popup checks the link again before it becomes an href.
+(b) **The storage areas are restricted at worker start** (step 1): `setAccessLevel(TRUSTED_CONTEXTS)` on
+storage.session and, where it exists (Chrome 140+), on storage.local, both awaited before any lock samples the
+quick-unlock compartment verdict. That verdict now says what the code saw: on Chrome the session call resolved (a call
+that exists and fails leaves the compartment untrusted, so nothing arms); on Firefox, which has no such call, only that
+storage.session exists. Since A16 the verdict also needs the session sealing key (below). `minimum_chrome_version`
+stays 127. Checked in a headless Chrome 149: once locked, a content
+script's storage.local `get` and `set` are refused, where both worked before.
+(c) **Durable trust state lives in the extension origin's IndexedDB** (step 2; `trustedkv.ts`), with the service worker
+as its only reader and writer: the server choice, the update offer and its anti-rollback seq, item homes, the
+personal-wrap cache and a pending personal change, and the conveniences (the remembered email, which content scripts
+could read, the biometric credential id, the offer-dismissed flag). The update throttle stamp and quiet
+marker are not trust state and live in storage.session. The popup and the options page never touch a storage area or
+the store: they ask the worker (`serverInfo`), and the server choice changes only through `setServerUrl`, which the
+options page sends after the Trust Gate's Connect and which the A14 gate admits from our pages only (with
+`serverInfo` and `forgetLegacyServer`, 30 extension-page-only types now); the worker canonicalizes, writes the store
+and runs the origin-clean switch. The `onChanged` trigger is gone. "Remove data for this server" now removes every
+record under that origin's namespace in every store, by prefix, including the per-user item homes, personal wrap and
+pending change that the fixed key list had always missed although the options copy promised "cached state for that
+server". Source fences hold the layout: the content bundle and our pages never name chrome.storage or IndexedDB, and
+the worker hands storage.local to three leaves only (the migration, which reads it only when owed; the server state,
+which reads its `serverUrl` only with no store and only to block; the purge) and otherwise only removes from it. Since
+the A15 review every store operation, the open and the transaction together, is bounded at 4 s and then rejects as
+"unavailable, timed out" (S1: an IndexedDB open that never settled wedged worker start and with it every message),
+and a transaction whose body throws is aborted (S2: the puts issued before the throw used to auto-commit, so a write
+reported as failed had half happened); the quick-unlock co-key database opens under the same bound.
+(d) **The one-time migration adopts nothing a web page could have planted, and runs only on the upgrade it exists
+for.** Any pre-A15 storage.local value may be planted and cannot be told apart from a real one, so: a non-default
+`serverUrl` is NOT adopted; it becomes a pending server ((f) below). The update channel is not migrated (the seq floor
+restarts at `MIN_SEQ`; the forced start/install check re-derives the offer). A pending personal change is dropped (the
+next unlock re-stages it). Item homes and the personal wrap move under their strict decoders, the same trust they had
+(homes are ids the server knows; the wrap is AEAD-sealed under the UVK). The conveniences move shape-checked. Since the
+A15 review (F2) storage.local is read only when the browser attested an upgrade from a pre-A15 build:
+`runtime.onInstalled` with reason `update` and a `previousVersion` no newer than 0.28.1, the last release without the
+store (`LAST_PRE_A15_VERSION`, to be raised should another release without A15 ship first). That event is recorded in
+the store as "owed" before anything is read; the flag and the owed mark are swapped in one write when the copy has been
+read back and compared, so a migration cut short once "owed" is recorded finishes at the next start (owed alone, no
+event needed). That first write is the one thing a later start cannot redo, since the event exists only in that worker
+life: when the store refuses it or does not answer, nothing is recorded, so the worker retries it within the same life
+(at once, then after 2, 10 and 30 s), and the block stays `unsettled` meanwhile (A16 review R3: before, the next start
+then skipped the migration and dialed the default while storage.local still named the self-hoster's server). Every
+other start without the flag (a fresh install, an update from an A15 build, a browser update, or a start with no install
+event at all) sets the flag WITHOUT reading storage.local, and in the same write a mark that it did so. With the store
+holding no server choice, that start then reads storage.local's `serverUrl` ONLY to block, decline-only as in (e): when
+it names another server, the worker signs in nowhere and the address is never offered for connecting (the user enters
+their server in Options, or chooses "Not mine"), so a planted value is only a denial of service. The origin is kept in
+the mark, so later starts block on it without reading storage.local again; it goes when that start finds no other
+server named there, when a server is chosen, or on "Not mine" (which also removes the old value). Before F2 any flagless start migrated, so a store that was
+unavailable at the upgrade and available later (Firefox's "Never remember history" turned off), or that lost its data
+while storage.local kept its own, moved whatever a content script had written there in the meantime (a planted server
+suggestion, homes, an older wrap, an email, a credential id); the Options copy "Before an update, this browser was set
+to connect to" was then untrue. Worker start waits for the install event at most 5 s, and only while the store holds
+neither the flag nor the owed mark (the event arrives right after the worker first runs); an attesting event that
+lands after that wait is recorded as owed and migrated then. The migration flag and the owed mark live in the store
+only, so a content script can neither skip, re-run nor owe the migration; the old keys are deleted only after the copy
+was verified; a value the store already holds is never overwritten. **No store at the attested upgrade** (Firefox
+"Never remember history"): there is nowhere trustworthy to record "owed", so nothing migrates, then or ever. The fail
+safe is (e)'s block, and once the store is available again the first start sets the flag without reading: the device
+is on the default server with nothing migrated (a fresh install's posture) and the user enters their server in Options.
+(e) **No IndexedDB means safe defaults, never storage.local for trust.** Firefox blocks IndexedDB for extension pages
+in private browsing, and under permanent private browsing ("Never remember history") that includes the background page
+(bug 1841806, Firefox 117, 116.0.3 and ESR 115.2; https://bugzilla.mozilla.org/show_bug.cgi?id=1841806; an extension
+page in a private window cannot open it either, which is one reason the pages ask the worker). There the extension can
+keep no server choice: Options says why and refuses a switch rather than pretend. The default server is the only one
+in effect, except that since the A15 review (F1) storage.local's `serverUrl` is read at each worker start ONLY to
+block: when it names another server, the worker signs in nowhere and the popup says the previous server cannot be kept
+in this mode (turn the setting off, restart, enter the address in Options), with "Not mine" (which removes that old
+value) as the way to the default. It is never adopted and never offered for connecting. Item homes are kept for the
+browser session (in the session snapshot), the personal vault is asked for at each unlock (the staged choice is held in
+worker memory, and an accepted one applies to that session), there is no update banner (a failed seq read ends the
+check before anything is fetched; Firefox's own `update_url` still updates the add-on), and no email is remembered;
+quick unlock already did not work there (its co-key is in IndexedDB).
+(f) **A pending server dials nothing, the default included** (A15 review F1). Before the review the worker dialed
+DEFAULT_SERVER_URL while a migrated server waited for its confirm, with nothing stopping a sign-in. The update clears
+storage.session, so the user signed in again, the email prefilled, and the reference instance, which answers an unknown
+email with a deterministic fake salt, received the email and an authKey derived from the master password under a salt
+it chose (an offline-guessable verifier at the KDF floor). The update channel polled it, the open-vault, forgot and
+must-change buttons opened it, and the self-host vault UI lost its autofill exclusion. Now, while a server is pending
+(`serverstate.ts`): every sign-in lane and the connection test (`unlock`, `unlockTotp`, `unlockWithPin`,
+`unlockWithBio`, `ping`) are answered `confirm_server` right after the sender gate, before any handler; the update
+check returns before it fetches; and since the A16 review (R4) nothing else dials either: the worker's api refuses
+every request (a hydrated session's sync and saves, a token refresh, the socket's ticket), the resync and the socket do
+not start, and a sign-out wipes locally without its revoke; the pending origin's match pattern joins the autofill exclusions, and an origin that
+cannot be written as one (a bracketed IPv6 literal) means no autofill at all (excluding a planted origin is harmless);
+the popup shows the confirm route INSTEAD of any sign-in form ("Before this update, andvari was set to use: …",
+"Confirm in Options" first, "Not mine — use <default host> instead" second), its header names no server, and no server
+page opens. Only the Trust Gate's Connect (`setServerUrl`, after the choice was kept) or "Not mine"
+(`forgetLegacyServer`) lifts the block; the pending state is read from the store at every start, so it survives
+restarts. The same block, `unsettled`, stands when the store did not answer in time or an owed migration did not
+complete: the worker cannot tell which server the user chose, so it signs in nowhere, registers no autofill (the
+user's vault origin is unknown) and says so (the next worker start retries). A later re-read of the store in the same
+worker life (a late install event, the retried owed write) never moves the dialed origin, so when it names another
+origin than the one the worker dials, the block stays `unsettled`. A page that gets no answer from the worker
+opens nothing and shows no origin (S3: before, it fell back to the default, and a click opened the reference instance).
+Checked in a headless Chrome 149 over the pre-A15 build's profile: after the update, the five dials were refused with
+no request to any server (an update poll and a prelogin to the default on the build before the review), the pending
+origin was excluded from autofill, the popup showed the confirm card, the block survived a restart, "Not mine" lifted it
+(a ping then reached the default), and a store wiped while storage.local held a plant migrated nothing.
+(g) **The rest of the review.** F3: the anti-rollback seq is read with the store's own `get` before the fetch, and a
+failed read ends the check (before, a read error folded into the `MIN_SEQ` floor and a verified manifest could then
+write a lower seq). S1: a lock never waits on the store beyond 1.5 s: the popup's Lock skips the general load, and
+`doLock` waits for the origin (whose namespace its arm and wipe land in) at most that long; a healthy store answers in
+milliseconds, so a cold idle lock still arms. Past the bound it erases the session snapshot first, keeps only the tab
+records' page-known half, arms nothing and wipes no quick-unlock record (the current namespace is unknown; an enrolled
+record stays unarmed, so the next unlock is a full one), and a load that read the snapshot before that erase does not
+hydrate it. The autofill registration also reconciles one call at a time now: worker start and the install event both
+reconcile on an update, and two overlapping runs made the second register fail on a duplicate id and, failing closed,
+unregister the first (no autofill until the next worker start; seen in the live check).
+Residuals: (1) Chrome 127–139 and Firefox: storage.local stays open to content scripts. The extension reads it for trust
+only during the attested migration, so what is left is the window before the upgrade: values planted then move with the
+trust they always had (homes, the wrap, the conveniences), and a planted server only ever becomes a pending server. On
+Chrome 140+ the area is locked, and the level is kept in the extension's prefs across restarts. (2) A15 left
+storage.session as it was: on Firefox, its exclusion of content scripts was relied on for the session snapshot and the
+armed quick-unlock record. Since A16 it is not relied on (below). (3) A server planted before the
+upgrade is shown as the user's previous server, and "Confirm in Options" is the popup's first button; the Trust Gate
+still shows the raw origin and Connect is still the only commit. (4) Firefox permanent private browsing loses the
+self-host choice and the remembered state across restarts, as (e) says; a value a content process plants in
+storage.local there blocks sign-in until "Not mine" (a denial of service, never a repoint); and turning the mode off
+lands on the default server with nothing migrated and no pending server, so a self-hoster must re-enter the address
+(the popup's header shows the default's origin, and the earlier block told them to). (5) `LAST_PRE_A15_VERSION` is a
+release fact: if a release without A15 ships after 0.28.1, an update from it to A15 attests nothing and migrates
+nothing (the fail-safe direction: no read, the default with no pending server). (6) A session that hydrates in a
+worker life where a block stands — from a sealed snapshot of the dialed origin, when the trusted store did not answer
+but the seal's key did (`unsettled`), or in the no-store mode, where the block is recomputed at each start — stays
+unlocked on this device and serves what it holds, but dials nothing until the block is lifted (no sync, save, refresh,
+socket or revoke); signed out meanwhile, it is wiped locally only, and its refresh token stays valid server-side until
+it expires or the device is revoked. (7) The unattested block (d) rests on storage.local at the one start that skips
+the migration: a content process that deletes the old value before that start (after an attested upgrade whose "owed"
+write failed, and was not recorded by the retries within that worker life) leaves no block, and the default is then the
+server, as in the no-store mode (4); one that plants a value then gets a denial of service until "Not mine". After that
+start the origin is kept in the store, and storage.local no longer moves it. If the write of the flag and the mark
+fails, the next start skips again, reads again and blocks again.
+
+**A16 (security review 2026-10, sealed custody in storage.session).** The extension keeps unlocked custody in
+`storage.session` on both engines, because the worker is stopped when idle: the session snapshot (tokens, unwrapped
+vault keys, decrypted items), the tab records (a pending save holds a page's password in plaintext, also while locked),
+the armed quick-unlock record (the PIN-crackable UVK blob and a live refresh token) and the known-logins digest (an HMAC
+key beside its digests). A compromised content process is in the model (A14's F11, A15), and that a content script
+cannot reach `storage.session` is no longer relied on: Firefox's exclusion of content scripts from it is not relied on,
+and Chrome's browser-side enforcement is kept as a second layer. The boundary relied on instead is the extension
+origin's IndexedDB, which a compromised renderer cannot read or write
+(https://chromium.googlesource.com/chromium/src/+/main/docs/security/compromised-renderers.md), and which Mozilla
+names as the origin-bound storage to use (https://bugzilla.mozilla.org/show_bug.cgi?id=2018494). Memory-only custody
+was not an option: Firefox stops the event page after about 30 s idle, and the vault would lock every time. The seal
+is not a lock (spec 01 §8.4 rejects a key-beside-ciphertext lock): a lock still erases; the seal keeps what
+`storage.session` holds from anything that can reach that area but not the extension's IndexedDB.
+(a) **One sealing key per browser session, replaced on the browser's word** (`sessionseal.ts`): a non-extractable
+AES-GCM 256 key in its own IndexedDB database (`andvari-session-seal`, apart from the quick-unlock co-key and the A15
+trusted store), every operation bounded like the trusted store's (4 s). When the browser reports a new browser session
+to the worker — `runtime.onStartup` (a browser start) or `runtime.onInstalled` (an install, an update, a reload, a
+browser update), events a web page cannot raise — every sealed record is dropped and a fresh key replaces the old one.
+No session can exist at that point, so whatever the worker hydrated, read or was writing before the report in that
+worker life is dropped too, never armed: a load in flight installs nothing, a write issued before it is not written, a
+read reads absent, a quick-unlock record read before it is not written back. At any other worker start the stored key
+is kept only if a record in `storage.session` opens under it (in its own slot, for its origin, under the stored epoch);
+otherwise — no record, garbage of the right shape, another key's records, copies from before a lock — every sealed
+record is dropped and a fresh key replaces the old one. Before the A16 review a record's shape was enough to keep the
+key, so a planted `{v:1, iv, ct}` kept it and, with it, a copy of the previous browser session's records openable (R1).
+What holds: once the worker has handled a browser session's report, nothing sealed before it opens again; a start with
+no report keeps the key only for records sealed under it. What does not: residual (7).
+(b) **Every secret-bearing record is sealed, through one helper**, and stored as `{v:1, iv, ct}`. The AAD binds the
+record kind and the origin namespace, so a record copied into another record's slot, or into another origin's slot,
+does not open. The session snapshot and the tab records are also bound to a custody epoch that every lock advances and
+that is kept beside the key, so a copy taken while unlocked does not open after the lock, a worker restart included. A
+record that does not open (no key, another key, tampered, swapped, from before the last lock, or plaintext) is
+absent, which reads as locked, and it is dropped; it is never adopted. The inventory: sealed — `session`, `tabs`,
+`ns.<origin>.quickUnlock`, `ns.<origin>.knownLogins`; plain, as none is secret — `lockNotice` (the idle-lock reason
+line), `ns.<origin>.updateCheckedAt` (the update-check throttle stamp) and `ns.<origin>.updateChannelQuiet` (a quiet
+reason from a fixed set); a write to one of those can at most show a false reason line or move an update check, and the
+forced check at start re-derives the last two. The worker reaches `storage.session` through two wrappers only: the
+seal, and a plain area that refuses any other key when called. A source fence holds every write to them.
+(c) **Migration.** At worker start a plaintext value in a sealed slot (the previous build's, or anyone's), the
+pre-namespacing bare quick-unlock key and any key this build does not keep are dropped, never unsealed into trust. The
+cost is one more unlock after the update, and the update clears `storage.session` anyway.
+(d) **No key store** (no IndexedDB, as under Firefox's "Never remember history", or no answer within the bound): no
+secret-bearing record is written to `storage.session` (a write removes the slot instead, so no older copy stays);
+custody stays in worker memory, so a stopped worker means a locked vault; quick unlock does not arm, and enrolling it is
+refused with a sentence that says why. The Options note for that mode says the vault locks whenever the browser pauses
+andvari. The next worker start tries the store again.
+(e) **The quick-unlock compartment verdict** (`quCompartmentTrusted`) now means that the sealing key is available,
+and, on Chrome, that `setAccessLevel(TRUSTED_CONTEXTS)` on `storage.session` resolved (kept as a second layer). It gates
+arming, enrolling, and keeping the known-logins digest across a lock.
+(f) **A lock never waits to erase.** Its first act, before it awaits anything, removes the snapshot and the tab
+records, advances the epoch in memory and drops the in-memory session, keeping in the same step a copy of the two
+records as they stood (ciphertext); a sealed write still in flight for them is dropped, and a load in flight installs
+nothing it read. Only then does the lock wait, at most 1.5 s, for the origin and the key (A15 review S1), and it decides
+the quick-unlock arm from what stood at the lock: the live token pair or, in a worker that had not loaded the session
+yet, its own copy, opened under the epoch it was sealed in (it keeps the tab records' page-known half the same way).
+Without the origin and the key in time it arms nothing, wipes no quick-unlock record and keeps no tab record. Before
+the A16 review a cold lock waited up to those 1.5 s before it erased (R4). A sign-out is that lock, then the server
+revoke on the pair the lock saw (before, it waited on a load and on the network, up to 7 s, before erasing); it waits
+up to 5 s for the origin and the key, after the erase, and one that gets neither wipes locally only. After the
+erase the lock waits, at most 1.5 s more, for the new epoch to reach the key store; a write that failed is retried by
+every later seal operation in that worker life; and the snapshot and the tab records are written only under an epoch
+the key store holds (held until it does, and not written at all while it refuses, so custody stays in memory), so no
+later start reads them under an older epoch and opens a copy from before the lock. A lock in a worker life with no key
+store is recorded against the stored key if the store answers later in that life. Before the review a failed epoch
+write was never retried, and a lock that ran before a failed start lost its advance (R2).
+Checked in a headless Chrome 149 against a local server: after a full unlock `storage.session` held only sealed
+records (no item name, email or password in it); a worker stopped and restarted stayed unlocked; quick unlock armed at
+the lock, survived a restart and redeemed with the PIN; the snapshot copied before a lock and put back after it did not
+open (the restarted worker stayed locked and dropped it); a plaintext snapshot planted while locked was dropped at the
+next start. After the A16 review, also: a lock sent to a stopped worker (nothing had loaded the session) erased at once
+and still armed, from its own copy; with only a sealed-shaped garbage record left in `storage.session`, a restarted
+worker replaced the key, and a copy of the armed quick-unlock record planted after it did not open (on the build before
+the review it armed again); and a browser restarted while unlocked came back locked, its IndexedDB intact, and the
+previous browser session's sealed snapshot planted afterwards was dropped unopened.
+Residuals: (1) custody in worker memory is still exposed to a compromised extension process: the worker holds the
+unlocked vault and the key's handle. (2) Chrome's browser-side enforcement of the `storage.session` access level is
+now a second layer, not the only one. (3) The quick-unlock record and the known-logins digest survive a lock by design,
+so they are not bound to the epoch: a party that can both read and write `storage.session` can put back an older sealed
+copy of either, which restores an earlier attempt count (already accepted, A7-extension (b)) or an earlier digest. (4)
+The epoch lives only in the key store. If the worker stops, or the store keeps refusing, before a lock's epoch lands —
+or a worker life has no key store at all and the store does not answer later in it — a copy of the snapshot from
+before that lock still opens at the next start. (5) A sealed record is about a third larger than the plain one
+(base64), against the area's quota. (6) Replay within one epoch: with no lock in between, a party that can read and
+write `storage.session` can put back an older copy of a record sealed under the current key and epoch — the snapshot
+(with a refresh token since spent, which the server takes for token reuse and answers by revoking the device: a
+denial of service), the tab records (a pending save already resolved, a stale top origin for a tab's badge), and at
+any time the records of (3). Nothing opens that was not sealed under the current key and epoch, and no secret leaves;
+binding a per-write counter would need a key-store write beside every `storage.session` write. (7) A browser session
+the worker is not told about: the extension does not rely on `runtime.onStartup` reaching its background (it may not,
+for an event page), and a message can wake the worker before the report is handled. Until the report is handled, or
+for the whole browser session where none comes, the key is kept on the start rule alone, so a party that can write
+`storage.session` before the worker's first read in the new browser session can put back a copy sealed in the
+previous one, and it opens: a snapshot from a session that ended unlocked (the vault opens without the password, until
+the report drops it), or an armed quick-unlock record (the PIN and the co-key are still needed, within its 24 h). A key
+store that refuses the replacement at a report leaves the old key in place (the worker deletes it where it can) until
+the next report, or a start where nothing opens under it.
+
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
 Enabling quick unlock changes the at-rest story of exactly one asset: a
@@ -495,8 +979,9 @@ full-password rule (spec 01 §8.1).
 The MV3 extension's quick unlock (spec 01 §8.4) has a **different** A7 posture than
 Android's: **non-durable but hardware-less**. Enabling it puts a PIN-wrapped,
 session-scoped UVK blob (`ct = AEAD(K_pin, AEAD(K_nonexp, UVK))`) **plus a live
-refresh token** in `chrome.storage.session` (memory-backed, `TRUSTED_CONTEXTS`,
-gone at browser exit), and the non-extractable co-key `K_nonexp` in IndexedDB. What
+refresh token** in `chrome.storage.session` (memory-backed, sealed since A16 under a
+non-extractable key in the extension origin's IndexedDB, gone at browser exit), and
+the non-extractable co-key `K_nonexp` in IndexedDB. What
 each attacker gets:
 
 | Attacker | Outcome |
@@ -504,14 +989,14 @@ each attacker gets:
 | **Device powered off / browser closed (thief, border search)** | Nothing quick-unlock-specific: `chrome.storage.session` is memory-backed and **evaporates at browser exit**, so the blob, counter, and retained token are simply gone. **Strictly better than A7-android vs a powered-off device** (no durable blob at all). Residual: OS **swap / hibernation** may page a memory image (blob + token) to disk — the co-key mitigates data-exfil of the blob alone but not a full RAM/swap image; ⊆ T7 for a disk that also holds the swapfile. |
 | **Human-at-keyboard opportunist, browser running, extension locked-armed** | The in-scope delta. Where a locked extension previously required the master password, it now falls to a **6+-char PIN, 5 attempts, then wipe**. This is the accepted, opt-in narrowing. The attempt counter is same-compartment and **attacker-resettable** (below), so against a *sophisticated* local attacker it is theater; against the opportunist it holds, and the PIN entropy floor + session scoping are the real bounds. |
 | **Malware / debugger reading the browser process or `storage.session`** | **T5, out of scope** for every client (a keylogger already gets the master password; unlocked-process memory already holds `vaultKeys`). Such an attacker gets a **PIN-crackable blob (double-wrapped: ~32 MiB+ Argon2id over a ≥6-char / ≥10-digit PIN ≈ GPU-hours for a floor PIN, more for a word) *plus* a live refresh token** — but note the blob alone is useless without the **non-extractable co-key** (A1): a pure `storage.session` dump cannot open it. **Per-extension storage isolation is a PLUS**: a co-installed extension cannot read another extension's `storage.session` except via a `chrome.debugger` grant or OS access (both T5). |
-| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and the `TRUSTED_CONTEXTS` access level is a hard precondition to arming at all (if it can't be guaranteed, the client does NOT arm — spec 01 §8.4). A page can neither send the PIN nor read the blob. |
+| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and arming requires the session sealing key (A16; spec 01 §8.4): the record is AES-GCM ciphertext under a non-extractable key in the extension origin's IndexedDB, which a content process cannot open, so that it cannot reach `storage.session` is not relied on. On Chrome the `TRUSTED_CONTEXTS` level is also set and awaited, a second layer. A page can neither send the PIN nor read the blob; a party that can write `storage.session` can put back an older sealed copy of the record (residual (b)). |
 | **The server** | Learns nothing — quick unlock is wire-invisible (spec 01 §8); no new endpoint/header/field. The one wire *interaction* is that a redeem forces a `POST /auth/refresh` FIRST, so revocation / a rescue (which revokes sessions) takes effect at the next redeem (T1 unaffected). |
 
 Residuals accepted (A7-extension): (a) **memory-backed ≠ never-on-disk** — OS
 swap/hiberfil can page the blob + token; the co-key defends data-exfil of the blob,
 not a full RAM/swap image. (b) The **attempt counter, freshness stamp, and pinParams
 are same-compartment and attacker-resettable** by a `storage.session`/DevTools write
-(= T5) — they defend only the unsophisticated opportunist; a **pinParams ceiling**
+(= T5; since A16 such a write can no longer forge them, only put back an older sealed copy) — they defend only the unsophisticated opportunist; a **pinParams ceiling**
 still bounds a planted-params OOM, and a sub-range set is treated as corrupt → wipe.
 (c) The whole in-scope delta reduces to the **human-at-keyboard opportunist on an
 unlocked machine with the browser running**; a machine that is unlocked with the

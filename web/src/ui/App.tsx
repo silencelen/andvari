@@ -22,21 +22,28 @@ import {
 } from "./useAutoLock";
 import {
   applyOrgOfflineCachePolicy,
+  claimTabTokens,
+  clearLockRevoke,
   clearSession,
+  clearTabTokens,
   declineCacheNudge,
   defaultBaseUrl,
   loadSession,
+  LOCK_REVOKE_UNCONFIRMED,
+  lockRevokeUnconfirmed,
   makeClient,
   migrateCacheConsentOnce,
+  migrateLegacySessionTokens,
   pendingSyncCount,
+  recordLockRevoke,
   REVOKE_UNCONFIRMED,
-  revokeSessionBestEffort,
-  SESSION_STORAGE_KEY,
   setOfflineCopyEnabled,
   shouldOfferCacheNudge,
+  tokensKeptAcrossLock,
   wipeVaultCache,
   type Session,
 } from "./session";
+import { adoptSharedPair, dropOnSignOutElsewhere, idleTimerUserId, lockTabTokens, revokeForSignOut, storageVerdict } from "./tabsession";
 
 /** `notice` (F26): one-line reason rendered on the auth card — why the user is looking
  *  at a lock/sign-in screen ("Locked.", "This device's access was revoked.", …). */
@@ -60,6 +67,8 @@ const LOCK_WARNING_NOTICE = "Still there? Locking soon — click, tap, or press 
 const CACHE_NUDGE_OFFER =
   "Keep an encrypted offline copy of your vault on this device? A tab you already have open could then unlock even when the server can't be reached.";
 const CACHE_NUDGE_ACCEPTED = "Offline copy turned on — it will be created at your next unlock or sign-in.";
+/** A14 (F5): how long a per-tab lock waits for the Vault's usage flush before revoking (H33 order). */
+const LOCK_USAGE_FLUSH_WAIT_MS = 2_000;
 
 export function App() {
   // UI-audit #26: apply the persisted theme preference before first paint, so every
@@ -110,12 +119,18 @@ export function App() {
   useEffect(() => {
     (async () => {
       await initSodium();
-      const session = loadSession();
+      // A14 (F5): is this tab's sessionStorage pair its own or a duplicated tab's copy? (A copy is
+      // dropped: two tabs must never spend one rotating refresh token.)
+      await claimTabTokens();
       // §5.4.1 continuity (design 2026-07-15): one-time boot reconciliation of the pre-pivot
       // default-ON cache into an explicit per-user opt-in — BEFORE the policy fetch and any
       // unlock consult the consent-keyed gate, so an existing member's offline copy survives
       // the flip without a beat where the gate reads "no consent".
-      await migrateCacheConsentOnce(session?.userId ?? null);
+      await migrateCacheConsentOnce(loadSession()?.userId ?? null);
+      // A14 (F5): with the gate settled, a pre-A14 pair on disk for a browser without the offline
+      // copy moves into this tab now — nothing secret stays in localStorage past this line.
+      migrateLegacySessionTokens();
+      const session = loadSession();
       const client = makeClient(session, baseUrl);
       // The one client lives for the whole tab (sign-in/lock reuse it), so registering
       // here covers every phase. Never auto-reload on 426 — an open editor may hold
@@ -128,9 +143,12 @@ export function App() {
       // surface a notice instead of silently swallowing the scanned link (never repoint the
       // session's server from a link).
       const pendingEnroll = peekPendingEnroll();
+      // A14 (F5): on a browser without the offline copy a session with no tokens (after a lock, or a
+      // new tab) still lands on the unlock card, which then runs the normal sign-in. With the offline
+      // copy on, today's rule stands: no tokens, no unlock card.
+      const unlockable = session !== null && (session.tokens !== null || !tokensKeptAcrossLock(session.userId));
       setPhase(
-        session?.tokens
-          ? { kind: "unlock", session, notice: pendingEnroll ? "You're signed in on this browser. To set up a NEW account from that invite link, sign out first." : undefined }
+        unlockable ? { kind: "unlock", session, notice: pendingEnroll ? "You're signed in on this browser. To set up a NEW account from that invite link, sign out first." : undefined }
           : { kind: "welcome" },
       );
     })();
@@ -156,6 +174,8 @@ export function App() {
   }, []);
 
   const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) => {
+    lockRevokeRef.current = null; // A14 review W1: this tab holds a new pair; an older lock's record is moot
+    clearLockRevoke(); // ...and so is the copy of it in the tab's sessionStorage (A14 review 3, W-b)
     setPhase({ kind: "vault", account, store, meta });
     setCacheNudge(shouldOfferCacheNudge(account.userId) ? { userId: account.userId, state: "offered" } : null);
     // Refresh policy at unlock so the auto-lock/clipboard windows reflect the CURRENT
@@ -181,6 +201,10 @@ export function App() {
   //  - "expired" (definitive-401 / WS session-end): cannot be blocked (spec 02 §8), but the
   //               count is SURFACED in the notice so the loss is never silent;
   //  - "revoked" (server WS revoked frame): silent-drop (spec 03 §4 accepts it).
+  // A14 review W1: the revocation the last per-tab lock made of the pair it dropped (lockTabTokens), so a
+  // sign-out with no pair left in the client reports THAT, rather than POSTing a logout with no token.
+  const lockRevokeRef = useRef<Promise<boolean> | null>(null);
+
   const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user") => {
     const uid = loadSession()?.userId ?? null;
     const unsynced = uid ? await pendingSyncCount(uid) : 0;
@@ -203,8 +227,12 @@ export function App() {
     // local wipe — bounded + best-effort, mirroring the natives; without it the refresh token
     // stays refreshable for ~30 days. "expired"/"revoked" skip it (already dead server-side).
     // Security review 2026-10: it resolves false when the server did not confirm the revocation —
-    // the wipe below still happens, but the member is told (REVOKE_UNCONFIRMED).
-    const revoked = kind === "user" ? await revokeSessionBestEffort(clientRef.current) : true;
+    // the wipe below still happens, but the member is told (REVOKE_UNCONFIRMED). A14 review W1: with
+    // no pair left in the client (a per-tab lock dropped it, or this tab never had one) nothing is
+    // POSTed; the lock's own revocation result is what is reported.
+    // A14 review 3 (W-b): after a reload there is no in-memory lock record; the tab's sessionStorage one answers.
+    const revoked = kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid)) : true;
+    lockRevokeRef.current = null;
     clearSession();
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);
@@ -216,19 +244,64 @@ export function App() {
   // `storage` event can no longer signal it — locks are announced explicitly.
   const lockChannelRef = useRef<BroadcastChannel | null>(null);
 
+  // A14 (F5): the open Vault registers its usage-ledger flush here, so a lock that revokes can let
+  // the session's last uses land first (the H33 flush-before-revoke rule).
+  const usageFlushRef = useRef<(() => Promise<void>) | null>(null);
+  const perTabLockRef = useRef(false);
+
+  // A14 (F5) — owner decision: a browser NOT opted into the offline copy keeps no token once locked.
+  // Lock (manual, idle, or a lock announced by another tab) therefore: lets the Vault's usage flush
+  // land (bounded), revokes THIS tab's pair server-side (best-effort, LOGOUT_TIMEOUT_MS; logout()
+  // captures the pair synchronously, so dropping it on the next line is safe), drops it, and lands
+  // on the unlock card, which then runs the normal sign-in (email pre-filled, TOTP when enrolled).
+  // [revoke] is false only when another tab took over this pair (it turned the offline copy off):
+  // revoking would end THAT tab's session too.
+  // A14 review W1: the revocation's result is recorded for a later sign-out, and a refusal is said on
+  // the unlock card. W7: the phase change runs in a finally — nothing above (a storage write that
+  // throws inside setTokens) can leave the vault open.
+  const lockPerTab = useCallback(async (notice: string, meta: Session, revoke: boolean) => {
+    if (perTabLockRef.current) return;
+    perTabLockRef.current = true;
+    try {
+      const { revoked } = await lockTabTokens(clientRef.current, { flush: usageFlushRef.current, flushWaitMs: LOCK_USAGE_FLUSH_WAIT_MS, revoke });
+      if (revoked) {
+        lockRevokeRef.current = revoked;
+        // A14 review 3 (W-b): the result is also kept in the tab's sessionStorage, so a reload before a sign-out still
+        // knows it; until the server answers it is "pending", which a reload reads as unconfirmed.
+        recordLockRevoke(meta.userId, "pending");
+        void revoked.then((ok) => {
+          if (lockRevokeRef.current !== revoked) return;
+          recordLockRevoke(meta.userId, ok ? "confirmed" : "unconfirmed");
+          if (ok) return;
+          setPhase((p) => (p.kind === "unlock" && p.session.userId === meta.userId ? { ...p, notice: [p.notice, LOCK_REVOKE_UNCONFIRMED].filter(Boolean).join(" ") } : p));
+        });
+      }
+    } finally {
+      clearTabTokens();
+      setPhase((p) => (p.kind === "vault" || p.kind === "unlock" ? { kind: "unlock", session: { ...meta, tokens: null }, notice } : p));
+      perTabLockRef.current = false;
+    }
+  }, []);
+
   // F26: lock drops this tab's keys (the phase change unmounts Vault, releasing the
   // Account/VaultStore) but KEEPS the persisted session and tokens, so the user lands
   // on the lighter master-password-only Unlock card with a reason line. Same ZK
   // posture as sign-out: unlock re-derives every key from the password; no secret is
-  // ever persisted (spec 01 §8).
+  // ever persisted (spec 01 §8). That is the offline-copy-ON browser; without the
+  // offline copy the lock is lockPerTab above (A14, F5).
   const lockLocal = useCallback((notice: string) => {
+    const meta = loadSession();
+    if (meta && !tokensKeptAcrossLock(meta.userId)) {
+      void lockPerTab(notice, meta, true);
+      return;
+    }
     setPhase((p) => {
       if (p.kind !== "vault") return p; // nothing unlocked here — nothing to lock
       const session = loadSession();
       // No persisted session to come back to (shouldn't happen) — fall back to sign-in.
       return session?.tokens ? { kind: "unlock", session, notice } : { kind: "welcome", notice };
     });
-  }, []);
+  }, [lockPerTab]);
 
   const lock = useCallback(
     (notice: string) => {
@@ -272,28 +345,36 @@ export function App() {
     lockChannelRef.current = ch;
     if (ch) ch.onmessage = () => lockLocal("Locked in another tab.");
     const onStorage = (e: StorageEvent) => {
-      if (e.key !== SESSION_STORAGE_KEY) return;
-      if (e.newValue === null) {
-        clientRef.current?.setTokens(null);
-        setPhase((p) =>
-          p.kind === "vault" || p.kind === "unlock" ? { kind: "welcome", notice: "Signed out in another tab." } : p,
-        );
-      } else {
-        // SAME-USER guard (shared browser): the persisted session may now belong to a
-        // DIFFERENT account (someone signed in as Y while X's tab was frozen) — never
-        // graft Y's pair into X's live client.
-        const cur = loadSession();
-        const t = cur?.tokens;
-        const have = clientRef.current?.getTokens();
-        if (
-          cur &&
-          t &&
-          clientRef.current &&
-          cur.userId === activeUserIdRef.current &&
-          (!have || have.refreshToken !== t.refreshToken)
-        ) {
-          clientRef.current.setTokens(t);
-        }
+      // A14 (F5) + A14 review W4/We: the decision is tabsession.storageVerdict, tested there.
+      const v = storageVerdict(e, {
+        activeUserId: activeUserIdRef.current,
+        have: clientRef.current?.getTokens() ?? null,
+        after: loadSession(),
+        keptAcrossLock: tokensKeptAcrossLock,
+      });
+      switch (v.kind) {
+        case "signedOutElsewhere":
+          // W4: without the offline copy this tab's pair is its own device session — revoked, then dropped.
+          void dropOnSignOutElsewhere(clientRef.current, v.revokeOwn);
+          clearTabTokens(); // A14 (F5): this tab's own pair goes with the sign-out
+          setPhase((p) =>
+            p.kind === "vault" || p.kind === "unlock" ? { kind: "welcome", notice: "Signed out in another tab." } : p,
+          );
+          return;
+        case "lockWithoutRevoke":
+          // Another tab turned the offline copy OFF and took the shared pair into its own sessionStorage.
+          // This tab was riding that same pair, so it stops using it — without revoking, which would end
+          // the other tab's session — and locks.
+          void lockPerTab("The offline copy was turned off in another tab — sign in again.", v.meta, false);
+          return;
+        case "adopt":
+          // SAME-USER guard inside storageVerdict (shared browser): only this tab's own account. We: a
+          // per-tab pair being replaced by the shared one (offline copy turned ON elsewhere) is revoked first.
+          void adoptSharedPair(clientRef.current, v.tokens, v.revokeOwnFirst);
+          clearTabTokens(); // A14 (F5): the shared pair supersedes this tab's own
+          return;
+        case "ignore":
+          return;
       }
     };
     window.addEventListener("storage", onStorage);
@@ -302,7 +383,7 @@ export function App() {
       lockChannelRef.current = null;
       ch?.close();
     };
-  }, [lockLocal]);
+  }, [lockLocal, lockPerTab]);
 
   // Inactivity auto-lock (spec 01 §8): active only while a vault is open; drives the
   // SAME path as the manual Lock button (F26: session kept → Unlock card + reason).
@@ -315,6 +396,10 @@ export function App() {
   // server can disable the lock; only the vaultUserId===null "nothing unlocked" state
   // passes 0 (timer off).
   const vaultUserId = phase.kind === "vault" ? phase.account.userId : null;
+  // A14 review W5: an unlock card that still holds this tab's pair (a reload while unlocked, on a
+  // browser without the offline copy) runs the same policy idle timer; when it fires the tab takes the
+  // per-tab lock, revoking and dropping the pair.
+  const idleUserId = idleTimerUserId(vaultUserId, phase.kind === "unlock" ? phase.session : null, tokensKeptAcrossLock);
   const fetchedAutoLock = policy ? policy.autoLockSeconds ?? 0 : null;
   useEffect(() => {
     if (vaultUserId === null || fetchedAutoLock === null) return;
@@ -322,13 +407,21 @@ export function App() {
     if (persist !== null) writePersistedAutoLockSeconds(vaultUserId, persist);
   }, [vaultUserId, fetchedAutoLock]);
   const autoLockSeconds =
-    vaultUserId === null
+    idleUserId === null
       ? 0
-      : resolveAutoLockSeconds(fetchedAutoLock, readPersistedAutoLockSeconds(vaultUserId)).seconds;
+      : resolveAutoLockSeconds(fetchedAutoLock, readPersistedAutoLockSeconds(idleUserId)).seconds;
   // Cut M (v2 #16): `lockWarning` is true while ~30 s remain (windows > 60 s only) — an
   // unannounced lock silently destroys open editor work, so the user gets a chance to
   // wiggle first. Rendered as a slim .banner + spoken via the persistent Announcer below.
-  const lockWarning = useAutoLock(autoLockSeconds, () => lock(inactivityNotice(autoLockSeconds)));
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const onIdle = useCallback(() => {
+    const p = phaseRef.current;
+    const notice = inactivityNotice(autoLockSeconds);
+    if (p.kind === "vault") lock(notice);
+    else if (p.kind === "unlock" && p.session.tokens) void lockPerTab(notice, p.session, true);
+  }, [autoLockSeconds, lock, lockPerTab]);
+  const lockWarning = useAutoLock(autoLockSeconds, onIdle);
 
   // 426 nudge: a persistent, non-dismissable slim bar (the Vault mustChange-banner
   // idiom) above whichever phase shell is showing. App itself never unmounts, so the
@@ -419,6 +512,9 @@ export function App() {
         offlineRecoveryReminder={phase.meta.offlineRecoveryReminder ?? false}
         onLock={onManualLock}
         onRevoked={onRevoked}
+        registerUsageFlush={(fn) => {
+          usageFlushRef.current = fn;
+        }}
       />
     );
   }

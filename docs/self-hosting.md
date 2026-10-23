@@ -139,8 +139,11 @@ chmod +x bringup.sh
    past a dead instance). *Print the sheet twice, copy the seed to a USB stick, store
    them separately, then clear your terminal scrollback.* If you prefer the
    by-the-book air-gapped ceremony, run
-   `docker run --rm --network none ghcr.io/silencelen/andvari:latest recovery-cli keygen`
-   on an offline machine and paste the two `ANDVARI_RECOVERY_*` values yourself;
+   `docker run --rm --network none --log-driver none ghcr.io/silencelen/andvari:latest recovery-cli keygen`
+   on an offline machine and paste the two `ANDVARI_RECOVERY_*` values yourself.
+   Keep `--log-driver none` on every `recovery-cli` run (bring-up passes it too): docker
+   copies an attached container's output to its log driver (json-file on disk, the
+   journal, or a log shipper), and that output is the seed;
 4. mints a bootstrap token, starts the stack, waits for `/healthz`, smoke-checks that
    `GET /api/v1/client-policy` declares your configured policy, and prints the
    **first-admin enroll URL**.
@@ -184,8 +187,11 @@ Everything lives in `./data` next to `docker-compose.yml`:
 - `data/andvari.db` — the SQLite database (accounts, ciphertext items, audit log)
 - `data/blobs/` — encrypted attachment blobs
 
-Both are ciphertext (a stolen backup is as useless to a thief as the live server is —
-spec 05 T7), but they are the *only* copy of your household's vaults. Back them up:
+The vault contents in both are ciphertext the server cannot read (spec 05 T7), but a copy of
+the database is not harmless to a thief: it also holds every member's sign-in TOTP seed in
+plaintext and the login verifiers a guess at a master password can be checked against offline
+(the master password's Argon2id cost is what slows that down). Keep backups as private as the
+live `./data`, and remember they are the *only* copy of your household's vaults. Back them up:
 
 ```sh
 # consistent DB snapshot, safe against the live WAL (needs sqlite3 on the host):
@@ -194,6 +200,14 @@ sqlite3 ./data/backup/andvari-nightly.db.tmp "PRAGMA integrity_check;"   # expec
 mv -f ./data/backup/andvari-nightly.db.tmp ./data/backup/andvari-nightly.db
 # then rsync/restic/borg the whole ./data directory off-host
 ```
+
+`./data` is owner-only: the container makes it mode 700, owned by its `andvari` user
+(uid 10001), and the database files 0600, because the database also holds the members'
+sign-in TOTP seeds and login verifiers. Run the snapshot and the copy as root (or that uid).
+Under **rootless docker** the container's uid 10001 is not 10001 on the host: it maps to a
+subordinate uid (the first one in your `/etc/subuid` range plus 10000), so `./data` belongs to
+that uid and your own account cannot read it. Run the host-side snapshot and copy as real root,
+or as that mapped subordinate uid.
 
 Cron that nightly, and alert yourself when it fails — a backup you never notice
 breaking is not a backup. Restore = put `andvari.db` + `blobs/` back under `./data`
@@ -278,7 +292,8 @@ cryptographically verified by clients.
   backstop key until a fleet drill (`recovery-cli verify`) passes on the new one; paste the
   receipt it prints into **Admin → Record a fleet drill**. The normative steps are spec 04 §4. The recovery-cli in the image is
   the same tool:
-  `docker run --rm -it --network none ghcr.io/silencelen/andvari:<ver> recovery-cli`.
+  `docker run --rm -it --network none --log-driver none ghcr.io/silencelen/andvari:<ver> recovery-cli`
+  (`recover` prints the temporary password, so the log driver stays off here too).
 - **Members' self-service recovery** works out of the box (`/recovery/self/*`): each
   member gets a personal recovery phrase at enrollment. These endpoints are
   internet-reachable on a single-origin instance — they are rate-limited **per-IP only

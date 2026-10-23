@@ -251,7 +251,8 @@ auto-updates via the baked `update_url`.
 **Then RE-SIGN the downloads manifest (H2 — armed 2026-07-18).** Any release that changes
 `/downloads/manifest.json` (new ext version/urls, new deb/msi) must bump `seq` to max(published)+1,
 refresh `signedAt` (ISO-8601 UTC), and sign the EXACT final bytes with the ceremony key on the owner
-workstation. **Since 2026-08-20 that is one command — `signandvari <version>` — which mints the
+workstation. **Since 2026-08-20 that is one command — `signandvari <version> -Commit <sha>` (the pin is
+required since the 2026-10 security review) — which mints the
 manifest at the next `seq`, signs it, and delivers the bundle in the only order the build host
 tolerates;** see `docs/runbooks/release-signing-keys.md` §0, with the key locations in its §1.
 Publish `manifest.json` + `manifest.json.sig` together, byte-identical to what was signed. Skipping

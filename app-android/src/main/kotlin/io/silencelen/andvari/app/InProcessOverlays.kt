@@ -25,7 +25,7 @@ import android.os.Bundle
  *
  * The rule, then: an overlay closing is not "leaving the app". It tracks, via
  * [Application.ActivityLifecycleCallbacks], whether the most recent activity lifecycle event in
- * the process was one of the three overlays stopping; `lockFromBackground` ignores a process
+ * the process was one of the autofill overlays stopping; `lockFromBackground` ignores a process
  * ON_STOP that arrives in that state. MainActivity stopping resets it, so a session unlocked in
  * the main app still locks on leaving — the load-bearing pin of 0.26.0 stands.
  *
@@ -44,6 +44,8 @@ object InProcessOverlays {
         "io.silencelen.andvari.app.autofill.AutofillUnlockActivity",
         "io.silencelen.andvari.app.autofill.SaveConfirmActivity",
         "io.silencelen.andvari.app.autofill.TrustBrowserActivity",
+        // A14 (F7): the one-tap confirm before a package-only app fill — another in-process overlay.
+        "io.silencelen.andvari.app.autofill.AppFillConfirmActivity",
     )
 
     @Volatile
@@ -65,7 +67,7 @@ object InProcessOverlays {
         lastStartWasOverlay = isOverlay
     }
 
-    /** An activity stopped; [isOverlay] says whether it was one of the three overlays. */
+    /** An activity stopped; [isOverlay] says whether it was one of the autofill overlays. */
     fun noteStopped(isOverlay: Boolean) { lastEventWasOverlayStop = isOverlay }
 
     /** True when the process ON_STOP being handled was caused by an overlay closing. */

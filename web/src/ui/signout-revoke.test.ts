@@ -29,12 +29,14 @@ function closure(src: string, name: string, until: string): string {
 describe("App.signOut — revokes before the local teardown, and only for a USER sign-out", () => {
   const signOut = closure(appTsx, "signOut", "lockChannelRef");
 
-  it("routes the user sign-out through revokeSessionBestEffort", () => {
-    expect(signOut).toContain("revokeSessionBestEffort(clientRef.current)");
+  it("routes the user sign-out through revokeForSignOut (revokeSessionBestEffort when a pair is held)", () => {
+    // A14 review W1: with no pair left (a per-tab lock dropped it) the lock's own result is reported, and
+    // nothing is POSTed unauthenticated — behaviour-tested in tabsession.test.ts.
+    expect(signOut).toContain("revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid))");
   });
 
   it("gates it on kind === \"user\" — an expired/revoked session is already dead server-side", () => {
-    expect(signOut).toMatch(/kind === "user" \? await revokeSessionBestEffort\(/);
+    expect(signOut).toMatch(/kind === "user" \? await revokeForSignOut\(/);
   });
 
   it("tells the member when the server did NOT confirm the revocation (security review 2026-10)", () => {
@@ -46,8 +48,8 @@ describe("App.signOut — revokes before the local teardown, and only for a USER
   });
 
   it("issues it BEFORE the teardown — logout() reads the pair synchronously at call time", () => {
-    expect(signOut.indexOf("revokeSessionBestEffort(")).toBeLessThan(signOut.indexOf("clearSession()"));
-    expect(signOut.indexOf("revokeSessionBestEffort(")).toBeLessThan(signOut.indexOf("setTokens(null)"));
+    expect(signOut.indexOf("revokeForSignOut(")).toBeLessThan(signOut.indexOf("clearSession()"));
+    expect(signOut.indexOf("revokeForSignOut(")).toBeLessThan(signOut.indexOf("setTokens(null)"));
   });
 });
 
@@ -73,17 +75,21 @@ describe("App.signOut — the usage-ledger flush cannot be revoked out from unde
 
   it("the Vault unmount flushes the usage buffer BEFORE dispose, on a lock that keeps the tokens", () => {
     expect(vaultTsx).toContain("void usage.flush().finally(() => usage.dispose());");
-    // App's lock keeps the persisted session + tokens (the "never revokes" pins below), so this
-    // unmount flush rides a live pair; the user sign-out on the Unlock card comes after it.
+    // With the offline copy on, App's lock keeps the persisted session + tokens (the "never
+    // revokes" pins below), so this unmount flush rides a live pair; the user sign-out on the
+    // Unlock card comes after it. Without it (A14, F5) the lock revokes — and lockPerTab awaits
+    // the Vault's registered flush first, so the order holds there too (session.tokens.test.ts).
     expect(closure(appTsx, "lockLocal", "lock")).not.toContain("setTokens(null)");
   });
 });
 
-describe("App lock — never revokes", () => {
+describe("App lock — a browser WITH the offline copy never revokes", () => {
   it("the lock path keeps the session server-side (spec 05 T3)", () => {
     // Locking drops this tab's KEYS only; the persisted session and its tokens survive so the
     // user comes back through the master-password-only Unlock card. Revoking here would turn
-    // every auto-lock into a full sign-out on every device.
+    // every auto-lock into a full sign-out on every device. A14 (F5, owner decision): that is the
+    // offline-copy-ON browser. Without the offline copy lockLocal hands over to lockPerTab, which
+    // revokes THIS tab's pair and drops it (pinned in session.tokens.test.ts).
     expect(closure(appTsx, "lockLocal", "lock")).not.toContain("revokeSessionBestEffort");
     expect(closure(appTsx, "lock", "onRevoked")).not.toContain("revokeSessionBestEffort");
   });

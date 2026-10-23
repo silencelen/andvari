@@ -126,8 +126,11 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     constructed `CSSStyleSheet` (`adoptedStyleSheets`) — page-CSS-isolated AND immune to the site's
     `style-src`, so it works on strict-CSP sites (github.com, banks), not just fill.dev.
   - `src/background.ts` session custody: the unlocked vault survives MV3 SW death via
-    `chrome.storage.session` (memory-backed, never disk); `chrome.alarms` drive policy autolock +
-    periodic resync. Secret egress stays `reveal`-only: host-bound for page frames, or by a click in the popup.
+    `chrome.storage.session` (memory-backed, never disk), every secret-bearing record there sealed
+    (`src/sessionseal.ts`: AES-GCM under a non-extractable key in the extension's own IndexedDB; a
+    record that does not open reads as locked). Where the browser gives the extension no IndexedDB
+    (Firefox "Never remember history") nothing secret is kept there: the vault locks whenever the
+    worker stops, and quick unlock is off. `chrome.alarms` drive policy autolock + periodic resync. Secret egress stays `reveal`-only: host-bound for page frames, or by a click in the popup.
   - **KDF in a Web Worker** (`src/kdf-worker.ts`) — the ~5.8 s Argon2id runs off the SW event loop,
     with an inline fallback where nested workers aren't allowed.
   - **Member (shared-vault) grants** — `sealedVk` opened via `crypto_box_seal_open` reconstructed

@@ -213,6 +213,33 @@
         </p>
         <code id="origin-now" class="origin-now">…</code>
 
+        <!-- A15 (security review 2026-10): a server chosen before this update is NOT reconnected silently. The old
+             value sat in storage a web page could have written, so it is shown here for the user to review through
+             the Trust Gate (Connect is still the only commit), or to drop. Since the A15 review (F1) the worker signs
+             in nowhere, the default included, until one of the two happens; (F2) the address is offered only when the
+             browser itself reported the update from an older version. When this browser cannot keep a server choice
+             (Firefox "Never remember history") the address came from the old settings, can only be declined here, and
+             the review button is hidden (options.ts sets both texts). Hidden unless the worker reports one. -->
+        <div id="legacy-note" class="trust-gate" role="group" aria-labelledby="legacy-h" hidden>
+          <h3 id="legacy-h">Confirm your server</h3>
+          <p id="legacy-lead" class="gate-body">When andvari updated to this version, this browser was set to use:</p>
+          <code id="legacy-origin" class="gate-origin"></code>
+          <p id="legacy-body" class="gate-body">
+            That setting was kept where a web page could have changed it, so andvari won't use it, or sign in anywhere,
+            until you decide. If it is your own andvari server, review it and connect. If you don't recognize it,
+            choose "Not mine" and andvari uses its default server instead.
+          </p>
+          <div class="gate-actions">
+            <button id="legacy-forget" class="ghost" type="button">Not mine</button>
+            <button id="legacy-review" class="primary" type="button">Review this address</button>
+          </div>
+        </div>
+        <p id="store-note" class="caution" hidden>
+          This browser gives andvari no storage of its own in this mode (Firefox does this when it never remembers
+          history), so andvari can't keep a server choice here and stays on the server shown above. Nor can it keep
+          the vault open while idle: the vault locks whenever Firefox pauses andvari, and quick unlock is off.
+        </p>
+
         <p class="lede">
           To point it at your own server, enter its address (for example
           <code>https://andvari.example.com</code>) and continue.

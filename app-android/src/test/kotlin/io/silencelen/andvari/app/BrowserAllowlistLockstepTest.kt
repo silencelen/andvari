@@ -51,7 +51,9 @@ class BrowserAllowlistLockstepTest {
 
     @Test
     fun manifestQueriesCoverExactlyTheTrustTable() {
-        val queried = packageNamesIn(manifest, "package")
+        // A14 review N1: the one non-browser <package> is the Play installer, queried so the app-fill gate can read
+        // whether it is a system app. It is not a browser and never enters the trust table.
+        val queried = packageNamesIn(manifest, "package") - io.silencelen.andvari.core.client.autofill.AppFillGate.PLAY_INSTALLER
         val trusted = BrowserCertPins.TABLE.keys
         // Sorted lists, not sets: the assertion message then names the drifting package.
         assertEquals(

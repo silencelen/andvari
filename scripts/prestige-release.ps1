@@ -1,13 +1,22 @@
 # andvari - the PRESTIGE-side release ceremony, as one script.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0
-#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0 -DryRun
+#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0 -Commit <40-hex sha>
+#   powershell -ExecutionPolicy Bypass -File scripts\prestige-release.ps1 -Version 0.21.0 -Ref v0.21.0 -Commit <40-hex sha> -DryRun
 #
-# WHY THIS EXISTS. The update-manifest signing key lives ONLY on this machine - deliberately, so a
-# build-host compromise cannot forge a signed update to every armed client. That means the last mile
-# of every release is done by hand here, and until now it was driven by a prompt re-authored per
-# release. That prompt is where a `seq` or a checksum goes wrong. This script does the same steps
-# with the numbers read from the wire instead of typed.
+# Normally driven by signandvari.ps1, which verifies the tag against the same -Commit pin before
+# it checks anything out.
+#
+# WHY THIS EXISTS. The update-manifest signing key lives ONLY on this machine, deliberately: the
+# build host never holds it. That does NOT make a build-host compromise harmless, and this comment
+# used to say it did (security review 2026-10). Two gaps remain: this script, the MSI build and the
+# update-signer all come from the tree being released and run here beside the key (c03; the
+# -Commit pin and signandvari's last-signed baseline narrow that, see -Commit below), and the
+# linux / linuxArch / extension digests this run signs come from release-spec.json, which the
+# download origin serves unsigned, so a substituted spec and artifact pair that agree with each other
+# pass every check here (q15). Keeping the key here means the last mile of every release is done by
+# hand on this box; it used to be driven by a prompt re-authored per release, and that prompt is
+# where a `seq` or a checksum goes wrong. This script does the same steps with the numbers read
+# from the wire instead of typed.
 #
 # WHAT IT DOES
 #   1. Preflight    - Windows, signing key present, signtool/java, clean tree on the expected ref,
@@ -54,6 +63,19 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Ref,
 
+    # The full 40-hex commit -Ref must resolve to (security review 2026-10). -Ref alone is a name
+    # whose target can be moved on the remote. The pin comes from the build host's handover line,
+    # which reads the build host's own tag, so HEAD == -Ref == -Commit closes a tag moved by anyone
+    # other than the build host, a tag moved after the handover line was printed, and an accidental
+    # re-tag - but a compromised build host chooses both the tag and the pin. The layer aimed at
+    # that is signandvari's workstation-held baseline (the commit last signed here, outside the
+    # repo: the release must descend from it, and the operator reviews and confirms the change
+    # before this script runs); this script is the tree's own code and cannot be that check.
+    # It is what bundle.json records as `commit`.
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$Commit,
+
     # Public download origin. Same value the clients pin as the default origin.
     [string]$BaseUrl = 'https://andvari.monahanhosting.com',
 
@@ -74,9 +96,11 @@ param(
     # pass this - deliberately - to skip that one gate. It warns loudly; never routine.
     [switch]$AllowUnsignedBase,
 
-    # Everything except signing and emitting: preflight, fetch, seq arithmetic, spec validation and
-    # a full manifest preview. Skips the gradle MSI build, Authenticode signing, manifest signing
-    # and the bundle. Safe to run any time.
+    # Everything except building, signing and emitting: preflight, fetch, seq arithmetic, spec
+    # validation and a full manifest preview. Skips the update-signer build (and with it the live
+    # manifest's signature check, which needs the signer this run would build), the gradle MSI
+    # build, Authenticode signing, manifest signing and the bundle. Signs nothing; it is still this
+    # tree's code running on this account (signandvari's review and confirmation come first).
     [switch]$DryRun
 )
 
@@ -402,7 +426,7 @@ function Get-JsonFromUrl {
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Step 'Preflight'
-Write-Host "   version $Version   ref $Ref   dry-run $([bool]$DryRun)"
+Write-Host "   version $Version   ref $Ref   commit $Commit   dry-run $([bool]$DryRun)"
 
 # --- platform -----------------------------------------------------------------------------------
 if ($env:OS -ne 'Windows_NT' -or [System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
@@ -470,6 +494,8 @@ $wantRes = Invoke-Native -Exe 'git' -Arguments @('-C', $RepoRoot, 'rev-parse', '
 if ($wantRes.ExitCode -ne 0) { Die "ref '$Ref' does not resolve in this checkout (fetch tags first: git fetch --tags)" }
 $want = $wantRes.Output.Trim()
 if ($head -ne $want) { Die "HEAD is $head but -Ref $Ref is $want - check out the release ref first" }
+$CommitPin = $Commit.ToLowerInvariant()
+if ($want.ToLowerInvariant() -ne $CommitPin) { Die "-Ref $Ref resolves to $want, but -Commit is $CommitPin - the ref is not the pinned release commit" }
 Write-Ok "clean tree at $Ref ($($head.Substring(0, 12)))"
 
 # --- the version in the build file drives the MSI filename; a skew here breaks step 2 ------------
@@ -559,7 +585,7 @@ if ($specHasStore) {
 # andvari_<ver>-<rev>_amd64.deb; /downloads serves andvari-<ver>.deb) and the one with no
 # SHA256SUMS cross-check on the build host: the spec's sha256 was hashed from the LOCAL build
 # output and the served URL is constructed by convention. So the agreement is PROVEN here, not
-# assumed: GET the served deb and require it to hash to .linux.sha256 — before the multi-minute
+# assumed: GET the served deb and require it to hash to .linux.sha256 - before the multi-minute
 # MSI build, and long before a signed manifest can point every Linux client at bytes that do not
 # match their pinned digest. (The deb is already published when this ceremony runs; the spec is
 # emitted alongside the uploaded artifacts.)
@@ -592,21 +618,29 @@ if ($servedPkgSha -ne $prePkgSha) {
 }
 Write-Ok "served Arch package $prePkgUrl hashes to the spec's sha256 - rename/upload agreement proven"
 
-# --- update-signer jar (built here so a missing jar fails before the MSI build, not after) -------
+# --- update-signer jar: deleted and rebuilt from THIS tree on every real run (A14 review 3) -------
+# It is the program handed the key's path. A jar an earlier build left in build\libs (another
+# commit, another branch, anything else that wrote there) is not provably -Commit's, and reusing it
+# made the reviewed diff describe the tree but not necessarily the signer that ran. So a real run
+# deletes it and builds it here, from the checked-out tree, before the MSI build (a build failure
+# still costs seconds, not a multi-minute MSI build); a dry run runs no jar it did not build, so it
+# also skips the live manifest's signature check below, which the real run makes before the MSI.
 $SignerJar = Join-Path $RepoRoot 'tools\update-signer\build\libs\andvari-update-signer.jar'
-if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) {
-    if ($DryRun) {
-        Write-Would "build the update-signer: gradlew.bat :tools:update-signer:shadowJar"
-    }
-    else {
-        Write-Info 'update-signer jar missing - building it (gradlew :tools:update-signer:shadowJar)'
-        Push-Location $RepoRoot
-        try { Invoke-Native -Exe (Join-Path $RepoRoot 'gradlew.bat') -Arguments @(':tools:update-signer:shadowJar', '--console=plain') -What 'gradle :tools:update-signer:shadowJar' | Out-Null }
-        finally { Pop-Location }
-        if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) { Die "update-signer jar still missing at $SignerJar" }
-    }
+if ($DryRun) {
+    Write-Would "delete and rebuild the update-signer from this tree: gradlew.bat :tools:update-signer:shadowJar"
 }
-if (Test-Path -LiteralPath $SignerJar -PathType Leaf) { Write-Ok "update-signer $SignerJar" }
+else {
+    if (Test-Path -LiteralPath $SignerJar) {
+        Remove-Item -LiteralPath $SignerJar -Force
+        Write-Info 'removed the update-signer jar an earlier build left'
+    }
+    Write-Info 'building the update-signer from this tree (gradlew :tools:update-signer:shadowJar)'
+    Push-Location $RepoRoot
+    try { Invoke-Native -Exe (Join-Path $RepoRoot 'gradlew.bat') -Arguments @(':tools:update-signer:shadowJar', '--console=plain') -What 'gradle :tools:update-signer:shadowJar' | Out-Null }
+    finally { Pop-Location }
+    if (-not (Test-Path -LiteralPath $SignerJar -PathType Leaf)) { Die "the update-signer build produced no jar at $SignerJar" }
+    Write-Ok "update-signer built from this tree: $SignerJar"
+}
 
 # --- the signing base must itself be signed ------------------------------------------------------
 # The live manifest is about to become the BASE of the next signed manifest: every field outside
@@ -619,7 +653,11 @@ if ($AllowUnsignedBase) {
     Write-Warn2 'the SIGNING BASE is unverified - every carried-over field is being taken on trust.'
     Write-Warn2 'this switch is for the first-ever release or a knowingly-broken channel ONLY.'
 }
-elseif (Test-Path -LiteralPath $SignerJar -PathType Leaf) {
+elseif ($DryRun) {
+    # A dry run builds no signer and runs none it did not build (above).
+    Write-Would 'verify the live manifest signature against the pinned key, with the update-signer this run builds'
+}
+else {
     $baseVer = Invoke-Native -Exe $JavaExe -What 'update-signer verify (live manifest)' -Capture -AllowFailure -Arguments @(
         '-jar', $SignerJar, 'verify', $live.TempPath, $LiveSigPath, $PinnedPubKey
     )
@@ -628,10 +666,6 @@ elseif (Test-Path -LiteralPath $SignerJar -PathType Leaf) {
         Die "the LIVE manifest's signature does NOT verify against the pinned key - refusing to use it as the signing base. Investigate the channel before anything else; if this is a genuine bootstrap, re-run with -AllowUnsignedBase, deliberately."
     }
     Write-Ok 'live manifest signature verifies against the pinned key - safe to use as the base'
-}
-else {
-    # Only reachable under -DryRun: a real run either found the jar above or just built it (or died).
-    Write-Would 'verify the live manifest signature against the pinned key (update-signer jar not built yet)'
 }
 
 # --- paths --------------------------------------------------------------------------------------
@@ -994,13 +1028,17 @@ Write-Ok 'release-spec.json (exact consumed bytes) written into the bundle'
 $sigSha  = Get-Sha256Lower -Path $BundleSigTmp
 $sigSize = (Get-Item -LiteralPath $BundleSigTmp).Length
 
+# The tree must not have moved under the build (a gradle task, a hook): HEAD is still the pin.
+$headEnd = (Invoke-Native -Exe 'git' -Arguments @('-C', $RepoRoot, 'rev-parse', 'HEAD') -What 'git rev-parse HEAD' -Capture).Output.Trim()
+if ($headEnd.ToLowerInvariant() -ne $CommitPin) { Die "HEAD moved to $headEnd during the ceremony; -Commit is $CommitPin - refusing to write the bundle" }
+
 # bundle.json is metadata for the receiving watcher, not signed material - ConvertTo-Json is fine
 # here (unlike the manifest, whose exact bytes are load-bearing).
 $meta = [pscustomobject][ordered]@{
     version   = $Version
     seq       = $newSeq
     ref       = $Ref
-    commit    = $head
+    commit    = $CommitPin
     createdAt = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [cultureinfo]::InvariantCulture)
     files     = @(
         [pscustomobject][ordered]@{ name = $MsiName;             sha256 = $msiSha;      size = $msiSize }

@@ -42,6 +42,7 @@ import {
 import { BrandSigil } from "./Sigil";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { MasterPasswordHint } from "./passwordadvice";
+import { abandonSignIn, pendingSignInBinding } from "./tabsession";
 import { meetsMasterPasswordFloor } from "./strength";
 import { useAutoLock } from "./useAutoLock";
 
@@ -150,6 +151,9 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
   // §F.9: an unlock that succeeds but whose account has not durably CONFIRMED its recovery piece is
   // BLOCKED here — the capture gate takes over the card until the phrase is saved.
   const [capture, setCapture] = useState<CaptureHandoff | null>(null);
+  // A14 (F5): while the token-less sign-in below shows its recovery-capture gate, the card's own
+  // sign-out link steps aside (the gate carries its own).
+  const [signInBlocking, setSignInBlocking] = useState(false);
   // §E.3.4: does this device hold a durable offline copy for THIS account? Loaded async (IDB probe);
   // null (no cache / probe failed / still loading) renders nothing — the line never blocks unlock.
   const [copyStamp, setCopyStamp] = useState<{ lastSyncAt: number | null } | null>(null);
@@ -210,6 +214,26 @@ function Unlock({ client, policy, session, notice, onReady, onForget }: { client
             // App.signOut → the §E.4 wipe + welcome card). The gate re-fires with a fresh phrase.
             onTimeout={() => onForget(REVEAL_TIMEOUT_NOTICE)}
           />
+        </div>
+      </div>
+    );
+  }
+
+  // A14 (F5): a browser without the offline copy keeps no token once locked (and a new tab never had
+  // one), so this "unlock" is a full sign-in — the normal SignIn flow, TOTP step included, with the
+  // session's email filled in and fixed. A password-only unlock would have no session to unlock.
+  if (!session.tokens) {
+    return (
+      <div className="auth-shell">
+        <div className="card">
+          <div className="card-hero">
+            <div className="sigil"><BrandSigil /></div>
+            <h1>Welcome back</h1>
+            <p>{session.email}</p>
+          </div>
+          {notice && <Msg kind="info">{notice}</Msg>}
+          <SignIn client={client} policy={policy} onReady={onReady} onBlockingChange={setSignInBlocking} lockedEmail={session.email} />
+          {!signInBlocking && <SignOutLink userId={session.userId} onSignOut={() => onForget()} />}
         </div>
       </div>
     );
@@ -466,8 +490,11 @@ function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPo
   );
 }
 
-function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForgot: () => void; onBlockingChange: (blocking: boolean) => void }) {
-  const [email, setEmail] = useState("");
+/** [lockedEmail] (A14, F5): the token-less unlock card's sign-in — the email is the session's, shown
+ *  and fixed, and there is no "forgot" link (the card never had one; recovery is from the start
+ *  screen). */
+function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEmail }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForgot?: () => void; onBlockingChange: (blocking: boolean) => void; lockedEmail?: string }) {
+  const [email, setEmail] = useState(lockedEmail ?? "");
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [totpNeeded, setTotpNeeded] = useState(false);
@@ -488,6 +515,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
     e.preventDefault();
     setBusy(true);
     setErr("");
+    // A14 review 3: once login() has answered, the client holds a new device session's pair. Until saveSession below
+    // has recorded it, a failure must not leave that pair live in this tab's memory (abandonSignIn in the catch).
+    let signedIn = false;
+    let saved = false;
     try {
       const pre = await net(client.prelogin(email));
       const authKey = await Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams);
@@ -499,8 +530,15 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           installId: installId(),
         }),
       );
+      signedIn = true;
+      // A14 review W3: login() held the pair in memory only, and the saveSession below is its only writer.
+      // A14 review 3 (W-a): s.userId is the server's word until Account.unlock has checked the keys it came with, so
+      // until then the client is bound to a placeholder no account has: a rotation in that window is written nowhere
+      // and no persisted pair is adopted. The account the server answered for is bound only once unlock succeeded.
+      client.boundUserId = pendingSignInBinding();
       // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
       const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId, email));
+      client.boundUserId = s.userId;
       recordSelfIdentityPub(s.userId, account, email);
       // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
       // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1 dark-ship
@@ -523,8 +561,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
         personalVaultId: account.personalVaultId,
         email,
         isAdmin: s.isAdmin,
-        tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
+        // W3: the CURRENT pair — the sync above may already have rotated the one login returned.
+        tokens: client.getTokens(),
       });
+      saved = true;
       const meta: LoginMeta = { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowNeedsV2: s.accountKeys.escrowNeedsV2 ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint };
       if (needsRecoveryCapture(s.accountKeys)) {
         // `authKey` IS the login authKey derived from the just-typed master password — reuse it as
@@ -543,6 +583,9 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, currentWrappedUvk: s.accountKeys.wrappedUvk, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword, onUpgraded: () => refreshCachedAccountKeys(client, account.userId) });
       onReady(account, store, meta);
     } catch (e) {
+      // A14 review 3: login() succeeded and something after it failed before the session was saved (unlock refused the
+      // keys, the first sync failed): revoke the pair it got and drop it, rather than keep it live in memory.
+      if (signedIn && !saved) void abandonSignIn(client);
       if (e instanceof ApiError && e.code === "totp_required") {
         // §2.6 row 1 (origin-independent): the account has server-TOTP enrolled; the
         // password checked out and the server additionally wants the current code.
@@ -628,10 +671,10 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
       {/* a11y-webext--11: same silent-unseal fix as the Unlock card above. */}
       <Announcer text={busy ? UNSEALING_NOTICE : ""} />
       <Field label="Email">
-        <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input type="email" autoComplete="username" value={email} readOnly={lockedEmail !== undefined} onChange={(e) => setEmail(e.target.value)} />
       </Field>
       <Field label="Master password">
-        <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <input type="password" autoComplete="current-password" autoFocus={lockedEmail !== undefined} value={password} onChange={(e) => setPassword(e.target.value)} />
       </Field>
       {totpNeeded && (
         <Field
@@ -649,10 +692,12 @@ function SignIn({ client, policy, onReady, onForgot, onBlockingChange }: { clien
           />
         </Field>
       )}
-      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : "Sign in"}</button>
-      <div style={{ textAlign: "center", marginTop: 12 }}>
-        <button type="button" className="link" onClick={onForgot}>Forgot your master password? Recover with your recovery phrase</button>
-      </div>
+      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : lockedEmail !== undefined ? "Unlock" : "Sign in"}</button>
+      {onForgot && (
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <button type="button" className="link" onClick={onForgot}>Forgot your master password? Recover with your recovery phrase</button>
+        </div>
+      )}
     </form>
   );
 }
@@ -849,7 +894,10 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
       // BEFORE anything can bounce us back to the form (a resubmit could only yield "invite used").
       secretRef.current = recoverySecret;
       clearPendingEnroll();
-      client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
+      // A14 review W3: installed without the persistence hook and bound to the new account; the
+      // saveSession right below is the only writer of this pair.
+      client.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
+      client.boundUserId = s.userId;
       // No breach check on the new master password (security review 2026-10, root cause C): its
       // SHA-1 prefix would go to this server, which now holds the Argon2id verifier for it.
       saveSession({
@@ -858,7 +906,7 @@ function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy
         personalVaultId: request.personalVault.vaultId,
         email,
         isAdmin: s.isAdmin,
-        tokens: { accessToken: s.accessToken, refreshToken: s.refreshToken },
+        tokens: client.getTokens(),
       });
       const store = new VaultStore(client, account);
       await store.sync().catch(() => {});

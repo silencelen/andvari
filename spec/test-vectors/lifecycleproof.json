@@ -61,7 +61,7 @@
         }
     ],
     "verdicts": {
-        "note": "Hand-authored (security review 2026-10, root cause A §6.3/§8.6, branch A7); MACs computed by an independent HKDF/HMAC oracle, not by vector-gen. Graded against the verifier production calls: core RemovalProof.decide, web decideRemoval. vaultId and myUserId are fixed; `consumed` is THIS device's consumed set for the vault and `consumedAccount` the account-state set (A7 review MEDIUM-2: a nonce found only in account state, inside the window, is `already_recorded`, a calm verdict; one in this device's set is `replay_denied`); `consume` is [nonce, issuedAt] recorded on a valid verdict.",
+        "note": "Hand-authored (security review 2026-10, root cause A §6.3/§8.6, branch A7); MACs computed by an independent HKDF/HMAC oracle, not by vector-gen. Graded against the verifier production calls: core RemovalProof.decide, web decideRemoval. vaultId and myUserId are fixed; `consumed` is THIS device's consumed set for the vault and `consumedAccount` the account-state set (A7 review MEDIUM-2: a nonce found only in account state, inside the window, is `already_recorded`, a calm verdict; one in this device's set is `replay_denied`); `consume` is [nonce, issuedAt] recorded on a valid verdict. A13 (c10): a v1 proof carries no issuedAt, so for a v1 nonce found only in account state the time its account-state record was consumed (`consumedAccountAt`, nonce -> ms) stands in: it must be inside this device's window (liveSince - skewMs <= at <= now + skewMs), else `anomaly` at step `window`; a missing time or liveSince fails closed. Inside the window it is `already_recorded`, consumed at the RECORDED time (never this device's now), so a calm verdict cannot move the account-state record forward.",
         "vaultId": "0b7aa1e4-31f5-4f0a-9a6e-0e6a3a3d7d10",
         "myUserId": "f42e08cb-8cd4-435c-9599-83b519815789",
         "skewMs": 600000,
@@ -582,7 +582,49 @@
                 "step": "window"
             },
             {
-                "name": "v1 proof whose nonce is only in account state: already recorded",
+                "name": "v1 proof whose nonce is only in account state, recorded inside this device's window: already recorded",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "consumedAccount": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
+                ],
+                "consumedAccountAt": {
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60": 1759999000000
+                },
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "already_recorded",
+                "step": "recorded",
+                "consume": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                    1759999000000
+                ]
+            },
+            {
+                "name": "v1 nonce only in account state, recorded BEFORE this device's window (a replay after a re-add this device saw): anomaly, as on v2",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "consumedAccount": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
+                ],
+                "consumedAccountAt": {
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60": 1759995799999
+                },
+                "liveSince": 1759996400000,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "window"
+            },
+            {
+                "name": "v1 nonce only in account state with no recorded time fails closed",
                 "reason": "removed",
                 "proofV": null,
                 "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
@@ -594,12 +636,27 @@
                 ],
                 "liveSince": 1759996400000,
                 "now": 1760000060000,
-                "expect": "already_recorded",
-                "step": "recorded",
-                "consume": [
-                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
-                    1760000060000
-                ]
+                "expect": "anomaly",
+                "step": "window"
+            },
+            {
+                "name": "v1 nonce only in account state, no liveSince on this device fails closed",
+                "reason": "removed",
+                "proofV": null,
+                "proof": "77OOwg_Vz7zdfBgeaUI3IqUGzXlgB7vjbkGHRpuMt0w",
+                "nonce": "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60",
+                "issuedAt": null,
+                "consumed": [],
+                "consumedAccount": [
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60"
+                ],
+                "consumedAccountAt": {
+                    "5f2b9a1c-4d3e-4c7a-9b8f-1a2c3d4e5f60": 1759999000000
+                },
+                "liveSince": null,
+                "now": 1760000060000,
+                "expect": "anomaly",
+                "step": "window"
             },
             {
                 "name": "a reason that is neither removed nor left",

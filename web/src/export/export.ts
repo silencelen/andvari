@@ -81,6 +81,76 @@ export interface CsvWarnings {
    *  that leads with a spreadsheet formula character. The no-mangling rule above is only safe
    *  because the UI says so — this is that warning's input. */
   formulaRisk: string[];
+  /** Security review 2026-10, A14 (F6): the same risk, one entry per CELL (row order, then column
+   *  order), so the warning can name "Password of “…”" rather than only the item name an attacker
+   *  chose. The UI renders these with [formulaCellLabel] and gates Download on them. */
+  formulaCells: FormulaCell[];
+}
+
+/** The six written CSV columns, by the header's own names (spec 07 §1). */
+export type CsvColumn = "name" | "url" | "username" | "password" | "note" | "totp";
+
+/** One cell a spreadsheet would evaluate. `item` is the item's (possibly attacker-chosen) name. */
+export interface FormulaCell {
+  item: string;
+  column: CsvColumn;
+}
+
+/** The label each column is named by in the warning — byte-twin of core `ExportCsv.CsvColumn.label`. */
+const COLUMN_LABEL: Record<CsvColumn, string> = {
+  name: "Name",
+  url: "Website",
+  username: "Username",
+  password: "Password",
+  note: "Note",
+  totp: "One-time code",
+};
+
+/** The line and paragraph separators and the bidi controls (A14 review Wc/N9): a renderer takes the
+ *  first two as a line break and the rest as a reordering of what follows them. */
+const BIDI_AND_SEPARATORS = new Set([
+  0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+]);
+
+/** C0 (tab and newlines included), DEL, C1, U+2028/U+2029 and the bidi controls as a visible
+ *  `\u001B`-style escape — byte-twin of core `TerminalText.escape`, so a label is one line, in its
+ *  own order, on every client. */
+function escapeControls(s: string): string {
+  let out = "";
+  for (const ch of s) {
+    const c = ch.codePointAt(0)!;
+    const control = c < 0x20 || (c >= 0x7f && c <= 0x9f) || BIDI_AND_SEPARATORS.has(c);
+    out += control ? "\\u" + c.toString(16).toUpperCase().padStart(4, "0") : ch;
+  }
+  return out;
+}
+
+/** "Password of “GitHub”": OUR field label first, then the item's name in quotes, on one line.
+ *  Twin of core `ExportCsv.formulaCellLabel`. */
+export function formulaCellLabel(cell: FormulaCell): string {
+  return `${COLUMN_LABEL[cell.column]} of \u201C${escapeControls(cell.item)}\u201D`;
+}
+
+/** The acknowledgement sentence beside the formula warning — byte-twin of core `ExportCsv.FORMULA_ACK`. */
+export const CSV_FORMULA_ACK = "I understand that a spreadsheet would run these cells as formulas";
+
+/** The acknowledgement counts only for the cells it was given for: nothing risky needs none; a
+ *  vault re-included after the tick brings new cells and needs a fresh one. Twin of core
+ *  `ExportCsv.formulaAckSatisfied`. */
+export function formulaAckSatisfied(cells: readonly FormulaCell[], acked: readonly FormulaCell[] | null): boolean {
+  if (cells.length === 0) return true;
+  if (acked === null || acked.length !== cells.length) return false;
+  return cells.every((c, i) => c.item === acked[i]!.item && c.column === acked[i]!.column);
+}
+
+/** The CSV Download gate (spec 06 plaintext warning + A14 formula acknowledgement). */
+export function csvDownloadAllowed(g: {
+  plaintextAck: boolean;
+  loginCount: number;
+  cells: readonly FormulaCell[];
+  formulaAcked: readonly FormulaCell[] | null;
+}): boolean {
+  return g.plaintextAck && g.loginCount > 0 && formulaAckSatisfied(g.cells, g.formulaAcked);
 }
 
 /** F08 — the sentence the UI must render for [CsvWarnings.formulaRisk], byte-twin of core
@@ -112,6 +182,7 @@ export function csvWarnings(items: ItemDoc[]): CsvWarnings {
   const extraUris: string[] = [];
   const emptyUsernameAndPassword: string[] = [];
   const formulaRisk: string[] = [];
+  const formulaCells: FormulaCell[] = [];
   for (const doc of items) {
     // Cards interact with the other lists exactly as notes always have: still eligible
     // for [withAttachments] (that check is type-blind), never for the login-only lists.
@@ -126,20 +197,22 @@ export function csvWarnings(items: ItemDoc[]): CsvWarnings {
       // authors the password and totp cells too, and a formula there reads the OTHER rows — the
       // exporter's own passwords. The old exemption (a generated password may begin `-` or `@`)
       // made the warning silent on exactly the cell an attacker would pick. Core twin.
-      const written = [
-        doc.name,
-        doc.login?.uris?.[0] ?? "",
-        doc.login?.username ?? "",
-        doc.login?.password ?? "",
-        doc.notes ?? "",
-        doc.login?.totp ?? "",
+      const written: [CsvColumn, string][] = [
+        ["name", doc.name],
+        ["url", doc.login?.uris?.[0] ?? ""],
+        ["username", doc.login?.username ?? ""],
+        ["password", doc.login?.password ?? ""],
+        ["note", doc.notes ?? ""],
+        ["totp", doc.login?.totp ?? ""],
       ];
-      if (written.some(startsWithFormulaChar)) {
+      const risky = written.filter(([, v]) => startsWithFormulaChar(v));
+      if (risky.length > 0) {
         formulaRisk.push(doc.name);
+        for (const [column] of risky) formulaCells.push({ item: doc.name, column });
       }
     }
   }
-  return { noteItems, cardItems, withAttachments, extraUris, emptyUsernameAndPassword, formulaRisk };
+  return { noteItems, cardItems, withAttachments, extraUris, emptyUsernameAndPassword, formulaRisk, formulaCells };
 }
 
 function csvField(value: string): string {

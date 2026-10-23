@@ -1,6 +1,7 @@
 package io.silencelen.andvari.app
 
 import android.content.Context
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -26,6 +27,7 @@ import io.silencelen.andvari.core.client.BackupVault
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
+import io.silencelen.andvari.core.client.CSV_CHANGED_NOTICE
 import io.silencelen.andvari.core.client.Duplicates
 import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.ExportVault
@@ -207,6 +209,18 @@ sealed interface Screen {
     data class Recover(val email: String) : Screen
 }
 
+/**
+ * FLAG_SECURE (MainActivity.onCreate) is cleared for the WHOLE window on the Autofill Status screen, so the owner's
+ * debugging protocol can screenshot it. Security review 2026-10 (q30): that is safe only while nothing else in the
+ * window shows vault values, so [showsAttentionArea] is false on every exempt screen. Pure, and pinned together.
+ */
+internal fun flagSecureExempt(screen: Screen): Boolean = screen is Screen.AutofillStatus
+
+/** The attention area (vault names, co-holders, invitations, transfers) is composed above the screen switch on every
+ *  screen except the two recovery gates (§F.9) and any FLAG_SECURE-exempt screen (q30). */
+internal fun showsAttentionArea(screen: Screen): Boolean =
+    screen !is Screen.RecoverySetup && screen !is Screen.RecoveryCapture && !flagSecureExempt(screen)
+
 data class UiState(
     val screen: Screen = Screen.Loading,
     val items: List<VaultItem> = emptyList(),
@@ -365,6 +379,10 @@ data class UiState(
      *  selection so its counts and named skips describe the file that will actually be written. */
     val csvVaults: List<ExportVault> = emptyList(),
     val csvSelectedVaults: Set<String> = emptySet(),
+    /** A14 review N3: the formula cells the dialog's tick was given for, handed over as the SAF picker
+     *  opens (a configuration change while it is up must not drop them); [AndvariViewModel.csvRun]
+     *  re-checks them against the docs it actually writes. */
+    val csvAcknowledged: List<ExportCsv.FormulaCell>? = null,
     val lastExportAt: Long = 0,
     // Vault lifecycle (spec 03 §11) — notices banner, verified incoming ownership offers,
     // the Sharing screen's members/deleted/held lists, and bulk-copy / move progress.
@@ -481,7 +499,7 @@ data class UiState(
 internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     items = emptyList(), needsUpdateCount = 0,
     notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
-    backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(),
+    backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null,
     lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
     sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
     undecryptableSharedVaultCount = 0, sharingSettingsVaultId = null,
@@ -585,6 +603,38 @@ internal fun effectiveSignupMode(declared: String?): String = when (declared) {
  */
 internal fun switchDropsSession(oldOrigin: String, newOrigin: String): Boolean =
     OriginNamespace.canonicalOrigin(oldOrigin) != OriginNamespace.canonicalOrigin(newOrigin)
+
+/** Security review 2026-10, A14 (F8): a stored session's tokens go only to the session's own origin
+ *  (the canonical compare [switchDropsSession] uses). Unlock refuses a session saved for another
+ *  origin than the one the app dials; a locked sign-out revokes at the session's own origin. */
+internal fun sessionBelongsTo(sessionOrigin: String, liveOrigin: String): Boolean = !switchDropsSession(sessionOrigin, liveOrigin)
+
+/**
+ * A14 (F8): may an enroll that built its client for [opOrigin] while [opPending] was the pending
+ * invite switch commit its session now? Only while the app still dials that origin, the pending
+ * switch is the same one (its email may have been filled in; its origin and restore point may not
+ * change), and the probe generation has not moved (a round trip away and back counts as a change).
+ */
+internal fun enrollStillBound(
+    opOrigin: String,
+    opPending: PendingServer?,
+    liveOrigin: String,
+    livePending: PendingServer?,
+    fenceCurrent: Boolean,
+): Boolean = fenceCurrent && liveOrigin == opOrigin &&
+    opPending?.origin == livePending?.origin && opPending?.previousOrigin == livePending?.previousOrigin
+
+/** A14 (F8): the unlock refusal for a session saved under another origin. */
+internal fun sessionElsewhere(sessionOrigin: String): String =
+    "This saved sign-in belongs to $sessionOrigin, not this server. Sign out, then sign in here."
+
+/** A14 review N4: the sign-in whose origin moved while login was in flight. */
+internal fun signInOriginMoved(origin: String): String =
+    "The server changed while you were signing in at $origin, so that sign-in was not saved and was ended there. Sign in again."
+
+/** A14 (F8): the enroll whose origin moved while register was in flight. */
+internal fun enrollOriginMoved(origin: String): String =
+    "The server changed while your account was being created at $origin, so it was not saved here. Sign in at $origin to finish setting it up."
 
 /**
  * Audit F27 — did the pre-commit probe prove the target is DIALABLE at all?
@@ -1107,6 +1157,10 @@ class AndvariViewModel(
      */
     fun unlockWithBiometric(activity: FragmentActivity) = op {
         val session = store.load() ?: throw IllegalStateException("no session")
+        if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) { // A14 (F8)
+            _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
+            return@op
+        }
         val userId = session.userId
         val originKey = store.currentOriginKey() // §4.2: this unlock's namespace, captured before any await
         val uvk = when (val r = QuickUnlock.recoverUvk(activity, cacheDir, originKey, userId)) {
@@ -1207,6 +1261,21 @@ class AndvariViewModel(
     // [closeEditor] clears it (plaintext must not outlive the editor session).
     val editorPendingUploads = mutableListOf<PendingUpload>()
 
+    // The open editor's SECRET fields (password, TOTP seed, card number, security code; since the
+    // A13 review RF5 also the notes, which are the whole payload of a note item, and the attachment
+    // list, whose every AttachmentRef carries its file's key) — held here for the same reason as the
+    // picks: they must survive rotation/fold recreation, and they must never enter SavedState
+    // (system_server keeps that Bundle outside the app's lock and zeroization; security review
+    // 2026-10, q27). Seeded from the item on first read, cleared by [openEditor] and [closeEditor]
+    // (so also on lock).
+    private val editorSecrets = HashMap<String, MutableState<*>>()
+
+    /** The editor session's state for secret [field], seeded by [seed] the first time it is read in this session. Each
+     *  field name is used with ONE type, by the editor alone. */
+    @Suppress("UNCHECKED_CAST")
+    fun <T> editorSecretState(field: String, seed: () -> T): MutableState<T> =
+        editorSecrets.getOrPut(field) { mutableStateOf(seed()) } as MutableState<T>
+
     // The OPEN editor session (open flag + target itemId) also lives HERE, not in the
     // composition: a save completing across an Activity recreation must close the editor
     // the user is actually looking at — a composition-captured close callback died with
@@ -1241,7 +1310,7 @@ class AndvariViewModel(
      * Part of the editor SESSION, exactly like [editorItemId]/[editorNewType]: cleared by
      * [openEditor] on every fresh session (so an ordinary edit never inherits it) and by
      * [closeEditor]. Deliberately NOT rememberSaveable-equivalent — after an Activity
-     * recreation the password has already been generated into the editor's own saved state, and
+     * recreation the password has already been generated into the editor session's state, and
      * re-firing would roll a SECOND password over the one the user is reading.
      */
     var editorGenerateOnOpen by mutableStateOf(false)
@@ -1257,6 +1326,7 @@ class AndvariViewModel(
 
     fun openEditor(itemId: String?, newType: String = "login", generate: Boolean = false) {
         editorPendingUploads.clear() // a fresh editor session never inherits stale picks
+        editorSecrets.clear() // …nor another item's secrets
         draftItemId = null // …nor a previous session's draft id (reusing one would OVERWRITE that item)
         editorItemId = itemId
         editorVaultId = itemId?.let { engine?.item(it)?.vaultId }
@@ -1270,6 +1340,7 @@ class AndvariViewModel(
         editorItemId = null
         editorVaultId = null
         editorPendingUploads.clear()
+        editorSecrets.clear() // the secrets die with the editor session (and so with a lock)
         editorGenerateOnOpen = false
         draftItemId = null // cancel or success: the next editor session starts a fresh draft
     }
@@ -1287,8 +1358,8 @@ class AndvariViewModel(
 
     private fun needsUpdate(): Int = engine?.needsUpdateCount() ?: 0
 
-    private fun newApi(tokens: Tokens? = null): AndvariApi =
-        AndvariApi(store.baseUrl, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
+    private fun newApi(tokens: Tokens? = null, origin: String = store.baseUrl): AndvariApi =
+        AndvariApi(origin, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
 
     fun start() {
         viewModelScope.launch {
@@ -1434,6 +1505,7 @@ class AndvariViewModel(
     /** A foreign-origin enroll link was entered (design §4.4): show the Trust Gate (ENROLLMENT
      *  variant, B2-8). Connect enters the PENDING repoint; [email] seeds the crash marker. */
     fun requestInviteTrustGate(origin: String, email: String) {
+        if (_ui.value.busy) return // A14 (F8): no re-point under an op holding a client
         _ui.value = _ui.value.copy(
             trustGate = TrustGatePrompt(trustGateRender(origin), enrollment = true, action = TrustGateAction.InviteRepoint(origin, email)),
         )
@@ -1453,6 +1525,7 @@ class AndvariViewModel(
 
     /** Trust Gate → Connect: act on the held [TrustGateAction]. */
     fun trustGateConnect() {
+        if (_ui.value.busy) return // A14 (F8): every Connect moves the origin; never under a running op
         val gate = _ui.value.trustGate ?: return
         when (val a = gate.action) {
             // Manual switch — PROBE, then commit (the gate is the gesture, but the gesture must
@@ -1535,6 +1608,7 @@ class AndvariViewModel(
     /** §4.3 B2-6: "cancel and return to <previous origin>" — revert the uncommitted repoint,
      *  clear the marker, re-probe the previous origin (which re-enables sign-in). */
     fun cancelPendingSwitch() {
+        if (_ui.value.busy) return // A14 (F8): an enroll's register may still land at the pending origin
         val marker = store.pendingServer ?: run { _ui.value = _ui.value.copy(pendingSwitch = null); return }
         store.pendingServer = null
         _ui.value = _ui.value.copy(pendingSwitch = null, trustGate = null)
@@ -1675,7 +1749,12 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(busy = false, pendingReconcile = it, error = null)
             return@op
         }
-        val a = newApi()
+        // A14 review N4: the origin and probe generation this sign-in's client is bound to, captured with
+        // the client (as enrollOp does). login() answers whoever this client dialed; the session is saved
+        // under THAT origin, and only while nothing moved the app away from it meanwhile.
+        val opOrigin = store.baseUrl
+        val opTag = probeFence.tag(store.currentOriginKey())
+        val a = newApi(origin = opOrigin)
         try {
             val pre = a.prelogin(email)
             // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
@@ -1706,8 +1785,17 @@ class AndvariViewModel(
             }
             // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
             val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPub(email, s.userId)) }
+            // A14 review N4, second layer: if the app was moved while login and the KDF ran, these tokens
+            // are not for the origin it now dials. Do not commit: revoke them at the origin that issued
+            // them (this client's own), drop them, and say so. (No pending switch existed at the start.)
+            if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey()))) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+                _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(opOrigin))
+                return@op
+            }
             store.recordSelfIdentityPub(s.userId, email, acct)
-            store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             bind(a, acct)
             // F58: a recovery TEMP password logs in with mustChangePassword=true — persist it
@@ -1740,6 +1828,11 @@ class AndvariViewModel(
 
     fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError) {
         val session = store.load() ?: throw IllegalStateException("no session")
+        // A14 (F8): a stored session's tokens go only to its own origin — refuse, never "repair".
+        if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) {
+            _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
+            return@op
+        }
         val originKey = store.currentOriginKey() // §4.2: the server this unlock talks to
 
         // §F.9: set when this unlock must land in the capture gate — the FRESH accountKeys said
@@ -1909,7 +2002,13 @@ class AndvariViewModel(
             _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters.")
             return@op
         }
-        val a = newApi()
+        // A14 (F8): the origin, pending switch and probe generation this enroll's client is bound to.
+        // register() answers whoever this client dialed; the session is saved under THAT origin, and
+        // only while nothing moved the app away from it meanwhile.
+        val opOrigin = store.baseUrl
+        val opPending = store.pendingServer
+        val opTag = probeFence.tag(store.currentOriginKey())
+        val a = newApi(origin = opOrigin)
         // §F.4/§F.7: the per-member recovery piece is generated by enroll() and committed inside
         // register(); it is held here transiently so the shown-once gate (below) can reveal it.
         var recoverySecret: ByteArray? = null
@@ -1946,8 +2045,18 @@ class AndvariViewModel(
             // (no marker). baseUrl already points at the pending origin, so register hits the right one.
             store.pendingServer?.let { store.pendingServer = it.copy(email = email) }
             val s = a.register(req)
+            // A14 (F8), second layer: the switch is frozen while this op runs, but if the app was
+            // moved anyway this account is not the one it now points at. Do not commit: revoke the
+            // tokens at the origin that issued them (this client's own), drop them, and say so.
+            if (!enrollStillBound(opOrigin, opPending, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey()))) {
+                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
+                a.close()
+                secret.fill(0); recoverySecret = null
+                _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(opOrigin))
+                return@op
+            }
             recoveryPieceId = s.recoveryPieceId
-            store.save(Session(store.baseUrl, s.userId, email, s.accessToken, s.refreshToken))
+            store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
             persistAccountKeys(s.accountKeys)
             store.recordSelfIdentityPub(s.userId, email, acct)
             bind(a, acct)
@@ -3538,7 +3647,10 @@ class AndvariViewModel(
         _ui.value = u.copy(csvSelectedVaults = selected, csvPreflight = csvPreflightFor(current, selected, pre.offlineNote))
     }
 
-    fun csvDismiss() { _ui.value = _ui.value.copy(csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet()) }
+    fun csvDismiss() { _ui.value = _ui.value.copy(csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null) }
+
+    /** A14 review N3: the cells the user ticked the acknowledgement for, as the save picker opens. */
+    fun csvAcknowledge(cells: List<ExportCsv.FormulaCell>?) { _ui.value = _ui.value.copy(csvAcknowledged = cells) }
 
     /** CSV step 2: write the spec 07 §1 bytes (UTF-8, no BOM) through [write], then
      *  verify the on-disk bytes via [readBack] (backstops providers that ignore the
@@ -3552,7 +3664,7 @@ class AndvariViewModel(
             // (empty-only) document and surface the abort — never a silent 0-byte file.
             runCatching { discard(false) }
             _ui.value = _ui.value.copy(
-                busy = false, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(),
+                busy = false, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null,
                 error = "The vault locked while choosing where to save — nothing was exported.",
             )
             return
@@ -3561,27 +3673,54 @@ class AndvariViewModel(
         // It lives in UiState, not Compose `remember`, for the same reason BackupRequest does: a
         // configuration change while the SAF picker is up must not drop it.
         val selected = _ui.value.csvSelectedVaults
-        _ui.value = _ui.value.copy(busy = true, error = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet())
+        // A14 review N3: the cells the tick was given for — re-checked below against the docs written.
+        val acknowledged = _ui.value.csvAcknowledged
+        val vaults = _ui.value.csvVaults
+        val offline = _ui.value.csvPreflight?.offlineNote
+        _ui.value = _ui.value.copy(busy = true, error = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null)
         viewModelScope.launch {
             var writeBegan = false
             try {
-                val count = withContext(Dispatchers.IO) {
+                val outcome = withContext(Dispatchers.IO) {
                     val docs = orderedDocs(current, selected)
-                    val bytes = ExportCsv.write(docs).encodeToByteArray()
-                    try {
-                        writeBegan = true
-                        write(bytes)
-                        val onDisk = readBack()
-                        val ok = onDisk != null && onDisk.contentEquals(bytes)
-                        onDisk?.fill(0) // plaintext passwords — wipe the read-back copy too
-                        if (!ok) throw IllegalStateException("export verification failed — the saved file does not match what was written")
-                    } finally {
-                        bytes.fill(0) // plaintext passwords — wipe our copy
+                    // The RESUMED sync loop can land while the SAF picker is up: the cells are recomputed
+                    // from exactly these docs, and a mismatch writes nothing.
+                    when (val gated = ExportCsv.gatedWrite(docs, acknowledged)) {
+                        is ExportCsv.GatedWrite.NeedsAcknowledgement -> gated
+                        is ExportCsv.GatedWrite.Ready -> {
+                            val bytes = gated.csv.encodeToByteArray()
+                            try {
+                                writeBegan = true
+                                write(bytes)
+                                val onDisk = readBack()
+                                val ok = onDisk != null && onDisk.contentEquals(bytes)
+                                onDisk?.fill(0) // plaintext passwords — wipe the read-back copy too
+                                if (!ok) throw IllegalStateException("export verification failed — the saved file does not match what was written")
+                            } finally {
+                                bytes.fill(0) // plaintext passwords — wipe our copy
+                            }
+                            gated
+                        }
                     }
-                    docs.count { it.type == "login" }
                 }
-                VaultSession.touch()
-                _ui.value = _ui.value.copy(busy = false, notice = "Exported $count logins. Delete the CSV once the other manager has imported it.")
+                when (outcome) {
+                    is ExportCsv.GatedWrite.NeedsAcknowledgement -> {
+                        // Nothing was written: drop the empty document the picker created, and show the
+                        // dialog again for the same selection with the new list and an empty tick.
+                        runCatching { discard(false) }
+                        _ui.value = _ui.value.copy(
+                            busy = false,
+                            csvVaults = vaults,
+                            csvSelectedVaults = selected,
+                            csvPreflight = CsvPreflight(outcome.warnings, outcome.loginCount, offline, selection = selected, notice = CSV_CHANGED_NOTICE),
+                        )
+                        return@launch
+                    }
+                    is ExportCsv.GatedWrite.Ready -> {
+                        VaultSession.touch()
+                        _ui.value = _ui.value.copy(busy = false, notice = "Exported ${outcome.loginCount} logins. Delete the CSV once the other manager has imported it.")
+                    }
+                }
             } catch (t: Throwable) {
                 runCatching { discard(writeBegan) }
                 fail(t, ::exportError)
@@ -3658,13 +3797,17 @@ class AndvariViewModel(
                 // is still valid server-side — store.clear() alone would leave it live for
                 // ~30 days. Build a short-lived holder from the persisted session (same
                 // shape as newApi(): updateTokens wired so any rotation persists) purely
-                // to revoke it.
-                val a = newApi(session.tokens())
+                // to revoke it — at the session's OWN origin (A14, F8), never at whatever
+                // the app dials now.
+                val a = newApi(session.tokens(), origin = session.baseUrl)
                 runCatching { withTimeoutOrNull(5_000) { a.logout() } }
                 a.close()
             }
             // VaultSession.lock() closes the engine BEFORE we delete the DB (holders), then the api.
             VaultSession.lock()
+            // A14 (F7): the apps this member confirmed for package-only fills are their judgement,
+            // not the device's — the next account on this phone confirms its own.
+            runCatching { io.silencelen.andvari.app.autofill.AppSignerBindings.clearAll(appContext) }
             pendingBackupRequest = null // never carry a stashed export into a different account
             zeroPendingRecovery() // §F.7: the raw secret + its pieceId never outlive the account
             zeroPendingRecover() // …nor a forgot-password attempt's parsed phrase/ticket
@@ -3702,7 +3845,7 @@ class AndvariViewModel(
     fun openSettings() {
         _ui.value = _ui.value.copy(
             screen = Screen.Settings, totpStatus = null, totpSetup = null, totpMessage = null,
-            backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), lastExportAt = store.lastExportAt,
+            backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null, lastExportAt = store.lastExportAt,
         )
         refreshQuickUnlockState() // the quick-unlock toggle reflects current enrollment/eligibility
         viewModelScope.launch {
