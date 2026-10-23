@@ -61,11 +61,12 @@ import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
 import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, setServerUrl } from "./serverurl";
-import { openBoundedIdb, trustedStore, type KvArea } from "./trustedkv";
+import { idbKv, openBoundedIdb, trustedStore, type KvArea } from "./trustedkv";
+import { plainSessionArea, SEAL_DB_NAME, SessionSeal } from "./sessionseal";
 import { A15_OWED_KEY, attestsPreA15Upgrade, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail, type InstallSignal, type MigrationOutcome } from "./trustmigrate";
 import { autofillExcludeMatches, dialRefusal, forgetPendingServer, loadServerState, type ServerBlock } from "./serverstate";
 import { offerDownloadUrl, readUpdateOffer } from "./updateoffer";
-import { restrictStorageAccess, type StorageAccessAreas } from "./storageaccess";
+import { quickUnlockCompartment, restrictStorageAccess, type StorageAccessAreas, type StorageAccessVerdict } from "./storageaccess";
 import { armGate, withRedeemInFlight } from "./locksequence";
 import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
@@ -74,7 +75,9 @@ import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./ser
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
  * SW (~30 s), so the session ALSO lives in chrome.storage.session: memory-backed browser storage —
- * never disk, cleared on browser exit, trusted extension contexts only — lazily restored on wake.
+ * never disk, cleared on browser exit — lazily restored on wake. Since A16 every secret-bearing record there is SEALED
+ * (`seal`, sessionseal.ts: AES-GCM under a non-extractable key in the extension origin's own IndexedDB), because that
+ * content scripts cannot reach storage.session is not relied on; a record that does not open reads as absent (locked).
  * ZK holds: the master password and mk exist only transiently inside unlock(); what persists is
  * session-scoped custody (tokens, unwrapped vault keys b64, decrypted docs) — the same posture as
  * SW RAM. chrome.storage.local NEVER holds secrets, and since A15 no trust state either: content scripts can read and
@@ -110,8 +113,15 @@ const trusted = trustedStore();
 /** A15: chrome.storage.local, by name, for exactly two jobs: the one-time migration's input and the purge's sweep of
  *  pre-A15 leftovers. Nothing else reads it (storagefence.test.ts). */
 const legacyLocal = chrome.storage.local as unknown as KvArea;
-/** storage.session as a KvArea, for the purge's prefix sweep. */
-const sessionArea = chrome.storage.session as unknown as KvArea;
+/** A16: chrome.storage.session, by name, for exactly two wrappers (storagefence.test.ts): the seal, through which every
+ *  secret-bearing record is written and read, and the plain area, which takes only the plain inventory (the idle-lock
+ *  notice, the update throttle stamp, the quiet marker) and refuses any other key. */
+const sessionRaw = chrome.storage.session as unknown as KvArea;
+/** A16: the session seal (sessionseal.ts). Its key is a non-extractable AES-GCM key in the extension origin's IndexedDB
+ *  (a database of its own, every operation bounded like the trusted store's), made fresh for each browser session. Set
+ *  up now, beside serverReady: `sessionSeal.ready` settles once worker start found or made the key, or found no key store. */
+const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME) });
+const plainSession = plainSessionArea(sessionRaw);
 /** A read where a failure means "absent" (the safe default for every value read this way). Once worker start found no
  *  trusted store, it is not asked again for a best-effort read (a store that timed out would cost every caller the
  *  whole bound again). */
@@ -124,9 +134,11 @@ async function trustedGet(key: string): Promise<unknown> {
   }
 }
 
-const SKEY = "session"; // storage.session: SessionSnapshot
-const TKEY = "tabs"; //    storage.session: Record<tabId, TabState>
-const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 reason line (E1-7)
+// A16: storage.session holds four sealed records — the session snapshot (seal kind "session": SessionSnapshot), the tab
+// records ("tabs": Record<tabId, TabState>), and per origin the quick-unlock record ("quickUnlock", QKEY) and the
+// known-logins digest ("knownLogins", KLKEY) — read and written only through the seal, which owns their slot names; and
+// three plain ones (NKEY, ULAST, UQUIET), through plainSession. sessionseal.ts says why each is sealed or plain.
+const NKEY = "lockNotice"; // storage.session, plain: { kind:"idle"; seconds } — F26 reason line (E1-7)
 // Extension quick-unlock Tier B (spec 01 §8.4). QKEY is a DISTINCT storage.session key (breaker B3):
 // ensureLoaded MUST NOT hydrate `session` from it, so a locked-armed record leaves every `!session`
 // gate reporting fully locked. DKEY is the durable, NON-secret offer-card dismissed-once flag (breaker
@@ -135,7 +147,7 @@ const NKEY = "lockNotice"; // storage.session: { kind:"idle"; seconds } — F26 
 // quick-unlock record + offer flag belong to the account/server they were minted against, and the
 // update-channel state describes ONE origin's /downloads channel (an unscoped USEQ would let one
 // origin's seq numbering poison another's anti-rollback). Every read/write goes through nsk().
-const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + counter + locked-token stash)
+const QKEY = "quickUnlock"; // storage.session, namespaced, sealed: QuRecord (blob + counter + locked-token stash)
 // Known-logins digest (owner decision 2026-08-18; spec 01 §8.4 amendment): truncated HMACs over
 // (site key, username) pairs — NO password material — so the LOCKED capture path can tell "a
 // re-login to something we already hold" from "a genuinely new login" (knownlogins.ts has the
@@ -144,16 +156,16 @@ const QKEY = "quickUnlock"; // storage.session, namespaced: QuRecord (blob + cou
 // RETAINED across an idle/manual lock (that survival is its whole function), wiped at sign-out,
 // on an untrusted compartment, and by purgeOriginNamespace (H59 — it is per-origin namespaced
 // state, so "remove data for this server" has to take it too).
-const KLKEY = "knownLogins"; // storage.session, namespaced: KnownLoginsRecord
+const KLKEY = "knownLogins"; // storage.session, namespaced, sealed: KnownLoginsRecord
 const DKEY = "quOfferDismissed"; // trusted store, namespaced (non-secret): the offer card was dismissed once
 const BKEY = "quBioCred"; // trusted store, namespaced (non-secret, 0.17.0 amendment 4): { credentialId, prfSalt, userId } — reuse a passkey on re-enroll (avoid TPM/SEP litter). NOT secret: the PRF *output* needs the hardware + OS user-verification; salt/id/userId are public inputs (like a KDF salt).
 // A15: the verified offer and the anti-rollback seq are trust state (trusted store); the throttle stamp and the quiet
 // marker are not (storage.session — the forced start check re-derives them, and a throttle that works without
 // IndexedDB keeps a private-browsing Firefox from re-fetching on every wake). None is migrated from storage.local.
 const UKEY = "updateInfo"; // trusted store, namespaced (non-secret): UpdateInfo while a newer build is live
-const ULAST = "updateCheckedAt"; // storage.session, namespaced: epoch ms of the last COMPLETED update fetch
+const ULAST = "updateCheckedAt"; // storage.session, namespaced, plain: epoch ms of the last COMPLETED update fetch
 const USEQ = "updateAcceptedSeq"; // trusted store, namespaced: highest signed-manifest seq ever accepted (§B anti-rollback)
-const UQUIET = "updateChannelQuiet"; // storage.session, namespaced: { reason } — H2 fail-closed-QUIET (§M-D5), never a nag
+const UQUIET = "updateChannelQuiet"; // storage.session, namespaced, plain: { reason } — H2 fail-closed-QUIET (§M-D5), never a nag
 // M-D4b: ONLY these quiet reasons are ACTIONABLE and may surface a muted popup line. `seq_regression`
 // (already-accepted manifest re-polled — the normal steady state) and `disabled` are benign and must
 // NEVER render as "couldn't be verified" (permanent false alarm = the alert-fatigue failure M-D4b exists
@@ -469,20 +481,22 @@ function makeApi(url: string): AndvariApi {
 }
 let api = makeApi(serverUrl);
 
-// A9⊕B5: storage.session TRUSTED_CONTEXTS is the precondition for quick unlock — the armed record is a crackable
-// UVK blob + a LIVE refresh token, so content scripts must not be able to read it. `quCompartmentTrusted` gates arm
-// (doLock → armGate); enroll is IMPLICITLY gated (it requires an unlocked `session`, which only exists when
-// storage.session does). If the compartment is not trusted nothing arms and every lock is the full erase — NEVER a
-// storage.local fallback for the blob (that is the rejected durable Tier C, breaker A9).
-// What the code actually verifies (A15; storageaccess.ts): on Chrome, that `storage.session.setAccessLevel(
-// TRUSTED_CONTEXTS)` RESOLVED — awaited here, before any lock samples the verdict; a call that exists and fails
-// leaves the compartment untrusted. On Firefox, which has no setAccessLevel, only that storage.session exists: the
-// trusted-only property then rests on Firefox's API schema, which does not offer storage.session to content scripts
-// (an assumption this code cannot check). The same call restricts storage.local on Chrome 140+ (defense in depth:
-// since A15 storage.local holds no trust state).
+// A9⊕B5 → A16: the armed quick-unlock record is a crackable UVK blob + a LIVE refresh token, so it may sit in
+// storage.session only where a content script could not read it. Since A16 that rests on the seal, not on the area's
+// access level: `quCompartmentTrusted` means "the session sealing key is available" (sessionseal.ts — a non-extractable
+// key in the extension origin's IndexedDB, so the record is ciphertext to anyone who can only read storage.session),
+// AND, as a belt, that `storage.session.setAccessLevel(TRUSTED_CONTEXTS)` RESOLVED where it exists (Chrome; Firefox has
+// no such call, and its storage.session content exclusion is not relied on). That is exactly what
+// storageaccess.quickUnlockCompartment checks. It gates arm (doLock → armGate) and enroll (enrollQuickUnlock*: no
+// enrollment where nothing can arm). Without it nothing arms and every lock is the full erase — NEVER a storage.local
+// fallback for the blob (that is the rejected durable Tier C, breaker A9). The same access-level call restricts
+// storage.local on Chrome 140+ (defense in depth: since A15 storage.local holds no trust state).
 let quCompartmentTrusted = false;
-const storageAccess: Promise<void> = restrictStorageAccess(chrome.storage as unknown as StorageAccessAreas).then((v) => {
-  quCompartmentTrusted = v.sessionTrusted;
+const storageAccess: Promise<StorageAccessVerdict> = restrictStorageAccess(chrome.storage as unknown as StorageAccessAreas);
+/** A16: settles once both the access levels and the seal's key are decided, and sets `quCompartmentTrusted` from them.
+ *  Never rejects (neither input does). */
+const custodyReady: Promise<void> = Promise.all([storageAccess, sessionSeal.ready]).then(([verdict, sealed]) => {
+  quCompartmentTrusted = quickUnlockCompartment(verdict, sealed);
 });
 
 /** A15 review F1: while set, the worker dials NO server (serverstate.ts): a previous server awaits the user's confirm,
@@ -491,7 +505,8 @@ const storageAccess: Promise<void> = restrictStorageAccess(chrome.storage as unk
 let dialBlock: ServerBlock | null = null;
 /** Whether worker start found a trusted store (false: none in this browser mode, or it did not answer in time). */
 let trustedStoreOk = true;
-/** A15 review S1: how long a lock waits for serverReady (the trusted store) before it locks without the origin. */
+/** A15 review S1: how long a lock waits for serverReady (the trusted store) — and since A16 for the seal's key
+ *  (custodyLoaded) — before it locks without them. */
 const LOCK_STORE_WAIT_MS = 1500;
 /** A15 review S1: a lock ran before serverReady settled, erasing the session snapshot; ensureLoaded must not hydrate
  *  a copy it read before that erase. Once set it stays set: ensureLoaded hydrates at most once per worker life. */
@@ -540,6 +555,9 @@ const serverReady: Promise<void> = (async () => {
   }
   if (trustedStoreOk) await adoptLegacyNamespaceOnce();
 })();
+/** A16: what a lock needs before it can arm or wipe in the right namespace: the origin (serverReady), the access levels
+ *  and the seal's key (custodyReady). doLock waits for it at most LOCK_STORE_WAIT_MS. Never rejects. */
+const custodyLoaded: Promise<unknown> = Promise.all([serverReady, custodyReady]);
 
 /** A15 review F2: the install event landed after worker start stopped waiting for it, and it attests an upgrade from a
  *  pre-A15 build. Record the migration as owed and run it now (it reads storage.local only because of that record). */
@@ -618,16 +636,19 @@ const quCoKey: QuCoKey = {
   },
 };
 
-/** The DISTINCT storage.session record slot (breaker B3). `remove` deletes the key DIRECTLY (breaker
- *  A7/A10/B7) — never via persistSession, which early-returns when session===null. */
+/** The DISTINCT storage.session record slot (breaker B3), sealed (A16): a record that does not open — tampered,
+ *  swapped in from another slot or origin, plaintext, or with no key — reads as absent (not enrolled). `remove` deletes
+ *  the key DIRECTLY (breaker A7/A10/B7) — never via persistSession, which early-returns when session===null — and
+ *  without waiting for the key. A write that was not kept (no key store, or a wipe landed first) throws, so an arm or a
+ *  reserved attempt that did not reach storage fails closed. */
 const quStore: QuStore = {
   async read() {
-    const key = nsk(QKEY);
-    const got = await chrome.storage.session.get(key);
-    return (got[key] as QuRecord | undefined) ?? null;
+    return ((await sessionSeal.get("quickUnlock", currentOriginKey)) as QuRecord | undefined) ?? null;
   },
-  write: (rec) => chrome.storage.session.set({ [nsk(QKEY)]: rec }),
-  remove: () => chrome.storage.session.remove(nsk(QKEY)),
+  async write(rec) {
+    if (!(await sessionSeal.set("quickUnlock", currentOriginKey, rec))) throw new Error("the quick-unlock record was not kept");
+  },
+  remove: () => sessionSeal.remove("quickUnlock", currentOriginKey),
 };
 
 /** §4.2 adoption one-shot: pre-namespacing builds kept this material under BARE keys. Move it into
@@ -642,17 +663,8 @@ const NS_ADOPTED_KEY = "nsAdoptedOnce";
 async function adoptLegacyNamespaceOnce(): Promise<void> {
   try {
     if ((await trustedGet(NS_ADOPTED_KEY)) === true) return;
-    // storage.session: a quick-unlock record armed by the pre-update build (present only if the
-    // browser session survived the update).
-    try {
-      const rec = (await chrome.storage.session.get(QKEY))[QKEY];
-      if (rec !== undefined) {
-        await chrome.storage.session.set({ [nsk(QKEY)]: rec });
-        await chrome.storage.session.remove(QKEY);
-      }
-    } catch {
-      /* storage.session unavailable — nothing to adopt */
-    }
+    // (A16: a bare pre-namespacing quick-unlock record in storage.session is no longer adopted — it is plaintext, and
+    // the seal's start sweep drops it. storage.session does not survive an update anyway.)
     // IndexedDB: the non-extractable co-key moves to its per-origin record key.
     try {
       const k = await idbRun<CryptoKey | undefined>("readonly", (s) => s.get(IDB_KEY));
@@ -1217,7 +1229,7 @@ export async function purgeOriginNamespace(originKey: string): Promise<void> {
     /* best-effort */
   }
   try {
-    await chrome.storage.session.remove(keys);
+    await sessionSeal.removeKeys(keys); // A16: through the seal, so a sealed write still in flight for this origin is dropped
   } catch {
     /* storage.session unavailable */
   }
@@ -1228,7 +1240,7 @@ export async function purgeOriginNamespace(originKey: string): Promise<void> {
   // Guarded on the current origin because the cache only ever holds THAT origin's key.
   if (originKey === currentOriginKey) knownLoginsKey = null;
   // A15: every `ns.<originKey>.` record in every store, per-user ones included (serverswitch.purgeOriginRecords).
-  await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionArea]);
+  await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()]);
   if (originKey === currentOriginKey) stagedChangeFallback = null;
   try {
     await idbRun<void>("readwrite", (s) => s.delete(nsKey(originKey, IDB_KEY)));
@@ -1332,12 +1344,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ---- session custody ----
 
-/** Lazy wake path: one storage.session read per SW life hydrates session + tab state. */
+/** Lazy wake path: one storage.session read per SW life hydrates session + tab state. A16: both records are sealed —
+ *  read through the seal, which waits for its key (bounded) and answers absent for anything that does not open (a
+ *  tampered or swapped record, one sealed before the last lock, plaintext): absent means locked. */
 function ensureLoaded(): Promise<void> {
   loadPromise ??= (async () => {
     await serverReady; // api/originKey/namespace reflect the persisted origin before any state hydrates
-    const got = await chrome.storage.session.get([SKEY, TKEY]);
-    let snap = got[SKEY] as SessionSnapshot | undefined;
+    let snap = (await sessionSeal.get("session", currentOriginKey)) as SessionSnapshot | undefined;
+    const tabsRead = (await sessionSeal.get("tabs", currentOriginKey)) as Record<string, TabState> | undefined;
     // A15 review S1: a lock that ran before the origin was known erased the snapshot without this load; one read
     // before that erase landed must not bring the session back.
     if (lockedBeforeOrigin) snap = undefined;
@@ -1346,7 +1360,7 @@ function ensureLoaded(): Promise<void> {
     // (no `origin` field) fails the same check: fail closed, never guess.
     if (snap && snap.origin !== serverUrl) {
       snap = undefined;
-      await chrome.storage.session.remove(SKEY);
+      await sessionSeal.remove("session", currentOriginKey);
     }
     if (snap && !session) {
       api.setTokens(snap.access || null, snap.refresh);
@@ -1384,7 +1398,7 @@ function ensureLoaded(): Promise<void> {
     }
     // (After a lock that ran before the origin was known, doLock already loaded the tab records and kept only their
     // page-known half; a copy read here before that would bring a pending save's password back.)
-    const t = lockedBeforeOrigin ? undefined : (got[TKEY] as Record<string, TabState> | undefined);
+    const t = lockedBeforeOrigin ? undefined : tabsRead;
     if (t) {
       tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
       // [U14] the Tier-2 registry shape ({forms}) deliberately broke the additive rule — a record
@@ -1403,7 +1417,7 @@ function ensureLoaded(): Promise<void> {
   return loadPromise;
 }
 
-/** Persist the live session to storage.session. RETURNS the storage.set promise so
+/** Persist the live session to storage.session, sealed (A16). RETURNS the write's promise so
  *  api.onTokensChanged can AWAIT the snapshot write before spending a refresh token (a consumed
  *  pair must be persisted before the POST — see AndvariApi.doRefresh). The `!session` guard is
  *  safe for that path: unlock sets tokens before session exists (setTokens vs the session
@@ -1435,7 +1449,7 @@ function persistSession(): Promise<void> {
   // The known-logins digest tracks the items it is derived from: every persist of the session
   // is exactly "items changed or were (re)installed", so this is the one rebuild choke point.
   void refreshKnownLogins();
-  return chrome.storage.session.set({ [SKEY]: snap });
+  return sessionSeal.set("session", currentOriginKey, snap).then(() => {});
 }
 
 /** The digest HMAC key, cached across rebuilds within one SW life. null after sign-out (the
@@ -1447,15 +1461,19 @@ let knownLoginsKey: Uint8Array | null = null;
  *  Best-effort by design: a failed rebuild only means a known login banners while locked — the
  *  pre-digest behavior, never a wrong suppression. */
 async function refreshKnownLogins(): Promise<void> {
-  if (!session) return;
+  const s = session;
+  if (!s) return;
+  const ok = currentOriginKey;
   try {
     if (!knownLoginsKey) {
-      const got = await chrome.storage.session.get(nsk(KLKEY));
-      const rec = got[nsk(KLKEY)] as KnownLoginsRecord | undefined;
+      const rec = (await sessionSeal.get("knownLogins", ok)) as KnownLoginsRecord | undefined;
+      // A16: the read can wait for the seal's key; a lock (a sign-out's wipe) or another unlock that landed meanwhile
+      // must not see this rebuild mint the digest back.
+      if (session !== s) return;
       knownLoginsKey = rec?.key ? fromB64(rec.key) : crypto.getRandomValues(new Uint8Array(16));
     }
-    const digests = buildKnownLoginDigests(knownLoginsKey, session.items, pslResolve);
-    await chrome.storage.session.set({ [nsk(KLKEY)]: { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord });
+    const digests = buildKnownLoginDigests(knownLoginsKey, s.items, pslResolve);
+    await sessionSeal.set("knownLogins", ok, { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord);
   } catch {
     /* storage hiccup — the stale (or absent) set stands; fail toward the banner, never silence */
   }
@@ -1466,8 +1484,7 @@ async function refreshKnownLogins(): Promise<void> {
  *  default; silence is the privilege the digest has to earn. */
 async function isKnownLoginWhileLocked(host: string, username: string): Promise<boolean> {
   try {
-    const got = await chrome.storage.session.get(nsk(KLKEY));
-    const rec = got[nsk(KLKEY)] as KnownLoginsRecord | undefined;
+    const rec = (await sessionSeal.get("knownLogins", currentOriginKey)) as KnownLoginsRecord | undefined;
     if (!rec?.key || !Array.isArray(rec.digests)) return false;
     const site = siteKeyOfHost(host, pslResolve);
     if (!site) return false;
@@ -1501,11 +1518,14 @@ function gateReoffer(tabId: number, st: TabState): (PendingSave & { password: st
 }
 
 function persistTabs(): void {
-  void chrome.storage.session.set({ [TKEY]: Object.fromEntries([...tabs].map(([id, st]) => [String(id), st])) });
+  // A16: sealed (a pending save holds a page's password); the value is captured now, and writes land in call order.
+  void sessionSeal.set("tabs", currentOriginKey, Object.fromEntries([...tabs].map(([id, st]) => [String(id), st]))).catch(() => {});
 }
 
 /** Lock: drop in-memory vault material + the full storage.session snapshot (pending saves hold
  *  plaintext passwords — they lock too). `reason` records WHY for the F26 unlock-form line (E1-7).
+ *  A16: the erase never waits on IndexedDB — the sealed records are removed and the seal's custody epoch advanced
+ *  before anything here can wait on it (sessionseal.ts lockErase).
  *  The "clipboardclear" backstop alarm deliberately SURVIVES (a secret copied just before an idle lock
  *  still clears on schedule, E1-4).
  *
@@ -1520,16 +1540,20 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // chrome.storage calls, not the trusted store.
   await storageAccess;
   // A15 review S1: a lock never waits on the trusted store. serverReady (which reads it) loads the origin whose
-  // namespace the arm/wipe below lands in; a lock waits for it at most LOCK_STORE_WAIT_MS — a healthy store answers
-  // in milliseconds, so a cold idle lock still arms. Past that the origin is unknown: the lock erases the session
-  // snapshot and the tab records' sensitive half without it, arms nothing and wipes no quick-unlock record (it cannot
-  // tell which origin's namespace is current); an enrolled record is left unarmed, so the next unlock is a full one.
-  const originKnown = await Promise.race([serverReady.then(() => true), delay(LOCK_STORE_WAIT_MS).then(() => false)]);
-  if (!originKnown) {
+  // namespace the arm/wipe below lands in, and since A16 custodyReady decides the seal's key (which the arm's sealed
+  // record needs) and with it the compartment verdict; a lock waits for both at most LOCK_STORE_WAIT_MS — a healthy
+  // store answers in milliseconds, so a cold idle lock still arms. Past that the lock erases the session snapshot and
+  // the tab records' sensitive half without them, arms nothing and wipes no quick-unlock record (it cannot tell which
+  // origin's namespace is current); an enrolled record is left unarmed, so the next unlock is a full one.
+  const custodyKnown = await Promise.race([custodyLoaded.then(() => true), delay(LOCK_STORE_WAIT_MS).then(() => false)]);
+  if (!custodyKnown) {
     lockedBeforeOrigin = true; // ensureLoaded will not hydrate a snapshot it read before the erase below
-    await chrome.storage.session.remove(SKEY); // first: the unlocked snapshot goes before anything else is awaited
-    const t = (await chrome.storage.session.get(TKEY))[TKEY] as Record<string, TabState> | undefined;
+    const first = sessionSeal.remove("session", currentOriginKey); // first: the unlocked snapshot goes before anything else is awaited
+    // A16: peek, never get — this lock does not wait for the seal's key. Without the key in hand the tab records read as
+    // absent, and their page-known half goes with the rest.
+    const t = (await sessionSeal.peek("tabs", currentOriginKey)) as Record<string, TabState> | undefined;
     if (t) tabs = new Map(Object.entries(t).map(([id, st]) => [Number(id), st]));
+    await first.catch(() => {});
   }
   // D3: armGate AWAITS ensureLoaded (hydrates the persisted token pair) BEFORE it samples api.getTokens()
   // for the arm decision, returning both the sampled pair (the armed branch stashes it) and the verdict.
@@ -1539,8 +1563,8 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // load re-wipes). ensureLoaded awaits serverReady first, so the arm/wipe lands in the CURRENT origin's
   // namespace (§4.2), and it is idempotent — every other doLock caller (applyServerChange, handle(),
   // onRevoked) already ran it. It restores session too, but every write below is a CLEAR (session=null,
-  // tabs.clear, SKEY remove), so a briefly-rehydrated session is immediately re-locked — never resurrected.
-  const { tokens: toks, attempt: attemptArm } = originKnown
+  // tabs.clear, the snapshot's removal), so a briefly-rehydrated session is immediately re-locked — never resurrected.
+  const { tokens: toks, attempt: attemptArm } = custodyKnown
     ? await armGate({
         hydrate: ensureLoaded,
         readTokens: () => api.getTokens(),
@@ -1590,23 +1614,38 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   cardCaptureDedupe.clear();
   reuseNotices.clear(); // a reuse answer is an unlocked-vault fact — it never outlives the session
 
+  // A16: the erase, dispatched HERE — before anything below can wait on IndexedDB (the arm's sealed write, the
+  // quick-unlock co-key delete inside wipe()) or on the network (the teardown flush). The session snapshot and the tab
+  // records are removed, and the seal's custody epoch advances, so no copy of them taken before this lock opens again;
+  // a sealed write still in flight for them is dropped (sessionseal.ts). Awaited only at the end.
+  const erased = sessionSeal.lockErase();
+  // The known-logins digest (KLKEY) deliberately SURVIVES an idle/manual lock — that survival is
+  // its whole function (the locked save-prompt check, spec 01 §8.4 amendment 2026-08-18).
+  // Sign-out is its wipe choke point, and an untrusted compartment gets the same fail-closed
+  // erase as the quick-unlock blob (the record is only worth holding where the seal's key is, A16).
+  if (reason === "signout" || !quCompartmentTrusted) {
+    knownLoginsKey = null;
+    if (custodyKnown) await sessionSeal.remove("knownLogins", currentOriginKey); // S1: no namespace known → left as it stood
+  }
+
   // Arm decision (attemptArm, computed by armGate above). `signout` skips arming and forces a full wipe;
   // idle/manual attempt to arm — but ONLY when the storage.session compartment is trusted-only (breaker
   // A9⊕B5: without that guarantee we must NOT retain a crackable UVK blob + a live refresh token, so we
   // fall back to today's full erase + wipe). arm() fails CLOSED to "declined" if reading the flag throws
   // (breaker B3). On "armed" the record now holds the token stash; "not-enrolled" leaves nothing
-  // (byte-identical to today); SKEY+TKEY are erased below in ALL cases so a locked SW reports locked.
+  // (byte-identical to today); the snapshot and the tab records were erased above in ALL cases so a locked SW reports
+  // locked.
   if (attemptArm) {
-    // .catch → "declined": arm() must NEVER throw past the [SKEY,TKEY] erase below (review F1 — an
-    // unexpected throw, e.g. a malformed record, would otherwise skip the erase and leave the just-
-    // locked session snapshot on disk, rehydratable into an unlocked vault on the next SW wake).
+    // .catch → "declined": arm() must NEVER throw past the rest of the lock (review F1 — an unexpected throw, e.g. a
+    // malformed record, once skipped the erase and left the just-locked session snapshot on disk, rehydratable into an
+    // unlocked vault on the next SW wake; since A16 the erase is dispatched before the arm).
     // toks.access is non-null here (attemptArm ⇒ shouldAttemptArm required it); the `!` restates that
     // the extracted gate can't narrow across the armGate call the way an inline `&& toks.access` would.
     const armed = await quickUnlock.arm({ access: toks.access!, refresh: toks.refresh }).catch(() => "declined" as const);
     if (armed === "declined") {
       await quickUnlock.wipe(); // stale/ineligible/fail-closed → erase the residue
     }
-  } else if (originKnown) {
+  } else if (custodyKnown) {
     // signout, no live token, OR an untrusted compartment → full wipe (never leave standing material).
     await quickUnlock.wipe();
   }
@@ -1615,26 +1654,18 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise
   // once the session is gone — so they are forgotten only after the bounded await.
   await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);
   api.setTokens(null, null); // the api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens
-  await chrome.storage.session.remove([SKEY, TKEY]); // full vault snapshot always erased — locked reports locked
-  // The known-logins digest (KLKEY) deliberately SURVIVES an idle/manual lock — that survival is
-  // its whole function (the locked save-prompt check, spec 01 §8.4 amendment 2026-08-18).
-  // Sign-out is its wipe choke point, and an untrusted compartment gets the same fail-closed
-  // erase as the quick-unlock blob (the record is only worth holding where TRUSTED_CONTEXTS holds).
-  if (reason === "signout" || !quCompartmentTrusted) {
-    knownLoginsKey = null;
-    if (originKnown) await chrome.storage.session.remove(nsk(KLKEY)); // S1: no namespace known → left as it stood
-  }
+  await erased; // the full vault snapshot was erased above — locked reports locked
   // …then re-persist the [S3-lock] allow-listed remainder (top origin + card-form KINDS only — no
   // pending, no password, no username). The blanket remove above is what guarantees the sensitive
   // half never survives; this writes back only what the page already knows, so the chip's presence
   // stays lock-invariant even after the SW idles out. Skipped when nothing survived.
   if (tabs.size > 0) persistTabs();
-  // Write the reason AFTER the [SKEY,TKEY] remove so it survives it (a notice only from the idle
-  // path — web parity); manual/signout renders no reason line. storage.session clears on browser exit.
+  // Write the reason AFTER the snapshot's removal (a notice only from the idle path — web parity); manual/signout
+  // renders no reason line. storage.session clears on browser exit. Plain (A16): no secret, only a reason line.
   if (reason === "idle") {
-    await chrome.storage.session.set({ [NKEY]: { kind: "idle", seconds: secondsAtLock } });
+    await plainSession.set({ [NKEY]: { kind: "idle", seconds: secondsAtLock } });
   } else {
-    await chrome.storage.session.remove(NKEY);
+    await plainSession.remove(NKEY);
   }
   void chrome.alarms.clear("autolock");
   void chrome.alarms.clear("resync");
@@ -1809,7 +1840,7 @@ async function checkForUpdate(force = false): Promise<void> {
     const kSeq = nsk(USEQ);
     const kQuiet = nsk(UQUIET);
     if (!force) {
-      const seen = (await chrome.storage.session.get(kLast))[kLast];
+      const seen = (await plainSession.get(kLast))[kLast];
       if (typeof seen === "number" && Date.now() - seen < UPDATE_MIN_GAP_MS) return;
     }
     // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
@@ -1846,7 +1877,7 @@ async function checkForUpdate(force = false): Promise<void> {
       // (§M-D5): otherwise, once ULAST ages past UPDATE_MIN_GAP_MS, every SW wake (content message,
       // popup, alarm) would re-hammer two no-store fetches indefinitely. A genuine network reject is
       // caught above and left un-stamped for prompt retry when connectivity returns.
-      await chrome.storage.session.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
+      await plainSession.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
       return;
     }
 
@@ -1856,7 +1887,7 @@ async function checkForUpdate(force = false): Promise<void> {
     const sigBytes = raw === null ? null : await readCappedBody(sResp, UPDATE_SIG_MAX_BYTES);
     if (raw === null || sigBytes === null) {
       await sResp.body?.cancel().catch(() => undefined);
-      await chrome.storage.session.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
+      await plainSession.set({ [kQuiet]: { reason: "manifest_fetch_failed" }, [kLast]: Date.now() });
       return;
     }
     const sigText = new TextDecoder().decode(sigBytes);
@@ -1874,13 +1905,13 @@ async function checkForUpdate(force = false): Promise<void> {
         // Treat it like a clean verified read — CLEAR any prior quiet marker (healthy channel) and stamp
         // ULAST. Surfacing this as "couldn't be verified" would be a permanent false alarm, and stamping
         // it would also clobber a real prior `unverified`/`stale` signal (fail-open). Leave [UKEY] alone.
-        await chrome.storage.session.remove(kQuiet);
-        await chrome.storage.session.set({ [kLast]: Date.now() });
+        await plainSession.remove(kQuiet);
+        await plainSession.set({ [kLast]: Date.now() });
         return;
       }
       // Fail-closed QUIET (unverified/malformed/stale): record the distinct ACTIONABLE reason; leave any
       // prior VERIFIED [UKEY] signal alone.
-      await chrome.storage.session.set({ [kQuiet]: { reason: decision.reason }, [kLast]: Date.now() });
+      await plainSession.set({ [kQuiet]: { reason: decision.reason }, [kLast]: Date.now() });
       return;
     }
 
@@ -1888,10 +1919,10 @@ async function checkForUpdate(force = false): Promise<void> {
     const ext = decision.ext;
     const latest = typeof ext.version === "string" ? ext.version : null;
     const current = chrome.runtime.getManifest().version;
-    await chrome.storage.session.remove(kQuiet); // a clean verified read clears the quiet marker
-    // Stamp the throttle first, in storage.session: a trusted store that cannot be written (Firefox private browsing)
-    // must not turn every wake into another fetch.
-    await chrome.storage.session.set({ [kLast]: Date.now() });
+    await plainSession.remove(kQuiet); // a clean verified read clears the quiet marker
+    // Stamp the throttle first, in storage.session (plain: a timestamp): a trusted store that cannot be written (Firefox
+    // private browsing) must not turn every wake into another fetch.
+    await plainSession.set({ [kLast]: Date.now() });
     if (latest && isNewerVersion(latest, current)) {
       // A15 step 0: the links are built by the offer leaf only — `${DEFAULT_SERVER_URL}/downloads/<basename>` or none.
       const info: UpdateInfo = { latest, chromeUrl: offerDownloadUrl(ext.chromeUrl, serverUrl), firefoxUrl: offerDownloadUrl(ext.firefoxUrl, serverUrl) };
@@ -1920,7 +1951,7 @@ async function updateStatus(): Promise<Res<"updateStatus">> {
   if (offer) return { current, latest: offer.latest, chromeUrl: offer.chromeUrl, firefoxUrl: offer.firefoxUrl, quietReason: null };
   let quiet: { reason?: unknown } | undefined;
   try {
-    quiet = (await chrome.storage.session.get(kQuiet))[kQuiet] as { reason?: unknown } | undefined;
+    quiet = (await plainSession.get(kQuiet))[kQuiet] as { reason?: unknown } | undefined;
   } catch {
     quiet = undefined; // storage.session unavailable — no quiet line
   }
@@ -2693,7 +2724,7 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
     await quickUnlock.onFullUnlock(s.userId, session.lastFullUnlockAt);
 
     await persistSession();
-    void chrome.storage.session.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
+    void plainSession.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
     void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
     void ensureSocket(true); // T2: live bell up within ~1 s of unlock
     armAutoLock();
@@ -2800,7 +2831,10 @@ function mapUnlockError(e: unknown): UnlockCode {
  *  never mint a fresh 24 h window. The blob double-wraps the UVK under Argon2id(PIN) ⊕ a fresh
  *  non-extractable co-key (breaker A1). */
 async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">> {
+  await custodyReady; // A16: the compartment verdict is decided (it is, long before anyone is unlocked to ask)
   if (!session) return { ok: false, code: "locked" };
+  // A16: no enrollment where nothing can arm (no session sealing key, or Chrome's access level unconfirmed).
+  if (!quCompartmentTrusted) return { ok: false, code: "unavailable" };
   if (session.mustChangePassword) return { ok: false, code: "must_change_password" };
   if (!session.uvk) return { ok: false, code: "need_full_unlock" };
   const r = await quickUnlock.enroll({
@@ -2820,7 +2854,10 @@ async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">>
  *  we record the credential for amendment-4 reuse (litter reduction) so a future re-enroll needs only a
  *  get(). Never carries key material: the UVK stays in the SW (breaker B1). */
 async function enrollQuickUnlockBio(): Promise<Res<"enrollQuickUnlockBio">> {
+  await custodyReady; // A16: the compartment verdict is decided
   if (!session) return { ok: false, code: "locked" };
+  // A16: refused before the passkey ceremony — no enrollment where nothing can arm.
+  if (!quCompartmentTrusted) return { ok: false, code: "unavailable" };
   if (session.mustChangePassword) return { ok: false, code: "must_change_password" };
   if (!session.uvk) return { ok: false, code: "need_full_unlock" };
   dropEnrollSecretCache();
@@ -2967,7 +3004,7 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           clearPendingTotp(); // a PIN redeem opened the vault → any stale TOTP challenge is spent
           await persistSession();
           await quickUnlock.completeRedeem(autoLockSeconds);
-          void chrome.storage.session.remove(NKEY);
+          void plainSession.remove(NKEY);
           void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
           void ensureSocket(true);
           armAutoLock();
@@ -3028,10 +3065,10 @@ async function dismissQuickUnlockOffer(): Promise<Res<"dismissQuickUnlockOffer">
 }
 
 /** The F26 idle-lock reason, read from its own storage.session key (E1-7). Not part of the session
- *  snapshot — it must outlive the [SKEY,TKEY] removal doLock does. */
+ *  snapshot — it must outlive the snapshot's removal doLock does. Plain (A16): no secret in it. */
 async function readLockNotice(): Promise<{ kind: "idle"; seconds: number } | null> {
   try {
-    const n = (await chrome.storage.session.get(NKEY))[NKEY] as { kind?: unknown; seconds?: unknown } | undefined;
+    const n = (await plainSession.get(NKEY))[NKEY] as { kind?: unknown; seconds?: unknown } | undefined;
     if (n && n.kind === "idle" && typeof n.seconds === "number") return { kind: "idle", seconds: n.seconds };
   } catch {
     /* storage.session unavailable — no notice */

@@ -89,7 +89,7 @@ test("the worker reads chrome.storage.local only through the one-time migration,
       t === "const outcome = await migrateTrustState(legacyLocal, trusted, async () => null);" || // a late install event
       t === "const st = await loadServerState(outcome, trusted, legacyLocal);" || // F1: block-only read, no store
       t === "if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };" || // "Not mine"
-      t === "await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionArea]);";
+      t === "await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()]);";
     assert.ok(approved, `legacyLocal reached code this fence has not approved: ${t}`);
   }
   assert.equal(legacyLines.length, 6);
@@ -110,6 +110,64 @@ test("the server state reads storage.local only with no trusted store, only its 
   assert.equal((tm.match(/legacy\.get\(/g) ?? []).length, 1);
   const owedRun = tm.slice(tm.indexOf("async function runOwedMigration("));
   assert.ok(owedRun.includes("all = await legacy.get(null);"), "inside the owed run only");
+});
+
+// ---- A16 (security review 2026-10): storage.session holds only sealed records and the plain inventory ----
+// That a content script cannot reach storage.session is not relied on (Chrome enforces it in the browser; Firefox's
+// exclusion is not relied on). Every secret-bearing record is sealed under a non-extractable key in the extension
+// origin's IndexedDB (sessionseal.ts), and the worker reaches storage.session through exactly two wrappers: the seal,
+// and the plain area, which refuses any key outside the plain inventory at run time.
+
+test("A16: every storage.session write in the worker goes through the seal or the plain inventory — no raw touch", () => {
+  const bg = code(src("background.ts"));
+  const sessionLines = bg.split("\n").filter((l) => /storage\s*\??\.\s*session\b|\[\s*["'`]session["'`]\s*\]/.test(l)).map((l) => l.trim());
+  assert.deepEqual(sessionLines, ["const sessionRaw = chrome.storage.session as unknown as KvArea;"], "storage.session is named once, by name");
+  const rawLines = bg.split("\n").filter((l) => /\bsessionRaw\b/.test(l)).map((l) => l.trim());
+  for (const t of rawLines) {
+    const approved =
+      t === "const sessionRaw = chrome.storage.session as unknown as KvArea;" ||
+      t === "const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME) });" ||
+      t === "const plainSession = plainSessionArea(sessionRaw);";
+    assert.ok(approved, `sessionRaw reached code this fence has not approved: ${t}`);
+  }
+  assert.equal(rawLines.length, 3, "the declaration and the two wrappers");
+  // No other alias of the area: nothing assigns `chrome.storage` (or a property of it) to a name.
+  assert.ok(!/=\s*chrome\s*\.\s*storage\s*;/.test(bg), "no alias of chrome.storage itself");
+
+  // Every write through the plain area names only the plain inventory's keys (lockNotice, the update throttle stamp and
+  // the quiet marker). The area refuses anything else at run time too (sessionseal.test.ts).
+  const plainSets = bg.split("\n").filter((l) => /plainSession\s*\.\s*set\(/.test(l));
+  assert.ok(plainSets.length >= 4, "the plain writes exist (lockNotice, quiet, throttle)");
+  for (const l of plainSets) {
+    const arg = l.slice(l.search(/plainSession\s*\.\s*set\(/));
+    assert.match(arg, /^plainSession\s*\.\s*set\(\{ \[/, `a plain write is an object literal with computed keys this fence can read: ${l.trim()}`);
+    const keys = [...arg.matchAll(/\[\s*([A-Za-z_]+)\s*\]\s*:/g)].map((k) => k[1]!);
+    assert.ok(keys.length > 0, l.trim());
+    for (const k of keys) assert.ok(["NKEY", "kQuiet", "kLast"].includes(k), `plainSession.set writes ${k}, which is not in the plain inventory`);
+  }
+  assert.equal((bg.match(/plainSession\s*\.\s*set\(/g) ?? []).length, plainSets.length, "one plain write per line");
+  // Every write through the seal names a sealed kind, as a literal.
+  const sealSets = [...bg.matchAll(/sessionSeal\s*\.\s*set\(\s*([^,]+),/g)];
+  assert.ok(sealSets.length >= 4, "session, tabs, quickUnlock and knownLogins are written");
+  for (const m of sealSets) assert.match(m[1]!.trim(), /^"(session|tabs|quickUnlock|knownLogins)"$/, `sessionSeal.set(${m[1]})`);
+  // The secret-bearing records are never written or read beside the plain area, nor by the raw area's name.
+  for (const key of ["SKEY", "TKEY", "QKEY", "KLKEY", '"session"', '"tabs"', '"quickUnlock"', '"knownLogins"']) {
+    for (const l of bg.split("\n").filter((x) => x.includes(key))) {
+      assert.ok(!/plainSession|sessionRaw/.test(l), `${key} beside the plain area: ${l.trim()}`);
+    }
+  }
+});
+
+test("A16: the seal is the worker's alone — no content-side module or page names it", () => {
+  assert.ok(!importClosure("content.ts").has("sessionseal.ts"), "the content bundle does not import the seal");
+  for (const f of ["popup.ts", "options.ts", "connector.ts", "offscreen.ts", "kdf-worker.ts"]) {
+    const c = code(src(f));
+    for (const call of ["SessionSeal", "plainSessionArea(", "SEAL_DB_NAME"]) assert.ok(!c.includes(call), `${f} names ${call}`);
+  }
+  // The leaf itself is chrome-free: the areas are injected.
+  const leaf = code(src("sessionseal.ts"));
+  assert.equal(leaf.match(STORAGE_TOUCH), null, "sessionseal.ts names no storage API");
+  assert.ok(!/\bchrome\b/.test(leaf), "sessionseal.ts does not touch chrome");
 });
 
 test("no trust record is read from, or written to, a chrome.storage area by name", () => {
