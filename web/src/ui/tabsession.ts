@@ -8,6 +8,7 @@ import { revokeSessionBestEffort, SESSION_STORAGE_KEY, type Session } from "./se
  */
 
 type TokenHolder = Pick<ApiClient, "getTokens" | "setTokens" | "logout">;
+type BindableHolder = TokenHolder & Pick<ApiClient, "boundUserId">;
 
 /**
  * A per-tab lock's token half: let the Vault's usage flush land (bounded; a failure is ignored),
@@ -45,9 +46,43 @@ export async function lockTabTokens(
  * it dropped ([lockRevoke], `revoked` from [lockTabTokens]), or, for a tab that never held a pair, true: no
  * session of this tab's is left to end.
  */
-export async function revokeForSignOut(client: TokenHolder | null, lockRevoke: Promise<boolean> | null): Promise<boolean> {
+export async function revokeForSignOut(
+  client: TokenHolder | null,
+  lockRevoke: Promise<boolean> | null,
+  lockUnconfirmedOnRecord = false,
+): Promise<boolean> {
   if (client?.getTokens()) return revokeSessionBestEffort(client);
-  return lockRevoke ?? true;
+  // A14 review 3 (W-b): with no in-memory record (a reload, a new App instance) the tab's sessionStorage record of
+  // the last lock is the answer (session.ts lockRevokeUnconfirmed).
+  return lockRevoke ?? !lockUnconfirmedOnRecord;
+}
+
+/**
+ * A14 review 3 (W-a): what the client is bound to between login() and Account.unlock. The login response's userId is
+ * the server's word until unlock has checked the keys that came with it; bound to it, a rotation in that window would
+ * be written under (and another tab's pair adopted from) whatever session that id names. A fresh random placeholder
+ * matches no account, so the persistence hooks write nothing and adopt nothing until Welcome binds the real id.
+ */
+export function pendingSignInBinding(): string {
+  return `pending-sign-in-${crypto.randomUUID()}`;
+}
+
+/**
+ * A14 review 3: a sign-in that fails after login() succeeded used to keep the new device session's pair in the
+ * tab's memory, live and unrevoked, until the next sign-in replaced it. This revokes it (logout() captures it now)
+ * and drops it, rebinding the client to a placeholder first so dropping it writes nothing under any session.
+ * Returns the revocation's result, or null when the client held no pair.
+ */
+export function abandonSignIn(client: BindableHolder): Promise<boolean> | null {
+  client.boundUserId = pendingSignInBinding();
+  if (!client.getTokens()) return null;
+  const revoked = revokeSessionBestEffort(client);
+  try {
+    client.setTokens(null);
+  } catch {
+    /* the in-memory pair is already gone (ApiClient.setTokens clears it before its hook runs) */
+  }
+  return revoked;
 }
 
 /** What the `storage` listener does with a change of the persisted session (F27, A14 F5). */
