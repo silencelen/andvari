@@ -1,7 +1,7 @@
 // Runtime (value) imports carry the .ts extension so this leaf resolves under `node --test` (serverstate.test.ts).
 import { canonicalizeServerUrl, DEFAULT_SERVER_URL, originMatchPattern, SERVER_URL_KEY } from "./serverurl.ts";
 import type { KvArea } from "./trustedkv.ts";
-import { LEGACY_SERVER_KEY, type MigrationOutcome } from "./trustmigrate.ts";
+import { LEGACY_SERVER_KEY, UNATTESTED_SERVER_KEY, type MigrationOutcome } from "./trustmigrate.ts";
 
 /**
  * Which server the worker may dial, and when it may dial none (security review 2026-10, A15 review F1).
@@ -14,14 +14,16 @@ import { LEGACY_SERVER_KEY, type MigrationOutcome } from "./trustmigrate.ts";
  * it, the open-vault / forgot / must-change buttons opened it, and the self-host vault lost its autofill exclusion.
  *
  * So while a server is PENDING, the worker dials NO server at all — the default included — until the user decides:
- *  - [ServerBlock] `confirm`: a previous server awaits the user's confirm. `keepable` is false when this browser cannot
- *    keep a server choice at all (no trusted store: Firefox's "Never remember history"); the origin then came from
- *    storage.local, read ONLY to refuse sign-in, never adopted and never offered for connecting.
+ *  - [ServerBlock] `confirm`: a previous server awaits the user's confirm. `keepable` is false when the origin came from
+ *    storage.local, read ONLY to refuse sign-in, never adopted and never offered for connecting: either this browser
+ *    cannot keep a server choice at all (no trusted store: Firefox's "Never remember history"), or (A16 review R3) a
+ *    start found no migration flag and nothing attesting the upgrade while storage.local still names another server.
  *  - [ServerBlock] `unsettled`: the trusted store did not answer in time, or an owed migration did not complete, so the
  *    worker cannot tell which server the user chose. Retried at the next worker start.
  * Only a Trust-Gate Connect (setServerUrl) or "Not mine" ([forgetPendingServer]) clears a `confirm`. While any block
- * stands, [dialRefusal] refuses every sign-in lane and the connection test, the update check does not run, the pages
- * open nothing on a server, and [autofillExcludeMatches] keeps autofill out of the pending origin (failing closed).
+ * stands, [dialRefusal] refuses every sign-in lane and the connection test, and (A16 review R4) the worker's api sends
+ * no request at all — no sync, socket, save, refresh or sign-out revoke — the update check does not run, the pages open
+ * nothing on a server, and [autofillExcludeMatches] keeps autofill out of the pending origin (failing closed).
  *
  * Chrome-free; the stores are injected.
  */
@@ -54,6 +56,15 @@ function otherServer(v: unknown): string | null {
   return c !== null && c !== DEFAULT_SERVER_URL ? c : null;
 }
 
+/** The one read of storage.local here: its `serverUrl`, as a non-default origin to block on — never to adopt. */
+async function previousServer(legacy: KvArea): Promise<string | null> {
+  try {
+    return otherServer((await legacy.get(SERVER_URL_KEY))[SERVER_URL_KEY]);
+  } catch {
+    return null; // storage.local unreadable: nothing names another server
+  }
+}
+
 /**
  * The server state at worker start, from the migration's [outcome] (trustmigrate.migrateTrustState). Never throws.
  *  - Store answered: the stored choice (or the default); a pending suggestion blocks unless a choice was made since.
@@ -61,49 +72,64 @@ function otherServer(v: unknown): string | null {
  *    read ONLY to block (`keepable: false`): the user's previous server cannot be kept here, and signing in to the
  *    default in its place is exactly what F1 forbids. Read at every such start, never adopted, never connectable.
  *  - Store timed out, or an owed migration failed: `unsettled`.
+ *  - A16 review R3: a start that skipped the migration (no flag, nothing attested the upgrade), or any later start while
+ *    the [UNATTESTED_SERVER_KEY] mark it wrote with the flag stands, with no choice and no suggestion in the store: if
+ *    storage.local still names another server, the same read-only block as with no store (`keepable: false`:
+ *    decline-only, never offered for connecting, so a planted value is only a denial of service). The mark goes once
+ *    storage.local no longer names one, or a server is chosen. Before this the start that skipped the migration — the
+ *    next one after an attested upgrade whose "owed" write failed — dialed the default, and so did every start after
+ *    it, while storage.local still named the self-hoster's server: the A15 review's F1 harm again.
  */
 export async function loadServerState(outcome: MigrationOutcome, trusted: KvArea, legacy: KvArea): Promise<ServerState> {
   const unsettled: ServerState = { url: DEFAULT_SERVER_URL, trustedStore: true, block: { kind: "unsettled" } };
   if (outcome.kind === "unavailable") {
     if (outcome.timedOut) return { ...unsettled, trustedStore: false };
-    let previous: string | null = null;
-    try {
-      previous = otherServer((await legacy.get(SERVER_URL_KEY))[SERVER_URL_KEY]);
-    } catch {
-      previous = null; // storage.local unreadable too: nothing names another server
-    }
+    const previous = await previousServer(legacy);
     return { url: DEFAULT_SERVER_URL, trustedStore: false, block: previous === null ? null : { kind: "confirm", origin: previous, keepable: false } };
   }
   if (outcome.kind === "failed") return unsettled;
   let got: Record<string, unknown>;
   try {
-    got = await trusted.get([SERVER_URL_KEY, LEGACY_SERVER_KEY]);
+    got = await trusted.get([SERVER_URL_KEY, LEGACY_SERVER_KEY, UNATTESTED_SERVER_KEY]);
   } catch {
     return unsettled; // it answered a moment ago; whatever it is now, the choice cannot be read
   }
   const stored = got[SERVER_URL_KEY];
   const url = (typeof stored === "string" ? canonicalizeServerUrl(stored) : null) ?? DEFAULT_SERVER_URL;
   if (stored !== undefined) {
-    // A choice made through the gate stands; a suggestion left beside it (its removal failed) is moot.
-    if (got[LEGACY_SERVER_KEY] !== undefined) await trusted.remove(LEGACY_SERVER_KEY).catch(() => {});
+    // A choice made through the gate stands; a suggestion or an unattested mark left beside it (its removal failed) is moot.
+    const moot = [LEGACY_SERVER_KEY, UNATTESTED_SERVER_KEY].filter((k) => got[k] !== undefined);
+    if (moot.length > 0) await trusted.remove(moot).catch(() => {});
     return { url, trustedStore: true, block: null };
   }
   const pending = otherServer(got[LEGACY_SERVER_KEY]);
-  return { url, trustedStore: true, block: pending === null ? null : { kind: "confirm", origin: pending, keepable: true } };
+  if (pending !== null) return { url, trustedStore: true, block: { kind: "confirm", origin: pending, keepable: true } };
+  if (outcome.kind === "skipped" || got[UNATTESTED_SERVER_KEY] === true) {
+    const previous = await previousServer(legacy);
+    if (previous !== null) {
+      if (got[UNATTESTED_SERVER_KEY] !== true) await trusted.set({ [UNATTESTED_SERVER_KEY]: true }).catch(() => {});
+      return { url, trustedStore: true, block: { kind: "confirm", origin: previous, keepable: false } };
+    }
+    if (got[UNATTESTED_SERVER_KEY] !== undefined) await trusted.remove(UNATTESTED_SERVER_KEY).catch(() => {});
+  }
+  return { url, trustedStore: true, block: null };
 }
 
 /**
  * "Not mine": drop a `confirm` block's origin where it is kept — the trusted store's suggestion, or (keepable false)
- * storage.local's old `serverUrl`, the only write this extension makes there besides removals by the purge. An
- * `unsettled` block cannot be dismissed (there is nothing to dismiss: the store did not answer). Returns whether the
- * block may be lifted.
+ * storage.local's old `serverUrl`, the only write this extension makes there besides removals by the purge (and, A16
+ * review R3, the unattested mark beside it, best effort: with no store there is none). An `unsettled` block cannot be
+ * dismissed (there is nothing to dismiss: the store did not answer). Returns whether the block may be lifted.
  */
 export async function forgetPendingServer(block: ServerBlock | null, trusted: KvArea, legacy: KvArea): Promise<boolean> {
   if (block === null) return true;
   if (block.kind !== "confirm") return false;
   try {
     if (block.keepable) await trusted.remove(LEGACY_SERVER_KEY);
-    else await legacy.remove(SERVER_URL_KEY);
+    else {
+      await legacy.remove(SERVER_URL_KEY);
+      await trusted.remove(UNATTESTED_SERVER_KEY).catch(() => {});
+    }
     return true;
   } catch {
     return false;

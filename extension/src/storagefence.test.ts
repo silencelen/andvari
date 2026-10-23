@@ -9,9 +9,9 @@
 //      so "the worker is the only writer" is true by construction (and a Firefox page shown in a private window,
 //      which would get a private IndexedDB of its own, never reads a different store than the worker);
 //   3. the worker hands chrome.storage.local to exactly three leaves — the one-time migration (which reads it only when
-//      the browser attested the upgrade, A15 review F2), the server state (which, with no trusted store, reads its
-//      `serverUrl` ONLY to block sign-in, A15 review F1), and the purge — and otherwise only removes from it; it no
-//      longer listens to storage.onChanged at all.
+//      the browser attested the upgrade, A15 review F2), the server state (which reads its `serverUrl` ONLY to block
+//      sign-in: with no trusted store, A15 review F1, or after a start that skipped the migration, A16 review R3), and
+//      the purge — and otherwise only removes from it; it no longer listens to storage.onChanged at all.
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -95,16 +95,23 @@ test("the worker reads chrome.storage.local only through the one-time migration,
   assert.equal(legacyLines.length, 6);
 });
 
-test("the server state reads storage.local only with no trusted store, only its serverUrl, and only to block; it never writes there", () => {
+test("the server state reads storage.local only to block — with no trusted store, or (A16 review R3) after a start that skipped the migration — only its serverUrl; it never writes there", () => {
   const ss = code(src("serverstate.ts"));
   const reads = ss.match(/legacy\.get\(/g) ?? [];
   assert.equal(reads.length, 1, "one read");
-  assert.ok(ss.includes("previous = otherServer((await legacy.get(SERVER_URL_KEY))[SERVER_URL_KEY]);"), "of serverUrl alone");
+  const one = ss.slice(ss.indexOf("async function previousServer(legacy: KvArea): Promise<string | null> {"));
+  assert.ok(one.startsWith("async function previousServer(") && one.includes("return otherServer((await legacy.get(SERVER_URL_KEY))[SERVER_URL_KEY]);"), "of serverUrl alone, in one helper");
+  // Its callers: the no-trusted-store branch and the unattested branch, and each turns the answer into a block that cannot
+  // be confirmed (never adopted, never offered for connecting).
+  assert.equal((ss.match(/await previousServer\(legacy\)/g) ?? []).length, 2);
   const unavailable = ss.slice(ss.indexOf('if (outcome.kind === "unavailable") {'), ss.indexOf('if (outcome.kind === "failed")'));
-  assert.ok(unavailable.includes("legacy.get(SERVER_URL_KEY)"), "inside the no-trusted-store branch");
+  assert.ok(unavailable.includes("await previousServer(legacy)"), "inside the no-trusted-store branch");
   assert.ok(unavailable.includes('{ kind: "confirm", origin: previous, keepable: false }'), "as a block that cannot be confirmed (never adopted)");
+  const unattested = ss.slice(ss.indexOf('if (outcome.kind === "skipped" || got[UNATTESTED_SERVER_KEY] === true) {'));
+  assert.ok(unattested.indexOf("await previousServer(legacy)") > -1, "inside the unattested branch");
+  assert.ok(unattested.indexOf('block: { kind: "confirm", origin: previous, keepable: false }') > unattested.indexOf("await previousServer(legacy)"), "as the same read-only block");
   assert.ok(!/legacy\.set\(/.test(ss), "never a write");
-  assert.equal((ss.match(/legacy\.remove\(/g) ?? []).length, 1, "the one removal: 'Not mine' in the no-store mode");
+  assert.equal((ss.match(/legacy\.remove\(/g) ?? []).length, 1, "the one removal: 'Not mine' for a block read from storage.local");
   // The migration leaf: storage.local is read in exactly one place, the owed run.
   const tm = code(src("trustmigrate.ts"));
   assert.equal((tm.match(/legacy\.get\(/g) ?? []).length, 1);

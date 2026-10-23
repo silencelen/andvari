@@ -397,3 +397,48 @@ test("§4.1 rule 1 / B1-5: AndvariApi's origin is immutable — a fresh instance
     if (c.url.startsWith("https://new.example")) assert.notEqual(c.auth, "Bearer access-OLD");
   }
 });
+
+// ---- A16 review R4 (2026-10-23): while a server is pending or unknown, the api sends NOTHING ----
+// Before, only the sign-in lanes were refused (at dispatch): a session hydrated under a block (the trusted store timed
+// out while the seal's key answered) still synced, opened the socket's ticket, saved, refreshed, and sign-out still
+// POSTed its logout. Background wires `mayDial` to `dialBlock === null`.
+test("R4: mayDial false — no call, refresh or logout reaches the network, and the token pair is left as it was", async () => {
+  let fetched = 0;
+  globalThis.fetch = (async () => {
+    fetched++;
+    return jsonResp(200, OK_SYNC);
+  }) as unknown as typeof fetch;
+  const api = new AndvariApi("https://x", "1.2.3") as AndvariApi & { mayDial: (() => boolean) | null };
+  api.setTokens("a1", "r1");
+  let open = false;
+  api.mayDial = () => open;
+  await assert.rejects(api.sync(0), (e: unknown) => e instanceof ApiError && e.code === "confirm_server" && e.status === 0);
+  await assert.rejects(api.clientPolicy(), (e: unknown) => e instanceof ApiError && e.code === "confirm_server");
+  await assert.rejects(api.eventsTicket(), (e: unknown) => e instanceof ApiError && e.code === "confirm_server");
+  assert.equal(await api.forceRefresh(), "transient", "a redeem's forced refresh keeps the blob and sends nothing");
+  assert.equal(await api.logout(), false);
+  assert.equal(fetched, 0, "nothing was sent");
+  assert.deepEqual(api.getTokens(), { access: "a1", refresh: "r1" }, "nothing consumed");
+  open = true;
+  await api.sync(0);
+  assert.equal(fetched, 1, "allowed again once the block is lifted");
+});
+
+test("R4: a block that appears while a refresh is being persisted stops the POST, and the pair is restored", async () => {
+  let fetched = 0;
+  globalThis.fetch = (async (url: string) => {
+    fetched++;
+    if (url.includes("/sync")) return jsonResp(401, { error: "expired" });
+    return jsonResp(200, { accessToken: "a2", refreshToken: "r2" });
+  }) as unknown as typeof fetch;
+  const api = new AndvariApi("https://x", "1.2.3") as AndvariApi & { mayDial: (() => boolean) | null };
+  api.setTokens("a1", "r1");
+  let open = true;
+  api.mayDial = () => open;
+  api.onTokensChanged = async () => {
+    open = false; // the block lands during the awaited persist of the consumed pair
+  };
+  await assert.rejects(api.sync(0));
+  assert.equal(fetched, 1, "the sync went out (before the block); the refresh POST did not");
+  assert.deepEqual(api.getTokens(), { access: "a1", refresh: "r1" }, "transient-keep: the consumed refresh token is restored");
+});

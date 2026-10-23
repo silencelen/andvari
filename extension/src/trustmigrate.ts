@@ -25,17 +25,18 @@ import { isUuid } from "./wireids.ts";
  *  - The conveniences move too, shape-checked: `lastEmail` (closing its read by content scripts on Firefox),
  *    `quBioCred`, `quOfferDismissed`.
  *  - The flag that says "done" lives in the TRUSTED store only, so a content script can neither skip the migration
- *    nor make it run again. Once it is set, storage.local is never read again.
+ *    nor make it run again. Once it is set, this module never reads storage.local again (the server state may read its
+ *    `serverUrl`, only ever to block: serverstate.ts).
  *  - Nothing is deleted from storage.local until the copy has been read back and compared. A value the trusted store
  *    already holds is never overwritten (a retry after a partial run, or a choice made since).
  *
  * WHEN it reads storage.local (A15 review F2): only when the BROWSER attested an upgrade from a pre-A15 build —
  * `runtime.onInstalled` with reason "update" and a `previousVersion` no newer than [LAST_PRE_A15_VERSION]. That event is
- * recorded in the trusted store as "owed" ([A15_OWED_KEY]) before anything is read, so a migration cut short (the worker
- * died, a write failed) is finished at the next start, and the flag and the owed mark are swapped in ONE write when it
- * completes. Every other start without the flag — a fresh install, an update from an A15 build, or a later start with
+ * recorded in the trusted store as "owed" ([A15_OWED_KEY]) before anything is read, so a migration cut short after that
+ * (the worker died, a later write failed) is finished at the next start, and the flag and the owed mark are swapped in
+ * ONE write when it completes. Every other start without the flag — a fresh install, an update from an A15 build, or a later start with
  * no install event at all (the trusted store was unavailable at the upgrade, or lost its data while storage.local kept
- * its own) — sets the flag WITHOUT reading storage.local. Before F2 any flagless start migrated, so whatever a content
+ * its own) — sets the flag WITHOUT reading storage.local (and, A16 review R3, the [UNATTESTED_SERVER_KEY] mark with it). Before F2 any flagless start migrated, so whatever a content
  * script had written to storage.local in the meantime (a planted server suggestion, homes, an older wrap, an email,
  * a credential id) moved into the trusted store.
  *  - The store unavailable at the attested upgrade (Firefox "Never remember history"): "owed" cannot be recorded, so
@@ -46,6 +47,11 @@ import { isUuid } from "./wireids.ts";
  *    the user re-enters their server in Options.
  *  - The install event arrives after the bounded wait ([awaitInstall] answered null): the worker re-runs this with the
  *    late event once it lands (background.ts); the owed mark makes that run migrate even though the flag was set.
+ *  - The store answers but refuses or times out the "owed" write at the attested upgrade ([migrateTrustState] answers
+ *    `failed` or `unavailable`): nothing is recorded, so a migration cut short there does NOT finish at the next start.
+ *    The worker retries the write within the same worker life, where the event is still in memory (background.ts,
+ *    A16 review R3); should that life end first, the next start skips the migration, and the mark it writes with the
+ *    flag ([UNATTESTED_SERVER_KEY]) keeps sign-in blocked while storage.local names another server (serverstate.ts).
  */
 
 /** The migration's "done" flag — trusted store only. */
@@ -54,7 +60,8 @@ export const A15_MIGRATED_KEY = "a15Migrated";
  *  store only; set before storage.local is read, cleared in the same write that sets [A15_MIGRATED_KEY]. */
 export const A15_OWED_KEY = "a15MigrationOwed";
 /** The newest extension release WITHOUT the trusted store (A15). An update FROM this version or an older one owes the
- *  migration. If another release without A15 ships before A15 does, raise this to that release's version. */
+ *  migration. If another release without A15 ships before A15 does, raise this to that release's version. A release of
+ *  this tree must be NEWER than it: package.mjs refuses to package one that is not (releasegate.ts). */
 export const LAST_PRE_A15_VERSION = "0.28.1";
 
 /** What `runtime.onInstalled` reported (the two fields this needs). */
@@ -72,6 +79,10 @@ export function attestsPreA15Upgrade(sig: InstallSignal | null | undefined): boo
 }
 /** A pre-A15 non-default server choice awaiting re-confirmation through the Trust Gate. Display only, never dialed. */
 export const LEGACY_SERVER_KEY = "legacyServerUrl";
+/** A16 review R3: the flag was set WITHOUT reading storage.local (nothing attested the upgrade). Written in the same
+ *  write as the flag; while it stands, each start reads storage.local's `serverUrl` ONLY to block while it names
+ *  another server (serverstate.ts), and it goes once it does not, or once a server is chosen. Trusted store only. */
+export const UNATTESTED_SERVER_KEY = "a15UnattestedServer";
 /** The email the user last signed in with (non-secret; the popup prefills it). */
 export const LAST_EMAIL_KEY = "lastEmail";
 
@@ -87,6 +98,7 @@ const LEGACY_GLOBAL_DROP = new Set([
   A15_MIGRATED_KEY,
   A15_OWED_KEY,
   LEGACY_SERVER_KEY,
+  UNATTESTED_SERVER_KEY,
 ]);
 
 const NS_RE = /^ns\.([0-9a-f]{16})\.(.+)$/;
@@ -211,8 +223,10 @@ export async function migrateTrustState(
     }
     if (!attestsPreA15Upgrade(sig)) {
       // F2: nothing attests a pre-A15 upgrade, so storage.local is NOT read — whatever sits there may be a content
-      // script's. Best effort: a flag that could not be written is simply set at a later start, the same way.
-      await trusted.set({ [A15_MIGRATED_KEY]: true }).catch(() => {});
+      // script's. Best effort: a flag that could not be written is simply set at a later start, the same way. A16 review
+      // R3: with the flag, in the same write, the mark that says it was set unread — so a self-hoster whose attested
+      // upgrade could not record "owed" is blocked (serverstate.ts), not signed in to the default, at this start and after.
+      await trusted.set({ [A15_MIGRATED_KEY]: true, [UNATTESTED_SERVER_KEY]: true }).catch(() => {});
       return { kind: "skipped", signal: sig === null ? "none" : "other" };
     }
     try {
