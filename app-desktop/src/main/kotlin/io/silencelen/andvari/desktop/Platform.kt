@@ -326,7 +326,8 @@ fun copyWithAutoClear(value: String, clearSeconds: Int = 30): Boolean {
     // The systemClipboard ACCESSOR can throw too (headless JVM; some Linux setups without a
     // system clipboard) — guard the whole acquire-and-write, not just setContents.
     val clipboard = runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull() ?: return false
-    if (runCatching { clipboard.setContents(StringSelection(value), null) }.isFailure) return false
+    // A14 (F9): marked sensitive — Windows clipboard history/cloud clipboard and Klipper skip it.
+    if (runCatching { clipboard.setContents(SensitiveClipboard.selectionFor(value), null) }.isFailure) return false
     val generation = clipboardCopyGeneration.incrementAndGet()
     lastSecretCopied = value
     clipboardCleaner.schedule({
