@@ -4,6 +4,109 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.29.0 (2026-10-23) — what a web page can reach · fleet 0.29.0, extension 0.29.0
+
+*Security review 2026-10 scanned the whole repository at 0.28.1, then reviewed every fix adversarially
+until the reviews came back clean. Most of what it found is about one question: what can a hostile or
+compromised web page reach inside the browser extension? Before this release, a compromised page
+could write the extension's ordinary storage, which held the chosen server and the update offer. The
+extension now keeps everything it trusts where pages cannot reach, and seals what it keeps between
+restarts. Nothing in this release lets the server read your passwords. The changes you will see are
+listed first.*
+
+**What you will notice**
+- **Browser extension: if you use your own server, the extension asks you to confirm it once after
+  this update.** Until you confirm it in Options (or choose "Not mine" to use the default server),
+  the extension signs in nowhere and contacts no server, the default included. Extensions that use
+  the default server see nothing new.
+- **Browser extension: you unlock once more after the update.** Unlocked state from 0.28.x is not
+  carried over.
+- **Browser extension in Firefox with "Never remember history":** the extension cannot keep a server
+  choice there, so it uses the default server, and quick unlock (PIN or device) is not offered. The
+  vault locks when Firefox suspends the extension after a short idle period.
+- **Web vault: on a browser where the offline copy is off, locking ends your session with the
+  server.** Unlocking again is a full sign-in: your password, and your 2FA code if you use one. A
+  browser with the offline copy on behaves as before. A new tab signs in on its own.
+- **CSV export: a cell that a spreadsheet would run as a formula now has to be acknowledged before
+  the download starts,** on web, desktop and Android. The warning names each cell by item and field
+  ("Password of …"). The exported values stay exactly as stored, so the file still imports into
+  another password manager.
+- **Android: filling a login into an app that was not installed by the Play Store asks you once.**
+  The prompt shows the app's package, its installer and its signing certificate, and names the login
+  it would fill. Once you confirm, that app (with that signer) fills without asking again on this
+  device. Apps from the Play Store and system apps fill as before.
+- **Desktop: copied passwords, card numbers, codes and the recovery phrase are kept out of clipboard
+  history,** including Windows clipboard history, Windows cloud clipboard and KDE's Klipper. The
+  30-second clear stays.
+- **Desktop and Android: cancelling an invite link while a new vault is being created can no longer
+  leave that server's sign-in saved under your old server.** The Cancel button and the invite field
+  are disabled while the vault is created.
+
+**Also fixed**
+- The browser extension only accepts unlock, PIN, quick-unlock, lock, sign-out and card-list
+  requests from its own popup and pages, never from a page's content script.
+- The browser extension's update link only ever points at the default server's `/downloads/`, and
+  it is checked again each time it is shown.
+- Android: the item editor no longer puts notes, attachment keys, passwords, codes or card numbers
+  into the state Android saves when it pauses an app. The Autofill-status screen's screenshot
+  exemption no longer uncovers the notices above it.
+- Desktop and the browser extension cap the size of the update manifest and signature they read.
+- An offline edit is no longer lost when saving it is refused after other queued edits were folded
+  into it (core, used by desktop and Android, and web).
+- Removing a contact pin, or pinning again, now wins over an older copy from another device even when
+  the devices' clocks disagree.
+- `backup-cli verify` and `recovery-cli verify` print names from a backup with every control
+  character escaped, so a shared item's name cannot rewrite your terminal. `backup-cli extract`
+  refuses two attachment names that would be one file on a case-insensitive filesystem, instead of
+  writing over the first.
+
+**For self-hosters**
+- **`deploy/bringup.sh` no longer lets Docker log the org recovery seed.** The keygen runs with
+  `--log-driver none`. If you generated your org recovery key with an earlier `bringup.sh` on a host
+  whose Docker logs are kept (journald, syslog or a log shipper), treat that seed as exposed to
+  whoever can read those logs or their backups, and remove it from them.
+- **The data directory is owner-only.** The container entrypoint sets `/data` to 0700 and the
+  database files to 0600, with umask 077, and `bringup.sh` creates `./data` with mode 700. Run
+  host-side backups of `./data` as root (or, under rootless Docker, as the mapped uid).
+- Purging a vault also clears its stored signed grants.
+- The schema stays at v15 and the minimum client version is not raised: the compatibility window
+  stays open.
+
+**For maintainers: the release signing ceremony**
+- `signandvari` takes a required `-Commit <sha>`, fetches only the release tag and never forces it.
+  It refuses a release that does not descend from the last commit this workstation signed.
+- Before it checks anything out, it shows what changed since that commit: a stat, the commits, then
+  the full diff, all escaped and paged. Only trees that never run on the signing workstation are
+  left out, and they are counted. The checkout runs with no hooks and no LFS filters, and every
+  reviewed file is checked byte for byte before you type the version to continue.
+- It is installed outside the repository, so the first run needs a one-time install of the new
+  script. See docs/runbooks/release-signing-keys.md §0. It needs Git 2.42 or later on the signing
+  workstation.
+
+**Under the hood, for readers**
+- *Extension trust state (spec 05 A15):* the server choice, item homes, the personal-vault wrap, the
+  update offer and its anti-rollback sequence live in the extension origin's IndexedDB, written only by
+  the service worker. `storage.local` is locked to extension pages on Chrome 140+. A value found in
+  `storage.local` at the upgrade from 0.28.1 or older is migrated once, and a non-default server is
+  never adopted from it: it is only offered for confirmation.
+- *Sealed session custody (spec 05 A16):* every secret-bearing `storage.session` record (the unlocked
+  session, tab state, the quick-unlock record and known logins) is sealed with AES-GCM under a
+  non-extractable key held in IndexedDB. The additional data binds the record's kind, server origin
+  and a custody epoch that every lock advances. The key is replaced when the browser reports a new
+  session. A record that does not open is treated as absent. Without IndexedDB nothing secret is
+  kept between restarts.
+- *Sender gate (spec 05 A14):* every message type is classified at compile time as one a content
+  script may send or one only extension pages may send.
+- *Web tokens (spec 05 A14):* without the offline copy, tokens live in sessionStorage for the tab and
+  are revoked and dropped at lock. A refresh in flight cannot restore a dropped pair. A sign-in binds
+  the server's userId only after unlock succeeds.
+- *Android app fills (spec 05 A14):* "Play" means the installer `com.android.vending` is itself a
+  system app. The app's identity always comes from the package manager on the service side. The app
+  needs a launcher-intent `<queries>` entry to see the app it fills, and HIDE_OVERLAY_WINDOWS to hide
+  overlays while the prompt is shown.
+- *Removal proofs (spec 01, spec 05 A13):* a consumed removal nonce keeps the earliest time any
+  device recorded. A replayed v1 removal proof gets the same window treatment as v2.
+
 ## 0.28.1 (2026-10-19) — who you add is who you verified · fleet 0.28.1, extension 0.28.1
 
 *A follow-up pass of security review 2026-10 went over the 0.28.0 fixes, again assuming the vault
