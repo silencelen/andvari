@@ -23,6 +23,7 @@ type UnlockCode =
   | "keys_damaged"
   | "kdf_policy"
   | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
+  | "confirm_server" // A15 review F1: a server is pending (confirm it or say "Not mine") — nothing was sent anywhere
   | "server_error"
   | "network"
   | "unknown";
@@ -44,6 +45,7 @@ type PinUnlockCode =
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
 type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
@@ -60,8 +62,13 @@ type BioUnlockCode =
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
+
+/** A15 review F1: the refusal while a server is pending. The popup shows the confirm route instead of any sign-in
+ *  form, so this is the fallback line only (a sign-in raced the update, or a stale popup). */
+export const CONFIRM_SERVER_FIRST = "Confirm your server first — andvari signs in nowhere until you confirm it or choose “Not mine”.";
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
@@ -117,6 +124,8 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
       // Security review 2026-10, branch A11 (c18): the login answer carried a malformed user/device id (A10 wire
       // grammar). A tampering-class refusal: never softened into "try again", like identity_mismatch above.
       return "The server sent a malformed account record, so sign-in was stopped. Tell your admin — the server may be misbehaving.";
+    case "confirm_server":
+      return CONFIRM_SERVER_FIRST;
     case "server_error":
       return "The server had a problem answering — your details may be fine. Try again in a moment.";
     case "network":
@@ -274,6 +283,8 @@ export function pinUnlockErrorCopy(code: PinUnlockCode | undefined, attemptsRema
       return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
     case "kdf_policy":
       return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "confirm_server":
+      return CONFIRM_SERVER_FIRST;
     case "server_error":
       return "The server had a problem answering — try again in a moment.";
     case "network":
@@ -331,6 +342,8 @@ export function bioUnlockErrorCopy(code: BioUnlockCode | undefined): string {
       return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
     case "kdf_policy":
       return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "confirm_server":
+      return CONFIRM_SERVER_FIRST;
     case "server_error":
       return "The server had a problem answering — try again in a moment.";
     case "network":

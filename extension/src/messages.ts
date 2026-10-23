@@ -207,9 +207,15 @@ export type UnlockCode =
   | "keys_damaged" // H67: the account's stored wrappedUvk isn't a readable envelope — terminal, not credentials
   | "kdf_policy"
   | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
+  | "confirm_server" // A15 review F1: a server is pending (confirm it or say "Not mine") — nothing was sent anywhere
   | "server_error"
   | "network"
   | "unknown";
+
+/** A15 review F1 (serverstate.ts ServerBlock, structurally): while one stands, the worker dials no server. `confirm` —
+ *  a previous server awaits the user's confirm (`keepable` false: this browser cannot keep a server choice, so it can
+ *  only be declined here); `unsettled` — the trusted store did not answer, so the server is unknown. */
+export type ServerBlockWire = { kind: "confirm"; origin: string; keepable: boolean } | { kind: "unsettled" };
 
 /** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
@@ -239,6 +245,7 @@ export type PinUnlockCode =
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 
 /** Why the PIN entropy floor rejected an enrollment PIN (breaker A2⊕B8) — the popup renders a nudge. */
@@ -263,6 +270,7 @@ export type BioUnlockCode =
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 
 /** Biometric enrollment refusal (0.17.0). `bio_unsupported` = no platform authenticator / no PRF;
@@ -312,16 +320,18 @@ export type Req =
    *  exactly `origin`'s namespaced keys (quick-unlock/PIN co-key + cached channel state) everywhere,
    *  touching no other origin. `origin` is a raw/canonical origin string; the SW re-canonicalizes it. */
   | { type: "purgeServerData"; origin: string }
-  /** Options page + popup (security review 2026-10, A15): the origin the worker dials, a pre-A15 server choice
-   *  awaiting re-confirmation through the Trust Gate (display only — never dialed), and whether this browser can
-   *  keep a server choice at all (false when IndexedDB is unavailable, e.g. Firefox's permanent private browsing).
-   *  Pages never read the trusted store themselves; they ask here. Extension pages only. */
+  /** Options page + popup (security review 2026-10, A15): the origin the worker's api is built for, whether this
+   *  browser can keep a server choice at all (false when IndexedDB is unavailable, e.g. Firefox's permanent private
+   *  browsing), and (A15 review F1) a block: while one stands the worker dials NO server — a previous server awaits
+   *  the user's confirm (display only until the Trust Gate commits it), or the trusted store did not answer. Pages
+   *  never read the trusted store themselves; they ask here. Extension pages only. */
   | { type: "serverInfo" }
   /** Options page ONLY (A15): commit a server origin after the Trust Gate's Connect (the grant gesture). The worker
    *  canonicalizes, writes its trusted store and runs the origin-clean switch (§4.1) before answering. This message
    *  is the ONLY way the server choice changes; a storage write is no longer a switch. */
   | { type: "setServerUrl"; url: string }
-  /** Options page (A15): drop the pre-A15 server suggestion without connecting to it ("not mine"). */
+  /** Options page + popup (A15): drop the pending previous server without connecting to it ("Not mine"); the
+   *  default server is then in effect. */
   | { type: "forgetLegacyServer" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
@@ -546,7 +556,7 @@ export type Res<T extends Req["type"]> = T extends "status"
               : T extends "dismissQuickUnlockOffer"
                 ? { ok: boolean }
                 : T extends "ping"
-        ? { ok: boolean; serverTime?: number; error?: string }
+        ? { ok: boolean; serverTime?: number; error?: string; code?: "confirm_server" }
         : T extends "matches"
           ? { locked: boolean; matches: MatchItem[] }
           : T extends "passwordReuse"
@@ -623,7 +633,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               : T extends "purgeServerData"
                                                 ? { ok: boolean }
                                               : T extends "serverInfo"
-                                                ? { url: string; legacy: string | null; trustedStore: boolean }
+                                                ? { url: string; trustedStore: boolean; block: ServerBlockWire | null }
                                               : T extends "setServerUrl"
                                                 ? { ok: boolean; url?: string; code?: "invalid" | "storage" | "not_allowed" }
                                               : T extends "forgetLegacyServer"

@@ -11,7 +11,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { DEFAULT_SERVER_URL, getServerUrl, originKeyFor, SERVER_URL_KEY } from "./serverurl.ts";
 import { TrustedStoreUnavailable, type KvArea } from "./trustedkv.ts";
-import { A15_MIGRATED_KEY, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail } from "./trustmigrate.ts";
+import { A15_MIGRATED_KEY, A15_OWED_KEY, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail, type InstallSignal } from "./trustmigrate.ts";
 
 const OK = originKeyFor(DEFAULT_SERVER_URL);
 const OK2 = originKeyFor("https://self.example");
@@ -20,6 +20,9 @@ const V1 = "22222222-2222-4222-8222-222222222222";
 const I1 = "33333333-3333-4333-8333-333333333333";
 const I2 = "44444444-4444-4444-8444-444444444444";
 const ns = (ok: string, k: string) => `ns.${ok}.${k}`;
+/** A15 review F2: the browser's report of an update from the last pre-A15 release — the only thing that lets the
+ *  migration read storage.local. The tests below that exercise the migration itself start from it. */
+const ATTESTED = async (): Promise<InstallSignal> => ({ reason: "update", previousVersion: "0.28.1" });
 
 type Fake = KvArea & { map: Map<string, unknown>; writes: number };
 function area(initial: Record<string, unknown> = {}, opts: { failGet?: boolean; failSet?: boolean; lossy?: boolean } = {}): Fake {
@@ -69,7 +72,7 @@ function preA15Local(serverUrl: string) {
 test("a planted NON-default serverUrl is never adopted: the worker stays on the default until the Trust Gate", async () => {
   const legacy = area(preA15Local("https://evil.example"));
   const trusted = area();
-  const r = await migrateTrustState(legacy, trusted);
+  const r = await migrateTrustState(legacy, trusted, ATTESTED);
   assert.equal(r.kind, "migrated");
   assert.equal(trusted.map.has(SERVER_URL_KEY), false, "the server choice is NOT written");
   assert.equal(await getServerUrl(trusted), DEFAULT_SERVER_URL, "the worker dials the default");
@@ -88,7 +91,7 @@ test("a legacy value is canonicalized before it is even suggested; the default o
     [42, undefined],
   ] as const) {
     const trusted = area();
-    await migrateTrustState(area({ [SERVER_URL_KEY]: stored }), trusted);
+    await migrateTrustState(area({ [SERVER_URL_KEY]: stored }), trusted, ATTESTED);
     assert.equal(trusted.map.get(LEGACY_SERVER_KEY), suggested, JSON.stringify(stored));
     assert.equal(trusted.map.has(SERVER_URL_KEY), false);
   }
@@ -96,14 +99,14 @@ test("a legacy value is canonicalized before it is even suggested; the default o
 
 test("a server the user already chose in the trusted store is never shadowed by a legacy suggestion", async () => {
   const trusted = area({ [SERVER_URL_KEY]: "https://mine.example" });
-  await migrateTrustState(area({ [SERVER_URL_KEY]: "https://evil.example" }), trusted);
+  await migrateTrustState(area({ [SERVER_URL_KEY]: "https://evil.example" }), trusted, ATTESTED);
   assert.equal(trusted.map.get(SERVER_URL_KEY), "https://mine.example");
   assert.equal(trusted.map.has(LEGACY_SERVER_KEY), false);
 });
 
 test("the update channel is NOT migrated: no offer, no seq (restarts at the MIN_SEQ floor), no throttle, no quiet", async () => {
   const trusted = area();
-  await migrateTrustState(area(preA15Local(DEFAULT_SERVER_URL)), trusted);
+  await migrateTrustState(area(preA15Local(DEFAULT_SERVER_URL)), trusted, ATTESTED);
   for (const k of ["updateInfo", "updateAcceptedSeq", "updateCheckedAt", "updateChannelQuiet"]) {
     assert.equal(trusted.map.has(ns(OK, k)), false, `${k} must not move`);
   }
@@ -111,7 +114,7 @@ test("the update channel is NOT migrated: no offer, no seq (restarts at the MIN_
 
 test("item homes and the personal wrap move under their strict decoders; the pending change is dropped", async () => {
   const trusted = area();
-  await migrateTrustState(area(preA15Local(DEFAULT_SERVER_URL)), trusted);
+  await migrateTrustState(area(preA15Local(DEFAULT_SERVER_URL)), trusted, ATTESTED);
   assert.deepEqual(trusted.map.get(ns(OK2, `itemHomes:${U1}`)), { [I1]: V1 }, "only well-formed pairs move");
   assert.deepEqual(trusted.map.get(ns(OK2, `personalWrap:${U1}`)), { vaultId: V1, wrappedVk: "c2VhbGVk" });
   assert.equal(trusted.map.has(ns(OK2, `personalChange:${U1}`)), false, "the next unlock re-stages a pending change");
@@ -132,13 +135,15 @@ test("item homes and the personal wrap move under their strict decoders; the pen
       lastEmail: "a\nb@example.org",
     }),
     t2,
+    ATTESTED,
   );
-  assert.deepEqual([...t2.map.keys()], [A15_MIGRATED_KEY], "nothing malformed reached the trusted store");
+  assert.deepEqual([...t2.map.keys()].sort(), [A15_MIGRATED_KEY, A15_OWED_KEY].sort(), "nothing malformed reached the trusted store");
+  assert.equal(t2.map.get(A15_OWED_KEY), false, "(the owed mark is cleared in the write that sets the flag)");
 });
 
 test("after a verified migration every old key is deleted from storage.local; foreign keys are left alone", async () => {
   const legacy = area(preA15Local("https://evil.example"));
-  await migrateTrustState(legacy, area());
+  await migrateTrustState(legacy, area(), ATTESTED);
   assert.deepEqual([...legacy.map.keys()], ["someOtherExtensionLikeKey"]);
 });
 
@@ -146,13 +151,13 @@ test("the migration flag lives in the trusted store: a storage.local flag (plant
   // A planted flag in storage.local does not skip the migration…
   const trusted = area();
   const legacy = area({ ...preA15Local(DEFAULT_SERVER_URL), [A15_MIGRATED_KEY]: true });
-  const r = await migrateTrustState(legacy, trusted);
+  const r = await migrateTrustState(legacy, trusted, ATTESTED);
   assert.equal(r.kind, "migrated");
   assert.equal(trusted.map.get(A15_MIGRATED_KEY), true);
   assert.equal(legacy.map.has(A15_MIGRATED_KEY), false, "and the flag is never written to storage.local");
   // …and once the trusted flag is set, values planted in storage.local later are never read again.
   const replanted = area({ [SERVER_URL_KEY]: "https://evil.example", [ns(OK2, `itemHomes:${U1}`)]: { [I2]: V1 } });
-  const again = await migrateTrustState(replanted, trusted);
+  const again = await migrateTrustState(replanted, trusted, ATTESTED);
   assert.equal(again.kind, "already");
   assert.equal(trusted.map.has(LEGACY_SERVER_KEY), false);
   assert.deepEqual(trusted.map.get(ns(OK2, `itemHomes:${U1}`)), { [I1]: V1 }, "the migrated homes stand");
@@ -162,7 +167,7 @@ test("the migration flag lives in the trusted store: a storage.local flag (plant
 test("trusted store unavailable: nothing is read from or deleted in storage.local, no flag, and the default stands", async () => {
   const legacy = area(preA15Local("https://evil.example"));
   const trusted = area({}, { failGet: true, failSet: true });
-  const r = await migrateTrustState(legacy, trusted);
+  const r = await migrateTrustState(legacy, trusted, ATTESTED);
   assert.equal(r.kind, "unavailable");
   assert.equal(legacy.map.size, Object.keys(preA15Local("x")).length, "storage.local untouched (retried once IndexedDB works)");
   assert.equal(await getServerUrl(trusted), DEFAULT_SERVER_URL);
@@ -171,13 +176,13 @@ test("trusted store unavailable: nothing is read from or deleted in storage.loca
 test("a write the store did not keep fails verification: no flag, storage.local kept, retried next start", async () => {
   const legacy = area(preA15Local(DEFAULT_SERVER_URL));
   const lossy = area({}, { lossy: true });
-  const r = await migrateTrustState(legacy, lossy);
+  const r = await migrateTrustState(legacy, lossy, ATTESTED);
   assert.equal(r.kind, "failed");
   assert.equal(lossy.map.has(A15_MIGRATED_KEY), false);
   assert.equal(legacy.map.size, Object.keys(preA15Local("x")).length, "nothing deleted before the copy verified");
   // A retry on a working store completes, and never overwrites what is already there.
   const trusted = area({ [ns(OK2, `itemHomes:${U1}`)]: { [I2]: V1 } });
-  assert.equal((await migrateTrustState(legacy, trusted)).kind, "migrated");
+  assert.equal((await migrateTrustState(legacy, trusted, ATTESTED)).kind, "migrated");
   assert.deepEqual(trusted.map.get(ns(OK2, `itemHomes:${U1}`)), { [I2]: V1 }, "the trusted store's own record wins");
 });
 
