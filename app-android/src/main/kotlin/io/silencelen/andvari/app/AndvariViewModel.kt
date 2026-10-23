@@ -1252,16 +1252,20 @@ class AndvariViewModel(
     // [closeEditor] clears it (plaintext must not outlive the editor session).
     val editorPendingUploads = mutableListOf<PendingUpload>()
 
-    // The open editor's SECRET fields (password, TOTP seed, card number, security code) — held
-    // here for the same reason as the picks: they must survive rotation/fold recreation, and they
-    // must never enter SavedState (system_server keeps that Bundle outside the app's lock and
-    // zeroization; security review 2026-10, q27). Seeded from the item on first read, cleared by
-    // [openEditor] and [closeEditor] (so also on lock).
-    private val editorSecrets = HashMap<String, MutableState<String>>()
+    // The open editor's SECRET fields (password, TOTP seed, card number, security code; since the
+    // A13 review RF5 also the notes, which are the whole payload of a note item, and the attachment
+    // list, whose every AttachmentRef carries its file's key) — held here for the same reason as the
+    // picks: they must survive rotation/fold recreation, and they must never enter SavedState
+    // (system_server keeps that Bundle outside the app's lock and zeroization; security review
+    // 2026-10, q27). Seeded from the item on first read, cleared by [openEditor] and [closeEditor]
+    // (so also on lock).
+    private val editorSecrets = HashMap<String, MutableState<*>>()
 
-    /** The editor session's state for secret [field], seeded by [seed] the first time it is read in this session. */
-    fun editorSecretState(field: String, seed: () -> String): MutableState<String> =
-        editorSecrets.getOrPut(field) { mutableStateOf(seed()) }
+    /** The editor session's state for secret [field], seeded by [seed] the first time it is read in this session. Each
+     *  field name is used with ONE type, by the editor alone. */
+    @Suppress("UNCHECKED_CAST")
+    fun <T> editorSecretState(field: String, seed: () -> T): MutableState<T> =
+        editorSecrets.getOrPut(field) { mutableStateOf(seed()) } as MutableState<T>
 
     // The OPEN editor session (open flag + target itemId) also lives HERE, not in the
     // composition: a save completing across an Activity recreation must close the editor

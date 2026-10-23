@@ -236,7 +236,8 @@ object AccountState {
      *  - tombstones union (max), and a tombstone not older than a pin removes it (a same-millisecond
      *    tie removes: the fail-safe direction is "unpinned");
      *  - `orgRecoveryFp` from the document with the higher seq (the local copy on a tie or rollback);
-     *  - nonces union per vault, newest [NONCE_CAP] kept;
+     *  - nonces union per vault keeping the EARLIEST time of a repeated nonce (A13 review RF3, see [withConsumed]),
+     *    newest [NONCE_CAP] kept;
      *  - `personal` (A9): the designation with the newest `at` (tie: the smaller vaultId);
      *  - seq = max(local, served, highWater).
      * Rollback: a served seq below this device's [highWater], or a withheld blob once one was seen,
@@ -269,7 +270,8 @@ object AccountState {
         val nonces = HashMap<String, HashMap<String, Long>>()
         for ((vaultId, list) in docs.flatMap { it.consumedNonces.entries }) {
             val m = nonces.getOrPut(vaultId) { HashMap() }
-            for (n in list) m[n.nonce] = maxOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
+            // A13 review RF3: the EARLIEST time wins for a repeated nonce (see [withConsumed]).
+            for (n in list) m[n.nonce] = minOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
         }
         val cappedNonces = nonces.mapValues { (_, m) ->
             m.entries.map { ConsumedNonce(it.key, it.value) }
@@ -387,14 +389,19 @@ object AccountState {
 
     /**
      * Fold this device's consumed removal nonces (root cause A §6.2, branch A7) into [doc]: the same rule as [merge]
-     * (union per vault, the larger issuedAt for a repeated nonce, newest [NONCE_CAP] kept). Nothing else changes.
+     * (union per vault, the EARLIER time for a repeated nonce, newest [NONCE_CAP] kept). Nothing else changes.
+     *
+     * Earliest, not latest (A13 review RF3): for a v1 removal the record's time is the only time the proof has (c10), and
+     * a device that consumes the same nonce later (its own valid_legacy, or an N-1 build's already_recorded at `now`)
+     * would otherwise drag the account's record forward into a later window, so a replay after a re-add reads as a calm
+     * already_recorded instead of the anomaly. For v2 every device records the proof's own issuedAt, so min and max agree.
      */
     fun withConsumed(doc: AccountStateDoc, extra: Map<String, List<ConsumedNonce>>): AccountStateDoc {
         if (extra.isEmpty()) return doc
         val nonces = HashMap<String, HashMap<String, Long>>()
         for ((vaultId, list) in doc.consumedNonces.entries + extra.entries) {
             val m = nonces.getOrPut(vaultId) { HashMap() }
-            for (n in list) m[n.nonce] = maxOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
+            for (n in list) m[n.nonce] = minOf(m[n.nonce] ?: n.issuedAt, n.issuedAt)
         }
         val capped = nonces.mapValues { (_, m) ->
             m.entries.map { ConsumedNonce(it.key, it.value) }

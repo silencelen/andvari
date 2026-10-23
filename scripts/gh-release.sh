@@ -140,6 +140,9 @@ handover_line() {
   if c="$(git -C "$REPO_DIR" rev-parse -q --verify "refs/tags/$TAG^{commit}" 2>/dev/null)"; then
     note "signing-workstation ceremony (hand this line over verbatim — the commit is the pin it checks the tag against):"
     note "  signandvari $VERSION -Commit $c"
+    # An installed signandvari older than the pin rejects -Commit. Dropping the flag would run the old
+    # script, which force-fetches tags: the answer is to install the reviewed copy (release-signing-keys.md §0), never that.
+    note "  if signandvari rejects -Commit, STOP and install the reviewed scripts/signandvari.ps1 first (docs/runbooks/release-signing-keys.md §0); never drop -Commit"
   else
     note "no local tag $TAG — cut and push it first; the ceremony line is signandvari $VERSION -Commit <the tag's commit>"
   fi

@@ -34,7 +34,6 @@ import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -102,7 +101,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 
 class MainActivity : FragmentActivity() {
     private val vm: AndvariViewModel by viewModels {
@@ -2334,8 +2332,10 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     var cardExpYear by rememberSaveable { mutableStateOf(initial.card?.expYear ?: "") }
     var cardSecurityCode by remember { vm.editorSecretState("cardSecurityCode") { initial.card?.securityCode ?: "" } }
     var cardPostal by rememberSaveable { mutableStateOf(initial.card?.postalCode ?: "") }
-    var notes by rememberSaveable { mutableStateOf(initial.notes ?: "") }
-    var attachments by rememberSaveable(stateSaver = attachmentListSaver) { mutableStateOf(initial.attachments) }
+    // A13 review RF5: the notes (a note item's whole payload) and the attachment list (every ref carries its fileKey)
+    // are secrets too: the ViewModel's editor session, never the saved-instance Bundle.
+    var notes by remember { vm.editorSecretState("notes") { initial.notes ?: "" } }
+    var attachments by remember { vm.editorSecretState("attachments") { initial.attachments } }
     // Pending pick BYTES live in the ViewModel (they can't go in SavedState) — see
     // AndvariViewModel.editorPendingUploads.
     val pendingUploads = vm.editorPendingUploads
@@ -3736,16 +3736,6 @@ private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, modifie
 // ---- non-composable helpers ----
 
 private const val DEFAULT_ATTACHMENT_MAX_BYTES = 25L * 1024 * 1024
-
-private val attachmentJson = Json { ignoreUnknownKeys = true }
-
-/** SavedState Saver for the editor's attachment list — JSON via the spec serializer so
- *  unknown-field extras survive the recreation round-trip too. Restore failures fall
- *  back to re-initialization (null) rather than crashing the restore. */
-private val attachmentListSaver = listSaver<List<AttachmentRef>, String>(
-    save = { list -> list.map { attachmentJson.encodeToString(AttachmentRef.serializer(), it) } },
-    restore = { list -> runCatching { list.map { attachmentJson.decodeFromString(AttachmentRef.serializer(), it) } }.getOrNull() },
-)
 
 private fun needsUpdateLine(n: Int): String =
     if (n == 1) "1 item needs an app update to display." else "$n items need an app update to display."
