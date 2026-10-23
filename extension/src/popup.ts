@@ -11,7 +11,8 @@ import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, enrollBioErrorC
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res } from "./messages";
-import { DEFAULT_SERVER_URL, getServerUrl, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { displaySite, safeSiteUrl } from "./siteurl";
 import { reuseWarning } from "./reusealert";
@@ -228,7 +229,7 @@ async function refresh(): Promise<void> {
   }
   const email = el<HTMLInputElement>("email");
   if (!email.value) {
-    const remembered = s.email ?? (await rememberedEmail());
+    const remembered = s.email ?? s.rememberedEmail ?? null; // A15: kept by the worker, not in storage.local
     if (remembered) email.value = remembered;
   }
   (email.value ? el("password") : email).focus();
@@ -261,8 +262,11 @@ async function renderUpdate(): Promise<void> {
   el("update-text").textContent = `Update available — andvari ${r.latest}. `;
   // Firefox gets the Firefox zip; everything else (Chrome/Edge/Brave) the Chrome zip. Fall back
   // to whichever URL exists so a single-target publish still links somewhere real.
+  // A15 step 0: the popup re-checks the link itself before it becomes an href — only
+  // `${DEFAULT_SERVER_URL}/downloads/<basename>`, and only while the current server is the default.
   const isFirefox = /firefox/i.test(navigator.userAgent);
-  const url = (isFirefox ? r.firefoxUrl : r.chromeUrl) ?? r.chromeUrl ?? r.firefoxUrl;
+  const server = await currentServer();
+  const url = [isFirefox ? r.firefoxUrl : r.chromeUrl, r.chromeUrl, r.firefoxUrl].map((u) => offerDownloadUrl(u, server)).find((u) => u !== null) ?? null;
   if (url) {
     link.href = url;
     link.textContent = "Download & reload";
@@ -280,16 +284,11 @@ function updateQuietCopy(reason: string): string {
     : "Updates: the server’s update listing couldn’t be verified, so no update will be offered from it. Your vault and sync are unaffected.";
 }
 
-/** Email is deliberately non-secret (remembered for convenience) — the ZK line is the master
- *  password and keys, which never touch chrome.storage.local. */
-async function rememberedEmail(): Promise<string | null> {
-  try {
-    const st = (await chrome.storage.local.get("lastEmail")) as Record<string, unknown>;
-    const v = st["lastEmail"];
-    return typeof v === "string" && v ? v : null;
-  } catch {
-    return null;
-  }
+/** A15: the configured server origin, from the worker (the only reader of its trusted store) — asked on every use,
+ *  never cached in the popup. A worker that does not answer reads as the default (the fail-safe it always had). */
+async function currentServer(): Promise<string> {
+  const r = await ask({ type: "serverInfo" });
+  return r?.url || DEFAULT_SERVER_URL;
 }
 
 function relocked(): void {
@@ -1075,25 +1074,15 @@ async function unlock(): Promise<void> {
   try {
     const r = await ask({ type: "unlock", email, password: pw.value });
     if (r?.ok) {
-      pw.value = "";
-      try {
-        await chrome.storage.local.set({ lastEmail: email }); // the email only — never the password
-      } catch {
-        /* remembering is best-effort */
-      }
+      pw.value = ""; // (A15: the worker remembers the email itself — the popup writes no storage)
       await refresh();
     } else if (r?.code === "totp_required") {
       // 0.16.3: password verified server-side + keys derived (SW memory) — collect the code, no
       // second KDF. Clear the password field (a "start over" is a fresh full sign-in).
       pw.value = "";
       totpBadCount = 0;
-      // The email is proven correct here (server accepted the authKey, only the code is left) — remember
-      // it now, else TOTP-enrolled accounts (exactly this seam's users) never get it stored.
-      try {
-        await chrome.storage.local.set({ lastEmail: email });
-      } catch {
-        /* best-effort */
-      }
+      // The email is proven correct here (server accepted the authKey, only the code is left); the worker
+      // remembered it on this answer (A15), so TOTP-enrolled accounts get it stored too.
       enterTotpChallenge(true);
     } else if (r?.code === "aborted") {
       // A server switch / lock landed mid-sign-in — the SW installed nothing; just re-render silently.
@@ -1439,11 +1428,11 @@ el("lock").addEventListener("click", async () => {
   await refresh();
 });
 
-/** Open a page on the configured server (design §5.1 — the origin is read fresh from
- *  storage.local via serverurl.ts on every click, never cached in the popup). window.close() only
+/** Open a page on the configured server (design §5.1 — the origin is asked of the worker on
+ *  every click, never cached in the popup). window.close() only
  *  AFTER tabs.create resolves: a closed popup's pending promise continuations never run. */
 async function openServerPage(path = ""): Promise<void> {
-  const base = await getServerUrl();
+  const base = await currentServer();
   try {
     await chrome.tabs.create({ url: base + path });
   } catch {
@@ -1506,10 +1495,14 @@ document.addEventListener("keydown", (e) => {
 });
 
 /** Persistent anti-phishing origin display (design §5.1): render the RAW configured origin in the
- *  header, middle-truncated to fit, with the FULL origin on title + aria-label (hover/focus). Read
- *  fresh from storage.local every open — never cached — so it always reflects the real switch target. */
+ *  header, middle-truncated to fit, with the FULL origin on title + aria-label (hover/focus). Asked
+ *  of the worker every open — never cached — so it shows the origin the worker actually dials. */
 async function renderServerOrigin(): Promise<void> {
-  const origin = await getServerUrl();
+  const info = await ask({ type: "serverInfo" });
+  const origin = info?.url || DEFAULT_SERVER_URL;
+  // A15: a server chosen before the update is not reconnected silently (the old value sat where a web page could have
+  // written it); the strip routes to Options, where the user reviews that address through the Trust Gate or drops it.
+  el("legacy-server-cta").hidden = !info?.legacy;
   const node = el("server-origin");
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
@@ -1530,7 +1523,7 @@ async function renderServerOrigin(): Promise<void> {
 async function detectMissingHostGrant(): Promise<void> {
   let granted: boolean | null = null;
   try {
-    const pattern = originMatchPattern(await getServerUrl());
+    const pattern = originMatchPattern(await currentServer());
     if (pattern) granted = await chrome.permissions.contains({ origins: [pattern] });
   } catch {
     /* permissions API unavailable — granted stays null (no detection, no false route) */
@@ -1538,6 +1531,15 @@ async function detectMissingHostGrant(): Promise<void> {
   document.body.dataset.missingHostGrant = granted === false ? "true" : "false";
   if (shouldRouteToOptions(granted)) el("host-grant-cta").hidden = false;
 }
+
+el("legacy-server-cta").addEventListener("click", () => {
+  try {
+    chrome.runtime.openOptionsPage();
+  } catch {
+    void chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
+  }
+  window.close();
+});
 
 el("host-grant-cta").addEventListener("click", () => {
   try {

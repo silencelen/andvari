@@ -310,10 +310,72 @@ test("A10: the worker's api client reports refused ids, and the api sanitises sy
   assert.ok(api.includes("const r = refusedSession(s);") && api.includes('"bad_wire_id"'), "login() refuses a malformed session id");
 });
 
-test("A10: every storage.local trust record is read through its strict decoder", () => {
-  assert.ok(bg.includes("const d = decodeItemHomes((await chrome.storage.local.get(k))[k]);"), "loadHomes decodes strictly");
+test("A10: every trust record is read through its strict decoder (since A15 from the trusted store, not storage.local)", () => {
+  assert.ok(bg.includes("const d = decodeItemHomes((await trusted.get(k))[k]);"), "loadHomes decodes strictly");
   assert.ok(bg.includes("[homesKey(userId)]: encodeItemHomes(homes)"), "saveHomes writes only well-formed pairs");
-  assert.ok(bg.includes("const d = decodePersonalWrap((await chrome.storage.local.get(key))[key]);"), "the personal-wrap cache decodes strictly");
-  assert.ok(bg.includes("const d = decodePersonalChange((await chrome.storage.local.get(k))[k]);"), "the pending change decodes strictly");
+  assert.ok(bg.includes("const d = decodePersonalWrap((await trusted.get(key))[key]);"), "the personal-wrap cache decodes strictly");
+  assert.ok(bg.includes("const d = decodePersonalChange((await trusted.get(k))[k]);"), "the pending change decodes strictly");
   assert.ok(!/as PersonalWrapWire \| undefined/.test(bg) && !/as Record<string, string> \| undefined/.test(bg), "no raw cast reads a trust record any more");
+});
+
+// ---- security review 2026-10, branch A15: trust state out of content-script-reachable storage ----
+// The leaves (trustedkv.ts, trustmigrate.ts, updateoffer.ts, storageaccess.ts, serverswitch.purgeOriginRecords) are
+// behaviour-tested; these pins hold the worker to them, and storagefence.test.ts holds who touches which storage.
+
+test("A15: worker start awaits the storage access levels, then migrates, then reads the server from the trusted store", () => {
+  const ready = spanOf(bg, "const serverReady: Promise<void> = (async () => {", "})();");
+  const order = ["await storageAccess;", "await migrateTrustState(legacyLocal, trusted);", "const url = await getServerUrl(trusted);", "await adoptLegacyNamespaceOnce();"];
+  let at = -1;
+  for (const step of order) {
+    const i = ready.indexOf(step);
+    assert.ok(i > at, `serverReady must run "${step}" after the step before it`);
+    at = i;
+  }
+  assert.match(bg, /const storageAccess: Promise<void> = restrictStorageAccess\(chrome\.storage as unknown as StorageAccessAreas\)\.then\(/);
+  assert.match(bg, /const trusted = trustedStore\(\);/);
+});
+
+test("A15: doLock samples the compartment verdict only after the access-level calls settled", () => {
+  const lock = spanOf(bg, 'async function doLock(reason: "idle" | "manual" | "signout" = "manual"): Promise<void> {', "redeemGen++;");
+  assert.ok(lock.indexOf("await storageAccess;") > -1 && lock.indexOf("await storageAccess;") < lock.indexOf("compartmentTrusted: quCompartmentTrusted"));
+});
+
+test("A15: the server choice changes only through the setServerUrl message — canonicalized, persisted, then switched", () => {
+  assert.ok(!bg.includes("chrome.storage.onChanged"), "the storage.onChanged trigger is gone");
+  const handler = spanOf(bg, 'case "setServerUrl":', 'case "forgetLegacyServer":');
+  assert.ok(handler.includes("return commitServerUrl(msg.url);"));
+  const commit = spanOf(bg, "async function commitServerUrl(", "/** Apply a server change.");
+  const steps = ["canonicalizeServerUrl(raw)", "await setServerUrl(canonical, trusted);", "switchChain.then(() => applyServerChange(canonical))"];
+  let at = -1;
+  for (const step of steps) {
+    const i = commit.indexOf(step);
+    assert.ok(i > at, `commitServerUrl: "${step}" in order`);
+    at = i;
+  }
+  assert.ok(commit.includes('return { ok: false, code: "invalid" }') && commit.includes('return { ok: false, code: "storage" }'));
+});
+
+test("A15: the update offer is re-checked on read, its link built only by the offer leaf, its seq kept in the trusted store", () => {
+  const status = spanOf(bg, "async function updateStatus(", "// ---- message dispatch ----");
+  assert.ok(status.includes("const offer = readUpdateOffer(await trustedGet(kInfo), current, serverUrl);"), "re-checked on every read");
+  assert.ok(!status.includes("isNewerVersion("), "the read goes through the leaf, not a version-only check");
+  const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
+  assert.ok(check.includes("chromeUrl: offerDownloadUrl(ext.chromeUrl, serverUrl), firefoxUrl: offerDownloadUrl(ext.firefoxUrl, serverUrl)"));
+  assert.ok(check.includes("const storedSeq = await trustedGet(kSeq);"), "the anti-rollback seq is read from the trusted store");
+  assert.ok(check.includes("await trusted.set({ [kInfo]: info, [kSeq]: decision.seq });"), "…and written there with the offer");
+  assert.ok(!bg.includes("function downloadUrl("), "the old absolutizer (any https URL passed) is gone");
+  // The throttle and the quiet marker are not trust state: storage.session (re-derived by the forced start check).
+  assert.ok(check.includes("const seen = (await chrome.storage.session.get(kLast))[kLast];"));
+});
+
+test("A15: the purge clears every record of that origin in the trusted store, storage.local and storage.session", () => {
+  const purge = spanOf(bg, "export async function purgeOriginNamespace(", "// Re-offer a pending save once");
+  assert.ok(purge.includes("await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionArea]);"));
+});
+
+test("A15: the remembered email is recorded by the worker, from the popup's own unlock, never by a page", () => {
+  const mapper = spanOf(bg, "async function unlockWithMapping(", "function mapUnlockError(");
+  assert.ok(mapper.includes('if (r.ok || r.code === "totp_required") await rememberEmail(email);'));
+  const status = spanOf(bg, 'case "status": {', 'case "lock": {');
+  assert.ok(status.includes("rememberedEmail: session ? null : await readRememberedEmail(),"));
 });
