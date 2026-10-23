@@ -65,12 +65,25 @@ class SurfaceCopyPinsTest {
 
     @Test
     fun theCsvPreflightRendersTheFormulaRiskRow() {
-        // ExportCsv.warnings() computes formulaRisk for every export; the dialog is the ONLY
-        // place a user can ever learn about it (the writer deliberately mangles nothing).
+        // ExportCsv.warnings() computes the formula cells for every export; the dialog is the ONLY
+        // place a user can ever learn about them (the writer deliberately mangles nothing).
+        // A14 (F6): by CELL — "Password of “…”", our field label before the attacker-chosen name.
         assertTrue(
-            mainActivity.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)"),
-            "the CSV preflight must enumerate the formula-risk items beside its five sibling categories",
+            mainActivity.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))"),
+            "the CSV preflight must enumerate the formula-risk cells beside its five sibling categories",
         )
+    }
+
+    @Test
+    fun theFormulaWarningIsARequiredAcknowledgement() {
+        // A14 (F6): the warning used to be advisory, with "Choose where to save" enabled beside it.
+        // The button now waits for the acknowledgement, which is bound to the cells it was ticked for.
+        assertTrue(
+            mainActivity.contains("ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)"),
+            "the save button must be gated on the formula acknowledgement",
+        )
+        assertTrue(mainActivity.contains("formulaAcked = if (on) pre.warnings.formulaCells else null"), "the tick records exactly the cells shown")
+        assertTrue(mainActivity.contains("Text(ExportCsv.FORMULA_ACK"), "the acknowledgement sentence is the shared canon's")
     }
 
     // ---- H23 (audit 2026-09-13) ----

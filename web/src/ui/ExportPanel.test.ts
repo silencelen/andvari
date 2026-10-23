@@ -99,23 +99,50 @@ describe("backup container carries the policy KDF params", () => {
 describe("F08 — the formula-risk bucket reaches the CSV screen", () => {
   const panel = readFileSync(fileURLToPath(new URL("./ExportPanel.tsx", import.meta.url)), "utf8");
 
-  it("the sentence and the names are both rendered, in the CSV branch", () => {
-    expect(panel).toContain("{warnings.formulaRisk.length > 0 && (");
-    expect(panel).toContain("{CSV_FORMULA_WARNING} {warnings.formulaRisk.join(\", \")}.");
+  it("the sentence and the cells are both rendered, in the CSV branch", () => {
+    expect(panel).toContain("{warnings.formulaCells.length > 0 && (");
+    expect(panel).toContain("{CSV_FORMULA_WARNING}");
+    expect(panel).toContain("warnings.formulaCells.map((cell, i) => <li key={i}>{formulaCellLabel(cell)}</li>)");
     expect(panel).toContain('CSV_FORMULA_WARNING,'); // …and actually imported, not just referenced
   });
 
   it("it is drawn like the other five buckets, so it can't be styled out of existence", () => {
-    // Every bucket is the same `msg info` block; count them to catch a sixth that was added as a
-    // comment, a console.log, or a differently-shaped element nobody notices.
     const csvBranch = panel.slice(panel.indexOf("{/* §1 loss enumeration"), panel.indexOf("The spec 06 plaintext warning"));
-    for (const bucket of ["noteItems", "cardItems", "withAttachments", "extraUris", "emptyUsernameAndPassword", "formulaRisk"]) {
+    for (const bucket of ["noteItems", "cardItems", "withAttachments", "extraUris", "emptyUsernameAndPassword"]) {
       expect(csvBranch, `${bucket} is not enumerated on screen`).toContain(`warnings.${bucket}.join(", ")`);
     }
+    expect(csvBranch).toContain("warnings.formulaCells.map(");
     expect(csvBranch.match(/warnings\.\w+\.length > 0 && \(/g) ?? []).toHaveLength(6);
   });
 
   it("the names are enumerated, never counted (spec 07 §1)", () => {
     expect(panel).not.toContain("warnings.formulaRisk.length}");
+    expect(panel).not.toContain("warnings.formulaCells.length}");
+  });
+});
+
+/**
+ * Security review 2026-10, A14 (F6): the formula warning was advisory — Download stayed enabled
+ * beside it. It is now a required acknowledgement like the plaintext checkbox, bound to the cells
+ * on screen (a vault re-included afterwards needs a fresh one), and runCsv re-checks the gate.
+ */
+describe("A14 — the formula warning gates Download", () => {
+  const panel = readFileSync(fileURLToPath(new URL("./ExportPanel.tsx", import.meta.url)), "utf8");
+
+  it("the button and the write both go through csvDownloadAllowed", () => {
+    expect(panel).toContain("const downloadAllowed = csvDownloadAllowed({ plaintextAck, loginCount, cells: warnings.formulaCells, formulaAcked });");
+    expect(panel).toContain("disabled={!downloadAllowed}");
+    const run = panel.slice(panel.indexOf("const runCsv = () => {"), panel.indexOf("writeCsv(", panel.indexOf("const runCsv = () => {")));
+    expect(run).toContain("if (!downloadAllowed) return;");
+  });
+
+  it("the acknowledgement is a checkbox that records exactly the cells it was given for", () => {
+    expect(panel).toContain("checked={formulaAckSatisfied(warnings.formulaCells, formulaAcked) && warnings.formulaCells.length > 0}");
+    expect(panel).toContain("onChange={(e) => setFormulaAcked(e.target.checked ? warnings.formulaCells : null)}");
+    expect(panel).toContain("{CSV_FORMULA_ACK}");
+  });
+
+  it("the no-mangling decision is stated where the write happens", () => {
+    expect(panel).toMatch(/verbatim[\s\S]{0,400}another password manager[\s\S]{0,200}corrupt/);
   });
 });

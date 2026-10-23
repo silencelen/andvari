@@ -7,11 +7,16 @@ import {
   type AttachmentSection,
   type BackupAttachmentEntry,
   type BackupPayload,
+  CSV_FORMULA_ACK,
   CSV_FORMULA_WARNING,
+  type FormulaCell,
   MAX_KDF_MEM_BYTES,
   MAX_KDF_OPS,
   buildBackup,
+  csvDownloadAllowed,
   csvWarnings,
+  formulaAckSatisfied,
+  formulaCellLabel,
   openBackup,
   writeCsv,
 } from "../export/export";
@@ -249,12 +254,20 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
   // ---- CSV (spec 07 §1) ----
   const warnings = useMemo(() => csvWarnings(orderedItems.map((it) => it.doc)), [orderedItems]);
   const [plaintextAck, setPlaintextAck] = useState(false);
+  // A14 (F6): the cells the user acknowledged, exactly as shown. A vault re-included afterwards
+  // brings new cells, and formulaAckSatisfied then asks again.
+  const [formulaAcked, setFormulaAcked] = useState<FormulaCell[] | null>(null);
   const loginCount = orderedItems.filter((it) => it.doc.type === "login").length;
+  const downloadAllowed = csvDownloadAllowed({ plaintextAck, loginCount, cells: warnings.formulaCells, formulaAcked });
 
   const runCsv = () => {
+    if (!downloadAllowed) return; // the button's gate, re-checked where the file is written
     setErr("");
     try {
       keepAutoLockAlive();
+      // Every cell is written verbatim, formula characters included. A CSV export is input for
+      // another password manager, and a ' prefix would corrupt a real password that starts with
+      // = + - or @ there; the acknowledged warning above is the control instead.
       const csv = writeCsv(orderedItems.map((it) => it.doc));
       const filename = exportFilename("csv");
       // UTF-8, no BOM (spec 07 §1) — encode explicitly rather than trusting Blob string handling.
@@ -438,12 +451,25 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
                 </div>
               )}
               {/* Audit F08, the sixth bucket: the writer deliberately does NOT mangle a leading
-                  =+-@ (that would corrupt real secrets, in any column), and this sentence is the
-                  compensating control that bargain assumes exists. csvWarnings has computed the
-                  names since the writer shipped; nothing rendered them. */}
-              {warnings.formulaRisk.length > 0 && (
+                  =+-@ (that would corrupt real secrets, in any column), and this warning is the
+                  compensating control that bargain assumes exists. A14 (F6): it names each CELL
+                  ("Password of “…”" — our field label first, the attacker-chosen item name quoted
+                  on one line after it) and it is a required acknowledgement, like the plaintext
+                  checkbox: Download stays disabled until it is ticked for exactly these cells. */}
+              {warnings.formulaCells.length > 0 && (
                 <div className="msg info" style={{ display: "block" }}>
-                  {CSV_FORMULA_WARNING} {warnings.formulaRisk.join(", ")}.
+                  {CSV_FORMULA_WARNING}
+                  <ul>
+                    {warnings.formulaCells.map((cell, i) => <li key={i}>{formulaCellLabel(cell)}</li>)}
+                  </ul>
+                  <label className="check" style={{ margin: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={formulaAckSatisfied(warnings.formulaCells, formulaAcked) && warnings.formulaCells.length > 0}
+                      onChange={(e) => setFormulaAcked(e.target.checked ? warnings.formulaCells : null)}
+                    />
+                    {CSV_FORMULA_ACK}
+                  </label>
                 </div>
               )}
               <div className="msg info" style={{ display: "block" }}>
@@ -465,7 +491,7 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
 
               {err && <Msg kind="err">{err}</Msg>}
               <div className="actions">
-                <button type="button" className="primary" disabled={!plaintextAck || loginCount === 0} onClick={runCsv}>
+                <button type="button" className="primary" disabled={!downloadAllowed} onClick={runCsv}>
                   Download {loginCount} {loginCount === 1 ? "login" : "logins"} as CSV
                 </button>
                 <div className="spacer" />

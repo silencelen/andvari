@@ -3211,10 +3211,14 @@ private fun ExportVaultRows(vaults: List<ExportVault>, selected: Set<String>, on
 
 @Composable
 private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
+    // A14 (F6): the formula cells the user acknowledged, exactly as shown — re-including a vault
+    // brings new cells, and formulaAckSatisfied then asks again.
+    var formulaAcked by remember { mutableStateOf<List<ExportCsv.FormulaCell>?>(null) }
+    val canSave = !ui.busy && pre.loginCount > 0 && ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)
     AlertDialog(
         onDismissRequest = { if (!ui.busy) vm.csvDismiss() },
         confirmButton = {
-            TextButton(onClick = onChooseDestination, enabled = !ui.busy && pre.loginCount > 0) { Text("Choose where to save") }
+            TextButton(onClick = { if (canSave) onChooseDestination() }, enabled = canSave) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = vm::csvDismiss, enabled = !ui.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
@@ -3245,11 +3249,22 @@ private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPrefli
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
-                // Audit F08: the writer deliberately never mangles a leading =+-@ (mangling would
-                // corrupt real secrets), so THIS row is the compensating control — the warning was
-                // computed and then rendered nowhere. Same NamedSkips shape as its five siblings;
-                // the sentence itself is the shared canon's, byte-equal with web's.
-                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)
+                // Audit F08: the writer deliberately never mangles a leading =+-@ (a CSV export is
+                // input for another password manager, and a ' prefix would corrupt a real password),
+                // so THIS row is the compensating control. A14 (F6): it names each CELL ("Password
+                // of “…”", our label before the attacker-chosen name) and it is a required
+                // acknowledgement: "Choose where to save" waits for the tick below.
+                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))
+                if (pre.warnings.formulaCells.isNotEmpty()) {
+                    val acked = ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)
+                    Row(
+                        Modifier.toggleable(value = acked, role = Role.Checkbox, onValueChange = { on -> formulaAcked = if (on) pre.warnings.formulaCells else null }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(acked, onCheckedChange = null)
+                        Text(ExportCsv.FORMULA_ACK, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Reimporting a CSV collapses exact duplicates.",
