@@ -1565,7 +1565,7 @@ async function renderServerOrigin(): Promise<void> {
   // an anti-phishing display.
   const origin = info && typeof info.url === "string" && info.url && !info.block ? info.url : null;
   if (origin === null) {
-    const why = info?.block ? "No server confirmed yet" : "Server unknown";
+    const why = info?.block?.kind === "confirm" ? "No server confirmed yet" : "Server unknown";
     node.textContent = why;
     node.title = why;
     node.setAttribute("role", "note");
