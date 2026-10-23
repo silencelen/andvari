@@ -96,6 +96,9 @@ jobs:
       # crypto proof (crypto.vectors.test.ts) and its entire signed-update suite. Mirror the gate's
       # two floors here, set well under the current counts so they catch a suite that VANISHED, not
       # one that was pruned. Keep these in step with scripts/verify.sh when either moves.
+      # The count is read from the TAP summary line (`# pass N`), so `npm test` pins
+      # `--test-reporter=tap`: newer Node prints its spec reporter even when piped, and this floor
+      # then read 0 on every run (red from 2026-10-20 with all tests passing).
       - name: Tests (with the collected-nothing floors verify.sh uses)
         working-directory: extension
         run: |
