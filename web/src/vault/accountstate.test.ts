@@ -10,8 +10,9 @@ import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
+import { decideRemoval, removeProof } from "../crypto/lifecycleproof";
 import { Account } from "./account";
-import { type AccountStateDoc, AccountStateError, type Contact, decodeAccountState, emptyAccountState, encodeAccountState, mergeAccountState, withContact, withoutContact } from "./accountstate";
+import { type AccountStateDoc, AccountStateError, type Contact, decodeAccountState, emptyAccountState, encodeAccountState, mergeAccountState, withConsumedNonces, withContact, withoutContact } from "./accountstate";
 import { AccountStateSync, memoryClientState } from "./accountstatesync";
 
 /**
@@ -168,3 +169,42 @@ describe("A13 (security review 2026-10, q23): a human unpin / re-pin wins the me
   });
 });
 
+describe("A13 review RF3: a consumed nonce keeps the EARLIEST time any device recorded for it", () => {
+  const me = "33333333-3333-4333-8333-333333333333";
+  const vault = "66666666-6666-4666-8666-666666666666";
+  const doc = (seq: number, list: Array<[string, number]>): AccountStateDoc => ({ ...emptyAccountState(me), seq, consumedNonces: { [vault]: list } });
+  beforeAll(async () => {
+    await initSodium();
+  });
+
+  it("withConsumedNonces keeps the earlier time for a repeated nonce, whichever side holds it", () => {
+    expect(withConsumedNonces(doc(1, [["v1-nonce-a", 100]]), { [vault]: [["v1-nonce-a", 5_000], ["v1-nonce-c", 200]] }).consumedNonces[vault]).toEqual([
+      ["v1-nonce-c", 200],
+      ["v1-nonce-a", 100],
+    ]);
+    expect(withConsumedNonces(doc(1, [["v1-nonce-a", 5_000]]), { [vault]: [["v1-nonce-a", 100]] }).consumedNonces[vault]).toEqual([["v1-nonce-a", 100]]);
+  });
+
+  it("a later re-recording on another device cannot launder a replayed v1 removal into the window", async () => {
+    // D consumed the v1 nonce at t=1_000; another device later wrote it again at t=50_000_000 (an N-1 build's
+    // already_recorded, or its own valid_legacy). A device that saw the vault go live again at t=40_000_000 is shown
+    // the proof replayed: the record's time is the only time a v1 proof has, so it must still be D's.
+    const key = randomBytes(32);
+    const nonce = "v1-nonce-a";
+    for (const [local, served] of [
+      [doc(3, [[nonce, 1_000]]), doc(4, [[nonce, 50_000_000]])],
+      [doc(4, [[nonce, 50_000_000]]), doc(3, [[nonce, 1_000]])],
+    ] as const) {
+      const merged = mergeAccountState(me, local, served, 0).doc;
+      const at = new Map(merged.consumedNonces[vault]!.map(([n, t]) => [n, t] as const));
+      expect(at.get(nonce)).toBe(1_000);
+      const d = await decideRemoval({
+        lifecycleKey: key, vaultId: vault, myUserId: me, reason: "removed", proofV: 1,
+        proof: await removeProof(key, vault, me, nonce), nonce,
+        consumed: new Set(), consumedAccount: new Set(at.keys()), consumedAccountAt: at, liveSince: 40_000_000, now: 50_000_100,
+      });
+      expect(d.verdict).toBe("anomaly");
+      expect(d.step).toBe("window");
+    }
+  });
+});

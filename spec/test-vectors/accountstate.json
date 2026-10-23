@@ -3,7 +3,7 @@
     "Security review 2026-10, root cause A §4.2 (branch A5). Hand-authored: blobs from an INDEPENDENT oracle (@noble/ciphers XChaCha20-Poly1305, fixed nonces); merge expectations written from the spec text (core AccountState.merge / web mergeAccountState must equal them).",
     "open: sampleBlob opens under uvkB64 with AD 'andvari/v1|account-state|{userId}' to the document `sample`. rejectOpen rows MUST fail to open for `userId` (another user's slot; another key = an injected blob).",
     "rejectDecode: plaintexts that open fine but are NOT a v1 document for userId; every engine MUST refuse them.",
-    "merge(local, served, highWater) → {doc, rollback}: contacts union by userId, newest verifiedAt wins (tie: smaller identityPub string); tombstones union max, a tombstone >= verifiedAt removes the pin; orgRecoveryFp from the higher seq (local on tie/rollback); nonces union per vault keeping the max issuedAt, newest 256 by (issuedAt desc, nonce asc); seq = max(local, served, highWater, 0). rollback = served below highWater, or served withheld once highWater > 0. Contacts compared sorted by userId; maps compared as sets of entries.",
+    "merge(local, served, highWater) → {doc, rollback}: contacts union by userId, newest verifiedAt wins (tie: smaller identityPub string); tombstones union max, a tombstone >= verifiedAt removes the pin; orgRecoveryFp from the higher seq (local on tie/rollback); nonces union per vault keeping the EARLIEST time for a repeated nonce (min; A13 review RF3: a later re-recording on another device must never move a consumption forward into a window), newest 256 by (time desc, nonce asc); seq = max(local, served, highWater, 0). rollback = served below highWater, or served withheld once highWater > 0. Contacts compared sorted by userId; maps compared as sets of entries.",
     "A6b (security review 2026-10, branch A6b): issuedGrants union by (vaultId, userId), newest `at` wins (tie: the smaller keyHash), and an issuedTombstones entry (key \"<vaultId>|<userId>\") not older than the entry removes it; ownedVaults union (max), an ownedTombstones entry not older removes it. Like contacts, a rollback or a withheld blob never shrinks either: both copies are UVK-authenticated and the local one is kept. Documents without these keys decode with them empty.",
     "A9 (security review 2026-10, branch A9): `personal` = {vaultId, at} is the account's own personal-vault designation (written on register, on the migration choice, on a re-designation and on an accepted change). Tombstone-free: the entry with the newest `at` wins on merge (tie: the smaller vaultId), a rollback or a withheld blob never revives an older one, and a document without the key reads it as absent (null). vaultId MUST be a uuid, at MUST be a non-negative integer, no other keys.",
     "A11 (security review 2026-10, q00): a contact MAY carry `email`, the address the human typed when running the ceremony, already normalised (trimmed, lowercase, one '@', no whitespace or control characters, at most 320 chars); a malformed one is refused (rejectDecode contact-email-*). It rides its pin whole through the merge (the newer pin wins, with or without an email) and is omitted while absent, so a pre-A11 document is byte-identical."
@@ -651,7 +651,7 @@
       }
     },
     {
-      "name": "nonce-union-max-and-cap-256",
+      "name": "nonce-union-earliest-and-cap-256",
       "local": {
         "v": 1,
         "userId": "33333333-3333-4333-8333-333333333333",
@@ -1038,7 +1038,6 @@
           "orgRecoveryFp": null,
           "consumedNonces": {
             "55555555-5555-4555-8555-555555555555": [
-              ["n150", 1000],
               ["n299", 299],
               ["n298", 298],
               ["n297", 297],
@@ -1188,6 +1187,7 @@
               ["n153", 153],
               ["n152", 152],
               ["n151", 151],
+              ["n150", 150],
               ["n149", 149],
               ["n148", 148],
               ["n147", 147],
@@ -2072,6 +2072,63 @@
           "contactTombstones": {},
           "orgRecoveryFp": null,
           "consumedNonces": {}
+        }
+      }
+    },
+    {
+      "name": "a13-nonce-repeat-keeps-the-earliest-consumption",
+      "local": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 3,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {
+          "66666666-6666-4666-8666-666666666666": [
+            ["v1-nonce-a", 100]
+          ],
+          "77777777-7777-4777-8777-777777777777": [
+            ["v1-nonce-b", 7000]
+          ]
+        }
+      },
+      "served": {
+        "v": 1,
+        "userId": "33333333-3333-4333-8333-333333333333",
+        "seq": 4,
+        "contacts": [],
+        "contactTombstones": {},
+        "orgRecoveryFp": null,
+        "consumedNonces": {
+          "66666666-6666-4666-8666-666666666666": [
+            ["v1-nonce-a", 5000],
+            ["v1-nonce-c", 200]
+          ],
+          "77777777-7777-4777-8777-777777777777": [
+            ["v1-nonce-b", 300]
+          ]
+        }
+      },
+      "highWater": 3,
+      "expected": {
+        "rollback": false,
+        "doc": {
+          "v": 1,
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "seq": 4,
+          "contacts": [],
+          "contactTombstones": {},
+          "orgRecoveryFp": null,
+          "consumedNonces": {
+            "66666666-6666-4666-8666-666666666666": [
+              ["v1-nonce-c", 200],
+              ["v1-nonce-a", 100]
+            ],
+            "77777777-7777-4777-8777-777777777777": [
+              ["v1-nonce-b", 300]
+            ]
+          }
         }
       }
     }
