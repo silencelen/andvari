@@ -2,9 +2,22 @@ import { ApiClient, LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
 import { idbSupported, openVaultCache, vaultDbName } from "../vault/idbcache";
 
 /**
- * Non-secret session metadata persisted across reloads. Tokens are here too (MVP);
- * the vault KEY is NEVER persisted — a reload always re-prompts for the master
- * password (spec 01 §8: web has no quick-unlock).
+ * The session: non-secret metadata persisted across reloads, plus the token pair. The vault KEY is
+ * NEVER persisted — a reload always re-prompts for the master password (spec 01 §8: web has no
+ * quick-unlock).
+ *
+ * WHERE THE TOKENS LIVE (security review 2026-10, A14 F5 — owner decision: "a browser not opted
+ * into the offline copy keeps no token once locked"):
+ *  - offline copy ON for this user on this browser ({@link webCacheEnabled}): today's behaviour —
+ *    the pair rides the localStorage session, shared by every tab (the F25 Web Lock + re-read
+ *    keeps their rotations from colliding);
+ *  - otherwise: localStorage keeps the metadata only (`tokens: null` — its REMOVAL is the F27
+ *    cross-tab sign-out signal), and each TAB holds its own pair in sessionStorage
+ *    ({@link TAB_TOKENS_KEY}). A tab with no pair signs in (a new device session of its own, so tabs
+ *    never share one rotating refresh token); a lock revokes the tab's pair and drops it (App).
+ * {@link saveSession} places the pair by that rule every time it writes, so a toggle of the offline
+ * copy moves it at once ({@link setOfflineCopyEnabled}, {@link applyOrgOfflineCachePolicy}), and
+ * {@link migrateLegacySessionTokens} moves a pre-A14 pair off disk at load.
  */
 export interface Session {
   baseUrl: string;
@@ -20,23 +33,177 @@ export interface Session {
 export const SESSION_STORAGE_KEY = "andvari.session";
 const KEY = SESSION_STORAGE_KEY;
 
-export function loadSession(): Session | null {
-  const raw = localStorage.getItem(KEY);
+/** This tab's token slot in sessionStorage (A14 F5): `{ tabId, userId, tokens }`. Per tab, never on
+ *  disk — but browsers COPY sessionStorage into a duplicated tab, hence {@link claimTabTokens}. */
+export const TAB_TOKENS_KEY = "andvari.tabTokens";
+
+interface TabSlot {
+  tabId: string;
+  userId: string;
+  tokens: Tokens;
+}
+
+function ssGet(key: string): string | null {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function ssSet(key: string, value: string): void {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    /* storage unreachable: the pair then lives only in this tab's memory (the ApiClient) */
+  }
+}
+function ssRemove(key: string): void {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    /* storage unreachable */
+  }
+}
+
+function readSlot(): TabSlot | null {
+  const raw = ssGet(TAB_TOKENS_KEY);
   if (!raw) return null;
   try {
-    const s = JSON.parse(raw) as Session;
-    return { ...s, isAdmin: !!s.isAdmin }; // sessions saved before P4 lack the field
+    const s = JSON.parse(raw) as Partial<TabSlot>;
+    const t = s.tokens as Partial<Tokens> | undefined;
+    if (typeof s.tabId !== "string" || typeof s.userId !== "string" || typeof t?.accessToken !== "string" || typeof t.refreshToken !== "string") return null;
+    return { tabId: s.tabId, userId: s.userId, tokens: { accessToken: t.accessToken, refreshToken: t.refreshToken } };
   } catch {
     return null;
   }
 }
 
+/** Drop this tab's pair (a per-tab lock, a sign-out). */
+export function clearTabTokens(): void {
+  ssRemove(TAB_TOKENS_KEY);
+}
+
+/** True when a lock keeps this user's tokens (the offline copy is on): today's behaviour. */
+export function tokensKeptAcrossLock(userId: string): boolean {
+  return webCacheEnabled(userId);
+}
+
+// ---- duplicated-tab guard ----
+// The id of the tab slot this document has claimed (holds the Web Lock for). Document-lifetime state.
+let claimedTabId: string | null = null;
+
+type LockManagerLike = {
+  request(name: string, options: { signal?: AbortSignal; ifAvailable?: boolean }, callback: (lock: unknown) => unknown): Promise<unknown>;
+};
+function lockManager(): LockManagerLike | null {
+  const l = typeof navigator !== "undefined" ? (navigator as { locks?: LockManagerLike }).locks : undefined;
+  return l && typeof l.request === "function" ? l : null;
+}
+const tabLockName = (tabId: string): string => `andvari-tab-${tabId}`;
+
+/** Hold `andvari-tab-<tabId>` for the rest of this document's life (the callback never settles). */
+function holdTabLock(locks: LockManagerLike, tabId: string, signal?: AbortSignal): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    locks
+      .request(tabLockName(tabId), { signal }, () => {
+        resolve(true);
+        return new Promise(() => {});
+      })
+      .catch(() => resolve(false));
+  });
+}
+
+/**
+ * Boot (A14 F5): is this tab's slot its own, or a COPY? Chrome's and Firefox's "Duplicate tab" (and a
+ * window.open that keeps the opener) copy sessionStorage, pair included, and two tabs spending one
+ * single-use refresh token trip the server's reuse heuristic, which revokes the whole device. Each
+ * tab with a slot holds a Web Lock named after its tab id for its lifetime; at boot this tab waits a
+ * moment (a reloading tab's previous document releases its lock on unload) for its slot's lock. A
+ * tab that cannot get it is a copy: it drops the copied pair and signs in on its own. Without Web
+ * Locks a copy cannot be told from a reload, and the slot is kept (residual, spec 05 A14).
+ */
+export async function claimTabTokens(opts: { waitMs?: number } = {}): Promise<void> {
+  const slot = readSlot();
+  if (!slot || claimedTabId === slot.tabId) return;
+  const locks = lockManager();
+  if (!locks) return;
+  const waitMs = opts.waitMs ?? 1500;
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(waitMs) : undefined;
+  if (await holdTabLock(locks, slot.tabId, signal)) {
+    claimedTabId = slot.tabId;
+  } else {
+    clearTabTokens();
+  }
+}
+
+/** Test seam: forget this document's claim (a fresh document, as far as the module is concerned). */
+export function resetTabClaim(): void {
+  claimedTabId = null;
+}
+
+/** The tab id this document's slot is written under, claiming a fresh one (and its lock) if needed. */
+function ownTabId(): string {
+  if (claimedTabId) return claimedTabId;
+  const id = crypto.randomUUID();
+  const locks = lockManager();
+  if (locks) void holdTabLock(locks, id);
+  claimedTabId = id;
+  return id;
+}
+
+function readPersisted(): Session | null {
+  const raw = localStorage.getItem(KEY);
+  if (!raw) return null;
+  try {
+    const s = JSON.parse(raw) as Session;
+    return { ...s, isAdmin: !!s.isAdmin, tokens: s.tokens ?? null }; // sessions saved before P4 lack isAdmin
+  } catch {
+    return null;
+  }
+}
+
+export function loadSession(): Session | null {
+  const meta = readPersisted();
+  if (!meta) return null;
+  if (tokensKeptAcrossLock(meta.userId)) return meta; // offline copy ON: today's behaviour
+  // Per-tab: only THIS tab's own pair, and only for the account the metadata names — another
+  // tab may have signed a different member in since this tab wrote its slot.
+  const slot = readSlot();
+  return { ...meta, tokens: slot && slot.userId === meta.userId ? slot.tokens : null };
+}
+
 export function saveSession(s: Session): void {
-  localStorage.setItem(KEY, JSON.stringify(s));
+  if (tokensKeptAcrossLock(s.userId)) {
+    localStorage.setItem(KEY, JSON.stringify(s));
+    clearTabTokens();
+    return;
+  }
+  localStorage.setItem(KEY, JSON.stringify({ ...s, tokens: null }));
+  if (s.tokens) ssSet(TAB_TOKENS_KEY, JSON.stringify({ tabId: ownTabId(), userId: s.userId, tokens: s.tokens } satisfies TabSlot));
+  else clearTabTokens();
 }
 
 export function clearSession(): void {
   localStorage.removeItem(KEY);
+  clearTabTokens();
+}
+
+/**
+ * A14 F5 migration, at load: a pre-A14 session carrying its pair in localStorage on a browser that
+ * does not keep the offline copy has the pair moved off disk at once — into this tab's slot, unless
+ * this tab already holds its own pair for that account (then the disk copy is simply dropped).
+ */
+export function migrateLegacySessionTokens(): void {
+  const meta = readPersisted();
+  if (!meta?.tokens || tokensKeptAcrossLock(meta.userId)) return;
+  const own = readSlot();
+  saveSession({ ...meta, tokens: own && own.userId === meta.userId ? own.tokens : meta.tokens });
+}
+
+/** Re-place the persisted pair after the offline-copy gate changed (A14 F5). [before] is the session
+ *  as read under the OLD placement. */
+function rehomeSessionTokens(before: Session | null, userId: string | null): void {
+  if (before && userId !== null && before.userId === userId) saveSession(before);
 }
 
 /**
@@ -211,14 +378,18 @@ export function ensureCachePersistenceRequested(): void {
  *    store keeps its current cache shape.
  */
 export async function setOfflineCopyEnabled(userId: string, enabled: boolean): Promise<void> {
+  // A14 F5: the session's pair follows the gate — read it under the OLD placement, re-place it after.
+  const before = loadSession();
   if (!enabled) {
     lsSet(CACHE_OPT_OUT_KEY, String(Date.now()));
     lsRemove(cacheOptInKey(userId));
+    rehomeSessionTokens(before, userId); // off disk, into this tab, before the wipe's await
     await wipeVaultCache(userId);
     return;
   }
   lsRemove(CACHE_OPT_OUT_KEY);
   lsSet(cacheOptInKey(userId), String(Date.now()));
+  rehomeSessionTokens(before, userId);
   await requestCachePersistence();
 }
 
@@ -287,11 +458,14 @@ export function declineCacheNudge(): void {
  * ClientPolicy fetch.
  */
 export async function applyOrgOfflineCachePolicy(allowed: boolean, userId: string | null): Promise<void> {
+  const before = loadSession(); // A14 F5: the pair follows the gate, like the device toggle
   if (allowed) {
     lsRemove(ORG_CACHE_OFF_KEY);
+    rehomeSessionTokens(before, userId);
     return;
   }
   lsSet(ORG_CACHE_OFF_KEY, String(Date.now()));
+  rehomeSessionTokens(before, userId);
   if (userId) await wipeVaultCache(userId);
 }
 

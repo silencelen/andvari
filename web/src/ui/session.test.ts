@@ -1,3 +1,4 @@
+import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
 import { loadSession, makeClient, revokeSessionBestEffort, saveSession, type Session } from "./session";
@@ -46,8 +47,14 @@ const jsonResp = (status: number, body: unknown): Response =>
   }) as unknown as Response;
 
 describe("makeClient same-user token guards", () => {
+  // These guards are about a pair SHARED by every tab through localStorage, which since A14 (F5) is
+  // the placement only while the offline copy is on for the user; without it each tab holds its
+  // own pair (session.tokens.test.ts) and there is no shared pair to adopt or overwrite.
   beforeEach(() => {
     vi.stubGlobal("localStorage", fakeStorage());
+    vi.stubGlobal("sessionStorage", fakeStorage());
+    (globalThis as { indexedDB?: IDBFactory }).indexedDB = new FakeIDBFactory() as unknown as IDBFactory;
+    for (const u of ["user-x", "user-y"]) localStorage.setItem(`andvari.cacheOptIn.${u}`, "1");
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -146,6 +153,7 @@ describe("makeClient same-user token guards", () => {
 describe("revokeSessionBestEffort — sign-out revocation", () => {
   beforeEach(() => {
     vi.stubGlobal("localStorage", fakeStorage());
+    vi.stubGlobal("sessionStorage", fakeStorage()); // A14 (F5): without the offline copy the pair lives here
   });
   afterEach(() => {
     vi.unstubAllGlobals();
