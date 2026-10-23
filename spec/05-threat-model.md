@@ -336,7 +336,8 @@ the tag and the pin. The layer aimed at that is held by the workstation: the com
 signed, recorded outside the repo and moved only after `prestige-release.ps1` succeeded and `bundle.json` records the
 pin. Before any of the tree's code runs, the release commit must descend from it; a stat, the commits and then the
 full diff since it are printed, every line taken from git escaped (C0, DEL, C1, the line separators and the bidi
-controls; A14 review R2-2) and read as bytes split at LF alone, so a CR cannot fake a commit line or a diff header (A14
+controls; A14 review R2-2; the invisible and space-like characters, a byte that is not UTF-8 as `\xNN`, and lines cut
+at 400 characters on screen, whole in a review copy; A14 review 5) and read as bytes split at LF alone, so a CR cannot fake a commit line or a diff header (A14
 review 3); the tree is checked out and must then be clean and byte-identical to the commit where the review covers it;
 and the operator types the version; a run with no human at a console fails closed before anything is checked out.
 **The review is default-include** (A14 review 3, C1): every changed path except a short explicit list of trees that
@@ -355,9 +356,15 @@ reason to stop. Not covered: the third-party artifacts gradle downloads (only th
 for Windows pages through `less -R`, which passes SGR), with `--text --no-textconv --no-ext-diff --no-color`, so neither
 the box's diff settings nor any attribute file can hide, rewrite or recolour a change (C2). **The checkout** runs with
 `core.hooksPath` pointed at an empty directory, no fsmonitor hook and the LFS smudge off, and afterwards every file the
-review covers must hash with no filter (`git hash-object --no-filters`) to what the index holds, allowing only the CRLF
-git's own Windows checkout writes; a symlink or submodule there is refused. That closes a system LFS filter writing
-unreviewed LFS content for a pointer while `git status` stays clean, and any other filter's output (C3). Every way out
+review covers must hash with no filter to what the index holds (hashed by `signandvari` itself since A14 review 5, H1:
+`git hash-object --stdin-paths` read its paths from a pipeline, which a UTF-8 `$OutputEncoding` on Windows PowerShell
+5.1 starts with a byte-order mark), allowing only the CRLF git's own Windows checkout writes, and only for a blob git
+would convert (no NUL, no CR; S4); a symlink or submodule there is refused. That closes a system LFS filter writing
+unreviewed LFS content for a pointer while `git status` stays clean, and any other filter's output (C3). Every git
+command blanks the LFS clean, smudge and process filters, and from the checkout on reads no attributes from the release
+tree where git has `--attr-source` (2.42+). A reviewed PowerShell file with a byte above 0x7F and no byte-order mark
+(5.1 reads it in the ANSI code page, where 0x91-0x94 are quotes) and a reviewed text file with a CR that no LF follows
+(a line break to Kotlin, Java and PowerShell, not to the review) are refused (A14 review 5, S1, S2). Every way out
 between the checkout and the confirmation (a refusal, a failed git command, Ctrl+C) puts HEAD back, in a `finally`
 (C5); closing the window does not. `prestige-release.ps1` deletes and rebuilds the update-signer jar from the tree on
 every real run, so the jar handed the key is that commit's, not one an earlier build left (A14 review 3). What the

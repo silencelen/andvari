@@ -112,7 +112,14 @@ code runs (dry runs included) it:
    controls print as `\u001B`-style text, so neither a commit subject nor a changed line can move
    the cursor or redraw what is above it on a VT console; A14 review R2-2), and read from git as
    bytes split at LF alone, so a CR cannot start a fake commit line or a fake `diff --git` header
-   either (A14 review 3).
+   either (A14 review 3). Since A14 review 5 the characters that print as nothing or as a plain
+   space are escaped too (zero-width space and joiners, word joiner, `U+FEFF`, the soft hyphen, the
+   Hangul fillers that are valid inside an identifier, variation selectors, tag characters as
+   `\U000E00xx`, non-ASCII spaces); a byte that is not UTF-8 prints as `\xNN`, and a real `U+FFFD`
+   as `\uFFFD`, so a replacement character never hides which byte was there. **No line on screen is
+   longer than 400 characters:** a longer one is cut at a `<<CAPPED: 400 of N characters shown …>>`
+   marker, the number of cut lines is printed before and after the diff, and the review copy (below)
+   holds every line whole — read a cut line there.
    **What it shows (A14 review 3, C1): every changed path**, except the files under a short list of
    trees that never run on the signing box — `app-android/` (the phone app), `web/` and
    `extension/` (browser code, built on the build host; here it runs only inside a browser),
@@ -138,19 +145,39 @@ code runs (dry runs included) it:
    `git diff --text --no-textconv --no-ext-diff --no-color`, so neither this box's diff settings nor
    any attribute file can turn a file into "Binary files differ", rewrite it or colour it. It pages
    one console height at a time in PowerShell (Enter: next page, `a`: the rest, `q`: stop reading) —
-   never through an external pager — and the same escaped text is saved as
+   never through an external pager — counting the console rows a line wraps to, not lines (A14
+   review 5), so a page cannot scroll its own top away; and the same escaped text — the stat, the
+   commits and the diff, every line whole — is saved as
    `%LOCALAPPDATA%\andvari\signandvari-review-<commit>.txt` for reading in Notepad. Do not read the
    change with a plain `git diff` instead: Git for Windows pages it through `less -R`, which passes
    colour sequences that can hide text, and it honours the tree's attributes;
-4. checks the tree out with **no hook** (`core.hooksPath` is an empty directory for the checkout,
-   whatever the repo config names), no fsmonitor hook and **no LFS smudge** (`GIT_LFS_SKIP_SMUDGE=1`,
-   the LFS filter blanked): Git for Windows installs a system LFS filter, and a tree whose
-   `.gitattributes` says `filter=lfs` would otherwise have LFS content nobody reviewed written for a
-   pointer, while `git status` stays clean. It then refuses unless `git status --porcelain` is empty
-   **and** every file the review covers is, byte for byte, what git holds for it (`git hash-object
-   --no-filters` against `git ls-files -s`; A14 review 3, C3). The one difference allowed is the CRLF
-   git's own end-of-line conversion writes on a Windows checkout (`core.autocrlf=true`, the Git for
-   Windows default). A symlink or a submodule among those paths is refused;
+4. checks the tree out with **no hook** (`core.hooksPath` is an empty directory for every git command
+   it runs, whatever the repo config names), no fsmonitor hook and **no LFS filter**
+   (`GIT_LFS_SKIP_SMUDGE=1` for the checkout; `filter.lfs.clean`, `.smudge` and `.process` blanked
+   for every git command, so `git status` after the checkout cannot run `git-lfs clean` either; A14
+   review 5): Git for Windows installs a system LFS filter, and a tree whose `.gitattributes` says
+   `filter=lfs` would otherwise have LFS content nobody reviewed written for a pointer, while
+   `git status` stays clean. **From the checkout on, the release tree's `.gitattributes` are not
+   read at all** where the box's git has `--attr-source` (Git 2.42 and later; the run prints `OK …
+   read no .gitattributes from the release tree`): the tree cannot name a filter, an `ident` or an
+   encoding for the checkout to apply. An older git prints a `WARN` and keeps only the LFS filters
+   blanked — update Git for Windows. This box's own attribute files still apply. It then refuses
+   unless `git status --porcelain` is empty **and** every file the review covers is, byte for byte,
+   what git holds for it (A14 review 3, C3): `signandvari` reads each file and hashes it itself, as
+   git hashes a blob, against `git ls-files -s` — no git process and no pipeline, so a profile that
+   sets a UTF-8 `$OutputEncoding` (which puts a byte-order mark in front of a native program's
+   input) cannot break it (A14 review 5, H1). The one difference allowed is the CRLF git's own
+   end-of-line conversion writes on a Windows checkout (`core.autocrlf=true`, the Git for Windows
+   default), and only for a blob git itself would convert — one with no NUL and no CR (A14 review
+   5, S4): the CRLF form of a binary is an attribute forcing it, and is refused. A symlink or a
+   submodule among those paths is refused. So are, among the files the review covers (A14 review
+   5): **a PowerShell file (`.ps1`, `.psm1`, `.psd1`) with a byte above 0x7F and no UTF-8
+   byte-order mark** — Windows PowerShell 5.1 reads such a script in the ANSI code page, where
+   bytes 0x91–0x94 are curly quotes that PowerShell takes for real ones, so a line that reads as one
+   inert string in the review can run code (S1); and **a text file with a CR that no LF follows** —
+   the review shows it as `\u000D` inside its line, but Kotlin, Java and PowerShell end a line
+   there, so text after a `//` can read as a comment and compile as code (S2; a binary holding a
+   NUL is exempt unless it is a source, script or build file);
 5. asks the operator to **type the version** being released. Anything else stops the run, and so does
    every other way out between the checkout and that answer — a refusal above, a git command that
    fails, Ctrl+C at the prompt — and each one **puts HEAD back** where it was (A14 review 3, C5).
@@ -188,6 +215,24 @@ also be passed on any first run to choose the comparison, it must be a **strict*
 `-Commit` (`-Baseline` equal to `-Commit` would compare the release with itself and show nothing;
 A14 review R2-4), and it is refused once a record exists. **Reset:** deleting the record on purpose
 (history rewritten, a new checkout) makes the next run a first run again.
+
+**What to check by hand on the first ceremony with this version** (A14 review 5; none of it can be
+tested off Windows):
+
+- `git --version` is 2.42 or later, and step 3 prints `OK … read no .gitattributes from the release
+  tree (--attr-source)`, not a `WARN`. On a `WARN`, update Git for Windows before signing.
+- The run goes past `all N files the review covers are on disk exactly as git holds them, hashed
+  here` whatever `$PROFILE` sets `$OutputEncoding` to. If an older copy ever died at "could not
+  hash the checked-out files", that was the byte-order mark (A14 review 5, H1), and this version no
+  longer feeds git a pipeline at all.
+- Run a `-DryRun` and press **Ctrl+C at the "Type the version" prompt** once: the run must print
+  `HEAD is back at <your branch>` (or the commit it was at), and `git -C $env:ANDVARI_REPO status`
+  must show your branch again. This was tested under pwsh 7 only.
+- Shrink the console window to a few dozen rows during the diff: no page may scroll its first line
+  out of sight before the `-- line N of M` prompt, and a `<<CAPPED …>>` line must be readable whole
+  in the review copy.
+- No `scripts\*.ps1` in the release tree holds a byte above 0x7F any more (the gate enforces it);
+  a refusal naming one of the repo's own scripts means the tree is not what the gate passed.
 
 Configuration is **environment-only**, so nothing instance-specific lives in this public repo:
 `ANDVARI_REPO` (the checkout), `ANDVARI_RELEASE_DROP` (`user@host:/path/`), optionally
