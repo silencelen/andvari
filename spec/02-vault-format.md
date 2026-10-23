@@ -381,7 +381,7 @@ A5b).** There is NO automatic pick. A client keeps the wrap it last authenticate
 device state (it is UVK-sealed, so caching it is safe), which MUST outlive the offline cache: an
 in-memory cache, an org-forbid policy, a policy-flip or revocation purge and a sign-out leave it in place
 (native: a file in the (origin, user) namespace beside the self-identity pin; web: localStorage; the
-extension: storage.local). When the server serves no wrap:
+extension: its own IndexedDB, since A15; storage.local before, which content scripts can write). When the server serves no wrap:
 - and the device has a cached wrap: the wrap was WITHHELD — an anomaly the client surfaces; the cached
   wrap stands, and no question is asked and no label consulted;
 - and the device has none: the client asks "Which vault is your Personal vault?", offering EVERY held
@@ -615,8 +615,8 @@ pure functions graded by `spec/test-vectors/itemhome.json` (core `ItemHome`, web
 
 - **INV-HOME.** For every itemId a client records `home(itemId)`: the vaultId of the FIRST envelope it applied
   for that itemId (or of its own first seal of a fresh id). It is persisted with the offline cache (§8: native
-  client-state rows `item.home.<itemId>`, web kv rows `itemHome:<itemId>`, the extension's storage.local per
-  origin and user), survives a 410 resync and a restart, and is rebuilt from the cached rows on hydrate. Every
+  client-state rows `item.home.<itemId>`, web kv rows `itemHome:<itemId>`, the extension's IndexedDB store per
+  origin and user since A15, storage.local before), survives a 410 resync and a restart, and is rebuilt from the cached rows on hydrate. Every
   later row for that itemId, live or tombstone, whose vaultId differs from the home is NOT applied: it goes to a
   quarantine (ciphertext, kept for diagnosis), is excluded from items, search, export, autofill and capture, and
   the pull raises ONE "the server sent an item under the wrong vault" notice. No legitimate flow re-homes an

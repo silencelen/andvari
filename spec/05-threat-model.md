@@ -401,8 +401,10 @@ before it can reach account state, a cache row or a device-local record; a row w
 dropped and surfaced as a `bad-id` anomaly, and a session or identity row with one is refused outright.
 The device-local trust records themselves (the §8.2 vouches, the held-key memory, member-received
 provenance, declined invitations, issued tombstones, confirmed pins, consumed removal nonces) are JSON
-records with a strict decode on core and web, and the extension's storage.local records are re-checked
-on read; a pre-A10 line record is migrated once, keeping only lines whose ids are UUIDs. Before this a
+records with a strict decode on core and web, and the extension's records are re-checked on read; a
+pre-A10 line record is migrated once, keeping only lines whose ids are UUIDs. Since A15 the extension's
+records live in the extension origin's IndexedDB, not storage.local: a strict decode checks shape, and
+storage.local, which content scripts can write, could not give the integrity the re-check assumed. Before this a
 server-chosen vault id carrying a line break could, through one human Accept on a decoy, write forged
 vouch and held-key lines for OTHER vaults (trust laundering through the record delimiter). Residual: the
 grammar is a shape check, not authentication — a well-formed id the server made up is still just a row,
@@ -581,7 +583,8 @@ refusal shape unless `sender.url` is one of this extension's pages (`chrome.runt
 malformed base fails closed), before the handler runs, and a refused message does not re-arm the idle lock. `status`,
 `ping`, `updateStatus` and `linkUri` are gated too: no content script sends them. Unknown types are refused. The
 per-handler checks stay. Residual: a compromised RENDERER of one of our own extension pages is outside this gate (it is
-the extension). (d) **The CSV formula warning is an acknowledgement** (F6) on web, desktop and Android: it names each
+the extension). The gate covers messages only: until A15, storage.local was a second way in (the worker adopted a
+`serverUrl` written there and linked a stored update offer), which A15 closed. (d) **The CSV formula warning is an acknowledgement** (F6) on web, desktop and Android: it names each
 risky cell by field and item ("Password of “…”", the name escaped onto one line after our label), and the save stays
 disabled until it is ticked for exactly those cells. Values are written verbatim, by decision: a CSV export is input for
 another password manager, and a `'` prefix would corrupt a real password that starts with `=`, `+`, `-` or `@`. Since
@@ -665,6 +668,75 @@ confirm; an app with no launcher activity stays invisible to andvari, so its fil
 remembered (owner device check); the host app holds each confirm row's IntentSender and can fire it again, which only
 reopens the confirm; card datasets are not app-gated (wallet posture, unchanged).
 
+**A15 (security review 2026-10, the extension's storage, from the A14 review's Wa note).** Platform facts, which set
+the shape of the fix. Content scripts can read and write `chrome.storage.local` and receive its `onChanged` events. On
+Chrome that is the default: "By default, it's exposed to content scripts, but this behavior can be changed by calling
+`chrome.storage.local.setAccessLevel()`" (https://developer.chrome.com/docs/extensions/reference/api/storage), and
+`setAccessLevel` covers `local` only from Chrome 140; before that it exists for `session` alone
+(https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/storage/StorageArea/setAccessLevel). On
+Firefox it is by design: there is no `setAccessLevel` (bug 1724754), and "a compromised content process can read/write
+any extension's storage.local" was closed as invalid, with origin-bound storage such as IndexedDB as the advice
+(https://bugzilla.mozilla.org/show_bug.cgi?id=2018494). A compromised renderer cannot read or write another origin's
+storage, IndexedDB included, and a content script runs in the web page's origin, so the extension origin's IndexedDB is
+out of its reach on both engines
+(https://chromium.googlesource.com/chromium/src/+/main/docs/security/compromised-renderers.md). The precondition is
+A14's F11 (code with content-script privileges, i.e. a compromised renderer), and before A15 it got past the A14 sender
+gate through storage: a `serverUrl` written to storage.local repointed the extension with no Trust Gate (the worker
+switched on `onChanged` and adopted the value at every start), and a stored update offer put an unverified "Download &
+reload" link into the popup (MEDIUM each); planted item homes hid items from fill (LOW).
+(a) **The update link has one shape** (step 0): `${DEFAULT_SERVER_URL}/downloads/<basename>` (a plain file name: no
+slash, dot-dot, query, fragment or escape), only while the current server is the default, whose `/downloads` is what
+the pinned key signs. The worker builds it from the verified manifest, re-checks the stored offer on every read
+(version, server and both links; `updateoffer.ts`), and the popup checks the link again before it becomes an href.
+(b) **The storage areas are restricted at worker start** (step 1): `setAccessLevel(TRUSTED_CONTEXTS)` on
+storage.session and, where it exists (Chrome 140+), on storage.local, both awaited before any lock samples the
+quick-unlock compartment verdict. That verdict now says what the code saw: on Chrome the session call resolved (a call
+that exists and fails leaves the compartment untrusted, so nothing arms); on Firefox, which has no such call, only that
+storage.session exists. `minimum_chrome_version` stays 127. Checked in a headless Chrome 149: once locked, a content
+script's storage.local `get` and `set` are refused, where both worked before.
+(c) **Durable trust state lives in the extension origin's IndexedDB** (step 2; `trustedkv.ts`), with the service worker
+as its only reader and writer: the server choice, the update offer and its anti-rollback seq, item homes, the
+personal-wrap cache and a pending personal change, and the conveniences (the remembered email, which content scripts
+could read, the biometric credential id, the offer-dismissed flag). The update throttle stamp and quiet
+marker are not trust state and live in storage.session. The popup and the options page never touch a storage area or
+the store: they ask the worker (`serverInfo`), and the server choice changes only through `setServerUrl`, which the
+options page sends after the Trust Gate's Connect and which the A14 gate admits from our pages only (with
+`serverInfo` and `forgetLegacyServer`, 30 extension-page-only types now); the worker canonicalizes, writes the store
+and runs the origin-clean switch. The `onChanged` trigger is gone. "Remove data for this server" now removes every
+record under that origin's namespace in every store, by prefix, including the per-user item homes, personal wrap and
+pending change that the fixed key list had always missed although the options copy promised "cached state for that
+server". Source fences hold the layout: the content bundle and our pages never name chrome.storage or IndexedDB, and
+the worker names storage.local only as the migration's input and in the purge.
+(d) **The one-time migration adopts nothing a web page could have planted.** Any pre-A15 storage.local value may be
+planted and cannot be told apart from a real one, so: a non-default `serverUrl` is NOT adopted. The worker dials
+DEFAULT_SERVER_URL, and the old value is kept only as a display-only suggestion: the popup routes to Options, which
+shows it ("if you don't recognize it, choose Not mine") and offers it through the ordinary Trust Gate, whose Connect
+is still the only commit. The update channel is not migrated (the seq floor restarts at `MIN_SEQ`; the forced
+start/install check re-derives the offer). A pending personal change is dropped (the next unlock re-stages it). Item
+homes and the personal wrap move under their strict decoders, the same trust they had (homes are ids the server knows;
+the wrap is AEAD-sealed under the UVK). The conveniences move shape-checked. The migration flag lives in the store
+only, so a content script can neither skip the migration nor re-run it; the old keys are deleted only after the copy
+was read back and compared; a value the store already holds is never overwritten; and with no store the migration
+does nothing and retries at the next start.
+(e) **No IndexedDB means safe defaults, never storage.local.** Firefox blocks IndexedDB for extension pages in private
+browsing, and under permanent private browsing ("Never remember history") that includes the background page (bug
+1841806, Firefox 117, 116.0.3 and ESR 115.2; https://bugzilla.mozilla.org/show_bug.cgi?id=1841806; an extension page
+in a private window cannot open it either, which is one reason the pages ask the worker). There the extension uses the
+default server only (Options says why, and refuses a switch rather than pretend), keeps item homes for the browser
+session (in the session snapshot), asks for the personal vault at each unlock (the staged choice is held in worker
+memory, and an accepted one applies to that session), shows no update banner (Firefox's own `update_url` still
+updates the add-on), and remembers no email; quick unlock already did not work there (its co-key is in IndexedDB).
+Residuals: (1) Chrome 127–139 and Firefox: storage.local stays open to content scripts. Since A15 the extension reads nothing from
+it after the migration, so what is left is the window before the migration ran: values planted then move with the
+trust they always had (homes, the wrap, the conveniences), and a planted server only ever becomes a suggestion. On
+Chrome 140+ the area is locked, and the level is kept in the extension's prefs across restarts. (2) Firefox
+storage.session is kept from content scripts by the API schema only; from Firefox's source, the parent process does
+not re-check the caller's context for `get`/`set` (only for `onChanged`), so a compromised content process may reach
+it. That is inferred, not tested, and A15 does not change it; it covers the session snapshot and the armed quick-unlock
+record (the A7-extension row below), and the update throttle and quiet marker (LOW). (3) A planted non-default server
+becomes a suggestion a user may still confirm through the gate. (4) Firefox permanent private browsing loses the
+self-host choice and the remembered state across restarts, as (e) says.
+
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
 Enabling quick unlock changes the at-rest story of exactly one asset: a
@@ -699,7 +771,7 @@ each attacker gets:
 | **Device powered off / browser closed (thief, border search)** | Nothing quick-unlock-specific: `chrome.storage.session` is memory-backed and **evaporates at browser exit**, so the blob, counter, and retained token are simply gone. **Strictly better than A7-android vs a powered-off device** (no durable blob at all). Residual: OS **swap / hibernation** may page a memory image (blob + token) to disk — the co-key mitigates data-exfil of the blob alone but not a full RAM/swap image; ⊆ T7 for a disk that also holds the swapfile. |
 | **Human-at-keyboard opportunist, browser running, extension locked-armed** | The in-scope delta. Where a locked extension previously required the master password, it now falls to a **6+-char PIN, 5 attempts, then wipe**. This is the accepted, opt-in narrowing. The attempt counter is same-compartment and **attacker-resettable** (below), so against a *sophisticated* local attacker it is theater; against the opportunist it holds, and the PIN entropy floor + session scoping are the real bounds. |
 | **Malware / debugger reading the browser process or `storage.session`** | **T5, out of scope** for every client (a keylogger already gets the master password; unlocked-process memory already holds `vaultKeys`). Such an attacker gets a **PIN-crackable blob (double-wrapped: ~32 MiB+ Argon2id over a ≥6-char / ≥10-digit PIN ≈ GPU-hours for a floor PIN, more for a word) *plus* a live refresh token** — but note the blob alone is useless without the **non-extractable co-key** (A1): a pure `storage.session` dump cannot open it. **Per-extension storage isolation is a PLUS**: a co-installed extension cannot read another extension's `storage.session` except via a `chrome.debugger` grant or OS access (both T5). |
-| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and the `TRUSTED_CONTEXTS` access level is a hard precondition to arming at all (if it can't be guaranteed, the client does NOT arm — spec 01 §8.4). A page can neither send the PIN nor read the blob. |
+| **Co-installed page / content script** | No access: the PIN UI and enroll are **popup-only** (`chrome-extension://`), there is no `externally_connectable`, and the `TRUSTED_CONTEXTS` access level is a hard precondition to arming at all (if it can't be guaranteed, the client does NOT arm — spec 01 §8.4). A page can neither send the PIN nor read the blob. On Chrome the level is set and awaited; on Firefox it is the schema default, which a compromised content process may bypass (A15 residual 2, inferred from source). |
 | **The server** | Learns nothing — quick unlock is wire-invisible (spec 01 §8); no new endpoint/header/field. The one wire *interaction* is that a redeem forces a `POST /auth/refresh` FIRST, so revocation / a rescue (which revokes sessions) takes effect at the next redeem (T1 unaffected). |
 
 Residuals accepted (A7-extension): (a) **memory-backed ≠ never-on-disk** — OS

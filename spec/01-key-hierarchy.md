@@ -894,7 +894,10 @@ refresh token**, so `chrome.storage.session`'s `TRUSTED_CONTEXTS` access level i
 **hard precondition**: if `setAccessLevel` throws and content scripts cannot be
 guaranteed excluded, the client MUST NOT arm and MUST NOT retain tokens (it falls
 back to today's full erase). A `storage.local` fallback for the blob is **forbidden**
-(that is the rejected durable Tier C).
+(that is the rejected durable Tier C). Since A15 the call is awaited at worker start and
+a call that exists but fails means no arm; Firefox has no `setAccessLevel`, so there the
+client arms on Firefox's documented default, which its API schema enforces in the
+content process only (spec 05 A15, residual 2).
 
 **Locked-but-authenticated state.** When armed, `doLock()` keeps a slim
 `{access, refresh, userId, email, blob, counter}` record under the distinct key and
