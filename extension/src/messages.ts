@@ -35,6 +35,11 @@
  *    through the popup-minted one-shot `revealCardForFill` ([A5] unchanged).
  *  - Locked state is FIRST-CLASS: list calls answer `{locked:true}` rather than
  *    pretending "no matches", so the UI can render an honest locked state.
+ *  - WHO MAY SEND WHAT (security review 2026-10, A14): sendergate.ts classifies every `Req` type as
+ *    content-sent or extension-page-only, and the SW's dispatch refuses an extension-page-only type
+ *    from any sender whose `sender.url` is not one of this extension's pages, before the handler
+ *    runs (the per-handler checks below stay). Adding a type here without classifying it there
+ *    fails `tsc` and the extension suite.
  */
 import type { CardFieldKind } from "./detect";
 
@@ -202,9 +207,17 @@ export type UnlockCode =
   | "keys_damaged" // H67: the account's stored wrappedUvk isn't a readable envelope — terminal, not credentials
   | "kdf_policy"
   | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
+  | "confirm_server" // A15 review F1: a server is pending (confirm it or say "Not mine") — nothing was sent anywhere
   | "server_error"
   | "network"
   | "unknown";
+
+/** A15 review F1 (serverstate.ts ServerBlock, structurally): while one stands, the worker dials no server. `confirm` —
+ *  a previous server awaits the user's confirm (`keepable` false: the origin was read from storage.local only to block,
+ *  so it can only be declined here — because this browser cannot keep a server choice, or, A16 review R3, because the
+ *  update could not confirm it; serverInfo's `trustedStore` tells the two apart); `unsettled` — the trusted store did not
+ *  answer, so the server is unknown. */
+export type ServerBlockWire = { kind: "confirm"; origin: string; keepable: boolean } | { kind: "unsettled" };
 
 /** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
@@ -228,18 +241,22 @@ export type PinUnlockCode =
   | "not_armed"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 
 /** Why the PIN entropy floor rejected an enrollment PIN (breaker A2⊕B8) — the popup renders a nudge. */
 export type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
 
-/** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. */
-export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
+/** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. `unavailable` (A16): nothing here
+ *  can keep the record — no session sealing key (no IndexedDB in this browser mode), or on Chrome the storage.session
+ *  access level could not be confirmed — so nothing would ever arm. */
+export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin" | "unavailable";
 
 /** Biometric quick-unlock redeem failure (0.17.0). No `wrong_pin`/`exhausted` — a hardware-held
  *  full-entropy PRF secret has no offline oracle, so there is no attempt budget. `bio_cancelled` =
@@ -251,16 +268,18 @@ export type BioUnlockCode =
   | "expired"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 
 /** Biometric enrollment refusal (0.17.0). `bio_unsupported` = no platform authenticator / no PRF;
  *  `bio_cancelled` = the enroll ceremony threw (nothing written — amendment 3). */
-export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
+export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled" | "unavailable";
 
 export type Req =
   | { type: "status" }
@@ -298,13 +317,26 @@ export type Req =
   | { type: "enrollQuickUnlockBio" }
   /** Popup: turn quick unlock off — a full wipe, no auth gate (§8.1 parity). */
   | { type: "disableQuickUnlock" }
-  /** Popup: the one-time post-unlock offer card was dismissed (durable, storage.local — breaker B7). */
+  /** Popup: the one-time post-unlock offer card was dismissed (durable, the worker's trusted store — breaker B7). */
   | { type: "dismissQuickUnlockOffer" }
   /** Options page ONLY: the explicit "Remove data for this server" action (design §4.2/B2-7 — the
    *  ONLY destructive per-origin path; a server switch PRESERVES the old origin's namespace). Purges
    *  exactly `origin`'s namespaced keys (quick-unlock/PIN co-key + cached channel state) everywhere,
    *  touching no other origin. `origin` is a raw/canonical origin string; the SW re-canonicalizes it. */
   | { type: "purgeServerData"; origin: string }
+  /** Options page + popup (security review 2026-10, A15): the origin the worker's api is built for, whether this
+   *  browser can keep a server choice at all (false when IndexedDB is unavailable, e.g. Firefox's permanent private
+   *  browsing), and (A15 review F1) a block: while one stands the worker dials NO server — a previous server awaits
+   *  the user's confirm (display only until the Trust Gate commits it), or the trusted store did not answer. Pages
+   *  never read the trusted store themselves; they ask here. Extension pages only. */
+  | { type: "serverInfo" }
+  /** Options page ONLY (A15): commit a server origin after the Trust Gate's Connect (the grant gesture). The worker
+   *  canonicalizes, writes its trusted store and runs the origin-clean switch (§4.1) before answering. This message
+   *  is the ONLY way the server choice changes; a storage write is no longer a switch. */
+  | { type: "setServerUrl"; url: string }
+  /** Options page + popup (A15): drop the pending previous server without connecting to it ("Not mine"); the
+   *  default server is then in effect. */
+  | { type: "forgetLegacyServer" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
@@ -497,6 +529,9 @@ export type Res<T extends Req["type"]> = T extends "status"
       waitingGrants: number;
       /** Root cause A §5.1 INV-HOME (A1b): rows the last snapshot sent under the wrong vault (not applied). */
       wrongVault: number;
+      /** A15: while LOCKED, the email this browser last signed in with (non-secret; prefills the form). Kept by the
+       *  worker in its trusted store — the popup no longer writes storage.local. Null while unlocked. */
+      rememberedEmail: string | null;
     }
   : T extends "personalAcceptChange"
     ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" | "coholders_not_loaded" }
@@ -507,11 +542,11 @@ export type Res<T extends Req["type"]> = T extends "status"
     : T extends "unlockTotp"
       ? { ok: boolean; code?: UnlockCode; error?: string }
       : T extends "cancelTotp"
-        ? { ok: true }
+        ? { ok: boolean } // ok:false only when the A14 sender gate refused (nothing was done)
         : T extends "lock"
-          ? { ok: true }
+          ? { ok: boolean }
       : T extends "signOut"
-        ? { ok: true }
+        ? { ok: boolean }
         : T extends "unlockWithPin"
           ? { ok: boolean; code?: PinUnlockCode; attemptsRemaining?: number }
           : T extends "enrollQuickUnlock"
@@ -521,11 +556,11 @@ export type Res<T extends Req["type"]> = T extends "status"
               : T extends "enrollQuickUnlockBio"
                 ? { ok: boolean; code?: EnrollBioCode }
             : T extends "disableQuickUnlock"
-              ? { ok: true }
+              ? { ok: boolean }
               : T extends "dismissQuickUnlockOffer"
-                ? { ok: true }
+                ? { ok: boolean }
                 : T extends "ping"
-        ? { ok: boolean; serverTime?: number; error?: string }
+        ? { ok: boolean; serverTime?: number; error?: string; code?: "confirm_server" }
         : T extends "matches"
           ? { locked: boolean; matches: MatchItem[] }
           : T extends "passwordReuse"
@@ -600,6 +635,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                                             : T extends "revealCardForFill"
                                               ? { ok: boolean; fields?: CardFillFields; error?: string }
                                               : T extends "purgeServerData"
+                                                ? { ok: boolean }
+                                              : T extends "serverInfo"
+                                                ? { url: string; trustedStore: boolean; block: ServerBlockWire | null }
+                                              : T extends "setServerUrl"
+                                                ? { ok: boolean; url?: string; code?: "invalid" | "storage" | "not_allowed" }
+                                              : T extends "forgetLegacyServer"
                                                 ? { ok: boolean }
                                                 : /** C1 §C2 [S7]: the branch matches ONLY these two booleans — no `string` type is
                                                    *  admitted here, so an "origin"/"name"/"subtitle" field can never be added to the

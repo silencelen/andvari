@@ -6,17 +6,233 @@ Sibling to the escrow/recovery-ceremony record (`docs/drills/escrow-genesis-cere
 
 ## 0. The ceremony is one command (`signandvari`, 2026-08-20)
 
-Everything the signing box does for a release — fetch tags, check out the tag, find `signtool`,
-build and sign the MSI, mint the manifest at the next `seq`, sign it, and deliver the bundle —
-runs as **`scripts/signandvari.ps1`**, installed *outside* the repo (`%USERPROFILE%\bin` plus a
-`$PROFILE` function) because step 3 checks out the release tag and would otherwise replace the
-script underneath its own execution.
+Everything the signing box does for a release — fetch the release tag, check out the tag, find
+`signtool`, build and sign the MSI, mint the manifest at the next `seq`, sign it, and deliver the
+bundle — runs as **`scripts/signandvari.ps1`**, installed *outside* the repo (`%USERPROFILE%\bin`
+plus a `$PROFILE` function) because step 3 checks out the release tag and would otherwise replace
+the script underneath its own execution.
 
 ```powershell
-signandvari 0.25.0 -DryRun     # preflight, seq arithmetic and manifest preview; signs nothing
-signandvari 0.25.0             # checkout + preflight -> ceremony -> ordered drop
-signandvari 0.25.0 -SkipDrop   # produce the bundle, deliver it by hand
+signandvari 0.25.0 -Commit <sha> -DryRun     # signs nothing; still stops at the typed confirm, then runs the tree's prestige-release.ps1
+signandvari 0.25.0 -Commit <sha>             # verify tag -> review -> checkout -> typed confirm -> ceremony -> ordered drop
+signandvari 0.25.0 -Commit <sha> -SkipDrop   # produce the bundle, deliver it by hand
 ```
+
+**`-DryRun` is not a run in which no tree code runs** (A14 review R2-6). It signs nothing and
+drops nothing, but it goes through the same review and typed confirmation, and once you confirm it
+runs the release tree's own `prestige-release.ps1` on this account, beside `update-signing.key`
+(with `-DryRun`, which that tree's script is trusted to honour; it then builds no update-signer and
+so skips the live manifest's signature check). Confirm a dry run only for a tree you would confirm a
+real run for.
+
+**One-time, before the first ceremony that uses `-Commit`** (security review 2026-10). The box runs
+the INSTALLED copy, so the reviewed script has to be installed before it can protect anything. An
+older copy rejects `-Commit` ("A parameter cannot be found that matches parameter name 'Commit'").
+**If it does, STOP and install first; never drop `-Commit`**: the old script force-fetches tags and
+then runs whatever tree the tag names, and the pin checks inside that tree's own
+`prestige-release.ps1` are that tree's code. It is two separate steps, and the second is never
+pasted together with the first (A14 review R2-5).
+
+*Step 1 - fetch the reviewed copy beside the installed one and read the diff.* This replaces
+nothing:
+
+```powershell
+git -C $env:ANDVARI_REPO fetch origin main
+git -C $env:ANDVARI_REPO show <reviewed-sha>:scripts/signandvari.ps1 | Set-Content -Encoding Ascii "$HOME\bin\signandvari.new.ps1"
+git --no-pager diff --no-index --no-color --ignore-cr-at-eol -- "$HOME\bin\signandvari.ps1" "$HOME\bin\signandvari.new.ps1"
+```
+
+*Step 2 - only once you have read that diff and it is the change you reviewed,* install it:
+
+```powershell
+Move-Item -Force "$HOME\bin\signandvari.new.ps1" "$HOME\bin\signandvari.ps1"
+```
+
+If the diff is not what you reviewed, delete `signandvari.new.ps1` and stop. (`signandvari.ps1`
+is pure printable ASCII - no control character but tab and line ends, which the PowerShell gate
+enforces - so `Set-Content -Encoding Ascii` is byte-faithful apart from line endings, and this one
+raw diff, kept out of a pager and uncoloured, cannot carry a terminal escape.) Repeat both steps whenever a release changes
+`scripts/signandvari.ps1`: the tree never updates the installed copy, by design.
+
+**Where `<reviewed-sha>` and `<sha>` come from** (A14 review R2-5). Not from the handoff alone:
+the handoff is written by the build host, and a value it supplies would become the installed
+verifier or the release pin. Read each one off GitHub's web UI yourself and compare it with the
+handoff value; stop if they differ. `<reviewed-sha>` is the merge commit (or pull request head)
+you approved there; `<sha>` is the commit GitHub's page for the release tag `v<ver>` names.
+**Compare all 40 hex characters** (A14 review 3): GitHub's tag, release and pull-request pages show
+only the first 7. Click the short sha through to the commit page — its address ends in the full
+40-character sha (`…/commit/<sha>`), and the copy button beside the short sha copies the full one —
+and compare that with the handoff value character for character. What
+that does: GitHub is a second view of what was pushed, served by a party the build host does not
+control, so it catches a handoff value that was mistyped, altered on its way to you, or names a
+commit that was never published, and it ties `<reviewed-sha>` to the review you actually did rather
+than to whatever the build host says you reviewed. What it does not do: the build host can push to
+that repository, so a commit it pushed and tagged there itself appears on GitHub exactly as it
+handed it over. Against that, what remains is your own review of the merge, the stat, commit
+list and full diff `signandvari` prints since the last release you signed (below), and GitHub's record of who
+pushed what.
+
+**Do not `git pull` or run a plain `git fetch` in the signing checkout before the first ceremony
+on this version of `signandvari`** (A14 review R2-3). Step 1's `git fetch origin main` is the only
+fetch it needs (a fetch that names a branch does not pull tags in with it), and `signandvari`
+fetches the release tag itself. A pull checks an unreviewed tree out into the very checkout the
+ceremony runs in, and a plain fetch brings in every new tag on the remote.
+
+**`-Commit <sha>` is required** (security review 2026-10): the full 40-hex commit the release tag
+was cut at, copied from the handover line the build host prints
+(`scripts/gh-release.sh` ends with `signandvari <ver> -Commit <sha>`). The signing box runs the
+tag's tree — its scripts and its gradle build — with the update-signing key openable by the same
+account, and a tag is a mutable ref on a remote the build host can write to. So before anything is
+checked out, the tag must resolve to exactly that commit; HEAD must equal it after the checkout and
+again right before `prestige-release.ps1` starts (which takes the same `-Commit` and records it as
+`bundle.json.commit`). Only the release tag is fetched (`refs/tags/v<ver>`, `--no-tags`), and
+**never with `--force`**: a remote release tag that differs from the local one stops the run and
+names both commits, instead of silently replacing it, and any *other* tag that moved on the remote
+is not fetched, so it cannot block a ceremony. A mismatch is a reason to ask the build host what
+happened, never to re-run with the tag's commit.
+
+**What the pin does and does not do.** The handover line reads the build host's own local tag, so
+the pin closes a tag moved by anyone other than the build host, a tag moved after the handover line
+was printed, and an accidental re-tag. It does **not** close a compromised build host: that host
+chooses both the tag and the pin. The layer aimed at that is the workstation's own record:
+
+**The last signed commit.** `signandvari` keeps the commit of its last *successful* ceremony in
+`%LOCALAPPDATA%\andvari\signandvari-last-signed.json`, outside the repo. Before any of the tree's
+code runs (dry runs included) it:
+
+1. refuses unless the release commit **descends** from that commit
+   (`git merge-base --is-ancestor <last> <commit>`) — merge a release branch back before the next
+   ceremony;
+2. refuses a release tree in which two paths are **one file on a case-insensitive disk** (NTFS
+   compares names case-insensitively and ignores a trailing dot or space, so
+   `Scripts/prestige-release.ps1` beside `scripts/prestige-release.ps1` would be written one over
+   the other);
+3. prints what changed in `<last>..<commit>`: a stat **first**, then `git log` of the commits in
+   that range, then the **full diff** — every line taken from git escaped (C0, DEL, C1 and the bidi
+   controls print as `\u001B`-style text, so neither a commit subject nor a changed line can move
+   the cursor or redraw what is above it on a VT console; A14 review R2-2), and read from git as
+   bytes split at LF alone, so a CR cannot start a fake commit line or a fake `diff --git` header
+   either (A14 review 3). Since A14 review 5 the characters that print as nothing or as a plain
+   space are escaped too (zero-width space and joiners, word joiner, `U+FEFF`, the soft hyphen, the
+   Hangul fillers that are valid inside an identifier, variation selectors, tag characters as
+   `\U000E00xx`, non-ASCII spaces); a byte that is not UTF-8 prints as `\xNN`, and a real `U+FFFD`
+   as `\uFFFD`, so a replacement character never hides which byte was there. **No line on screen is
+   longer than 400 characters:** a longer one is cut at a `<<CAPPED: 400 of N characters shown …>>`
+   marker, the number of cut lines is printed before and after the diff, and the review copy (below)
+   holds every line whole — read a cut line there.
+   **What it shows (A14 review 3, C1): every changed path**, except the files under a short list of
+   trees that never run on the signing box — `app-android/` (the phone app), `web/` and
+   `extension/` (browser code, built on the build host; here it runs only inside a browser),
+   `server/` and `deploy/` (run on the server host), `docs/` and `spec/` (prose, and test vectors
+   only test tasks read; the ceremony runs no test), `.github/` (CI). Their changes are **counted**
+   under the stat instead (`NOT shown: N changed file(s) in trees that never run on this box`, per
+   tree). Even inside those trees, what gradle, git or Windows reads as code or as checkout
+   instructions is shown: every `*.gradle`/`*.kts`, `gradle.properties`, gradle wrapper files,
+   `*.jar`, PowerShell and batch files, `.gitattributes`, `.lfsconfig` and `.gitmodules`. Everything
+   else is shown because it is not on the list: all of `core/` and `tools/` (the update-signer, which
+   is handed the key's path, is a shadowJar of `tools/update-signer` plus **all** of `:core` — Kotlin
+   resolves an unqualified call to a declaration in the caller's own package ahead of its default
+   imports, from any module on the classpath, so one core file that declares the signer's package
+   can replace the signer's key read; A14 review R2-1), `scripts/`, `gradle/`, `buildSrc/`, the root
+   files, any new top-level directory — and **`app-desktop/`**, because the MSI it is compiled into
+   is the household's Windows client, which runs on this very account once it is installed here. So
+   whatever a build script newly links (a module, a source or resource directory, a buildscript
+   classpath file, a `-javaagent` jar) is in the review wherever it lives, unless it lives inside one
+   of the excluded trees: **a build-script line that links a file in one of those trees is a reason to
+   stop**, since from then on that file's own changes would not be shown. Not covered at all: the
+   third-party artifacts gradle downloads (only the catalog that names them) and the JDK.
+   **The full diff (C2)** is printed by `signandvari` itself, **before** anything is checked out, with
+   `git diff --text --no-textconv --no-ext-diff --no-color`, so neither this box's diff settings nor
+   any attribute file can turn a file into "Binary files differ", rewrite it or colour it. It pages
+   one console height at a time in PowerShell (Enter: next page, `a`: the rest, `q`: stop reading) —
+   never through an external pager — counting the console rows a line wraps to, not lines (A14
+   review 5), so a page cannot scroll its own top away; and the same escaped text — the stat, the
+   commits and the diff, every line whole — is saved as
+   `%LOCALAPPDATA%\andvari\signandvari-review-<commit>.txt` for reading in Notepad. Do not read the
+   change with a plain `git diff` instead: Git for Windows pages it through `less -R`, which passes
+   colour sequences that can hide text, and it honours the tree's attributes;
+4. checks the tree out with **no hook** (`core.hooksPath` is an empty directory for every git command
+   it runs, whatever the repo config names), no fsmonitor hook and **no LFS filter**
+   (`GIT_LFS_SKIP_SMUDGE=1` for the checkout; `filter.lfs.clean`, `.smudge` and `.process` blanked
+   for every git command, so `git status` after the checkout cannot run `git-lfs clean` either; A14
+   review 5): Git for Windows installs a system LFS filter, and a tree whose `.gitattributes` says
+   `filter=lfs` would otherwise have LFS content nobody reviewed written for a pointer, while
+   `git status` stays clean. **From the checkout on, the release tree's `.gitattributes` are not
+   read at all** where the box's git has `--attr-source` (Git 2.42 and later; the run prints `OK …
+   read no .gitattributes from the release tree`): the tree cannot name a filter, an `ident` or an
+   encoding for the checkout to apply. An older git prints a `WARN` and keeps only the LFS filters
+   blanked — update Git for Windows. This box's own attribute files still apply. It then refuses
+   unless `git status --porcelain` is empty **and** every file the review covers is, byte for byte,
+   what git holds for it (A14 review 3, C3): `signandvari` reads each file and hashes it itself, as
+   git hashes a blob, against `git ls-files -s` — no git process and no pipeline, so a profile that
+   sets a UTF-8 `$OutputEncoding` (which puts a byte-order mark in front of a native program's
+   input) cannot break it (A14 review 5, H1). The one difference allowed is the CRLF git's own
+   end-of-line conversion writes on a Windows checkout (`core.autocrlf=true`, the Git for Windows
+   default), and only for a blob git itself would convert — one with no NUL and no CR (A14 review
+   5, S4): the CRLF form of a binary is an attribute forcing it, and is refused. A symlink or a
+   submodule among those paths is refused. So are, among the files the review covers (A14 review
+   5): **a PowerShell file (`.ps1`, `.psm1`, `.psd1`) with a byte above 0x7F and no UTF-8
+   byte-order mark** — Windows PowerShell 5.1 reads such a script in the ANSI code page, where
+   bytes 0x91–0x94 are curly quotes that PowerShell takes for real ones, so a line that reads as one
+   inert string in the review can run code (S1); and **a text file with a CR that no LF follows** —
+   the review shows it as `\u000D` inside its line, but Kotlin, Java and PowerShell end a line
+   there, so text after a `//` can read as a comment and compile as code (S2; a binary holding a
+   NUL is exempt unless it is a source, script or build file);
+5. asks the operator to **type the version** being released. Anything else stops the run, and so does
+   every other way out between the checkout and that answer — a refusal above, a git command that
+   fails, Ctrl+C at the prompt — and each one **puts HEAD back** where it was (A14 review 3, C5).
+   Closing the window is the one exit that cannot; if you do, `git checkout` your branch before
+   opening the checkout in anything that runs gradle. A run with no human at a console —
+   `-NonInteractive`, piped or redirected input, a service — stops before anything is checked out;
+   there is no flag that skips it.
+
+Once confirmed, `prestige-release.ps1` **deletes the update-signer jar and rebuilds it** from the
+checked-out tree on every real run (A14 review 3), so the jar handed the key's path is this
+commit's, never one an earlier build left in `tools\update-signer\build\libs`; a dry run builds no
+signer, runs none it did not build, and so skips the live manifest's signature check, which the
+real run makes before the MSI build.
+
+The record moves only after `prestige-release.ps1` exited 0 **and** `bundle.json` records the
+pinned commit. A dry run, a refused run or a failed ceremony leaves it where it was. This is a review
+aid that rests on the operator reading the diff, not a proof: a compromised build host can still cut
+a descendant commit, but it can no longer swap the tree silently or rewrite history under the last
+release, and a change to the build is in front of a human before it runs.
+
+**First run** (no record yet, e.g. the first ceremony after this change; A14 review R2-3): the
+baseline is the commit in **this box's own most recent signed bundle**:
+`dist\release-bundle-<version>\bundle.json` in the checkout, beside its `manifest.json.sig`.
+`prestige-release.ps1` writes both only after a signature it verified (the `.sig` last), `dist\` is
+gitignored so no checkout replaces it, and the highest `seq` wins. **No seed is taken while git
+tracks anything under `dist/` in any case** (A14 review 3, C4): git matches paths by case even on
+NTFS, which does not, so a tracked `Dist/…` or `…/Bundle.json` — the tree's content, not this box's —
+would land exactly where the seed is read. The output says FIRST RUN, names the bundle,
+and prints the baseline commit's date and subject — check that it is the release you last signed.
+**A tag is never the seed**: a plain `git fetch` or `git pull` brings in new tags, so a planted
+intermediate tag would become the baseline and hide every change up to it. With no signed bundle
+(a new checkout, a cleaned `dist\`) the run stops and asks for `-Baseline <40-hex>`: a commit you
+reviewed yourself, such as the last release you signed — never one read off the build host. It may
+also be passed on any first run to choose the comparison, it must be a **strict** ancestor of
+`-Commit` (`-Baseline` equal to `-Commit` would compare the release with itself and show nothing;
+A14 review R2-4), and it is refused once a record exists. **Reset:** deleting the record on purpose
+(history rewritten, a new checkout) makes the next run a first run again.
+
+**What to check by hand on the first ceremony with this version** (A14 review 5; none of it can be
+tested off Windows):
+
+- `git --version` is 2.42 or later, and step 3 prints `OK … read no .gitattributes from the release
+  tree (--attr-source)`, not a `WARN`. On a `WARN`, update Git for Windows before signing.
+- The run goes past `all N files the review covers are on disk exactly as git holds them, hashed
+  here` whatever `$PROFILE` sets `$OutputEncoding` to. If an older copy ever died at "could not
+  hash the checked-out files", that was the byte-order mark (A14 review 5, H1), and this version no
+  longer feeds git a pipeline at all.
+- Run a `-DryRun` and press **Ctrl+C at the "Type the version" prompt** once: the run must print
+  `HEAD is back at <your branch>` (or the commit it was at), and `git -C $env:ANDVARI_REPO status`
+  must show your branch again. This was tested under pwsh 7 only.
+- Shrink the console window to a few dozen rows during the diff: no page may scroll its first line
+  out of sight before the `-- line N of M` prompt, and a `<<CAPPED …>>` line must be readable whole
+  in the review copy.
+- No `scripts\*.ps1` in the release tree holds a byte above 0x7F any more (the gate enforces it);
+  a refusal naming one of the repo's own scripts means the tree is not what the gate passed.
 
 Configuration is **environment-only**, so nothing instance-specific lives in this public repo:
 `ANDVARI_REPO` (the checkout), `ANDVARI_RELEASE_DROP` (`user@host:/path/`), optionally
@@ -103,7 +319,9 @@ So the provenance chain is deliberately made of things that *are* checkable:
    proceeds.
 
 Which is why `-Ref v<version>` in the ceremony (§Signing-box preflight item 2) is not a
-convenience: it is now the difference between a publish and a quarantine.
+convenience: it is now the difference between a publish and a quarantine. `-Commit <sha>` is the
+other half: the watcher checks the bundle against the tag, and the pin checks the tag against the
+commit the build host says it cut, before the signing box runs a line of the tree.
 
 ## 1. Update-manifest signing — Ed25519 (H2 §F / core `UpdateVerify.PINNED`)
 - **Public key (base64url):** `e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI`
@@ -356,7 +574,8 @@ state, so they recur on a fresh box or after a long gap.
    The script preflights for it and stops early rather than failing after the MSI build.
 2. **Check out the TAG, not `main`.** `main` moves on after a release; an MSI built from it would
    carry dependencies no other artifact of that version has, so Windows would silently diverge from
-   the deb, APK and extension already in users' hands. `-Ref v<version>` pins it.
+   the deb, APK and extension already in users' hands. `-Ref v<version>` names it and
+   `-Commit <sha>` pins it (signandvari passes both).
 3. **A stale clone is fine to update, but only if it postdates 2026-07-16.** Anything older predates
    the `git-filter-repo` rewrite and the repo recreation, and will not reconcile — take a fresh
    clone instead. A clean `git fetch --all --tags` succeeding is the signal that yours is fine.

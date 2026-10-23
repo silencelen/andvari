@@ -843,6 +843,34 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(await cache.pending()).toEqual([]);
   });
 
+  it("A13 (q54): a seal that REFUSES after the fold puts the offline backlog back — the fold never outlives its put", async () => {
+    // coalesceQueuedPuts dequeues the item's unsent rows durably, BEFORE the new put is sealed. A seal refusal there
+    // (the vault was removed or held, or its key turned legacy-read-only, during the fold's awaits) threw outside the
+    // R32 restore, and the member's offline edits were gone while the optimistic envelope still showed them.
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    api.offline = true;
+    await store.save(s.itemId, { ...DOC, name: "draft 1" }, [], undefined, s.vaultId);
+    await store.save(s.itemId, { ...DOC, name: "draft 2" }, [], undefined, s.vaultId);
+    expect(await cache.pending()).toHaveLength(1);
+
+    const refusal = new Error("this vault's key is read-only on this device");
+    const spy = vi.spyOn(store as unknown as { putMutation: (...a: unknown[]) => unknown }, "putMutation").mockImplementationOnce(() => {
+      throw refusal;
+    });
+    const res = await store.save(s.itemId, { ...DOC, name: "draft 3" }, [], undefined, s.vaultId).then(() => "ok", (e) => e);
+    spy.mockRestore();
+    expect(res).toBe(refusal);
+    const left = await cache.pending();
+    expect(left, "the folded rows must be restored, not destroyed").toHaveLength(1);
+    expect(left[0]!.baseItemRev).toBe(4);
+
+    api.offline = false;
+    await store.sync();
+    expect(store.get(s.itemId)?.doc.name).toBe("draft 2");
+    expect(await cache.pending()).toEqual([]);
+  });
+
   it("H37: folding keeps the ORIGINAL base rev, so a peer's edit still lands as a genuine conflict copy", async () => {
     // The other half of the rule: folding must NOT re-base onto whatever the client now holds
     // (its own optimistic rev, or a peer's). Taking a fresher base would make this put "clean"

@@ -4,14 +4,16 @@
  * (§4.3), and on the gate's "Connect" click — the user gesture — requests BOTH host-permission grants
  * (per-origin fetch + broad autofill) and commits the switch (grantflow.ts, flag D2). The actual
  * origin-clean switch (token drop, api/WS/namespace/autofill rebuild) happens in the service worker,
- * which reacts to the storage.local write; this page only validates, gates, grants, and persists.
+ * on this page's `setServerUrl` message (security review 2026-10, A15: the worker keeps the choice in
+ * its own store, which neither this page nor any web page writes); this page only validates, gates,
+ * grants, and asks.
  *
  * External module only (MV3 CSP forbids inline). No key material ever reaches here.
  */
 import { BROAD_ORIGIN_PATTERN, requestServerGrants } from "./grantflow";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
-import { send } from "./messages";
-import { canonicalizeServerUrl, getServerUrl, originMatchPattern, setServerUrl } from "./serverurl";
+import { send, type Res } from "./messages";
+import { canonicalizeServerUrl, DEFAULT_SERVER_URL, originMatchPattern } from "./serverurl";
 import { readThemePref, setThemePref, type ThemePref } from "./theme";
 import { trustGateView } from "./trustgate";
 
@@ -36,6 +38,13 @@ const serverMsg = el("server-msg");
 const purgeBtn = el<HTMLButtonElement>("purge");
 const purgeMsg = el("purge-msg");
 const autofillStatus = el("autofill-status");
+const legacyNote = el("legacy-note");
+const legacyOrigin = el("legacy-origin");
+const legacyLead = el("legacy-lead");
+const legacyBody = el("legacy-body");
+const legacyReview = el<HTMLButtonElement>("legacy-review");
+const legacyForget = el<HTMLButtonElement>("legacy-forget");
+const storeNote = el("store-note");
 const themeChoices = el("theme-choices");
 
 /** The canonical origin the Trust Gate is currently offering — set at Continue, read at Connect. The
@@ -56,11 +65,58 @@ function clearMsg(node: HTMLElement): void {
   clearLiveMsg(node);
 }
 
-/** Read + render the current configured origin (raw, exactly as it will be dialed). */
+/** A15: what the worker dials, whether a choice can be kept here, and (A15 review F1) a block while no server is
+ *  dialed. Null when the worker does not answer (S3: never read as the default — nothing is shown as connected). */
+async function serverInfoNow(): Promise<Res<"serverInfo"> | null> {
+  try {
+    const r = await send({ type: "serverInfo" });
+    if (r && typeof r.url === "string" && r.url) return r;
+  } catch {
+    /* the worker did not answer */
+  }
+  return null;
+}
+
+/** The pending server the notice offers for review, or null. Display only: the ONLY way to adopt it is the Trust Gate. */
+let legacyCandidate: string | null = null;
+
+/** Read + render the current configured origin (raw, exactly as it will be dialed), or why there is none. */
 async function renderCurrent(): Promise<void> {
-  const current = await getServerUrl();
-  originNow.textContent = current;
-  if (!input.value.trim()) input.value = current; // prefill so a Firefox first-run just Continues → Connects
+  const info = await serverInfoNow();
+  const block = info?.block ?? null;
+  if (info === null) originNow.textContent = "unknown — andvari isn't answering. Close this page and open it again.";
+  else if (block?.kind === "unsettled") originNow.textContent = "unknown — andvari couldn't load its settings, so it signs in nowhere. Close this page and open it again in a minute.";
+  else if (block?.kind === "confirm") originNow.textContent = "no server yet — andvari signs in nowhere until you confirm your server below, or choose \"Not mine\".";
+  else originNow.textContent = info.url;
+  // prefill so a Firefox first-run just Continues → Connects (never with a server that is not in effect)
+  if (!input.value.trim() && info !== null && block === null) input.value = info.url;
+  // A15: a server chosen before the update is shown, never reconnected: it sat in storage a web page could write.
+  const pending = block?.kind === "confirm" ? block : null;
+  legacyCandidate = pending?.keepable ? pending.origin : null;
+  legacyOrigin.textContent = pending?.origin ?? "";
+  legacyNote.hidden = pending === null;
+  legacyReview.hidden = !pending?.keepable;
+  legacyForget.textContent = `Not mine — use ${new URL(DEFAULT_SERVER_URL).host}`;
+  if (pending && !pending.keepable && info?.trustedStore) {
+    // A16 review R3: the update could not confirm the old setting (nothing attested it), so it is never offered for
+    // connecting; it is read only to keep andvari from signing in to another server in its place. A choice CAN be kept
+    // here: the user enters the address themselves and connects through the gate.
+    legacyLead.textContent = "This browser has a server address saved by an older version of andvari:";
+    legacyBody.textContent =
+      "andvari couldn't confirm this setting when it updated, and a web page could have changed it, so andvari won't use it, or sign in anywhere, until you decide. If it is your own andvari server, enter its address in the server field and connect. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
+  } else if (pending && !pending.keepable) {
+    // A15 review F1: no trusted store in this mode, so the old setting can only be declined here. It is read only to
+    // keep andvari from signing in to another server in its place.
+    legacyLead.textContent = "This browser has a server address saved by an older version of andvari:";
+    legacyBody.textContent =
+      "andvari can't keep a server choice in this browser mode (Firefox does this when it never remembers history), so it won't sign in anywhere in its place. To keep using it: turn that setting off, restart Firefox, and enter the address below. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
+  } else if (pending) {
+    legacyLead.textContent = "When andvari updated to this version, this browser was set to use:";
+    legacyBody.textContent =
+      "That setting was kept where a web page could have changed it, so andvari won't use it, or sign in anywhere, until you decide. If it is your own andvari server, review it and connect. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
+  }
+  // A15: no extension store here (Firefox "Never remember history"): say so before the user tries to connect.
+  storeNote.hidden = info === null || info.trustedStore || pending !== null; // a pending server's note says it all
 }
 
 /** Card autofill Tier 1 §10: the honest injection state — held broad grant = autofill can inject;
@@ -127,7 +183,13 @@ async function connect(): Promise<void> {
       }
       return;
     }
-    await setServerUrl(canonical); // persists → the service worker performs the origin-clean switch
+    // A15: the worker canonicalizes, keeps the choice in its own store and runs the origin-clean switch before it
+    // answers. A choice it cannot keep (no extension store in this browser mode) changes nothing.
+    const r = await send({ type: "setServerUrl", url: canonical });
+    if (!r?.ok) {
+      setMsg(serverMsg, "err", r?.code === "storage" ? STORE_UNAVAILABLE : "Couldn't switch servers. Nothing changed — try again.");
+      return;
+    }
     hideGate();
     input.value = canonical;
     await renderCurrent();
@@ -149,12 +211,20 @@ async function connect(): Promise<void> {
   }
 }
 
+const STORE_UNAVAILABLE =
+  "This browser gives andvari no storage of its own in this mode (Firefox does this when it never remembers history), so it can't keep a server choice. Nothing changed.";
+
 /** Danger zone: purge THIS browser's stored data for the current origin (§4.2/B2-7 — the only
  *  destructive path). Two-click confirm so it can't fire by accident. */
 let purgeArmed = false;
 async function purge(): Promise<void> {
   clearMsg(purgeMsg);
-  const current = await getServerUrl();
+  const info = await serverInfoNow();
+  if (info === null) {
+    setMsg(purgeMsg, "err", "andvari isn't answering, so nothing was removed. Close this page and open it again.");
+    return;
+  }
+  const current = info.url;
   if (!purgeArmed) {
     purgeArmed = true;
     purgeBtn.textContent = `Remove all data for ${current}? Click again to confirm`;
@@ -191,6 +261,23 @@ themeChoices.addEventListener("click", (e) => {
 });
 
 continueBtn.addEventListener("click", openGate);
+// A15: "Review this address" opens the ordinary Trust Gate for the pre-update choice — Connect stays the only commit.
+legacyReview.addEventListener("click", () => {
+  if (legacyCandidate === null) return;
+  input.value = legacyCandidate;
+  openGate();
+});
+legacyForget.addEventListener("click", () => {
+  void (async () => {
+    try {
+      await send({ type: "forgetLegacyServer" });
+    } catch {
+      /* the worker did not answer — the notice simply stays */
+    }
+    if (legacyNote.contains(document.activeElement)) input.focus();
+    await renderCurrent();
+  })();
+});
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();

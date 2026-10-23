@@ -34,7 +34,6 @@ import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -102,7 +101,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 
 class MainActivity : FragmentActivity() {
     private val vm: AndvariViewModel by viewModels {
@@ -137,10 +135,13 @@ class MainActivity : FragmentActivity() {
         // Block Recents thumbnails / screen recording / casting from capturing revealed
         // secrets (set AFTER the crash-screen early-return above — crash traces must stay
         // screenshot-able). The Autofill Status screen is exempted below: the owner's Fold
-        // debugging protocol depends on screenshotting it, and it renders no vault values.
+        // debugging protocol depends on screenshotting it, and it renders no vault values — which
+        // holds for the WHOLE window only because the attention area (vault names, co-holders,
+        // invitations, transfers) is not composed on that screen ([showsAttentionArea]; security
+        // review 2026-10, q30).
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         lifecycleScope.launch {
-            vm.ui.map { it.screen is Screen.AutofillStatus }.distinctUntilChanged().collect { exempt ->
+            vm.ui.map { flagSecureExempt(it.screen) }.distinctUntilChanged().collect { exempt ->
                 if (exempt) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 else window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
             }
@@ -307,7 +308,8 @@ fun AndvariApp(vm: AndvariViewModel) {
             // shown-once reveal must not compete with re-seal/transfer cards (a migration account
             // entering the capture gate can carry several), and every card keeps working after
             // the gate lands the vault.
-            if (ui.screen !is Screen.RecoverySetup && ui.screen !is Screen.RecoveryCapture) AttentionArea(vm, ui)
+            // q30: nor the FLAG_SECURE-exempt Autofill Status screen ([showsAttentionArea]).
+            if (showsAttentionArea(ui.screen)) AttentionArea(vm, ui)
             // One-time quick-unlock enrollment offer, only over the vault list (design §3/§8).
             if (ui.quickUnlockOffer && ui.screen is Screen.Vault) QuickUnlockOfferCard(vm, ui.quickUnlockReoffered)
             // Cut L (v2 #20): autofill — the product's core daily value — was never offered;
@@ -643,7 +645,7 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
         NoticeBar(ui.notice, vm::clearNotice)
         // §4.3 B2-6 pending notice sits ABOVE the shared enroll form as a separate sibling — so it
         // can appear without disturbing the form's composition identity.
-        if (pending != null) PendingSwitchNotice(vm, pending)
+        if (pending != null) PendingSwitchNotice(vm, pending, busy = ui.busy)
         // §7.1 stranger nudge — only in the non-pending enroll-tab landing case.
         if (pending == null && effTab == 1 && signupMode == "landing") LandingNudge(ui.policy?.selfHostDocsUrl)
         // ONE stable call site per auth form: SignInForm only when signed-in entry is allowed, else
@@ -720,7 +722,7 @@ private fun TrustGateDialog(gate: TrustGatePrompt, vm: AndvariViewModel) {
  * user may only complete enrollment (the form below) or cancel and return to the previous origin.
  */
 @Composable
-private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi) {
+private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi, busy: Boolean) {
     Card(
         Modifier.fillMaxWidth().padding(bottom = 12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
@@ -735,6 +737,9 @@ private fun PendingSwitchNotice(vm: AndvariViewModel, pending: PendingSwitchUi) 
             )
             TextButton(
                 onClick = vm::cancelPendingSwitch,
+                // A14 (F8): disabled while an op (the enroll's register at the pending origin) runs —
+                // the ViewModel refuses it then too.
+                enabled = !busy,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
             ) { Text("Cancel and return to ${pending.previousOrigin}") }
         }
@@ -2307,24 +2312,30 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     val noPersonalVault = itemId == null && vm.personalVaultId().isEmpty()
     var targetVaultId by rememberSaveable(itemId) { mutableStateOf(if (noPersonalVault) null else vaultChoices.firstOrNull()?.vaultId) }
     var vaultError by remember(itemId) { mutableStateOf<String?>(null) }
-    // rememberSaveable: every typed field survives Activity recreation (rotation / fold
-    // posture change) — plain `remember` silently wiped them all.
+    // rememberSaveable: every typed NON-secret field survives Activity recreation (rotation / fold
+    // posture change) — plain `remember` silently wiped them all. The SECRET fields (password,
+    // TOTP seed, card number, security code) survive it from the ViewModel instead
+    // ([AndvariViewModel.editorSecretState]): app memory, dropped with the editor session and on
+    // lock, and never written into the saved-instance Bundle that system_server holds outside the
+    // app's lock (security review 2026-10, q27; the §F.7 idiom).
     var name by rememberSaveable { mutableStateOf(initial.name) }
     var username by rememberSaveable { mutableStateOf(initial.login?.username ?: "") }
-    var password by rememberSaveable { mutableStateOf(initial.login?.password ?: "") }
+    var password by remember { vm.editorSecretState("password") { initial.login?.password ?: "" } }
     var website by rememberSaveable { mutableStateOf(initial.login?.uris?.firstOrNull() ?: "") }
-    var totp by rememberSaveable { mutableStateOf(initial.login?.totp ?: "") }
+    var totp by remember { vm.editorSecretState("totp") { initial.login?.totp ?: "" } }
     // Card fields load VERBATIM (no normalization): merely opening the editor on an old card
     // must never change what a later Save writes back — normalization happens once, inside
     // builtDoc (the TOTP idiom).
     var cardholder by rememberSaveable { mutableStateOf(initial.card?.cardholderName ?: "") }
-    var cardNumber by rememberSaveable { mutableStateOf(initial.card?.number ?: "") }
+    var cardNumber by remember { vm.editorSecretState("cardNumber") { initial.card?.number ?: "" } }
     var cardExpMonth by rememberSaveable { mutableStateOf(initial.card?.expMonth ?: "") }
     var cardExpYear by rememberSaveable { mutableStateOf(initial.card?.expYear ?: "") }
-    var cardSecurityCode by rememberSaveable { mutableStateOf(initial.card?.securityCode ?: "") }
+    var cardSecurityCode by remember { vm.editorSecretState("cardSecurityCode") { initial.card?.securityCode ?: "" } }
     var cardPostal by rememberSaveable { mutableStateOf(initial.card?.postalCode ?: "") }
-    var notes by rememberSaveable { mutableStateOf(initial.notes ?: "") }
-    var attachments by rememberSaveable(stateSaver = attachmentListSaver) { mutableStateOf(initial.attachments) }
+    // A13 review RF5: the notes (a note item's whole payload) and the attachment list (every ref carries its fileKey)
+    // are secrets too: the ViewModel's editor session, never the saved-instance Bundle.
+    var notes by remember { vm.editorSecretState("notes") { initial.notes ?: "" } }
+    var attachments by remember { vm.editorSecretState("attachments") { initial.attachments } }
     // Pending pick BYTES live in the ViewModel (they can't go in SavedState) — see
     // AndvariViewModel.editorPendingUploads.
     val pendingUploads = vm.editorPendingUploads
@@ -3203,15 +3214,24 @@ private fun ExportVaultRows(vaults: List<ExportVault>, selected: Set<String>, on
 
 @Composable
 private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPreflight, onChooseDestination: () -> Unit) {
+    // A14 (F6): the formula cells the user acknowledged, exactly as shown — re-including a vault
+    // brings new cells, and formulaAckSatisfied then asks again.
+    var formulaAcked by remember { mutableStateOf<List<ExportCsv.FormulaCell>?>(null) }
+    val canSave = !ui.busy && pre.loginCount > 0 && ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)
     AlertDialog(
         onDismissRequest = { if (!ui.busy) vm.csvDismiss() },
         confirmButton = {
-            TextButton(onClick = onChooseDestination, enabled = !ui.busy && pre.loginCount > 0) { Text("Choose where to save") }
+            TextButton(onClick = { if (canSave) { vm.csvAcknowledge(formulaAcked); onChooseDestination() } }, enabled = canSave) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = vm::csvDismiss, enabled = !ui.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                // A14 review N3: why the dialog came back (the vault changed after the tick).
+                pre.notice?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
                 pre.offlineNote?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
@@ -3237,11 +3257,22 @@ private fun CsvPreflightDialog(vm: AndvariViewModel, ui: UiState, pre: CsvPrefli
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
-                // Audit F08: the writer deliberately never mangles a leading =+-@ (mangling would
-                // corrupt real secrets), so THIS row is the compensating control — the warning was
-                // computed and then rendered nowhere. Same NamedSkips shape as its five siblings;
-                // the sentence itself is the shared canon's, byte-equal with web's.
-                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)
+                // Audit F08: the writer deliberately never mangles a leading =+-@ (a CSV export is
+                // input for another password manager, and a ' prefix would corrupt a real password),
+                // so THIS row is the compensating control. A14 (F6): it names each CELL ("Password
+                // of “…”", our label before the attacker-chosen name) and it is a required
+                // acknowledgement: "Choose where to save" waits for the tick below.
+                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))
+                if (pre.warnings.formulaCells.isNotEmpty()) {
+                    val acked = ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)
+                    Row(
+                        Modifier.toggleable(value = acked, role = Role.Checkbox, onValueChange = { on -> formulaAcked = if (on) pre.warnings.formulaCells else null }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(acked, onCheckedChange = null)
+                        Text(ExportCsv.FORMULA_ACK, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Reimporting a CSV collapses exact duplicates.",
@@ -3710,16 +3741,6 @@ private fun PrimaryButton(text: String, enabled: Boolean, busy: Boolean, modifie
 // ---- non-composable helpers ----
 
 private const val DEFAULT_ATTACHMENT_MAX_BYTES = 25L * 1024 * 1024
-
-private val attachmentJson = Json { ignoreUnknownKeys = true }
-
-/** SavedState Saver for the editor's attachment list — JSON via the spec serializer so
- *  unknown-field extras survive the recreation round-trip too. Restore failures fall
- *  back to re-initialization (null) rather than crashing the restore. */
-private val attachmentListSaver = listSaver<List<AttachmentRef>, String>(
-    save = { list -> list.map { attachmentJson.encodeToString(AttachmentRef.serializer(), it) } },
-    restore = { list -> runCatching { list.map { attachmentJson.decodeFromString(AttachmentRef.serializer(), it) } }.getOrNull() },
-)
 
 private fun needsUpdateLine(n: Int): String =
     if (n == 1) "1 item needs an app update to display." else "$n items need an app update to display."

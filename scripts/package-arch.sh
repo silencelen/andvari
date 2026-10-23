@@ -96,6 +96,17 @@ if [ "$SELF_TEST" = 1 ]; then
   bsdtar -xOf "$PKG" usr/share/applications/archtest.desktop | grep -q '^MimeType=x-scheme-handler/archtest;$' || die "self-test: desktop-line not applied"
   bsdtar -tvf "$PKG" usr/bin/archtest | grep -q -- '-> /opt/archtest/bin/archtest$' || die "self-test: /usr/bin symlink wrong"
   sha=$(cut -d' ' -f1 "$PKG.sha256"); [ "$sha" = "$(sha256sum "$PKG" | cut -d' ' -f1)" ] || die "self-test: .sha256 sidecar disagrees"
+  # Every member root:root, by name AND by number, in the tar and in .MTREE — whoever ran this.
+  # (Run the self-test as a non-root user to exercise the case this guards.)
+  notroot=$(bsdtar -tvf "$PKG" | awk '$3 != "root" || $4 != "root"') || true
+  [ -z "$notroot" ] || die "self-test: package members not owned root:root (built as uid $(id -u)):
+$notroot"
+  notroot=$(bsdtar --numeric-owner -tvf "$PKG" | awk '$3 != "0" || $4 != "0"') || true
+  [ -z "$notroot" ] || die "self-test: package members not uid/gid 0:
+$notroot"
+  bsdtar -xOf "$PKG" .MTREE | gzip -dc | grep -oE '(^| )(uid|gid)=[0-9]+' | grep -vqE '=0$' \
+    && die "self-test: .MTREE records a non-root uid/gid"
+  bsdtar -xOf "$PKG" .MTREE | gzip -dc | grep -qE '(^| )uid=0( |$)' || die "self-test: .MTREE records no uid=0 at all"
   note "self-test OK: $PKG ($(stat -c %s "$PKG") bytes)"
   exit 0
 fi
@@ -130,8 +141,8 @@ PKGDIR="$WORK/pkg"; mkdir -p "$PKGDIR"
 
 # ------------------------------------------------------------------ payload
 # /opt/<name> = the app-image verbatim (the .deb's layout). cp -a keeps modes and the
-# relative symlinks jpackage writes; ownership is normalised below because the package
-# records uid/gid and a build user's ids mean nothing on the target.
+# relative symlinks jpackage writes. Ownership is NOT taken from the staging tree: both
+# bsdtar create calls below record every member as root:root (uid/gid 0), whoever runs this.
 install -d -m 755 "$PKGDIR/opt"
 cp -a "$APP_IMAGE" "$PKGDIR/opt/$NAME"
 install -d -m 755 "$PKGDIR/usr/bin" "$PKGDIR/usr/share/applications"
@@ -165,8 +176,6 @@ for spec in "${EXTRA_FILES[@]+"${EXTRA_FILES[@]}"}"; do
   install -D -m "$( [ -x "$src" ] && echo 755 || echo 644 )" "$src" "$PKGDIR$dest"
 done
 
-chown -R 0:0 "$PKGDIR" 2>/dev/null || true   # non-root builders keep their uid; pacman copes
-
 # ------------------------------------------------------------------ .PKGINFO
 # makepkg's own key order. `size` is the installed size: apparent bytes, as makepkg
 # computes it (du -sk --apparent-size * 1024). `xdata = pkgtype=pkg` is what pacman >= 6.1
@@ -187,17 +196,23 @@ if [ -n "$INSTALL_FILE" ]; then install -m 644 "$INSTALL_FILE" "$PKGDIR/.INSTALL
 # ------------------------------------------------------------------- .MTREE
 # makepkg's exact bsdtar options; member list sorted and relative (no leading ./), metadata
 # files first — pacman reads .PKGINFO from the head of the stream without unpacking the rest.
+# OWNER: `--uid 0 --gid 0 --uname root --gname root` on BOTH creates. libalpm extracts with the
+# recorded owner, so a non-root build would otherwise install /opt/<name> and the /usr/bin
+# launcher owned by the builder's numeric uid — and .MTREE would record the same uid, so
+# `pacman -Qkk` would call it consistent. (makepkg gets root:root from fakeroot; this gets it
+# from bsdtar, which needs no privilege.)
+ROOT_OWNER=(--uid 0 --gid 0 --uname root --gname root)
 (
   cd "$PKGDIR"
   find . -mindepth 1 ! -name .PKGINFO ! -name .INSTALL ! -name .MTREE -printf '%P\n' | LC_ALL=C sort > "$WORK/files"
   { printf '.PKGINFO\n'; [ -f .INSTALL ] && printf '.INSTALL\n'; cat "$WORK/files"; } > "$WORK/mtree-list"
-  LANG=C bsdtar -czf .MTREE --format=mtree \
+  LANG=C bsdtar "${ROOT_OWNER[@]}" -czf .MTREE --format=mtree \
     --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
     --files-from "$WORK/mtree-list"
   chmod 644 .MTREE
   { printf '.PKGINFO\n.MTREE\n'; [ -f .INSTALL ] && printf '.INSTALL\n'; cat "$WORK/files"; } > "$WORK/pkg-list"
   install -d -m 755 "$OUT"
-  LANG=C bsdtar --no-fflags -cnf - --files-from "$WORK/pkg-list" | zstd -c -z -q -T0 - > "$OUT/$PKGFILE.tmp"
+  LANG=C bsdtar "${ROOT_OWNER[@]}" --no-fflags -cnf - --files-from "$WORK/pkg-list" | zstd -c -z -q -T0 - > "$OUT/$PKGFILE.tmp"
 )
 mv -f "$OUT/$PKGFILE.tmp" "$OUT/$PKGFILE"
 ( cd "$OUT" && sha256sum "$PKGFILE" > "$PKGFILE.sha256" )

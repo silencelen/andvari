@@ -17,10 +17,12 @@
 #   3. manifest.json.* / manifest.json.sig.* backups LEAVE the web root (moved, never deleted) and
 #      the live pair stays;
 #   4. unrecognised names are reported and left alone;
-#   5. no --apply => nothing changes on disk at all.
+#   5. no --apply => nothing changes on disk at all;
+#   6. a LIVE release that is no longer among the newest N on disk keeps its detached signatures
+#      (security review 2026-10, q50): the manifest names the deb and the pkg, never their .asc.
 set -uo pipefail
 
-SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/prune-artifacts.sh"
+SCRIPT="${PRUNE_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/prune-artifacts.sh}"
 FAILED=0
 fail() { echo "    FAIL: $*" >&2; FAILED=1; }
 
@@ -139,6 +141,35 @@ OUT2="$(ANDVARI_DOWNLOADS_EXEC="env" ANDVARI_DOWNLOADS_DIR="$DL2" ANDVARI_DOWNLO
 [ -e "$DL2/andvari-0.26.3.deb" ] || fail "extension-less run removed the live deb"
 [ -e "$DL2/andvari-0.26.2.deb" ] || fail "extension-less run removed the previous release"
 [ -e "$DL2/andvari-0.24.0.deb" ] && fail "extension-less run did not prune the old release (did it abort early?)"
+
+echo "==> prune-downloads: a live release behind two newer uploads keeps its signatures"
+# The reachable operator state: debs/pkgs for 0.26.2 and 0.26.3 are already on /downloads (they are
+# served BEFORE the manifest ceremony), while the signed manifest still names 0.26.1. Rule 1 keeps
+# the two files the manifest spells out; the .asc beside each must survive with them, or the
+# fielded installer's published signature is gone and the runbook's gpg --verify fails.
+DL3="$WORK/downloads3"; BAK3="$WORK/bak3"; mkdir -p "$DL3"
+for v in 0.26.1 0.26.2 0.26.3; do
+  touch "$DL3/andvari-$v.deb" "$DL3/andvari-$v.deb.asc" \
+        "$DL3/andvari-$v-x86_64.pkg.tar.zst" "$DL3/andvari-$v-x86_64.pkg.tar.zst.asc" "$DL3/andvari-$v.msi"
+done
+touch "$DL3/andvari-0.25.0.deb" "$DL3/andvari-0.25.0.deb.asc"
+cat > "$DL3/manifest.json" <<'JSON'
+{ "seq": 11,
+  "linux":     { "version": "0.26.1", "url": "/downloads/andvari-0.26.1.deb" },
+  "linuxArch": { "version": "0.26.1", "url": "/downloads/andvari-0.26.1-x86_64.pkg.tar.zst" },
+  "windows":   { "version": "0.26.1", "url": "/downloads/andvari-0.26.1.msi" } }
+JSON
+: > "$DL3/manifest.json.sig"
+OUT3="$(ANDVARI_DOWNLOADS_EXEC="env" ANDVARI_DOWNLOADS_DIR="$DL3" ANDVARI_DOWNLOADS_BACKUP_DIR="$BAK3" \
+        bash "$SCRIPT" --downloads --apply 2>&1)" || fail "run aborted on the live-behind-newer directory: $OUT3"
+for f in andvari-0.26.1.deb andvari-0.26.1.deb.asc andvari-0.26.1-x86_64.pkg.tar.zst \
+         andvari-0.26.1-x86_64.pkg.tar.zst.asc andvari-0.26.1.msi; do
+  [ -e "$DL3/$f" ] || fail "$f was deleted although 0.26.1 is the LIVE release (the manifest still names it)"
+done
+for f in andvari-0.26.2.deb.asc andvari-0.26.3.deb.asc andvari-0.26.3-x86_64.pkg.tar.zst.asc; do
+  [ -e "$DL3/$f" ] || fail "$f was deleted although its release is among the newest two"
+done
+[ -e "$DL3/andvari-0.25.0.deb.asc" ] && fail "andvari-0.25.0.deb.asc survived — neither live nor among the newest two"
 
 if [ "$FAILED" = 0 ]; then
   echo "prune-downloads self-test OK"

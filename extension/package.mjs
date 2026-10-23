@@ -4,6 +4,7 @@
 // The zip roots the files directly (manifest.json at top level) — unzip → Load unpacked.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { a15ReleaseProblem } from "./src/releasegate.ts";
 
 const version = JSON.parse(readFileSync("manifest.json", "utf8")).version;
 // The version lives in three hand-edited files; a forgotten bump would silently ship a
@@ -15,6 +16,11 @@ if (version !== ffVersion || version !== pkgVersion) {
     `version drift: manifest.json=${version} manifest.firefox.json=${ffVersion} package.json=${pkgVersion} — bump all three`,
   );
 }
+// Security review 2026-10 (the A16 review): a release of this tree must be newer than the last release without the A15
+// trusted store, or the next update would be taken for the pre-A15 upgrade (src/releasegate.ts). Here, not in verify.sh:
+// between releases the tree may carry the last release's version.
+const a15 = a15ReleaseProblem(version);
+if (a15 !== null) throw new Error(a15);
 mkdirSync("artifacts", { recursive: true });
 
 // A7: refuse to zip a build whose tests fail — mirrors the version-drift refusal above.

@@ -680,6 +680,10 @@ class SyncEngine(
     /** A7 review MEDIUM-2: the account state's consumed nonces for [vaultId] (other devices of this user). */
     private fun accountConsumedFor(vaultId: String): Set<String> = accountState.doc.consumedNonces[vaultId].orEmpty().mapTo(HashSet()) { it.nonce }
 
+    /** A13 (c10): when each of those was consumed (v2: its issuedAt; v1: the consuming device's clock). */
+    private fun accountConsumedAtFor(vaultId: String): Map<String, Long> =
+        accountState.doc.consumedNonces[vaultId].orEmpty().associate { it.nonce to it.issuedAt }
+
     /** Called after a personal wrap is stored server-side, so a native host can update its cached
      *  `AccountKeys` (an offline cold start then knows the personal vault without the network). */
     var onPersonalWrapStored: ((io.silencelen.andvari.core.model.PersonalWrap) -> Unit)? = null
@@ -987,7 +991,17 @@ class SyncEngine(
         if (newlyHeld.isEmpty()) return
         for (w in cache.envelopes()) {
             if (w.deleted || w.vaultId !in newlyHeld) continue
-            runCatching { cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w))) }
+            // INV-HOME (A13, c05; the hydrate twin): a kept row is admitted against home(itemId) and HOMES the item once
+            // it is applied here. Without the home, the next row for this itemId under another held vault took NEW_HOME
+            // and quarantined this genuine one.
+            if (!admitHome(w)) {
+                cache.deleteItem(w.itemId)
+                continue
+            }
+            runCatching {
+                cache.upsertItem(w, VaultItem(w.itemId, w.vaultId, w.rev, w.updatedAt, account.decryptItem(w)))
+                homeApplied(w)
+            }
         }
     }
 
@@ -1959,6 +1973,7 @@ class SyncEngine(
                 issuedAt = info?.issuedAt,
                 consumed = consumedFor(vaultId),
                 consumedAccount = accountConsumedFor(vaultId),
+                consumedAccountAt = accountConsumedAtFor(vaultId),
                 liveSince = cache.liveSince(vaultId),
                 now = nowMs(),
             )
@@ -2624,7 +2639,7 @@ class SyncEngine(
         // H18: an edit to an item that exists ONLY as a queued, never-sent put (an offline
         // new-item save the list now projects). It is still the SAME new item: the server has
         // never seen it, so the newer doc simply supersedes the queued one. H37 generalizes
-        // that to EVERY item with unsent queued puts — see [coalesceQueuedPuts].
+        // that to EVERY item with unsent queued puts — see [queuedPutsToFold].
         val queuedOnly = if (itemId != null && existing == null) item(itemId) else null
         // Save guard (design §6): an edit to an itemId we no longer hold must NOT silently
         // teleport into the personal vault — the item's vault may have been deleted or its
@@ -2669,17 +2684,25 @@ class SyncEngine(
         }
         return syncMutex.withLock {
             // H37: the queued burst's ORIGINAL base rev wins over the cache's — see below.
-            val coalescedBase = coalesceQueuedPuts(id)
-            val m = putMutation(provenance, id, doc, coalescedBase ?: existing?.rev ?: 0)
+            val folded = queuedPutsToFold(id)
+            // A13 review RF4 (web q54's core twin): the seal is the step that can still refuse here — INV-WRITE-KEY, a
+            // home that moved, or a key a pull dropped during the upload awaits above. The folded rows are dequeued only
+            // once it has succeeded, so a refusal leaves the item's offline backlog queued exactly as it was.
+            val m = putMutation(provenance, id, doc, folded?.base ?: existing?.rev ?: 0)
+            if (folded != null) dequeueFolded(folded)
             sendOrQueue(m)?.let { return@withLock it }
             reconcileAfterWrite(m)
         }
     }
 
+    /** The item's unsent queued puts that [saveWithUploads] folds away, and the base rev the new put carries. */
+    private class FoldedPuts(val base: Long, val mutationIds: List<String>)
+
     /**
      * H18 + H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"): fold this item's UNSENT
      * queued puts into the one the caller is about to enqueue, and answer the base rev that
-     * one must carry. Web twin: store.ts coalesceQueuedPuts.
+     * one must carry. Web twin: store.ts coalesceQueuedPuts (which instead undoes its fold when
+     * the seal refuses, R32/q54).
      *
      * WHY (H37, the bug this exists to kill). The server's conflict test is
      * `baseItemRev < existing.rev` (Service.applyPut) against a GLOBALLY monotonic rev —
@@ -2712,18 +2735,25 @@ class SyncEngine(
      * old base, which degrades to exactly today's conflict copy, never to loss. Called under
      * [syncMutex], so a drain cannot be sending these rows meanwhile.
      *
-     * @return the oldest folded row's baseItemRev, or null when nothing was folded.
+     * Two halves since the A13 review (RF4): [queuedPutsToFold] only READS what will be folded, and [dequeueFolded]
+     * drops it once the new put is sealed. A seal that refuses in between (INV-WRITE-KEY, a home that moved, a vault
+     * key dropped during the upload awaits) therefore leaves the backlog queued; it used to have been dequeued already.
+     *
+     * @return the rows to fold and the oldest one's baseItemRev, or null when nothing would be folded.
      */
-    private fun coalesceQueuedPuts(itemId: String): Long? {
+    private fun queuedPutsToFold(itemId: String): FoldedPuts? {
         val rows = cache.pending().filter { it.itemId == itemId }
         if (rows.isEmpty()) return null
         if (rows.any { it.op != "put" }) return null // a queued delete — never reorder around it
-        val base = rows.first().baseItemRev
-        for (q in rows) {
-            cache.dequeue(q.mutationId)
-            pendingDocCache.remove(q.mutationId)
+        return FoldedPuts(rows.first().baseItemRev, rows.map { it.mutationId })
+    }
+
+    /** Drop the rows [queuedPutsToFold] chose, AFTER the put that supersedes them was sealed (A13 review RF4). */
+    private fun dequeueFolded(folded: FoldedPuts) {
+        for (id in folded.mutationIds) {
+            cache.dequeue(id)
+            pendingDocCache.remove(id)
         }
-        return base
     }
 
     /**
@@ -2831,7 +2861,7 @@ class SyncEngine(
         if (existing == null) {
             // H18: a queued, never-sent NEW item — the server has nothing to delete; dropping
             // the queued put(s) is the whole removal (and the projected row disappears).
-            if (item(itemId) != null) syncMutex.withLock { coalesceQueuedPuts(itemId) }
+            if (item(itemId) != null) syncMutex.withLock { queuedPutsToFold(itemId)?.let { dequeueFolded(it) } }
             return SaveOutcome.APPLIED
         }
         return syncMutex.withLock {

@@ -15,8 +15,9 @@ import {
   setServerUrl,
   type ServerUrlArea,
 } from "./serverurl.ts";
+import { TrustedStoreUnavailable } from "./trustedkv.ts";
 
-// A Map-backed chrome.storage.local stand-in (the module takes the area structurally).
+// A Map-backed stand-in for the trusted store (the module takes the area structurally).
 function fakeArea(initial: Record<string, unknown> = {}): ServerUrlArea & { map: Map<string, unknown>; gets: number; sets: number } {
   const map = new Map(Object.entries(initial));
   return {
@@ -76,7 +77,7 @@ test("canonicalizeServerUrl — rejects everything that is not a plain http(s) o
   for (const input of bad) assert.equal(canonicalizeServerUrl(input), null, `should reject: ${JSON.stringify(input)}`);
 });
 
-test("getServerUrl — storage.local.serverUrl ?? DEFAULT (§5.1), re-canonicalized on read", async () => {
+test("getServerUrl — the trusted store's serverUrl ?? DEFAULT (§5.1), re-canonicalized on read", async () => {
   assert.equal(await getServerUrl(fakeArea()), DEFAULT_SERVER_URL); // absent → default
   assert.equal(await getServerUrl(fakeArea({ [SERVER_URL_KEY]: "https://self.example:8443" })), "https://self.example:8443");
   // A hand-edited/legacy value resolves to the same canonical form (same originKey namespace)…
@@ -99,25 +100,73 @@ test("setServerUrl — canonicalizes before persisting; an invalid input throws 
   assert.equal(area.sets, 1);
 });
 
-test("server choice lives in storage.local ONLY — storage.sync is never touched (§5.1, binding)", async () => {
-  // The per-device trust rationale: a synced serverUrl would let one phished device repoint every
-  // synced browser. Pin the plumbing: with BOTH areas present, only local sees traffic.
-  const local = fakeArea();
-  const sync = fakeArea({ [SERVER_URL_KEY]: "https://evil.example" }); // even a planted sync value is never read
-  const g = globalThis as { chrome?: unknown };
-  const prior = g.chrome;
-  g.chrome = { storage: { local, sync } };
-  try {
-    assert.equal(await getServerUrl(), DEFAULT_SERVER_URL); // default args resolve chrome.storage.local
-    await setServerUrl("https://self.example"); // default-arg path → chrome.storage.local
+// ---- A15 (security review 2026-10): the server choice left chrome.storage.local ----
+// A content script (any web page's renderer, if compromised) can write chrome.storage.local on Firefox and on Chrome
+// before 140, and pre-A15 a write of `serverUrl` there repointed the extension with no Trust Gate. The choice now lives
+// in the extension origin's IndexedDB (trustedkv.ts), which a content script cannot open.
 
-  } finally {
-    g.chrome = prior;
-  }
-  assert.equal(local.map.get(SERVER_URL_KEY), "https://self.example");
-  assert.ok(local.gets >= 1 && local.sets === 1);
-  assert.equal(sync.gets + sync.sets, 0, "storage.sync must never be touched");
-  assert.equal(sync.map.get(SERVER_URL_KEY), "https://evil.example"); // untouched, unread
+/** Install a chrome global whose storage.local AND storage.sync both carry a planted origin, and count every touch. */
+function withPlantedChrome<T>(run: () => Promise<T>): Promise<{ result: T; touches: number }> {
+  let touches = 0;
+  const planted = (): ServerUrlArea & { remove(): Promise<void> } => ({
+    async get() {
+      touches++;
+      return { [SERVER_URL_KEY]: "https://evil.example" };
+    },
+    async set() {
+      touches++;
+    },
+    async remove() {
+      touches++;
+    },
+  });
+  const g = globalThis as { chrome?: unknown; indexedDB?: unknown };
+  const prior = { chrome: g.chrome, indexedDB: g.indexedDB };
+  g.chrome = { storage: { local: planted(), sync: planted(), session: planted() } };
+  return run()
+    .then((result) => ({ result, touches }))
+    .finally(() => {
+      g.chrome = prior.chrome;
+      if (prior.indexedDB === undefined) delete g.indexedDB;
+      else g.indexedDB = prior.indexedDB;
+    });
+}
+
+test("A15: a serverUrl planted in storage.local (or sync) changes nothing — the default-arg read never looks there", async () => {
+  const { result, touches } = await withPlantedChrome(async () => {
+    delete (globalThis as { indexedDB?: unknown }).indexedDB; // plain node: no IndexedDB at all
+    return getServerUrl();
+  });
+  assert.equal(result, DEFAULT_SERVER_URL, "the planted origin must not be adopted");
+  assert.equal(touches, 0, "chrome.storage is never read for the server choice");
+});
+
+test("A15: IndexedDB unavailable → DEFAULT_SERVER_URL, and setServerUrl refuses rather than fall back to storage.local", async () => {
+  const { touches } = await withPlantedChrome(async () => {
+    delete (globalThis as { indexedDB?: unknown }).indexedDB;
+    assert.equal(await getServerUrl(), DEFAULT_SERVER_URL);
+    await assert.rejects(() => setServerUrl("https://self.example"), TrustedStoreUnavailable, "no silent storage.local write");
+    // A store that answers but cannot be opened (Firefox private browsing before 115) is the same case.
+    (globalThis as { indexedDB?: unknown }).indexedDB = {
+      open() {
+        throw new Error("InvalidStateError");
+      },
+    };
+    assert.equal(await getServerUrl(), DEFAULT_SERVER_URL);
+    await assert.rejects(() => setServerUrl("https://self.example"), TrustedStoreUnavailable);
+  });
+  assert.equal(touches, 0, "no fallback to chrome.storage for trust state");
+});
+
+test("A15: the server choice never touches storage.sync or storage.local — only the injected trusted area sees traffic", async () => {
+  const trusted = fakeArea();
+  const { touches } = await withPlantedChrome(async () => {
+    assert.equal(await getServerUrl(trusted), DEFAULT_SERVER_URL);
+    await setServerUrl("https://self.example", trusted);
+    assert.equal(await getServerUrl(trusted), "https://self.example");
+  });
+  assert.equal(touches, 0, "storage.local / storage.sync must never be touched");
+  assert.equal(trusted.map.get(SERVER_URL_KEY), "https://self.example");
 });
 
 test("originKeyFor — hex(sha256(canonical origin)).take(16), the native scheme (§4.2)", () => {

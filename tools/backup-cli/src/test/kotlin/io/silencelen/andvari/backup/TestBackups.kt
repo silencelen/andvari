@@ -94,15 +94,23 @@ object TestBackups {
     }
 
     /** Two vaults, three items, two embedded attachments, recorded skips — the everything sample. */
-    fun buildSample(passphrase: String, itemNames: Map<String, String> = emptyMap(), attachmentNames: Pair<String, String> = "router-config.txt" to "scan.pdf"): Sample {
+    fun buildSample(
+        passphrase: String,
+        itemNames: Map<String, String> = emptyMap(),
+        attachmentNames: Pair<String, String> = "router-config.txt" to "scan.pdf",
+        /** A14 (F12): rewrite any other payload string (vault names, origin, userId, skips). */
+        edit: (BackupPayload) -> BackupPayload = { it },
+    ): Sample {
         val keyA = crypto.randomBytes(32)
         val keyB = crypto.randomBytes(32)
-        val payload = samplePayload(
-            listOf(
-                BackupAttachmentEntry(1, "aaaa1111-0000-4000-8000-000000000001", GITHUB_ITEM, attachmentNames.first, attachmentA.size.toLong(), Bytes.toB64(keyA)),
-                BackupAttachmentEntry(2, "aaaa1111-0000-4000-8000-000000000002", WIFI_ITEM, attachmentNames.second, attachmentB.size.toLong(), Bytes.toB64(keyB)),
+        val payload = edit(
+            samplePayload(
+                listOf(
+                    BackupAttachmentEntry(1, "aaaa1111-0000-4000-8000-000000000001", GITHUB_ITEM, attachmentNames.first, attachmentA.size.toLong(), Bytes.toB64(keyA)),
+                    BackupAttachmentEntry(2, "aaaa1111-0000-4000-8000-000000000002", WIFI_ITEM, attachmentNames.second, attachmentB.size.toLong(), Bytes.toB64(keyB)),
+                ),
+                itemNames,
             ),
-            itemNames,
         )
         val fileId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
         val parts = ArrayList<ByteArray>()

@@ -103,12 +103,43 @@ class SurfacePinsTest {
 
     @Test
     fun theCsvPreflightRendersTheFormulaRiskRow() {
-        // ExportCsv.warnings() computes formulaRisk for every export; the dialog is the ONLY
-        // place a user can ever learn about it (the writer deliberately mangles nothing).
+        // ExportCsv.warnings() computes the formula cells for every export; the dialog is the ONLY
+        // place a user can ever learn about them (the writer deliberately mangles nothing).
+        // A14 (F6): by CELL — "Password of “…”", our field label before the attacker-chosen name.
         assertTrue(
-            ui.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)"),
-            "the CSV preflight must enumerate the formula-risk items beside its five sibling categories",
+            ui.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))"),
+            "the CSV preflight must enumerate the formula-risk cells beside its five sibling categories",
         )
+    }
+
+    @Test
+    fun theFormulaWarningIsARequiredAcknowledgement() {
+        // A14 (F6): the warning used to be advisory, with "Choose where to save" enabled beside it.
+        // The button now waits for the acknowledgement, which is bound to the cells it was ticked for.
+        assertTrue(
+            ui.contains("ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)"),
+            "the save button must be gated on the formula acknowledgement",
+        )
+        assertTrue(ui.contains("formulaAcked = if (on) pre.warnings.formulaCells else null"), "the tick records exactly the cells shown")
+        assertTrue(ui.contains("Text(ExportCsv.FORMULA_ACK"), "the acknowledgement sentence is the shared canon's")
+    }
+
+    @Test
+    fun theCsvWriteRechecksTheAcknowledgementAgainstWhatItWrites() {
+        // A14 review N3: the dialog's tick was for the cells the preflight showed; the write re-reads the vault after the
+        // file chooser (the 5-minute poll can sync in between). The cells are recomputed from the docs actually written
+        // (ExportCsv.gatedWrite, behaviour-tested in core ExportTest) and a mismatch writes nothing and shows the dialog
+        // again with the new list, the same vault selection and an empty tick.
+        assertTrue(ui.contains("state.csvRun(dest, selected, acked)"), "the acknowledged cells reach the writer")
+        val run = state.substringAfter("fun csvRun(dest: File, selectedVaults: Set<String>, acknowledged: List<ExportCsv.FormulaCell>?) {")
+            .substringBefore("private fun writeVerifiedAtomically(")
+        assertTrue(run.contains("ExportCsv.gatedWrite(docs, acknowledged)"), "the cells are recomputed from the docs being written")
+        assertTrue(run.contains("is ExportCsv.GatedWrite.NeedsAcknowledgement ->"), "a mismatch is handled, not written")
+        assertTrue(run.contains("csvPreflightVaults = vaults") && run.contains("selection = selectedVaults"), "…by re-presenting the dialog for the same selection")
+        assertTrue(run.contains("notice = CSV_CHANGED_NOTICE"), "…saying why it came back")
+        val dialog = ui.substringAfter("private fun CsvPreflightDialog(")
+        assertTrue(dialog.contains("mutableStateOf(synced.selection ?: vaults.map { it.vaultId }.toSet())"), "the re-presented dialog keeps the selection")
+        assertTrue(dialog.contains("synced.notice?.let"), "the dialog renders why it came back")
     }
 
     // ---- F31 ----
@@ -210,8 +241,8 @@ class SurfacePinsTest {
         assertTrue(csv.contains("item(s), personal"), "the personal vault line")
         assertTrue(csv.contains("item(s), shared (${'$'}{v.role})"), "one opt-out row per shared vault, in the backup dialog's words")
         assertTrue(csv.contains("Checkbox(v.vaultId in selected, onCheckedChange = null)"), "…as a real toggle, not a label")
-        assertTrue(ui.contains("state.csvRun(dest, selected)"), "the selection must reach the writer")
-        assertTrue(state.contains("fun csvRun(dest: File, selectedVaults: Set<String>)"))
+        assertTrue(ui.contains("state.csvRun(dest, selected, acked)"), "the selection must reach the writer")
+        assertTrue(state.contains("fun csvRun(dest: File, selectedVaults: Set<String>, acknowledged: List<ExportCsv.FormulaCell>?)"))
         assertTrue(state.contains("filter { it in selectedVaults }"), "csvRun must FILTER by the selection, never re-enumerate every held vault")
         assertTrue(state.contains("fun csvPreflightFor(selected: Set<String>)"), "the count/skip lines recompute for the selection")
     }

@@ -561,7 +561,9 @@ private fun Welcome(state: DesktopState) {
                 "Signed-in accounts stay on $prev — finish or cancel this invite first.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            TextButton(onClick = { state.cancelPendingSwitch() }) { Text("Cancel and return to $prev") }
+            // A14 (F8): disabled while an op (the enroll's register at the pending origin) is in
+            // flight — the state layer refuses it too (DesktopState.switchLockedByOp).
+            TextButton(onClick = { state.cancelPendingSwitch() }, enabled = !state.switchLockedByOp) { Text("Cancel and return to $prev") }
         }
     }
 }
@@ -720,7 +722,7 @@ private fun Enroll(state: DesktopState) {
                 invite = raw
                 linkOrigin = null // hand-edits after a link are a NEW entry — drop the stale confirmation
             }
-        }, mono = true, onEnter = submit, autoFocus = true) // a11ydesk-06: focus first field on open
+        }, mono = true, onEnter = submit, autoFocus = true, enabled = !state.switchLockedByOp) // a11ydesk-06; A14 (F8): no re-point mid-enroll
         // Confirmation only while the applied origin still IS the live server (a later manual
         // ServerField change must not keep claiming the link's server); helper line otherwise.
         if (linkOrigin != null && linkOrigin == state.baseUrl) {
@@ -864,7 +866,7 @@ private fun TrustGateInline(model: TrustGateModel, busy: Boolean, onConnect: () 
         Spacer(Modifier.height(16.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (onCancel != null) {
-                TextButton(onClick = onCancel, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") }
+                TextButton(onClick = onCancel, enabled = !busy, modifier = Modifier.focusRequester(cancelFocus)) { Text("Cancel") } // A14 (F8)
                 Spacer(Modifier.width(8.dp))
             }
             Primary("Connect", !busy, busy, onConnect)
@@ -3392,14 +3394,14 @@ private fun ExportDialogs(state: DesktopState) {
     }
     state.backupResult?.let { BackupResultDialog(it, state::backupResultDismiss) }
     state.csvPreflight?.let { pre ->
-        CsvPreflightDialog(state, pre) { selected ->
+        CsvPreflightDialog(state, pre) { selected, acked ->
             val dialog = FileDialog(null as Frame?, "Save CSV export", FileDialog.SAVE)
             dialog.file = "andvari-export-${exportDateSuffix()}.csv"
             dialog.isVisible = true
             val dir = dialog.directory; val file = dialog.file
             if (dir != null && file != null) {
                 val dest = File(dir, file)
-                overwrite.request(dest) { state.csvRun(dest, selected) }
+                overwrite.request(dest) { state.csvRun(dest, selected, acked) }
             }
         }
     }
@@ -3551,23 +3553,34 @@ private fun BackupResultDialog(r: BackupResult, onDone: () -> Unit) {
  * ([DesktopState.csvPreflightFor]) so the dialog never promises what the file won't hold.
  */
 @Composable
-private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChooseDestination: (Set<String>) -> Unit) {
+private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChooseDestination: (Set<String>, List<ExportCsv.FormulaCell>?) -> Unit) {
     val vaults = state.csvPreflightVaults
-    var selected by remember(synced) { mutableStateOf(vaults.map { it.vaultId }.toSet()) }
+    // A14 review N3: a dialog re-presented by the write keeps the selection it was confirmed with.
+    var selected by remember(synced) { mutableStateOf(synced.selection ?: vaults.map { it.vaultId }.toSet()) }
     // `pre` is the LIVE preflight for the current selection; [synced] (computed over every held
     // vault at sync time) is the fallback only while the engine is unbound (a lock mid-dialog —
     // the dialog dies with the session anyway).
     val pre = remember(synced, selected) { state.csvPreflightFor(selected) ?: synced }
+    // A14 (F6): the formula cells the user acknowledged, exactly as shown — re-including a vault
+    // brings new cells, and formulaAckSatisfied then asks again.
+    var formulaAcked by remember(synced) { mutableStateOf<List<ExportCsv.FormulaCell>?>(null) }
+    val canSave = !state.busy && pre.loginCount > 0 && ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)
     val dismiss = { if (!state.busy) state.csvDismiss() } // F72: Escape = Cancel (no fields → no Enter path)
     AlertDialog(
         onDismissRequest = dismiss,
         confirmButton = {
-            TextButton(onClick = { onChooseDestination(selected) }, enabled = !state.busy && pre.loginCount > 0) { Text("Choose where to save") }
+            TextButton(onClick = { if (canSave) onChooseDestination(selected, formulaAcked) }, enabled = canSave) { Text("Choose where to save") }
         },
         dismissButton = { TextButton(onClick = state::csvDismiss, enabled = !state.busy) { Text("Cancel") } },
         title = { Text("Export for another password manager?") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()).dismissOnEscape(dismiss)) {
+                // A14 review N3: why the dialog came back (the vault changed after the tick). Read off
+                // [synced], the re-presented preflight: [pre] is recomputed for the selection.
+                synced.notice?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(8.dp))
+                }
                 pre.offlineNote?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(8.dp))
@@ -3602,11 +3615,22 @@ private fun CsvPreflightDialog(state: DesktopState, synced: CsvPreflight, onChoo
                 NamedSkips("Attachments can't be represented in CSV:", pre.warnings.withAttachments)
                 NamedSkips("Only the first website is kept:", pre.warnings.extraUris)
                 NamedSkips("Written, but a reimport would skip them (no username or password):", pre.warnings.emptyUsernameAndPassword)
-                // Audit F08: the writer deliberately never mangles a leading =+-@ (mangling would
-                // corrupt real secrets), so THIS row is the compensating control — the warning was
-                // computed and then rendered nowhere. Same NamedSkips shape as its five siblings;
-                // the sentence itself is the shared canon's, byte-equal with web's.
-                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaRisk)
+                // Audit F08: the writer deliberately never mangles a leading =+-@ (a CSV export is
+                // input for another password manager, and a ' prefix would corrupt a real password),
+                // so THIS row is the compensating control. A14 (F6): it names each CELL ("Password
+                // of “…”", our label before the attacker-chosen name) and it is a required
+                // acknowledgement: "Choose where to save" waits for the tick below.
+                NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))
+                if (pre.warnings.formulaCells.isNotEmpty()) {
+                    val acked = ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)
+                    Row(
+                        Modifier.toggleable(value = acked, role = Role.Checkbox, onValueChange = { on -> formulaAcked = if (on) pre.warnings.formulaCells else null }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(acked, onCheckedChange = null)
+                        Text(ExportCsv.FORMULA_ACK, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "Reimporting a CSV collapses exact duplicates.",
@@ -3740,7 +3764,7 @@ private fun Modifier.dismissOnEscape(dismiss: () -> Unit): Modifier =
     }
 
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false) {
+private fun Field(label: String, value: String, onChange: (String) -> Unit, mono: Boolean = false, singleLine: Boolean = true, onEnter: (() -> Unit)? = null, autoFocus: Boolean = false, enabled: Boolean = true) {
     // F72 multi-line guard: onEnter is dropped (not just unused) when singleLine=false.
     // a11ydesk-06 (AM-9): optional initial focus — desktop had zero FocusRequester, so auth screens
     // opened focused on nothing. runCatching guards the composition race (requestFocus throws
@@ -3749,7 +3773,7 @@ private fun Field(label: String, value: String, onChange: (String) -> Unit, mono
     // field per screen — multiple requesters race, last wins.
     val fr = remember { FocusRequester() }
     LaunchedEffect(autoFocus) { if (autoFocus) runCatching { fr.requestFocus() } }
-    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter.takeIf { singleLine }), label = { Text(label) }, singleLine = singleLine,
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().padding(vertical = 4.dp).then(if (autoFocus) Modifier.focusRequester(fr) else Modifier).submitOnEnter(onEnter.takeIf { singleLine }), enabled = enabled, label = { Text(label) }, singleLine = singleLine,
         textStyle = if (mono) MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace) else MaterialTheme.typography.bodyMedium)
 }
 

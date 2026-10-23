@@ -206,6 +206,12 @@ test("biometric enroll (0.17.0): unsupported keeps the PIN path; cancel is retry
   assert.equal(enrollBioErrorCopy(undefined), "Couldn't turn on device quick unlock — try again.");
 });
 
+test("A16: an enroll refused because nothing could keep quick unlock says why, and never says try again", () => {
+  const why = "Quick unlock isn't available in this browser mode — andvari has no private storage here to keep it in (Firefox does this when it never remembers history).";
+  assert.equal(enrollErrorCopy("unavailable"), why);
+  assert.equal(enrollBioErrorCopy("unavailable"), why);
+});
+
 test("card + clipboard copy failures (#23): honest retryable sentences, never raw exception text", () => {
   assert.equal(CARD_COPY_FAILED, "Could not copy from this card — reopen the popup and try again.");
   assert.equal(CLIPBOARD_FAILED, "Couldn't copy to the clipboard — try again.");

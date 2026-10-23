@@ -23,6 +23,7 @@ type UnlockCode =
   | "keys_damaged"
   | "kdf_policy"
   | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
+  | "confirm_server" // A15 review F1: a server is pending (confirm it or say "Not mine") — nothing was sent anywhere
   | "server_error"
   | "network"
   | "unknown";
@@ -38,14 +39,16 @@ type PinUnlockCode =
   | "not_armed"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
 type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
-type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin";
+type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin" | "unavailable";
 // Biometric quick-unlock (0.17.0) twins — literal-identical to messages.ts BioUnlockCode / EnrollBioCode.
 type BioUnlockCode =
   | "bio_cancelled"
@@ -53,13 +56,24 @@ type BioUnlockCode =
   | "expired"
   | "corrupt"
   | "stale_uvk"
+  | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
   | "network"
   | "server_error"
   | "identity_mismatch"
   | "kdf_policy"
+  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
   | "aborted";
-type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled";
+type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled" | "unavailable";
+
+/** A16: quick unlock cannot be kept here (no session sealing key: Firefox's "Never remember history" gives the extension
+ *  no IndexedDB), so enrolling is refused rather than pretend. Shared by the PIN and the biometric enroll. */
+const QUICK_UNLOCK_UNAVAILABLE =
+  "Quick unlock isn't available in this browser mode — andvari has no private storage here to keep it in (Firefox does this when it never remembers history).";
+
+/** A15 review F1: the refusal while a server is pending. The popup shows the confirm route instead of any sign-in
+ *  form, so this is the fallback line only (a sign-in raced the update, or a stale popup). */
+export const CONFIRM_SERVER_FIRST = "Confirm your server first — andvari signs in nowhere until you confirm it or choose “Not mine”.";
 
 /** Verbatim web/src/ui/errors.ts UNREACHABLE — the one canonical "can't reach the server"
  *  sentence, duplicated as a const because no build path from extension/ to web/src exists. */
@@ -115,6 +129,8 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
       // Security review 2026-10, branch A11 (c18): the login answer carried a malformed user/device id (A10 wire
       // grammar). A tampering-class refusal: never softened into "try again", like identity_mismatch above.
       return "The server sent a malformed account record, so sign-in was stopped. Tell your admin — the server may be misbehaving.";
+    case "confirm_server":
+      return CONFIRM_SERVER_FIRST;
     case "server_error":
       return "The server had a problem answering — your details may be fine. Try again in a moment.";
     case "network":
@@ -263,12 +279,17 @@ export function pinUnlockErrorCopy(code: PinUnlockCode | undefined, attemptsRema
     case "corrupt":
     case "stale_uvk":
       return "Quick unlock needs to be set up again — unlock with your master password.";
+    case "keys_damaged":
+      // A13 (q38): the full unlock's H67 sentence, byte-identical — the same damaged row, the same verdict.
+      return unlockErrorCopy("keys_damaged");
     case "revoked":
       return "Your session ended — sign in again with your master password.";
     case "identity_mismatch":
       return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
     case "kdf_policy":
       return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "confirm_server":
+      return CONFIRM_SERVER_FIRST;
     case "server_error":
       return "The server had a problem answering — try again in a moment.";
     case "network":
@@ -289,6 +310,8 @@ export function enrollErrorCopy(code: EnrollCode | undefined, reason?: PinWeakRe
       return "Set a new master password in the web vault before turning on quick unlock.";
     case "need_full_unlock":
       return "Enter your master password once more to set up quick unlock.";
+    case "unavailable":
+      return QUICK_UNLOCK_UNAVAILABLE;
     case "weak_pin":
       switch (reason) {
         case "too_short":
@@ -318,12 +341,16 @@ export function bioUnlockErrorCopy(code: BioUnlockCode | undefined): string {
     case "corrupt":
     case "stale_uvk":
       return "Quick unlock needs to be set up again — unlock with your master password.";
+    case "keys_damaged":
+      return unlockErrorCopy("keys_damaged"); // A13 (q38): the H67 sentence, byte-identical
     case "revoked":
       return "Your session ended — sign in again with your master password.";
     case "identity_mismatch":
       return "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.";
     case "kdf_policy":
       return "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.";
+    case "confirm_server":
+      return CONFIRM_SERVER_FIRST;
     case "server_error":
       return "The server had a problem answering — try again in a moment.";
     case "network":
@@ -348,6 +375,8 @@ export function enrollBioErrorCopy(code: EnrollBioCode | undefined): string {
       return "This device can't do biometric quick unlock — set up a PIN instead.";
     case "bio_cancelled":
       return "Setup was cancelled — try again when you're ready.";
+    case "unavailable":
+      return QUICK_UNLOCK_UNAVAILABLE;
     default:
       return "Couldn't turn on device quick unlock — try again.";
   }

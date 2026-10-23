@@ -203,6 +203,20 @@ export class AndvariApi {
    *  not a replacement error path (web client.ts:120 parity). */
   onUpgradeRequired: (() => void) | null = null;
 
+  /** Security review 2026-10 (A16 review R4): asked before EVERY request this client would send — a call, a refresh, a
+   *  logout. While it answers false nothing reaches the network: a call throws `confirm_server` (status 0), a refresh
+   *  reports no fresh token and leaves the pair as it was, a logout reports false. Background: no server is dialed while
+   *  one is pending or unknown (serverstate.ts). Null = always allowed. */
+  mayDial: (() => boolean) | null = null;
+
+  private dialAllowed(): boolean {
+    return this.mayDial === null || this.mayDial();
+  }
+
+  private refuseDial(): ApiError {
+    return new ApiError(0, "confirm_server", "no server is dialed while one awaits confirmation");
+  }
+
   setTokens(access: string | null, refresh: string | null): void {
     this.accessToken = access;
     this.refreshToken = refresh;
@@ -218,6 +232,7 @@ export class AndvariApi {
       "X-Andvari-Client": this.clientHeader,
     };
     if (this.accessToken) headers["authorization"] = `Bearer ${this.accessToken}`;
+    if (!this.dialAllowed()) throw this.refuseDial();
     const resp = await fetch(this.baseUrl + path, {
       method,
       headers,
@@ -272,6 +287,7 @@ export class AndvariApi {
   private async doRefresh(): Promise<boolean> {
     const rt = this.refreshToken;
     if (!rt) return false;
+    if (!this.dialAllowed()) return false; // nothing consumed, nothing sent
     // 1. Consume + persist the consumed state before the POST (onTokensChanged is awaited).
     this.refreshToken = null;
     const atConsume = this.accessToken;
@@ -281,6 +297,7 @@ export class AndvariApi {
     //    refresh entirely (no set, no clear, no restore, no notify) rather than clobber the new pair.
     const owns = (): boolean => this.refreshToken === null && this.accessToken === atConsume;
     try {
+      if (!this.dialAllowed()) throw this.refuseDial(); // a block since the consume: restored below, like a transport failure
       const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
         method: "POST",
         headers: { "content-type": "application/json", "X-Andvari-Client": this.clientHeader },
@@ -364,9 +381,11 @@ export class AndvariApi {
   async forceRefresh(): Promise<"rotated" | "revoked" | "transient"> {
     const rt = this.refreshToken;
     if (!rt) return "revoked";
+    if (!this.dialAllowed()) return "transient"; // nothing consumed, nothing sent: keep the blob
     this.refreshToken = null; // consume + persist the consumed state before the POST (AM1)
     await this.onTokensChanged?.();
     try {
+      if (!this.dialAllowed()) throw this.refuseDial(); // a block since the consume: restored below, like a transport failure
       const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
         method: "POST",
         headers: { "content-type": "application/json", "X-Andvari-Client": this.clientHeader },
@@ -441,6 +460,7 @@ export class AndvariApi {
    *  the caller (doLock), which owns the pair's lifecycle. Resolves whether the server accepted. */
   async logout(): Promise<boolean> {
     const post = (): Promise<Response> => {
+      if (!this.dialAllowed()) return Promise.reject(this.refuseDial());
       const headers: Record<string, string> = { "X-Andvari-Client": this.clientHeader };
       if (this.accessToken) headers["authorization"] = `Bearer ${this.accessToken}`;
       return fetch(this.baseUrl + "/api/v1/auth/logout", { method: "POST", headers });

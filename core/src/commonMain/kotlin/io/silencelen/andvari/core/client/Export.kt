@@ -85,7 +85,66 @@ object ExportCsv {
          *  totp) that leads with a spreadsheet formula character. The no-mangling rule above is
          *  only safe because the UI says so — this is that warning's input. */
         val formulaRisk: List<String>,
+        /** Security review 2026-10, A14 (F6): the same risk, one entry per CELL (row order, then
+         *  column order), so the warning names "Password of “…”" rather than only the item name an
+         *  attacker chose. The UIs render these with [formulaCellLabel] and gate the write on
+         *  [formulaAckSatisfied]. */
+        val formulaCells: List<FormulaCell> = emptyList(),
     )
+
+    /** The six written CSV columns and the label the warning names each by — byte-twin of web
+     *  `CsvColumn` + its `COLUMN_LABEL` table. */
+    enum class CsvColumn(val label: String) {
+        NAME("Name"),
+        WEBSITE("Website"),
+        USERNAME("Username"),
+        PASSWORD("Password"),
+        NOTE("Note"),
+        TOTP("One-time code"),
+    }
+
+    /** One cell a spreadsheet would evaluate. [item] is the item's (possibly attacker-chosen) name. */
+    data class FormulaCell(val item: String, val column: CsvColumn)
+
+    /** "Password of “GitHub”": OUR field label first, then the item's name in quotes, escaped onto
+     *  one line ([TerminalText.escape]) so a newline or control character in the name cannot start
+     *  a line of its own. Byte-twin of web `formulaCellLabel`. */
+    fun formulaCellLabel(cell: FormulaCell): String = "${cell.column.label} of \u201C${TerminalText.escape(cell.item)}\u201D"
+
+    /** The acknowledgement beside the formula warning — byte-twin of web `CSV_FORMULA_ACK`. */
+    const val FORMULA_ACK = "I understand that a spreadsheet would run these cells as formulas"
+
+    /** The acknowledgement counts only for the cells it was given for: nothing risky needs none; a
+     *  vault re-included after the tick brings new cells and needs a fresh one. Twin of web
+     *  `formulaAckSatisfied`. */
+    fun formulaAckSatisfied(cells: List<FormulaCell>, acked: List<FormulaCell>?): Boolean =
+        cells.isEmpty() || acked == cells
+
+    /** What a native CSV write does with the docs it is about to write ([gatedWrite]). */
+    sealed class GatedWrite {
+        /** [csv] is [write] of exactly the docs that were checked. */
+        class Ready(val csv: String, val loginCount: Int) : GatedWrite()
+
+        /** The docs carry formula cells the acknowledgement does not cover: nothing is written, and the
+         *  caller shows [warnings] again (its [Warnings.formulaCells] is the list to acknowledge). */
+        class NeedsAcknowledgement(val warnings: Warnings, val loginCount: Int) : GatedWrite()
+    }
+
+    /**
+     * Security review 2026-10, A14 review N3: the acknowledgement re-checked against the docs a native
+     * write ACTUALLY writes. The desktop and Android dialogs gate their save button on the cells the
+     * preflight showed, but the write re-reads the vault after the file chooser, and a sync can land in
+     * between (desktop's poll runs during the chooser, Android's RESUMED loop during the SAF picker),
+     * bringing a cell nobody acknowledged. The cells are recomputed here from [docs], and the write
+     * goes ahead only when [acknowledged] covers exactly them ([formulaAckSatisfied]). Web needs no
+     * twin: its download handler writes the very items the render that enabled the button computed.
+     */
+    fun gatedWrite(docs: List<ItemDoc>, acknowledged: List<FormulaCell>?): GatedWrite {
+        val w = warnings(docs)
+        val logins = docs.count { it.type == "login" }
+        if (!formulaAckSatisfied(w.formulaCells, acknowledged)) return GatedWrite.NeedsAcknowledgement(w, logins)
+        return GatedWrite.Ready(write(docs), logins)
+    }
 
     /** F08 — the sentence the UI must render for [Warnings.formulaRisk], byte-twin of web
      *  `CSV_FORMULA_WARNING`. Ends in a colon: the caller appends the names, exactly like the
@@ -116,6 +175,7 @@ object ExportCsv {
         val uris = ArrayList<String>()
         val empty = ArrayList<String>()
         val formula = ArrayList<String>()
+        val formulaCells = ArrayList<FormulaCell>()
         for (doc in items) {
             // Cards interact with the other lists exactly as notes always have: still eligible
             // for [Warnings.withAttachments] (that check is type-blind), never for the login-only lists.
@@ -132,13 +192,18 @@ object ExportCsv {
                 // may begin `-` or `@`) made the warning silent on exactly the cell an attacker
                 // would pick; a name that occasionally appears for an honest password costs less.
                 val written = listOf(
-                    doc.name, doc.login?.uris?.firstOrNull() ?: "", doc.login?.username ?: "",
-                    doc.login?.password ?: "", doc.notes ?: "", doc.login?.totp ?: "",
+                    CsvColumn.NAME to doc.name, CsvColumn.WEBSITE to (doc.login?.uris?.firstOrNull() ?: ""),
+                    CsvColumn.USERNAME to (doc.login?.username ?: ""), CsvColumn.PASSWORD to (doc.login?.password ?: ""),
+                    CsvColumn.NOTE to (doc.notes ?: ""), CsvColumn.TOTP to (doc.login?.totp ?: ""),
                 )
-                if (written.any { startsWithFormulaChar(it) }) formula.add(doc.name)
+                val risky = written.filter { startsWithFormulaChar(it.second) }
+                if (risky.isNotEmpty()) {
+                    formula.add(doc.name)
+                    risky.forEach { formulaCells.add(FormulaCell(doc.name, it.first)) }
+                }
             }
         }
-        return Warnings(notes, cards, attach, uris, empty, formula)
+        return Warnings(notes, cards, attach, uris, empty, formula, formulaCells)
     }
 
     private fun field(value: String): String {

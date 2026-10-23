@@ -2,9 +2,22 @@ import { ApiClient, LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
 import { idbSupported, openVaultCache, vaultDbName } from "../vault/idbcache";
 
 /**
- * Non-secret session metadata persisted across reloads. Tokens are here too (MVP);
- * the vault KEY is NEVER persisted — a reload always re-prompts for the master
- * password (spec 01 §8: web has no quick-unlock).
+ * The session: non-secret metadata persisted across reloads, plus the token pair. The vault KEY is
+ * NEVER persisted — a reload always re-prompts for the master password (spec 01 §8: web has no
+ * quick-unlock).
+ *
+ * WHERE THE TOKENS LIVE (security review 2026-10, A14 F5 — owner decision: "a browser not opted
+ * into the offline copy keeps no token once locked"):
+ *  - offline copy ON for this user on this browser ({@link webCacheEnabled}): today's behaviour —
+ *    the pair rides the localStorage session, shared by every tab (the F25 Web Lock + re-read
+ *    keeps their rotations from colliding);
+ *  - otherwise: localStorage keeps the metadata only (`tokens: null` — its REMOVAL is the F27
+ *    cross-tab sign-out signal), and each TAB holds its own pair in sessionStorage
+ *    ({@link TAB_TOKENS_KEY}). A tab with no pair signs in (a new device session of its own, so tabs
+ *    never share one rotating refresh token); a lock revokes the tab's pair and drops it (App).
+ * {@link saveSession} places the pair by that rule every time it writes, so a toggle of the offline
+ * copy moves it at once ({@link setOfflineCopyEnabled}, {@link applyOrgOfflineCachePolicy}), and
+ * {@link migrateLegacySessionTokens} moves a pre-A14 pair off disk at load.
  */
 export interface Session {
   baseUrl: string;
@@ -20,23 +33,230 @@ export interface Session {
 export const SESSION_STORAGE_KEY = "andvari.session";
 const KEY = SESSION_STORAGE_KEY;
 
-export function loadSession(): Session | null {
-  const raw = localStorage.getItem(KEY);
+/** This tab's token slot in sessionStorage (A14 F5): `{ tabId, userId, tokens }`. Per tab, and gone when
+ *  the tab is closed — but NOT guaranteed off disk (A14 review Wb): Chrome and Firefox write
+ *  sessionStorage into the profile's session-restore data so a crash restore, "continue where you left
+ *  off" or reopen-closed-tab can bring the tab back with it. So an UNLOCKED tab's pair (only an unlocked
+ *  tab holds one; a lock drops it) can sit in those files while it is valid, and a tab brought back that
+ *  way resumes at the unlock card with its pair; anyone who can read the profile can read it then.
+ *  Browsers COPY sessionStorage into a duplicated tab, hence {@link claimTabTokens}. */
+export const TAB_TOKENS_KEY = "andvari.tabTokens";
+
+interface TabSlot {
+  tabId: string;
+  userId: string;
+  tokens: Tokens;
+}
+
+function ssGet(key: string): string | null {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function ssSet(key: string, value: string): void {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    /* storage unreachable: the pair then lives only in this tab's memory (the ApiClient) */
+  }
+}
+function ssRemove(key: string): void {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    /* storage unreachable */
+  }
+}
+
+function readSlot(): TabSlot | null {
+  const raw = ssGet(TAB_TOKENS_KEY);
   if (!raw) return null;
   try {
-    const s = JSON.parse(raw) as Session;
-    return { ...s, isAdmin: !!s.isAdmin }; // sessions saved before P4 lack the field
+    const s = JSON.parse(raw) as Partial<TabSlot>;
+    const t = s.tokens as Partial<Tokens> | undefined;
+    if (typeof s.tabId !== "string" || typeof s.userId !== "string" || typeof t?.accessToken !== "string" || typeof t.refreshToken !== "string") return null;
+    return { tabId: s.tabId, userId: s.userId, tokens: { accessToken: t.accessToken, refreshToken: t.refreshToken } };
   } catch {
     return null;
   }
 }
 
+/** Drop this tab's pair (a per-tab lock, a sign-out). */
+export function clearTabTokens(): void {
+  ssRemove(TAB_TOKENS_KEY);
+}
+
+/** True when a lock keeps this user's tokens (the offline copy is on): today's behaviour. */
+export function tokensKeptAcrossLock(userId: string): boolean {
+  return webCacheEnabled(userId);
+}
+
+// ---- duplicated-tab guard ----
+// The id of the tab slot this document has claimed (holds the Web Lock for). Document-lifetime state.
+let claimedTabId: string | null = null;
+
+type LockManagerLike = {
+  request(name: string, options: { signal?: AbortSignal; ifAvailable?: boolean }, callback: (lock: unknown) => unknown): Promise<unknown>;
+};
+function lockManager(): LockManagerLike | null {
+  const l = typeof navigator !== "undefined" ? (navigator as { locks?: LockManagerLike }).locks : undefined;
+  return l && typeof l.request === "function" ? l : null;
+}
+const tabLockName = (tabId: string): string => `andvari-tab-${tabId}`;
+
+/** Hold `andvari-tab-<tabId>` for the rest of this document's life (the callback never settles).
+ *  With [signal] the request waits until it is granted or the signal aborts; without one it only
+ *  takes a lock that is free right now (`ifAvailable`), so it can never wait forever. */
+function holdTabLock(locks: LockManagerLike, tabId: string, signal?: AbortSignal): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    locks
+      .request(tabLockName(tabId), signal ? { signal } : { ifAvailable: true }, (lock) => {
+        if (lock === null) {
+          resolve(false); // ifAvailable and held elsewhere
+          return undefined;
+        }
+        resolve(true);
+        return new Promise(() => {});
+      })
+      .catch(() => resolve(false));
+  });
+}
+
+/**
+ * Boot (A14 F5): is this tab's slot its own, or a COPY? Chrome's and Firefox's "Duplicate tab" (and a
+ * window.open that keeps the opener) copy sessionStorage, pair included, and two tabs spending one
+ * single-use refresh token trip the server's reuse heuristic, which revokes the whole device. Each
+ * tab with a slot holds a Web Lock named after its tab id for its lifetime; at boot this tab waits a
+ * moment (a reloading tab's previous document releases its lock on unload) for its slot's lock. A
+ * tab that cannot get it is a copy: it drops the copied pair and signs in on its own. Without Web
+ * Locks a copy cannot be told from a reload, and the slot is kept (residual, spec 05 A14).
+ */
+export async function claimTabTokens(opts: { waitMs?: number } = {}): Promise<void> {
+  const slot = readSlot();
+  if (!slot || claimedTabId === slot.tabId) return;
+  const locks = lockManager();
+  if (!locks) return;
+  const waitMs = opts.waitMs ?? 1500;
+  // No AbortSignal.timeout (some browsers have Web Locks without it): no bounded wait is possible, so
+  // only a lock that is free right now counts — a reload that races its previous document's unload
+  // then signs in again, which is the safe side.
+  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(waitMs) : undefined;
+  if (await holdTabLock(locks, slot.tabId, signal)) {
+    claimedTabId = slot.tabId;
+  } else {
+    clearTabTokens();
+  }
+}
+
+/** Test seam: forget this document's claim (a fresh document, as far as the module is concerned). */
+export function resetTabClaim(): void {
+  claimedTabId = null;
+}
+
+/** The tab id this document's slot is written under, claiming a fresh one (and its lock) if needed. */
+function ownTabId(): string {
+  if (claimedTabId) return claimedTabId;
+  const id = crypto.randomUUID();
+  const locks = lockManager();
+  if (locks) void holdTabLock(locks, id);
+  claimedTabId = id;
+  return id;
+}
+
+function readPersisted(): Session | null {
+  const raw = localStorage.getItem(KEY);
+  if (!raw) return null;
+  try {
+    const s = JSON.parse(raw) as Session;
+    return { ...s, isAdmin: !!s.isAdmin, tokens: s.tokens ?? null }; // sessions saved before P4 lack isAdmin
+  } catch {
+    return null;
+  }
+}
+
+export function loadSession(): Session | null {
+  const meta = readPersisted();
+  if (!meta) return null;
+  if (tokensKeptAcrossLock(meta.userId)) return meta; // offline copy ON: today's behaviour
+  // Per-tab: only THIS tab's own pair, and only for the account the metadata names — another
+  // tab may have signed a different member in since this tab wrote its slot.
+  const slot = readSlot();
+  return { ...meta, tokens: slot && slot.userId === meta.userId ? slot.tokens : null };
+}
+
+/** A14 review W7: every storage write here is guarded. saveSession runs inside ApiClient.setTokens (the
+ *  rotation hook), so a throwing write (a full quota, storage disabled) used to escape from a lock's
+ *  `setTokens(null)` and skip the rest of the lock, leaving the vault open. A failed write leaves the
+ *  pair unpersisted (a reload then asks to sign in), never the lock half-done. */
 export function saveSession(s: Session): void {
-  localStorage.setItem(KEY, JSON.stringify(s));
+  if (tokensKeptAcrossLock(s.userId)) {
+    lsSet(KEY, JSON.stringify(s));
+    clearTabTokens();
+    return;
+  }
+  lsSet(KEY, JSON.stringify({ ...s, tokens: null }));
+  if (s.tokens) ssSet(TAB_TOKENS_KEY, JSON.stringify({ tabId: ownTabId(), userId: s.userId, tokens: s.tokens } satisfies TabSlot));
+  else clearTabTokens();
 }
 
 export function clearSession(): void {
-  localStorage.removeItem(KEY);
+  lsRemove(KEY);
+  clearTabTokens();
+  clearLockRevoke();
+}
+
+/**
+ * A14 review 3 (W-b): this tab's record of its last per-tab lock's revocation of the pair it dropped, kept in the
+ * tab's sessionStorage so that a reload or a new App instance still knows it. App's in-memory record (W1) died with
+ * the document, and a sign-out after a reload then reported "confirmed" for a lock whose revocation the server had
+ * refused. `pending` until the server answers — a document that reloads first never learns the answer, so pending
+ * counts as unconfirmed; `unconfirmed` when the server did not confirm it; removed once it did. Same lifetime and
+ * same tab scope as the token slot; it names the account, so another account's sign-out never reads it.
+ */
+export const TAB_LOCK_REVOKE_KEY = "andvari.tabLockRevoke";
+
+export function recordLockRevoke(userId: string, state: "pending" | "unconfirmed" | "confirmed"): void {
+  if (state === "confirmed") ssRemove(TAB_LOCK_REVOKE_KEY);
+  else ssSet(TAB_LOCK_REVOKE_KEY, JSON.stringify({ userId, state }));
+}
+
+/** True when this tab's last lock of [userId]'s session may have left its pair live (pending or unconfirmed). An
+ *  unreadable record counts as unconfirmed: the warning is the safe side. */
+export function lockRevokeUnconfirmed(userId: string | null): boolean {
+  if (userId === null) return false;
+  const raw = ssGet(TAB_LOCK_REVOKE_KEY);
+  if (!raw) return false;
+  try {
+    const r = JSON.parse(raw) as { userId?: unknown; state?: unknown };
+    if (typeof r.userId !== "string") return true;
+    return r.userId === userId && r.state !== "confirmed";
+  } catch {
+    return true;
+  }
+}
+
+export function clearLockRevoke(): void {
+  ssRemove(TAB_LOCK_REVOKE_KEY);
+}
+
+/**
+ * A14 F5 migration, at load: a pre-A14 session carrying its pair in localStorage on a browser that
+ * does not keep the offline copy has the pair moved off disk at once — into this tab's slot, unless
+ * this tab already holds its own pair for that account (then the disk copy is simply dropped).
+ */
+export function migrateLegacySessionTokens(): void {
+  const meta = readPersisted();
+  if (!meta?.tokens || tokensKeptAcrossLock(meta.userId)) return;
+  const own = readSlot();
+  saveSession({ ...meta, tokens: own && own.userId === meta.userId ? own.tokens : meta.tokens });
+}
+
+/** Re-place the persisted pair after the offline-copy gate changed (A14 F5). [before] is the session
+ *  as read under the OLD placement. */
+function rehomeSessionTokens(before: Session | null, userId: string | null): void {
+  if (before && userId !== null && before.userId === userId) saveSession(before);
 }
 
 /**
@@ -211,14 +431,18 @@ export function ensureCachePersistenceRequested(): void {
  *    store keeps its current cache shape.
  */
 export async function setOfflineCopyEnabled(userId: string, enabled: boolean): Promise<void> {
+  // A14 F5: the session's pair follows the gate — read it under the OLD placement, re-place it after.
+  const before = loadSession();
   if (!enabled) {
     lsSet(CACHE_OPT_OUT_KEY, String(Date.now()));
     lsRemove(cacheOptInKey(userId));
+    rehomeSessionTokens(before, userId); // off disk, into this tab, before the wipe's await
     await wipeVaultCache(userId);
     return;
   }
   lsRemove(CACHE_OPT_OUT_KEY);
   lsSet(cacheOptInKey(userId), String(Date.now()));
+  rehomeSessionTokens(before, userId);
   await requestCachePersistence();
 }
 
@@ -287,11 +511,14 @@ export function declineCacheNudge(): void {
  * ClientPolicy fetch.
  */
 export async function applyOrgOfflineCachePolicy(allowed: boolean, userId: string | null): Promise<void> {
+  const before = loadSession(); // A14 F5: the pair follows the gate, like the device toggle
   if (allowed) {
     lsRemove(ORG_CACHE_OFF_KEY);
+    rehomeSessionTokens(before, userId);
     return;
   }
   lsSet(ORG_CACHE_OFF_KEY, String(Date.now()));
+  rehomeSessionTokens(before, userId);
   if (userId) await wipeVaultCache(userId);
 }
 
@@ -428,28 +655,32 @@ export function installId(): string {
 }
 
 export function makeClient(session: Session | null, baseUrl: string): ApiClient {
-  // SAME-USER guard: capture WHO this client was created for. On a shared browser the
-  // persisted session can come to belong to a DIFFERENT account (user X's frozen tab
-  // wakes after user Y signed in) — X's client must neither adopt Y's token pair nor
-  // write X's rotations into Y's persisted session. A client created without a session
-  // (fresh sign-in form) never adopts; its post-login rotations still persist because
-  // by then the persisted session is its own (sign-in replaces it atomically).
-  const userId = session?.userId ?? null;
-  return new ApiClient(
+  // SAME-USER guard: WHO this client's pair belongs to ([ApiClient.boundUserId]). On a shared
+  // browser the persisted session can come to belong to a DIFFERENT account (user X's frozen tab
+  // wakes after user Y signed in) — X's client must neither adopt Y's token pair nor write X's
+  // rotations into Y's persisted session. A client created without a session (fresh sign-in form)
+  // never adopts. A14 review W3: the bound account is no longer fixed at creation — the one client
+  // lives for the whole tab, so a sign-in or register rebinds it to the account the server answered
+  // for (Welcome), and until that account's own saveSession lands, its rotations are written nowhere.
+  const client: ApiClient = new ApiClient(
     baseUrl,
     session?.tokens ?? null,
     (tokens) => {
       const cur = loadSession();
-      if (cur && (userId === null || cur.userId === userId)) saveSession({ ...cur, tokens });
+      const bound = client.boundUserId;
+      if (cur && (bound === null || cur.userId === bound)) saveSession({ ...cur, tokens });
     },
     // F25 cross-tab refresh dedup: lets the client re-read, inside the Web Lock, a
     // pair another tab already rotated and adopt it instead of replaying ours —
-    // only when that pair belongs to the SAME user this client was created for.
+    // only when that pair belongs to the SAME user this client is bound to.
     () => {
       const cur = loadSession();
-      return userId !== null && cur?.userId === userId ? cur.tokens : null;
+      const bound = client.boundUserId;
+      return bound !== null && cur?.userId === bound ? cur.tokens : null;
     },
   );
+  client.boundUserId = session?.userId ?? null;
+  return client;
 }
 
 /**
@@ -473,6 +704,11 @@ export function makeClient(session: Session | null, baseUrl: string): ApiClient 
  *  be live, and a password change from another device is what ends every session. */
 export const REVOKE_UNCONFIRMED =
   "Signed out of this browser, but the server didn't confirm it ended the session. If this was a shared computer, change your master password from another device to end every session.";
+
+/** A14 review W1: shown on the unlock card when the lock's own revocation of this tab's pair was not
+ *  confirmed — the pair is gone from this browser either way, but a copy of it may still be live. */
+export const LOCK_REVOKE_UNCONFIRMED =
+  "The server didn't confirm it ended this tab's session. If this was a shared computer, change your master password from another device to end every session.";
 
 export async function revokeSessionBestEffort(client: Pick<ApiClient, "logout"> | null): Promise<boolean> {
   if (!client) return false;

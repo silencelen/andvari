@@ -27,12 +27,20 @@ data class BackupPreflight(
     val offlineNote: String?,
 )
 
-/** Preflight for "Export for another password manager…" (spec 07 §1). */
+/** Preflight for "Export for another password manager…" (spec 07 §1). [selection] and [notice] are
+ *  set only when a write re-presents the dialog (A14 review N3): the vault selection the user had,
+ *  and why the dialog came back. */
 data class CsvPreflight(
     val warnings: ExportCsv.Warnings,
     val loginCount: Int,
     val offlineNote: String?,
+    val selection: Set<String>? = null,
+    val notice: String? = null,
 )
+
+/** A14 review N3: the dialog came back because the vault changed after the acknowledgement. */
+const val CSV_CHANGED_NOTICE =
+    "Your vault changed while you were choosing where to save, so nothing was written. Check the cells below and tick the acknowledgement again."
 
 /**
  * A confirmed backup preflight, pending its destination pick. Held in the app's state

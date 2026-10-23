@@ -13,7 +13,7 @@
 #      signup-mode invite-only, TOTP not required, offline cache allowed,
 #      instance name, ANDVARI_STRICT_ENV=1, break-glass hostname left unset
 #   2. generates ANDVARI_ENUM_SECRET
-#   3. runs the escrow ceremony (`recovery-cli keygen`, network-less container)
+#   3. runs the escrow ceremony (`recovery-cli keygen`, no network, no log driver)
 #      and pins ANDVARI_RECOVERY_PUBKEY / _FINGERPRINT — enrollment stays
 #      refused until these exist, so bring-up never skips past a dead instance
 #   4. mints ANDVARI_BOOTSTRAP_TOKEN, `docker compose up -d`, waits for
@@ -219,8 +219,9 @@ fi
 
 if [ -z "$(get_env ANDVARI_RECOVERY_PUBKEY)" ] || [ -z "$(get_env ANDVARI_RECOVERY_FINGERPRINT)" ]; then
   say "==> escrow ceremony: generating the org recovery key (recovery-cli keygen)"
-  say "    The container runs with --network none; the private seed exists only in"
-  say "    the sheet printed below — it is NOT written to disk by this script."
+  say "    The container runs with --network none and --log-driver none: docker keeps no"
+  say "    log of its output, so the private seed is not written to disk by this script."
+  say "    It exists in the sheet printed below and in this terminal's scrollback."
   # The pull is the step a stranger hits first, and the GHCR package is not anonymously
   # pullable yet (audit H43), so say what to do instead of just failing. Docker's own error
   # for "denied" and for "no such host" look alike to someone meeting this for the first time.
@@ -229,7 +230,13 @@ if [ -z "$(get_env ANDVARI_RECOVERY_PUBKEY)" ] || [ -z "$(get_env ANDVARI_RECOVE
   that can read the package, or build it locally instead: clone the repo and re-run this
   script from the checkout as './deploy/bringup.sh --build' (identical in every other way).
   See docs/self-hosting.md > Install."
-  SHEET="$(docker run --rm --network none "$IMAGE" recovery-cli keygen)" || die "recovery-cli keygen failed"
+  # --log-driver none (security review 2026-10): docker copies an attached container's stdout to
+  # the daemon's log driver too — json-file under /var/lib/docker/containers (which --rm only
+  # unlinks), the journal, or whatever ships container logs off the host — and this stdout is the
+  # org recovery seed. With the driver off, the attached output reaches only this command
+  # substitution. --network none does nothing about logging: it only stops the container itself
+  # from sending.
+  SHEET="$(docker run --rm --network none --log-driver none "$IMAGE" recovery-cli keygen)" || die "recovery-cli keygen failed"
   printf '\n%s\n\n' "$SHEET"
   PUBKEY="$(printf '%s\n' "$SHEET"  | sed -n 's/^[[:space:]]*ANDVARI_RECOVERY_PUBKEY=//p'      | head -1)"
   FINGERPRINT="$(printf '%s\n' "$SHEET" | sed -n 's/^[[:space:]]*ANDVARI_RECOVERY_FINGERPRINT=//p' | head -1)"
@@ -260,6 +267,13 @@ BOOTSTRAP_TOKEN="$(get_env ANDVARI_BOOTSTRAP_TOKEN)"
 if [ -z "$BOOTSTRAP_TOKEN" ]; then
   BOOTSTRAP_TOKEN="$(gen_secret 24)"
   set_env ANDVARI_BOOTSTRAP_TOKEN "$BOOTSTRAP_TOKEN"
+fi
+
+# ./data holds the SQLite database (TOTP seeds and login verifiers in the clear beside the
+# ciphertext): create it owner-only rather than let docker create the bind source 0755. The
+# entrypoint tightens it again on every start (chmod 700 after its chown, umask 077 for the server).
+if [ ! -d data ]; then
+  mkdir -m 700 data
 fi
 
 say "==> docker compose up -d"

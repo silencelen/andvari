@@ -4,7 +4,6 @@ import io.silencelen.andvari.core.client.Backup
 import io.silencelen.andvari.core.client.BackupException
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import java.io.File
-import java.time.Instant
 
 /**
  * andvari backup-cli — OFFLINE reader of record for `.andvari` backup files
@@ -55,49 +54,17 @@ fun main(args: Array<String>) {
             )
         }
     } catch (e: BackupException) {
-        die("error [${e.code}]: ${e.message}")
+        die(BackupInspect.errorLine(e.code, e.message))
     } catch (e: Exception) {
-        die("error: ${e.message}")
+        die(BackupInspect.errorLine(null, e.message))
     }
 }
 
 private fun verify(path: String) {
     val file = readBackupFile(path)
     val report = BackupInspect.verify(crypto, readPassphrase(), file)
-    val payload = report.opened.payload
-
-    println("andvari backup — $path")
-    println("  fileId        ${report.opened.header.fileId}")
-    println("  exportedAt    ${Instant.ofEpochMilli(payload.exportedAt)} (authenticated)")
-    if (payload.origin.isNotEmpty()) println("  origin        ${payload.origin} (advisory)")
-    if (payload.userId.isNotEmpty()) println("  userId        ${payload.userId} (advisory)")
-    println()
-
-    println("Items per vault (${payload.items.size} total):")
-    for ((label, count) in report.itemsPerVault) println("  %-52s %d".format(label, count))
-    println()
-
-    if (report.checks.isEmpty()) {
-        println("Attachments: none embedded (items-only backup)")
-    } else {
-        println("Attachments (${report.checks.size} in manifest):")
-        println("  %-44s %-6s %s".format("item-attachment", "result", "detail"))
-        for (c in report.checks) {
-            println("  %-44s %-6s %s".format("${c.itemName}-${c.entry.name}", if (c.pass) "OK" else "FAIL", c.detail))
-        }
-    }
-    report.framingMismatch?.let { println("  FRAMING FAIL: $it") }
-    println()
-
-    val s = payload.skipped
-    if (s.undecryptable.isEmpty() && s.attachmentsOverCap.isEmpty() && s.attachmentFetchFailed.isEmpty()) {
-        println("Skips recorded in file: none")
-    } else {
-        println("Skips recorded in file (by the exporting client — these are NOT in the backup):")
-        if (s.undecryptable.isNotEmpty()) println("  undecryptable items:     ${s.undecryptable.joinToString { it.itemId }}")
-        if (s.attachmentsOverCap.isNotEmpty()) println("  attachments over cap:    ${s.attachmentsOverCap.joinToString()}")
-        if (s.attachmentFetchFailed.isNotEmpty()) println("  attachment fetch failed: ${s.attachmentFetchFailed.joinToString()}")
-    }
+    // A14 (F12): the renderer escapes every payload-authored string before it reaches the terminal.
+    print(BackupInspect.renderVerify(path, report))
     println()
 
     if (report.pass) {

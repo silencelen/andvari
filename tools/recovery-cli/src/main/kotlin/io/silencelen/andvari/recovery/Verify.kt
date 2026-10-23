@@ -1,5 +1,6 @@
 package io.silencelen.andvari.recovery
 
+import io.silencelen.andvari.core.client.TerminalText
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.Escrow
@@ -105,6 +106,21 @@ object EscrowVerify {
             }
         }
     }
+
+    /**
+     * The printed result table (A14, F12): header + one line per row. The userId is the server's
+     * dump data and the detail can quote exception text, so both go through [TerminalText.escape]
+     * — a hostile row must not move the cursor over another row's FAIL.
+     */
+    fun tableLines(results: List<EscrowVerifyResult>): List<String> =
+        listOf("%-38s %-6s %s".format("userId", "result", "detail")) +
+            results.map { "%-38s %-6s %s".format(TerminalText.escape(it.userId), if (it.pass) "PASS" else "FAIL", TerminalText.escape(it.detail)) }
+
+    /** [receipt] as printed: each line escaped. JSON already escapes C0 inside strings; what is left
+     *  (DEL, C1) becomes the `\u009B` form, which is JSON's own escape, so the pasted receipt still
+     *  decodes to the same userIds. */
+    fun receiptForTerminal(results: List<EscrowVerifyResult>): String =
+        receipt(results).lines().joinToString("\n") { TerminalText.escape(it) }
 
     /**
      * The drill receipt (§8.4 drill hook) for `POST /api/v1/admin/escrow/drill`: one entry per PASSED

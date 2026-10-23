@@ -82,6 +82,9 @@ class SyncEngineQueueDrainTest {
         /** R39: answer every push with this HTTP status (a 5xx / 429 — TRANSIENT, never a verdict). */
         var refuseWithStatus: HttpStatusCode? = null
 
+        /** A13 review RF4: runs while an attachment upload is in flight — what a concurrent pull could change meanwhile. */
+        var onUpload: (() -> Unit)? = null
+
         fun applied(): Set<String> = pushes.flatten().map { it.itemId }.filter { it !in rejectItems && it !in refuseBatchIfContains }.toSet()
 
         /**
@@ -152,7 +155,13 @@ class SyncEngineQueueDrainTest {
                             }
                         }
                     }
-                    else -> err(HttpStatusCode.NotFound, "not_found")
+                    else -> if (path.startsWith("/api/v1/attachments/")) {
+                        onUpload?.invoke()
+                        val q = req.url.parameters
+                        ok("""{"attachmentId":"${path.substringAfterLast('/')}","itemId":"${q["itemId"]}","vaultId":"${q["vaultId"]}","size":1,"sha256":"00"}""")
+                    } else {
+                        err(HttpStatusCode.NotFound, "not_found")
+                    }
                 }
             }
             return AndvariApi("http://fake", HttpClient(engine), Tokens("access", "refresh"))
@@ -460,6 +469,59 @@ class SyncEngineQueueDrainTest {
         val copyName = s.pushedName(copyMut)
         assertTrue(copyName.startsWith("peer edit"), "the copy carries the PEER's value, not our draft: $copyName")
         assertTrue(copyName.contains("(conflict "))
+    }
+
+    // ==== A13 review RF4 (the core twin of web q54): the fold never outlives the put it was folded into ====
+
+    /** One queued offline edit ("draft 1", base 6) of a server-confirmed item, then a save WITH an upload, back online. */
+    private suspend fun Seed.queuedDraftThenUpload(id: String, onUpload: () -> Unit): Result<SaveOutcome> {
+        server.offline = true
+        assertEquals(SaveOutcome.QUEUED, engine.save(id, doc.copy(name = "draft 1"), account.personalVaultId))
+        server.offline = false
+        server.onUpload = onUpload
+        val ref = AttachmentRef(account.newItemId(), "note.txt", 3, io.silencelen.andvari.core.crypto.Bytes.toB64(account.newFileKey()))
+        return runCatching {
+            engine.saveWithUploads(id, doc.copy(name = "draft 2", attachments = listOf(ref)), listOf(PendingUpload(ref, "abc".encodeToByteArray())), account.personalVaultId)
+        }.also { server.onUpload = null }
+    }
+
+    @Test
+    fun aSealThatRefusesAfterTheFold_leavesTheOfflineBacklogQueued_andItStillDrains() = runBlocking<Unit> {
+        // saveWithUploads folds the item's queued puts (H37) and only then seals the new one. The seal can still refuse:
+        // here the item's home moved while the upload was in flight, so sealFor throws ItemChangedVaultsException. The
+        // fold used to have DURABLY dequeued the backlog by then, so the member's offline edit was simply gone.
+        val s = seeded(DurableFakeCache())
+        val id = s.account.newItemId()
+        s.seedItem(id)
+        val other = s.account.newItemId()
+        val res = s.queuedDraftThenUpload(id) { s.cache.setItemHome(id, other) }
+        assertTrue(res.exceptionOrNull() is ItemChangedVaultsException, "the seal refused: ${res.exceptionOrNull()}")
+        val left = s.cache.pending()
+        assertEquals(1, left.size, "the folded offline edit is still queued, not destroyed by a refused seal")
+        assertEquals(6L, left.single().baseItemRev)
+        assertEquals("draft 1", s.pushedName(left.single()))
+
+        // Once the item is home again, the backlog drains as it would have: draft 1, once, at the original base.
+        s.cache.setItemHome(id, s.account.personalVaultId)
+        val pushesBefore = s.server.pushes.size
+        s.engine.sync()
+        val sent = s.server.pushes.drop(pushesBefore).flatten()
+        assertEquals(listOf("draft 1"), sent.map { s.pushedName(it) })
+        assertEquals(6L, sent.single().baseItemRev)
+        assertTrue(s.cache.pending().isEmpty())
+    }
+
+    @Test
+    fun aSealWithNoKeyAfterTheFold_leavesTheOfflineBacklogQueued() = runBlocking<Unit> {
+        // The other refusal the review names: a pull dropped the vault during the upload awaits, so the seal finds no key.
+        val s = seeded(DurableFakeCache())
+        val id = s.account.newItemId()
+        s.seedItem(id)
+        val res = s.queuedDraftThenUpload(id) { s.account.removeVault(s.account.personalVaultId) }
+        assertTrue(res.isFailure, "a seal with no vault key cannot succeed")
+        val left = s.cache.pending()
+        assertEquals(1, left.size, "the folded offline edit is still queued")
+        assertEquals(6L, left.single().baseItemRev)
     }
 
     @Test

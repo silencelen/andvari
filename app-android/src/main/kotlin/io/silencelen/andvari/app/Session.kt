@@ -1,6 +1,7 @@
 package io.silencelen.andvari.app
 
 import android.content.Context
+import io.silencelen.andvari.app.autofill.AppSignerBindings
 import android.os.SystemClock
 import android.provider.Settings
 import io.silencelen.andvari.core.client.Tokens
@@ -397,6 +398,9 @@ class SessionStore(context: Context) {
     }
 
     fun save(s: Session) {
+        // A14 review N5: another account saved over this one starts with no app-fill bindings.
+        val prior = prefs.getString("userId", null)
+        if (!prior.isNullOrEmpty() && prior != s.userId) runCatching { AppSignerBindings.clearAll(appContext) }
         prefs.edit()
             .putString("baseUrl", s.baseUrl)
             .putString("userId", s.userId)
@@ -477,6 +481,9 @@ class SessionStore(context: Context) {
      * wave 3's switch flow clears tokens itself before any repoint).
      */
     fun clear() {
+        // A14 review N5: every path that ends the session lands here (sign-out, a definitive 401, the
+        // revocation purge, a refused refresh) — the apps this member confirmed end with it.
+        runCatching { AppSignerBindings.clearAll(appContext) }
         val ok = currentOriginKey()
         prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
             .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed"))
@@ -493,6 +500,7 @@ class SessionStore(context: Context) {
      * for an A→B→A round trip (§4.2/B2-7). Callers change [baseUrl] around this.
      */
     fun clearSessionTokens() {
+        runCatching { AppSignerBindings.clearAll(appContext) } // A14 review N5: a server switch ends the session too
         prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
             .remove("mustChangePassword").apply()
     }

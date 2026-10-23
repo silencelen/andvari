@@ -119,7 +119,7 @@ test("H90 — the TOTP challenge stays MEMORY-ONLY: no part of it reaches the se
   // locked compartment — breaker B1 territory, and the exact change ("persist the challenge so a
   // popup reopen survives SW death") that would look harmless in review. The comment at the
   // pendingTotp declaration argues against it; this is the tripwire that argues back in CI.
-  const snap = spanOf(bg, "function persistSession(): Promise<void> {", "return chrome.storage.session.set({ [SKEY]: snap });");
+  const snap = spanOf(bg, "function persistSession(): Promise<void> {", 'return sessionSeal.set("session", currentOriginKey, snap)');
   for (const forbidden of ["pendingTotp", "authKey", "wrapKey"]) {
     assert.ok(!snap.includes(forbidden), `the session snapshot must never carry ${forbidden}`);
   }
@@ -156,11 +156,15 @@ test("H33/R43 — doLock captures the flush, drops the session AT ONCE, and awai
   assert.ok(round.includes("if (session) pendingUsage = mergeUsage(mine, pendingUsage);"), "the re-arm stays session-gated so a late teardown round cannot resurrect records into a locked SW");
 });
 
-test("H33 — doSignOut AWAITS the bounded usage flush BEFORE api.logout() revokes the session", () => {
+test("H33 — sign-out's bounded usage flush lands BEFORE the logout revokes the session (A16 review R4: after the erase)", () => {
   const so = spanOf(bg, "async function doSignOut(", "/** Re-arm the policy idle lock");
-  const flush = "await Promise.race([flushUsage(), delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);";
-  assert.ok(so.includes(flush), "sign-out must flush the usage buffer, bounded");
-  assert.ok(so.indexOf(flush) < so.indexOf("await Promise.race([api.logout(), delay(5000)]);"), "the flush must land before logout() revokes the tokens it rides on");
+  // The flush is doLock's teardown flush (bounded, before the pair is forgotten); the revoke comes after doLock returns.
+  const lock = so.indexOf('await doLock("signout", seen);');
+  const revoke = so.indexOf("await Promise.race([revoker.logout(), delay(5000)]);");
+  assert.ok(lock > -1 && revoke > lock, "the lock (erase + teardown flush) first, the revoke after it");
+  const dl = spanOf(bg, "async function doLock(", "type TokenPair =");
+  assert.ok(dl.indexOf("const teardownFlush = flushUsageForTeardown();") < dl.indexOf("await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);"));
+  assert.ok(!so.includes("flushUsage()"), "no second, session-reading flush ahead of the erase");
 });
 
 test("H35 — flushUsage runs the prune round even with an EMPTY buffer when handed a live set", () => {
@@ -310,10 +314,337 @@ test("A10: the worker's api client reports refused ids, and the api sanitises sy
   assert.ok(api.includes("const r = refusedSession(s);") && api.includes('"bad_wire_id"'), "login() refuses a malformed session id");
 });
 
-test("A10: every storage.local trust record is read through its strict decoder", () => {
-  assert.ok(bg.includes("const d = decodeItemHomes((await chrome.storage.local.get(k))[k]);"), "loadHomes decodes strictly");
+test("A10: every trust record is read through its strict decoder (since A15 from the trusted store, not storage.local)", () => {
+  assert.ok(bg.includes("const d = decodeItemHomes((await trusted.get(k))[k]);"), "loadHomes decodes strictly");
   assert.ok(bg.includes("[homesKey(userId)]: encodeItemHomes(homes)"), "saveHomes writes only well-formed pairs");
-  assert.ok(bg.includes("const d = decodePersonalWrap((await chrome.storage.local.get(key))[key]);"), "the personal-wrap cache decodes strictly");
-  assert.ok(bg.includes("const d = decodePersonalChange((await chrome.storage.local.get(k))[k]);"), "the pending change decodes strictly");
+  assert.ok(bg.includes("const d = decodePersonalWrap((await trusted.get(key))[key]);"), "the personal-wrap cache decodes strictly");
+  assert.ok(bg.includes("const d = decodePersonalChange((await trusted.get(k))[k]);"), "the pending change decodes strictly");
   assert.ok(!/as PersonalWrapWire \| undefined/.test(bg) && !/as Record<string, string> \| undefined/.test(bg), "no raw cast reads a trust record any more");
+});
+
+// ---- security review 2026-10, branch A15: trust state out of content-script-reachable storage ----
+// The leaves (trustedkv.ts, trustmigrate.ts, updateoffer.ts, storageaccess.ts, serverswitch.purgeOriginRecords) are
+// behaviour-tested; these pins hold the worker to them, and storagefence.test.ts holds who touches which storage.
+
+test("A15: worker start awaits the storage access levels, then settles the migration, then loads the server state", () => {
+  const ready = spanOf(bg, "const serverReady: Promise<void> = (async () => {", "})();");
+  const order = ["await storageAccess;", "await migrateTrustState(legacyLocal, trusted, () =>", "await applyServerState(outcome, true);", "if (trustedStoreOk) await adoptLegacyNamespaceOnce();"];
+  let at = -1;
+  for (const step of order) {
+    const i = ready.indexOf(step);
+    assert.ok(i > at, `serverReady must run "${step}" after the step before it`);
+    at = i;
+  }
+  // A16: the verdict is combined with the seal's key in custodyReady (quickUnlockCompartment).
+  assert.match(bg, /const storageAccess: Promise<StorageAccessVerdict> = restrictStorageAccess\(chrome\.storage as unknown as StorageAccessAreas\);/);
+  assert.match(bg, /const trusted = trustedStore\(\);/);
+});
+
+test("A15: doLock samples the compartment verdict only after the access-level calls settled", () => {
+  const lock = spanOf(bg, 'async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: { tokens?: TokenPair }): Promise<void> {', "if (seen) seen.tokens = toks;");
+  assert.ok(lock.indexOf("await storageAccess;") > -1 && lock.indexOf("await storageAccess;") < lock.indexOf("compartmentTrusted: quCompartmentTrusted"));
+});
+
+test("A15: the server choice changes only through the setServerUrl message — canonicalized, persisted, then switched", () => {
+  assert.ok(!bg.includes("chrome.storage.onChanged"), "the storage.onChanged trigger is gone");
+  const handler = spanOf(bg, 'case "setServerUrl":', 'case "forgetLegacyServer":');
+  assert.ok(handler.includes("return commitServerUrl(msg.url);"));
+  const commit = spanOf(bg, "async function commitServerUrl(", "/** Apply a server change.");
+  const steps = ["canonicalizeServerUrl(raw)", "await setServerUrl(canonical, trusted);", "switchChain.then(() => applyServerChange(canonical))"];
+  let at = -1;
+  for (const step of steps) {
+    const i = commit.indexOf(step);
+    assert.ok(i > at, `commitServerUrl: "${step}" in order`);
+    at = i;
+  }
+  assert.ok(commit.includes('return { ok: false, code: "invalid" }') && commit.includes('return { ok: false, code: "storage" }'));
+});
+
+test("A15: the update offer is re-checked on read, its link built only by the offer leaf, its seq kept in the trusted store", () => {
+  const status = spanOf(bg, "async function updateStatus(", "// ---- message dispatch ----");
+  assert.ok(status.includes("const offer = readUpdateOffer(await trustedGet(kInfo), current, serverUrl);"), "re-checked on every read");
+  assert.ok(!status.includes("isNewerVersion("), "the read goes through the leaf, not a version-only check");
+  const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
+  assert.ok(check.includes("chromeUrl: offerDownloadUrl(ext.chromeUrl, serverUrl), firefoxUrl: offerDownloadUrl(ext.firefoxUrl, serverUrl)"));
+  assert.ok(check.includes("storedSeq = (await trusted.get(kSeq))[kSeq];"), "the anti-rollback seq is read from the trusted store");
+  assert.ok(check.includes("await trusted.set({ [kInfo]: info, [kSeq]: decision.seq });"), "…and written there with the offer");
+  assert.ok(!bg.includes("function downloadUrl("), "the old absolutizer (any https URL passed) is gone");
+  // The throttle and the quiet marker are not trust state: storage.session (re-derived by the forced start check), as
+  // two of the plain inventory's three records (A16: sessionseal.ts).
+  assert.ok(check.includes("const seen = (await plainSession.get(kLast))[kLast];"));
+});
+
+test("A15: the purge clears every record of that origin in the trusted store, storage.local and storage.session", () => {
+  const purge = spanOf(bg, "export async function purgeOriginNamespace(", "// Re-offer a pending save once");
+  assert.ok(purge.includes("await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()]);"));
+});
+
+test("A15: the remembered email is recorded by the worker, from the popup's own unlock, never by a page", () => {
+  const mapper = spanOf(bg, "async function unlockWithMapping(", "function mapUnlockError(");
+  assert.ok(mapper.includes('if (r.ok || r.code === "totp_required") await rememberEmail(email);'));
+  const status = spanOf(bg, 'case "status": {', 'case "lock": {');
+  assert.ok(status.includes("rememberedEmail: session ? null : await readRememberedEmail(),"));
+});
+
+// ---- A15 review (2026-10-22): F1 the pending server dials nothing, F2 the attested migration, F3 the seq read, S1 the
+// lock path, S3 the popup's no-answer. The leaves (serverstate.ts, trustmigrate.ts, trustedkv.ts) are behaviour-tested;
+// these pins hold the worker and the pages to them. ----
+
+test("A15 review F1: every dial is refused right after the sender gate while a server is pending", () => {
+  const head = spanOf(bg, "async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {", "switch (msg.type) {");
+  const gate = head.indexOf("if (gate.refused) return gate.answer;");
+  const held = head.indexOf("const held = dialRefusal(msg.type, dialBlock);");
+  assert.ok(gate > -1 && held > gate, "after the A14 sender gate, before any handler");
+  assert.ok(head.includes("if (held) return held;"));
+  // The handlers the leaf names are the real ones (a renamed case would silently escape the hold).
+  for (const t of ["ping", "unlock", "unlockTotp", "unlockWithPin", "unlockWithBio"]) assert.ok(bg.includes(`case "${t}":`), `case "${t}" exists`);
+});
+
+test("A15 review F1: no update poll while a server is pending; autofill excludes the pending origin (fail closed)", () => {
+  const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
+  const ready = check.indexOf("await serverReady;");
+  const skip = check.indexOf("if (dialBlock) return;");
+  assert.ok(ready > -1 && skip > ready && skip < check.indexOf("fetch("), "checked before any fetch");
+  const reg = spanOf(bg, "async function reconcileAutofillScripts(): Promise<void> {", "async function unregisterAutofillScripts(");
+  // One reconcile at a time: two overlapping runs (worker start + onInstalled) made the second register throw a
+  // duplicate id, and its fail-closed catch unregistered the first (seen live on an update).
+  assert.ok(bg.includes("autofillChain = autofillChain.then(reconcileAutofillScripts, reconcileAutofillScripts);"));
+  assert.ok(reg.includes("const excludeMatches = autofillExcludeMatches(serverUrl, dialBlock);"));
+  assert.ok(/if \(excludeMatches === null\) \{\s*await unregisterAutofillScripts\(\);\s*return;/.test(reg), "null = no autofill at all");
+});
+
+test("A15 review F1: only the gate's commit and 'Not mine' lift the block; the pages render from serverInfo's block", () => {
+  const commit = spanOf(bg, "async function commitServerUrl(", "/** Apply a server change.");
+  assert.ok(commit.indexOf("await setServerUrl(canonical, trusted);") < commit.indexOf("dialBlock = null;"), "lifted only after the choice was kept");
+  assert.ok(commit.indexOf("await switchChain;") < commit.indexOf("if (serverUrl === canonical) dialBlock = null;"), "…and only once the switch took effect");
+  const forget = spanOf(bg, "async function forgetLegacyServer(", "\n}\n");
+  assert.ok(forget.includes("if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };"));
+  assert.ok(forget.indexOf("forgetPendingServer(") < forget.indexOf("dialBlock = null;"));
+  assert.equal((bg.match(/dialBlock = null;/g) ?? []).length, 2, "nowhere else");
+  assert.ok(bg.includes("return { url: serverUrl, trustedStore: trustedStoreOk, block: dialBlock };"));
+});
+
+test("A15 review F1: the popup leads with the confirm route; no server page opens and the header names no server meanwhile", () => {
+  const refresh = spanOf(popup, "async function refresh(): Promise<void> {", "/** Render the self-update banner");
+  const info = refresh.indexOf('const info = await ask({ type: "serverInfo" });');
+  const confirm = refresh.indexOf("showConfirmServer(info.block, info.trustedStore === true);");
+  const status = refresh.indexOf('const s = await ask({ type: "status" });');
+  assert.ok(info > -1 && confirm > info && status > confirm, "asked first; the confirm card replaces every sign-in form");
+  const show = spanOf(popup, "function showConfirmServer(block: ServerBlockWire, storeKept: boolean): void {", "\n}\n");
+  assert.ok(show.includes('el("locked").hidden = true;'), "the sign-in form is hidden");
+  assert.ok(show.includes("Not mine — use ${new URL(DEFAULT_SERVER_URL).host} instead"), '"Not mine" names the server it switches to');
+  assert.ok(show.includes('open.textContent = block.keepable ? "Confirm in Options" : "Open Options";'));
+  assert.ok(popup.includes('const r = await ask({ type: "forgetLegacyServer" });'));
+  const html = readFileSync(new URL("../popup.html", import.meta.url), "utf-8");
+  assert.ok(html.includes('<section id="confirm-server"') && html.includes('id="confirm-server-not-mine"') && html.includes('id="confirm-server-open"'));
+  assert.ok(!html.includes("legacy-server-cta"), "the old strip (beside a live sign-in form) is gone");
+  const header = spanOf(popup, "async function renderServerOrigin(): Promise<void> {", "\n}\n");
+  assert.ok(header.includes("!info.block ? info.url : null"), "the header shows an origin only when one is in effect");
+});
+
+test("A15 review S3: no answer from the worker opens nothing (never a guessed default)", () => {
+  const cur = spanOf(popup, "async function currentServer(): Promise<string | null> {", "\n}\n");
+  assert.ok(cur.includes("!r.block ? r.url : null"));
+  assert.ok(!cur.includes("DEFAULT_SERVER_URL"), "no fallback to the default");
+  const open = spanOf(popup, "async function openServerPage(path = \"\"): Promise<void> {", "\n}\n");
+  assert.ok(open.indexOf("if (base === null) {") > -1 && open.indexOf("if (base === null) {") < open.indexOf("chrome.tabs.create("));
+  const opt = readFileSync(new URL("./options.ts", import.meta.url), "utf-8");
+  const info = spanOf(opt, "async function serverInfoNow(): Promise<Res<\"serverInfo\"> | null> {", "\n}\n");
+  assert.ok(info.includes("return null;") && !info.includes("DEFAULT_SERVER_URL"), "options: no answer is no server, not the default");
+});
+
+test("A15 review F2: worker start waits (bounded) for the browser's install event; a late one still owes the migration", () => {
+  const ready = spanOf(bg, "const serverReady: Promise<void> = (async () => {", "})();");
+  assert.ok(ready.includes("Promise.race([installSignal, delay(INSTALL_SIGNAL_WAIT_MS).then(() => null)])"));
+  const installed = spanOf(bg, "chrome.runtime.onInstalled.addListener((details) => {", "chrome.runtime.onStartup.addListener(");
+  assert.ok(installed.includes("installSignalSeen(sig);"));
+  assert.ok(installed.includes("const late = serverReady.then(() => lateInstallSignal(sig)).catch(() => {});"));
+  assert.ok(installed.includes("void late.then(() => checkForUpdate(true));"), "the forced check runs after a late migration");
+  const late = spanOf(bg, "async function lateInstallSignal(", "\n}\n");
+  // A16 review R3: also when worker start saw the event but could not record it.
+  assert.ok(late.includes("if (!(installWaitTimedOut || startOwedUnrecorded) || !attestsPreA15Upgrade(d) || owedRecording) return;"));
+  assert.ok(late.includes("await recordOwedMigration();"));
+  const once = spanOf(bg, "async function recordOwedOnce(", "\n}\n");
+  assert.ok(once.indexOf("await trusted.set({ [A15_OWED_KEY]: true });") < once.indexOf("migrateTrustState("), "owed is recorded before the run");
+});
+
+test("A16 review R3: an attested upgrade that worker start could not record is recorded again within the worker life, with retries", () => {
+  const ready = spanOf(bg, "const serverReady: Promise<void> = (async () => {", "})();");
+  assert.ok(ready.includes('startOwedUnrecorded = outcome.kind === "failed" || (outcome.kind === "unavailable" && outcome.timedOut);'));
+  const rec = spanOf(bg, "async function recordOwedMigration(): Promise<void> {", "async function recordOwedOnce(");
+  assert.ok(rec.indexOf("if (await recordOwedOnce()) {") > -1, "the first try is awaited");
+  assert.ok(rec.includes("for (const ms of OWED_RETRY_DELAYS_MS) {") && rec.includes("await delay(ms);") && rec.includes("if (await recordOwedOnce()) return;"), "then retried");
+  assert.match(bg, /const OWED_RETRY_DELAYS_MS = \[2000, 10_000, 30_000\];/);
+  const once = spanOf(bg, "async function recordOwedOnce(", "\n}\n");
+  assert.ok(once.includes("return false; // no store to record it in (yet)"), "a refused write is not a migration");
+  assert.ok(once.includes("await applyServerState(outcome, false);"));
+  // The install event's handler reaches it after worker start (serverReady).
+  const installed = spanOf(bg, "chrome.runtime.onInstalled.addListener((details) => {", "chrome.runtime.onStartup.addListener(");
+  assert.ok(installed.includes("const late = serverReady.then(() => lateInstallSignal(sig)).catch(() => {});"));
+});
+
+test("A16 review: a later server-state application never lifts the block onto another origin than the one dialed", () => {
+  const apply = spanOf(bg, "async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Promise<void> {", "\n}\n");
+  assert.ok(apply.includes('dialBlock = !atStart && st.url !== serverUrl ? { kind: "unsettled" } : st.block;'));
+  assert.ok(apply.indexOf("if (atStart && st.url !== serverUrl) {") < apply.indexOf("dialBlock ="), "the url moves only at start, before");
+  assert.ok(/if \(dialBlock\) \{\s*events\?\.close\(\);\s*events = null;/.test(apply), "a block that appears mid-life closes the socket");
+});
+
+test("A15 review F3: a failed seq read aborts the update check before anything is fetched", () => {
+  const check = spanOf(bg, "async function checkForUpdate(", "/** Popup query:");
+  const read = check.indexOf("storedSeq = (await trusted.get(kSeq))[kSeq];");
+  assert.ok(read > -1 && read < check.indexOf("fetch("), "read before the fetch");
+  assert.ok(/storedSeq = \(await trusted\.get\(kSeq\)\)\[kSeq\];\s*\} catch \{\s*return;\s*\}/.test(check), "a read error returns");
+  assert.ok(!check.includes("trustedGet(kSeq)"), "not the fold-to-absent reader");
+});
+
+test("A15 review S1: a lock waits for the trusted store only within its bound — after its erase (A16 review R4)", () => {
+  const lock = spanOf(bg, 'async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: { tokens?: TokenPair }): Promise<void> {', "if (seen) seen.tokens = toks;");
+  // A16: the bound covers the sealing key as well as the origin (custodyLoaded = serverReady + custodyReady); a sign-out
+  // (which never arms) waits longer for its full wipe's namespace and its revoke's pair.
+  const race = lock.indexOf(
+    'const custodyKnown = await Promise.race([custodyLoaded.then(() => true), delay(reason === "signout" ? SIGNOUT_STORE_WAIT_MS : LOCK_STORE_WAIT_MS).then(() => false)]);',
+  );
+  assert.ok(race > -1 && race < lock.indexOf("armGate("), "bounded, before the arm gate");
+  assert.ok(race > lock.indexOf("const erase = sessionSeal.lockErase();"), "and after the erase");
+  assert.ok(bg.includes("const custodyLoaded: Promise<unknown> = Promise.all([serverReady, custodyReady]);"));
+  assert.ok(lock.includes(": { tokens: { access: null, refresh: null }, attempt: false };"), "no arm without the origin");
+  assert.ok(bg.includes('if (msg.type !== "lock" && msg.type !== "signOut") await ensureLoaded();'), "handle() makes neither a lock nor a sign-out wait on serverReady");
+  assert.ok(bg.includes("return openBoundedIdb(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, IDB_NAME, IDB_STORE);"), "the co-key DB opens bounded too");
+});
+
+test("A16 review R4: a load that a lock (or a browser-start report) overtook installs nothing it read", () => {
+  const load = spanOf(bg, "function ensureLoaded(): Promise<void> {", "\nfunction ");
+  const gen = load.indexOf("const gen = hydrateGen;");
+  assert.ok(gen > -1 && gen < load.indexOf("await serverReady;"), "captured before the first await");
+  const check = load.indexOf("if (gen !== hydrateGen) return;");
+  assert.ok(check > load.indexOf('await sessionSeal.get("tabs", currentOriginKey)'), "after the reads");
+  assert.ok(check > load.indexOf("await loadHomes(snap.userId)"), "after the last await");
+  assert.ok(check < load.indexOf("api.setTokens(snap.access || null, snap.refresh);") && check < load.indexOf("tabs = new Map("), "before anything is installed");
+  assert.ok(!load.slice(check).includes("await "), "nothing is awaited between the check and the install");
+  assert.ok(!bg.includes("lockedBeforeOrigin"), "the S1 flag is subsumed");
+});
+
+// ---- security review 2026-10, branch A16: secret-bearing storage.session records are sealed ----
+// The leaf (sessionseal.ts: the key, the seal, the epoch, the start sweep, the plain area) is behaviour-tested in
+// sessionseal.test.ts, and storagefence.test.ts holds every storage.session write to the seal or the plain inventory.
+// These pins hold the worker's custody paths and its lock to them.
+
+test("A16: the sealing key lives in its own IndexedDB database, opened bounded, and is set up at worker start", () => {
+  assert.ok(
+    bg.includes(
+      "const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME), originKey: () => serverReady.then(() => currentOriginKey) });",
+    ),
+  );
+  const ready = spanOf(bg, "const custodyReady: Promise<void> = Promise.all([storageAccess, sessionSeal.ready]).then(", "});");
+  assert.ok(ready.includes("storageVerdict = verdict;") && ready.includes("decideCompartment();"));
+  const decide = spanOf(bg, "function decideCompartment(): void {", "\n}\n");
+  assert.ok(decide.includes("quCompartmentTrusted = storageVerdict !== null && quickUnlockCompartment(storageVerdict, sessionSeal.available());"), "the verdict needs the key; the access level is the belt");
+  assert.equal((bg.match(/^\s*quCompartmentTrusted = /gm) ?? []).length, 1, "set in one place only");
+});
+
+test("A16 review R1: a browser-start report (onStartup, onInstalled) replaces the key and drops this worker life's custody, never arming it", () => {
+  const installed = spanOf(bg, "chrome.runtime.onInstalled.addListener((details) => {", "chrome.runtime.onStartup.addListener(");
+  assert.ok(installed.indexOf("browserSessionReported();") > -1 && installed.indexOf("browserSessionReported();") < installed.indexOf("installSignalSeen(sig);"), "first thing");
+  const startup = spanOf(bg, "chrome.runtime.onStartup.addListener(() => {", "});");
+  assert.ok(startup.trimStart().startsWith("chrome.runtime.onStartup.addListener(() => {\n  browserSessionReported();"), "first thing");
+  const fn = spanOf(bg, "function browserSessionReported(): void {", "\n}\n");
+  for (const step of ["hydrateGen++;", "redeemGen++;", "session = null;", "api.setTokens(null, null);", "knownLoginsKey = null;", "tabs.clear();", "const rotated = sessionSeal.rotate();", "decideCompartment();", "void rotated.then(decideCompartment);"]) {
+    assert.ok(fn.includes(step), `browserSessionReported: ${step}`);
+  }
+  assert.ok(fn.indexOf("session = null;") < fn.indexOf("const rotated = sessionSeal.rotate();"));
+  assert.ok(!/\bawait\b|quickUnlock\.arm|doLock\(|persistSession|persistTabs/.test(fn), "one synchronous step; nothing is armed or written");
+  // A quick-unlock record read under the old key is never written back under the new one (an arm, a reserved attempt).
+  const qu = spanOf(bg, "const quStore: QuStore = {", "\n};\n");
+  assert.ok(qu.includes("quReadUnder.set(rec, sessionSeal.generation());"));
+  assert.ok(qu.indexOf("if (readUnder !== undefined && readUnder !== sessionSeal.generation()) throw") < qu.indexOf('await sessionSeal.set("quickUnlock"'));
+  // …and a lock that began before a report does not arm with what it saw (its copy is absent; the verdict is false).
+  const lock = spanOf(bg, "async function doLock(", "type TokenPair =");
+  assert.ok(lock.includes("compartmentTrusted: quCompartmentTrusted && sessionSeal.generation() === sealGen,"));
+});
+
+test("A16: every custody record is read and written through the seal", () => {
+  const persist = spanOf(bg, "function persistSession(): Promise<void> {", "let knownLoginsKey");
+  assert.ok(persist.includes('return sessionSeal.set("session", currentOriginKey, snap).then(() => {});'));
+  assert.ok(bg.includes('void sessionSeal.set("tabs", currentOriginKey, Object.fromEntries([...tabs].map(([id, st]) => [String(id), st]))).catch(() => {});'));
+  const load = spanOf(bg, "function ensureLoaded(): Promise<void> {", "\nfunction ");
+  assert.ok(load.includes('let snap = (await sessionSeal.get("session", currentOriginKey)) as SessionSnapshot | undefined;'));
+  assert.ok(load.includes('(await sessionSeal.get("tabs", currentOriginKey)) as Record<string, TabState> | undefined'));
+  const qu = spanOf(bg, "const quStore: QuStore = {", "\n};\n");
+  assert.ok(qu.includes('await sessionSeal.get("quickUnlock", currentOriginKey)'));
+  assert.ok(qu.includes('if (!(await sessionSeal.set("quickUnlock", currentOriginKey, rec))) throw new Error("the quick-unlock record was not kept");'), "an unkept arm or reserve fails closed");
+  assert.ok(qu.includes('remove: () => sessionSeal.remove("quickUnlock", currentOriginKey),'));
+  const kl = spanOf(bg, "async function refreshKnownLogins(): Promise<void> {", "/** The locked capture path's membership test.");
+  assert.ok(kl.includes('const rec = (await sessionSeal.get("knownLogins", ok)) as KnownLoginsRecord | undefined;'));
+  assert.ok(kl.indexOf("if (session !== s) return;") > kl.indexOf('await sessionSeal.get("knownLogins", ok)'), "a lock during the read does not re-mint a wiped digest");
+  assert.ok(kl.includes('await sessionSeal.set("knownLogins", ok, { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord);'));
+  const known = spanOf(bg, "async function isKnownLoginWhileLocked(", "/** One gate for every locked-state RE-offer surface");
+  assert.ok(known.includes('const rec = (await sessionSeal.get("knownLogins", currentOriginKey)) as KnownLoginsRecord | undefined;'));
+  // The pre-namespacing bare quick-unlock record is never adopted: the seal's start sweep drops it (plaintext).
+  const adopt = spanOf(bg, "async function adoptLegacyNamespaceOnce(): Promise<void> {", "/** One-shot enroll bench");
+  assert.ok(!adopt.includes("sessionSeal.") && !adopt.includes("plainSession"), "no storage.session adoption any more");
+});
+
+test("A16 (review R4): the lock's erase is its first act — before ANY await — and the arm is decided after it", () => {
+  const lock = spanOf(bg, "async function doLock(", "type TokenPair =");
+  const body = lock.slice(lock.indexOf("{\n") + 2);
+  const erase = body.indexOf("const erase = sessionSeal.lockErase();");
+  assert.ok(erase > -1, "the erase");
+  assert.ok(!/\bawait\b/.test(body.slice(0, erase).replace(/\/\/.*$/gm, "")), "nothing is awaited before it");
+  assert.ok(body.indexOf("hydrateGen++;") < erase, "a load in flight is overtaken first");
+  // The whole in-memory teardown is in the same synchronous step: no await before the session and the tab half go.
+  const firstAwait = body.search(/^\s*(?:const [^=]+= )?await /m);
+  for (const sync of ["session = null;", "redeemGen++;", "events = null;", "const teardownFlush = flushUsageForTeardown();", "clearPendingTotp();", "pendingCardSave.clear();", "reuseNotices.clear();"]) {
+    const at = body.indexOf(sync);
+    assert.ok(at > -1 && at < firstAwait, `"${sync}" is in the erase's synchronous step`);
+  }
+  // The arm is decided after: from the live pair, or the lock's own copy (opened, not loaded).
+  assert.ok(body.indexOf("if (!api.getTokens().access) copy = await Promise.race([erase.opened(currentOriginKey), delay(LOCK_STORE_WAIT_MS).then(() => ({}))]);") > firstAwait, "bounded");
+  assert.ok(body.includes("return live.access ? live : snapshotTokens(copy.session);"));
+  assert.ok(!body.includes("hydrate: ensureLoaded"), "no general load inside a lock");
+  const kl = body.indexOf('if (reason === "signout" || !quCompartmentTrusted) {');
+  assert.ok(body.slice(kl, body.indexOf("if (attemptArm) {")).includes('await sessionSeal.remove("knownLogins", currentOriginKey);'));
+  for (const later of ["quickUnlock.arm(", "await quickUnlock.wipe();", "await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);"]) {
+    assert.ok(body.indexOf(later) > erase, `"${later}" comes after the erase`);
+  }
+  assert.ok(body.indexOf("await erase.erased;") > body.indexOf("api.setTokens(null, null);"), "awaited only at the end");
+  // A16 review R2: then the epoch, bounded; the allow-listed tab remainder is re-persisted after it.
+  const durable = body.indexOf("await sessionSeal.lockDurable(LOCK_EPOCH_WAIT_MS);");
+  assert.ok(durable > body.indexOf("await erase.erased;") && durable < body.indexOf("if (tabs.size > 0) persistTabs();"));
+  const tokens = spanOf(bg, "function snapshotTokens(raw: unknown): TokenPair {", "\n}\n");
+  assert.ok(tokens.includes("s.origin !== serverUrl"), "a copied snapshot's pair counts only for the dialed origin (§4.1 rule 1)");
+});
+
+test("A16 review R4: sign-out erases first, then revokes on the pair the lock saw — and not while a server is pending", () => {
+  const so = spanOf(bg, "async function doSignOut(", "/** Re-arm the policy idle lock");
+  const lock = so.indexOf('await doLock("signout", seen);');
+  assert.ok(lock > -1);
+  assert.ok(!/\bawait\b/.test(so.slice(so.indexOf("{\n"), lock).replace(/\/\/.*$/gm, "")), "the lock is the first thing awaited");
+  const gate = so.indexOf("if (dialBlock !== null || !pair?.access) return;");
+  assert.ok(gate > lock && gate < so.indexOf("revoker.logout()"));
+  assert.ok(so.includes("revoker.setTokens(pair.access, pair.refresh);") && so.includes("revoker.setTokens(null, null);"));
+  assert.ok(!so.includes("api.logout()"), "the worker's api has forgotten the pair by then");
+});
+
+test("A16 review R4: nothing dials while a server is pending — the api refuses every request, and resync / the socket do not start", () => {
+  const make = spanOf(bg, "function makeApi(url: string): AndvariApi {", "\n}\n");
+  assert.ok(make.includes("a.mayDial = () => dialBlock === null;"));
+  const rs = spanOf(bg, "async function resync(): Promise<void> {", "\n}\n");
+  assert.ok(rs.indexOf("if (dialBlock) return;") > -1 && rs.indexOf("if (dialBlock) return;") < rs.indexOf("api.sync(0)"));
+  const sock = spanOf(bg, "async function ensureSocket(reset = false): Promise<void> {", "\n}\n");
+  assert.ok(sock.indexOf("if (dialBlock) return;") > -1 && sock.indexOf("if (dialBlock) return;") < sock.indexOf("startEvents("));
+  // The only AndvariApi built outside makeApi is sign-out's revoker, which is gated by hand.
+  assert.equal((bg.match(/new AndvariApi\(/g) ?? []).length, 2);
+});
+
+test("A16: quick unlock cannot be enrolled where it cannot arm", () => {
+  for (const [from, to] of [
+    ["async function enrollQuickUnlock(pin: string): Promise<Res<\"enrollQuickUnlock\">> {", "async function enrollQuickUnlockBio("],
+    ["async function enrollQuickUnlockBio(): Promise<Res<\"enrollQuickUnlockBio\">> {", "/** Quick-unlock redeem (spec 01 §8.4)."],
+  ] as const) {
+    const fn = spanOf(bg, from, to);
+    const gate = fn.indexOf('if (!quCompartmentTrusted) return { ok: false, code: "unavailable" };');
+    assert.ok(gate > fn.indexOf("await custodyReady;") && fn.indexOf("await custodyReady;") > -1, "the verdict is settled first");
+    assert.ok(gate > -1 && gate < fn.indexOf("quickUnlock.enroll"), "refused before anything is wiped, prompted or written");
+  }
 });

@@ -1095,6 +1095,11 @@ export class VaultStore {
     return new Set((this.accountState.doc.consumedNonces[vaultId] ?? []).map(([n]) => n));
   }
 
+  /** A13 (c10): when each of those was consumed (v2: its issuedAt; v1: the consuming device's clock). */
+  private accountConsumedAtFor(vaultId: string): Map<string, number> {
+    return new Map((this.accountState.doc.consumedNonces[vaultId] ?? []).map(([n, at]) => [n, at] as [string, number]));
+  }
+
   /** Re-run §1.4 for rows whose key is not held (pending, refused) or held only from a v1 seal; make the items of
    *  any vault that became readable visible. */
   private reevaluateGrants(): void {
@@ -2972,6 +2977,7 @@ export class VaultStore {
         issuedAt: info?.issuedAt ?? null,
         consumed: this.consumedFor(vaultId),
         consumedAccount: this.accountConsumedFor(vaultId),
+        consumedAccountAt: this.accountConsumedAtFor(vaultId),
         liveSince: this.liveSince.get(vaultId) ?? null,
         now: Date.now(),
       });
@@ -3246,7 +3252,7 @@ export class VaultStore {
   }
 
   /**
-   * H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"; core SyncEngine.coalesceQueuedPuts
+   * H37 (audit 2026-09-13, spec 03 §5 "Queue coalescing"; core SyncEngine.queuedPutsToFold / dequeueFolded
    * twin): fold this item's UNSENT queued puts into the one save() is about to enqueue, and
    * answer the base rev — and the pre-edit truth — that one must carry.
    *
@@ -3619,7 +3625,17 @@ export class VaultStore {
     // H37: fold this item's own unsent queued puts into THIS one first — the folded base rev
     // (and the folded pre-edit truth) then ride the mutation below. See coalesceQueuedPuts.
     const folded = await this.coalesceQueuedPuts(id);
-    const m = this.putMutation(provenance, id, doc, folded ? folded.baseItemRev : (existing?.rev ?? 0));
+    // A13 (q54): the fold has DURABLY dequeued this item's backlog, and the seal below is the step that can still
+    // refuse (sealDecision, INV-WRITE-KEY, or a removal/hold that landed during the fold's awaits). A refusal must put
+    // the backlog back — the R32 restore — before it propagates, or the member's offline edits vanish here while the
+    // optimistic envelope still shows them.
+    let m: Mutation;
+    try {
+      m = this.putMutation(provenance, id, doc, folded ? folded.baseItemRev : (existing?.rev ?? 0));
+    } catch (e) {
+      if (folded) await this.restoreFoldedPuts(folded);
+      throw e;
+    }
     let mayQueue = newFiles.length === 0 && (await this.offlineQueueAllowed());
 
     const committedAt = Date.now();
