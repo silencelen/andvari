@@ -92,6 +92,45 @@ class TotpBreakGlassTest : P4TestSupport() {
         assertEquals(HttpStatusCode.OK, internal.status, internal.bodyAsText())
     }
 
+    /**
+     * Server scan 2026-10-26 F7 (owner decision, option 2): the public-origin refusal of an
+     * UN-ENROLLED account is only ever reached by a CORRECT password, so to an attacker who holds the
+     * email it confirms the master password with no second factor. It used to be exempt from the
+     * email backoff ("a policy refusal, not guessing surface") and so could be probed at the flat
+     * per-IP rate from as many addresses as a botnet has. It now counts like a wrong password: five
+     * refusals lock the email on EVERY origin; the lock lapses and a success clears the ladder.
+     */
+    @Test
+    fun publicOrigin_notEnrolledRefusal_countsTowardEmailBackoff() = testApplication {
+        val services = buildServices(config(publicHostname = publicHost), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val vc = VirtualClient("bg3@x.com", "break glass password three")
+        client.register(vc, bootstrapToken)
+
+        repeat(5) { n ->
+            val denied = client.publicLogin(vc) // distinct IP per attempt: the per-IP bucket is not what locks
+            assertEquals(HttpStatusCode.Forbidden, denied.status, "refusal ${n + 1} is still the policy 403")
+            assertEquals("public_login_requires_totp", errorOf(denied))
+        }
+        assertTrue(services.service.loginBackoff.blocked(vc.email), "five correct-password refusals armed the email lock")
+        // Locked on the public origin AND the internal one — the ladder is per email, not per origin.
+        assertEquals(HttpStatusCode.TooManyRequests, client.publicLogin(vc).status)
+        val internalBlocked = client.internalLogin(vc)
+        assertEquals(HttpStatusCode.TooManyRequests, internalBlocked.status)
+        assertEquals("rate_limited", errorOf(internalBlocked))
+
+        // The 5th-failure lock is 2^0 = 1 s (MultiTenantEndpointTest pins the ladder); advance the
+        // backoff's clock past it instead of sleeping (H97). The correct password on the internal origin
+        // then logs in — and that success clears the ladder, so one more public refusal is a plain 403.
+        val realClock = services.service.loginBackoff.clock
+        services.service.loginBackoff.clock = { realClock() + 1_500 }
+        val ok = client.internalLogin(vc)
+        assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
+        assertEquals(HttpStatusCode.Forbidden, client.publicLogin(vc).status)
+        assertTrue(!services.service.loginBackoff.blocked(vc.email))
+    }
+
     @Test
     fun enrollment_publicLogin_andCodeReplayRejection() = testApplication {
         application { andvariModule(buildServices(config(publicHostname = publicHost), Notifier())) }

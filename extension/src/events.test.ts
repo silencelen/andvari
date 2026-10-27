@@ -109,7 +109,8 @@ test("E3: fresh ticket per attempt — open → drop → backoff → second mint
   const h = makeHarness();
   h.start();
   await flush();
-  h.sockets[0].open(); // attempts reset to 0
+  h.sockets[0].open();
+  h.sockets[0].pong(); // registered → attempts reset to 0
   h.sockets[0].drop(); // → reconnect in base(0) = 1 s (rand = 1)
   t.mock.timers.tick(1_000);
   await flush();
@@ -157,12 +158,48 @@ test("E4: backoff 1,2,4…60 s cap; kick(false) respects a pending window, kick(
   await flush();
   assert.equal(h.counts.mints, 12);
   assert.equal(h.sockets.length, 1);
-  h.sockets[0].open(); // success resets attempts…
+  h.sockets[0].open();
+  h.sockets[0].pong(); // a REGISTERED socket resets attempts…
   h.sockets[0].drop();
   t.mock.timers.tick(1_000); // …so the post-drop retry is back at 1 s
   await flush();
   assert.equal(h.counts.mints, 13);
   assert.equal(h.sockets.length, 2);
+});
+
+// Security review 2026-10 (A17 item 3; web client.events.test.ts twin): the 101 alone used to reset
+// the ladder, so a worker whose sockets die before the server ever answers re-minted a ticket every
+// ~1 s and met the server's 60/min per-account ticket bucket — then every reconnect 429'd. An
+// unanswered socket is a FAILED cycle; only the registration pong restores the 1 s floor.
+test("E14: a socket that upgrades but dies before the pong keeps climbing the backoff; the pong resets it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const h = makeHarness();
+  h.start();
+  await flush();
+  for (const [delay, socketsAfter] of [
+    [1_000, 2],
+    [2_000, 3],
+    [4_000, 4],
+    [8_000, 5],
+  ] as const) {
+    const s = h.sockets[socketsAfter - 2];
+    s.open(); // 101…
+    s.drop(); // …and dead before any echo
+    t.mock.timers.tick(delay - 1);
+    await flush();
+    assert.equal(h.sockets.length, socketsAfter - 1, `the 101 bought no credit: still waiting inside ${delay} ms`);
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(h.sockets.length, socketsAfter);
+  }
+  assert.equal(h.counts.mints, 5, "15 s of flapping = 5 tickets, not 15");
+  const last = h.sockets[h.sockets.length - 1];
+  last.open();
+  last.pong();
+  last.drop();
+  t.mock.timers.tick(1_000);
+  await flush();
+  assert.equal(h.sockets.length, 6, "an answered socket restores the 1 s floor");
 });
 
 test("E5: mint → null stops the cycle (no socket, NO timer); a later kick() mints again", async (t) => {
