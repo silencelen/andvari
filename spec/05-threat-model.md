@@ -46,7 +46,10 @@ a fake salt never does, so an observer polling prelogin over time can tell the t
 apart. Closing either channel means making fake accounts mimic the real distribution
 (an HMAC-chosen parameter set from those actually enrolled, an epoch-rotated fake salt);
 not done, because the signal needs a population of diverged accounts or a before/after
-pair around a password change, and the per-IP 10/min bucket bounds the polling. R5 Single server per
+pair around a password change, and the per-IP 10/min bucket bounds the polling. Same
+class, same scan (F10, LOW, accepted): a former member of a shared vault who kept an
+attachment id can learn from the upload route whether that file still exists (spec 03 §8,
+audited as `attachment_cross_vault`). R5 Single server per
 instance — availability comes from offline-first clients plus the operator's own backups,
 never from HA. R6 TOTP seeds
 co-located with passwords (accepted eggs-in-one-basket, user decision). R7 removed

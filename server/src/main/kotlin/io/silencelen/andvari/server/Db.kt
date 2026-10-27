@@ -70,10 +70,19 @@ class Db(path: String) : AutoCloseable {
      * paths that destroy or replace key material (server scan 2026-10-26, F5): with secure_delete the
      * main file's copy is zeroed, but the WAL frames written before the destroying tx still carry the
      * old page images until a checkpoint overwrites and truncates them. One connection, so no reader
-     * can hold the checkpoint back; `PRAGMA wal_checkpoint` is a no-op on a non-WAL (test) connection.
+     * can hold the checkpoint back today; the result row is read anyway (review item 4) so the day a
+     * second connection appears (a backup tool, `VACUUM INTO`) a checkpoint that could not complete
+     * is at least said on stderr instead of silently voiding the guarantee.
      */
     fun checkpointTruncate() = lock.withLock {
-        conn.createStatement().use { st -> st.executeQuery("PRAGMA wal_checkpoint(TRUNCATE)").use { it.next() } }
+        conn.createStatement().use { st ->
+            st.executeQuery("PRAGMA wal_checkpoint(TRUNCATE)").use { rs ->
+                if (rs.next()) {
+                    val busy = rs.getInt(1); val log = rs.getInt(2); val done = rs.getInt(3)
+                    if (busy != 0 || done != log) System.err.println("[andvari] WARNING: wal_checkpoint(TRUNCATE) incomplete (busy=$busy, frames=$log, checkpointed=$done) — key-material residue may remain in the WAL")
+                }
+            }
+        }
     }
 
     /** Serialized read-write transaction. */

@@ -84,7 +84,8 @@ each `escrow_legacy` row whose fingerprint is not the current one (one audit row
 per account), and the admin download joins `escrow_legacy` on the current fingerprint, so a row an older
 build left behind, or a database restored across a rotation, is never served even before that purge.
 The purge (and every other path that destroys or replaces key material: the `PUT /escrow/self`
-re-seal, a password change, a self or admin recovery, a vault purge) runs on a connection with
+re-seal, a password change, a self or admin recovery, a member-recovery piece rotation (§6), a vault
+purge) runs on a connection with
 `PRAGMA secure_delete=ON` and is followed by `PRAGMA wal_checkpoint(TRUNCATE)` (server scan
 2026-10-26 F5): a plain `DELETE`/`UPDATE` only returns the old cells to free space with their
 bytes intact, so the retired-key blobs stayed carvable out of the live file, its WAL and every

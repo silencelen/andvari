@@ -354,8 +354,9 @@ cache OFF.
   audited.
 - `rejected` (audit 2026-09-13 H03) — a `put` the server can never apply AS
   SENT, answered per mutation with a `reason`: `unknown_attachment` (an `attachmentIds`
-  entry names no stored attachment), `attachment_mismatch` (it exists but is bound to a
-  different item or vault — §9), `item_attachment_quota` (the referenced total exceeds
+  entry names no stored attachment — or, since server scan 2026-10-26 F10, one that exists
+  in ANOTHER vault, so the reason never confirms a foreign vault's holdings),
+  `attachment_mismatch` (it exists in this vault but is bound to a different item — §9), `item_attachment_quota` (the referenced total exceeds
   `itemAttachmentsMaxBytes`), `item_too_large` (the blob exceeds the operator's per-item
   cap, `ANDVARI_ITEM_MAX_BYTES`, default 2 MiB of stored base64url), or
   `user_item_quota` (the put would GROW the pusher's live item ciphertext — across every
@@ -690,11 +691,15 @@ strips them degrades every client to the poll path (correct, just slower).
   `{ size, sha256(ciphertext), header }`, and never parses content. Idempotent per
   attachmentId: identical bytes → the stored meta; different bytes →
   `400 attachment_id_taken`. An id that already exists in a vault OTHER than the one named
-  by `vaultId` answers `403 no_grant`, exactly as the GET route answers a foreign id (server
-  scan 2026-10-26 F10): the distinct `attachment_id_taken` told a removed shared-vault
-  member whether a file they once synced still existed. Ids are unguessable, so an honest
-  client never collides across vaults; `attachment_id_taken` is kept only within the
-  caller's own vault, where the plan retry depends on it (spec 07 §4).
+  by `vaultId` answers the GET route's `403 no_grant` and writes an `attachment_cross_vault`
+  audit row (server scan 2026-10-26 F10); on push the same case is reported as
+  `unknown_attachment`, never `attachment_mismatch`. **Accepted LOW residual:** attachment
+  ids are one global namespace, so a fresh id must insert (`200`) and whoever holds a
+  foreign id still learns "exists" (`403`) vs "gone" (`200`). Ids are unguessable, so only a
+  former member of that vault can hold one, and an honest client never posts under another
+  vault (copy/move mints fresh ids; the plan retry re-posts the same (id, item, vault)
+  triple, spec 07 §4) — hence the audit row, a free anomaly signal. Closing it needs a
+  vault-scoped id namespace (schema + file layout), an owner call.
 - Uploads are additionally bounded per user by a concurrent-upload cap (429 when
   exceeded) and by in-flight `.part` bytes counted toward `userAttachmentsMaxBytes`
   mid-stream (413); the commit-time quota check remains authoritative.

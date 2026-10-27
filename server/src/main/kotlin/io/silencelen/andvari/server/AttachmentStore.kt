@@ -164,7 +164,7 @@ class AttachmentStore(
             // (committed row + fl.bytes) for a concurrent same-user upload → spurious 413.
             if (inFlightAdded > 0) { fl.bytes.addAndGet(-inFlightAdded); inFlightAdded = 0 }
 
-            return repo.db.tx { c ->
+            val meta = repo.db.tx { c ->
                 // Post-revocation blob-commit race (spec 03 §11 / design §4 matrix,
                 // attachment-upload-vs-delete): the route-level grant check ran before the
                 // body streamed; a vault delete or member removal can land in between.
@@ -179,12 +179,19 @@ class AttachmentStore(
                 if (existing != null) {
                     part.delete()
                     // Server scan 2026-10-26 (F10): a row in a vault the caller is NOT writing to is
-                    // answered exactly like the GET route answers a foreign id (`403 no_grant`, spec 03
-                    // §8) — never the distinct `attachment_id_taken`, which told a removed shared-vault
-                    // member whether a file they once synced still exists. Ids are unguessable, so the
-                    // only way to collide across vaults is to hold the id already; an honest client
-                    // never does this (its retry re-posts the same (id, item, vault) triple).
-                    if (existing.vaultId != vaultId) throw Forbidden("no_grant")
+                    // answered with the GET route's `403 no_grant` (spec 03 §8), not a distinct
+                    // `attachment_id_taken`. This does NOT close the oracle: attachment ids are one
+                    // global namespace, so a fresh id must insert (200) and a holder of a foreign id
+                    // still learns "exists" (403) vs "gone" (200) — an accepted LOW residual (spec 03,
+                    // spec 05 R4). What it does: ids are unguessable, so the ONLY way to reach this
+                    // branch is to hold an id synced while a member of that vault — an honest client
+                    // never does (copy/move mints fresh ids, the plan retry re-posts the same triple) —
+                    // so the branch is an anomaly and is audited (the tx commits the row; the 403 is
+                    // thrown after it, a throw in here would roll the row back).
+                    if (existing.vaultId != vaultId) {
+                        repo.auditOn(c, "attachment_cross_vault", userId, null, null, "$attachmentId:$vaultId")
+                        return@tx null
+                    }
                     if (existing.sha256 != sha || existing.itemId != itemId) throw BadRequest("attachment_id_taken")
                     return@tx AttachmentMeta(existing.attachmentId, existing.itemId, existing.vaultId, existing.size, existing.sha256, existing.createdAt)
                 }
@@ -204,6 +211,7 @@ class AttachmentStore(
                 repo.auditOn(c, "attachment_upload", userId, null, null, "$attachmentId:$cipherBytes")
                 AttachmentMeta(attachmentId, itemId, vaultId, cipherBytes, sha, t)
             }
+            return meta ?: throw Forbidden("no_grant")
         } finally {
             if (inFlightAdded > 0) fl.bytes.addAndGet(-inFlightAdded)
             fl.sem.release()
