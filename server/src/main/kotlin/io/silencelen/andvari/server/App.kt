@@ -334,12 +334,18 @@ private suspend fun ApplicationCall.respondFileContent(file: File) {
  */
 internal fun purgeRetiredEscrowLegacy(repo: Repo, config: Config) {
     if (!config.escrowConfigured) return
-    repo.db.tx { c ->
+    val purged = repo.db.tx { c ->
         val retired = c.queryAll("SELECT userId FROM escrow_legacy WHERE fingerprint<>?", config.recoveryFingerprint) { it.getString(1) }
-        if (retired.isEmpty()) return@tx
+        if (retired.isEmpty()) return@tx false
         c.exec("DELETE FROM escrow_legacy WHERE fingerprint<>?", config.recoveryFingerprint)
         for (userId in retired) repo.auditOn(c, "escrow_legacy_purged", null, null, null, userId)
+        true
     }
+    // Server scan 2026-10-26 (F5): the DELETE above zeroes the retired-key blobs in the main file
+    // (Db sets secure_delete); the WAL frames written before it still hold the old page images until
+    // this checkpoint overwrites and truncates them. Without both, the blobs the rotation exists to
+    // retire stayed carvable from the live file and every later backup (spec 04 §4).
+    if (purged) repo.db.checkpointTruncate()
 }
 
 private fun seedBootstrap(repo: Repo, config: Config) {
@@ -973,6 +979,10 @@ fun Application.andvariModule(services: Services) {
         // ---- escrow ----
         put("/api/v1/escrow/self") {
             val p = requirePrincipal(call, service)
+            // Server scan 2026-10-26 (F11 sibling): an authenticated writer with a WAL checkpoint
+            // behind it — bucketed per user before the body is read. A client re-seals once per
+            // unlock at most; this is an order of magnitude above a household's devices.
+            if (!limiter.allow("escrow_self:${p.userId}", 10, 60_000)) throw RateLimited()
             // H07: version-pinned — this REPLACES the account's only admin-backstop blob with
             // client-sealed ciphertext the server cannot verify (spec 04 §3). A build the pin bans
             // must not be the one that overwrites it: a defective seal here silently voids the
@@ -1009,6 +1019,10 @@ fun Application.andvariModule(services: Services) {
                 // Escrow is the sole recovery path (spec 04); replacing it is security-relevant.
                 services.repo.auditOn(c, "escrow_self_upload", p.userId, p.deviceId, call.clientIp(config), body.fingerprint)
             }
+            // F5: when this re-seal follows a key rotation (F57), the blob it replaced in place was
+            // sealed to the RETIRED key — zeroed in the main file by secure_delete, flushed out of
+            // the WAL here. Same-key re-seals pay the checkpoint too; it is a rare route.
+            services.repo.db.checkpointTruncate()
             call.respondText("ok")
         }
 
@@ -1026,6 +1040,11 @@ fun Application.andvariModule(services: Services) {
         }
         put("/api/v1/usage") {
             val p = requirePrincipal(call, service)
+            // Server scan 2026-10-26 (F11): the same per-user bucket its structural twin
+            // PUT /account/state carries. Each call is a 512 KiB fsync'd rewrite under the one
+            // SQLite lock, so one hijacked session looping it starved every co-member's sync —
+            // and, deliberately unaudited (below), invisibly. Clients flush a few times per hour.
+            if (!limiter.allow("usage:${p.userId}", 60, 60_000)) throw RateLimited()
             // H07: version-pinned — the ledger is AEAD ciphertext produced by the client (spec 02
             // §8.2) and this PUT overwrites the household copy wholesale; a banned build must not
             // write it (same rule as push/restore: "the pin exists to keep a banned build from
@@ -1268,6 +1287,10 @@ fun Application.andvariModule(services: Services) {
         // callers.
         post("/api/v1/events/ticket") {
             val p = requirePrincipal(call, service)
+            // Server scan 2026-10-26 (F11 sibling): each mint allocates a 30 s in-memory ticket;
+            // bucketed per user so a looping session cannot grow the store. A client mints one per
+            // socket (re)connect; a flapping network reconnects with back-off, far under this.
+            if (!limiter.allow("ws_ticket:${p.userId}", 60, 60_000)) throw RateLimited()
             call.respond(WsTicketResponse(services.wsTickets.mint(p.userId, p.deviceId), 30))
         }
         webSocket(EVENTS_PATH) {

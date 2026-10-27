@@ -220,23 +220,30 @@ fun ApplicationCall.hasForwardedHeader(extraTrusted: List<String> = emptyList())
     (FORWARDED_HEADER_NAMES + extraTrusted).any { request.header(it) != null }
 
 fun ApplicationCall.clientIp(config: Config): String =
-    pickClientIp(peerIsTrustedProxy(config), { request.header(it) }, config.trustedIpHeaders, peerAddress())
+    pickClientIp(peerIsTrustedProxy(config), { request.headers.getAll(it) }, config.trustedIpHeaders, peerAddress())
 
 /**
  * Pure header selection: the first trusted header bearing a non-loopback IP LITERAL wins.
  * X-Forwarded-For contributes only its RIGHTMOST entry (the one appended by the trusted
  * proxy — deeper entries are client-forgeable). Literal-only because
  * InetAddress.getByName would DNS-resolve hostnames.
+ *
+ * [headerLines] returns EVERY line of a header, in wire order, and only the LAST line is read
+ * (server scan 2026-10-26, F8). A proxy that adds its forwarding header as a separate line
+ * (HAProxy `option forwardfor`, whose docs say to use only the last occurrence) appends it AFTER
+ * the client's own; ktor's `request.header()` returned the FIRST line, so the rightmost entry of
+ * the CLIENT's line won and a caller could pick its own rate key and audit ip. The merging fronts
+ * (cloudflared, tailscale serve, Caddy, nginx) produce one line and are unchanged.
  */
 internal fun pickClientIp(
     peerIsTrustedProxy: Boolean,
-    header: (String) -> String?,
+    headerLines: (String) -> List<String>?,
     trustedHeaders: List<String>,
     fallback: String,
 ): String {
     if (!peerIsTrustedProxy) return fallback
     for (name in trustedHeaders) {
-        val raw = header(name) ?: continue
+        val raw = headerLines(name)?.lastOrNull() ?: continue
         val candidate = (if (name.equals("X-Forwarded-For", ignoreCase = true)) raw.substringAfterLast(',') else raw).trim()
         if (candidate.isEmpty() || !isIpLiteral(candidate)) continue
         val addr = runCatching { java.net.InetAddress.getByName(candidate) }.getOrNull() ?: continue

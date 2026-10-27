@@ -44,8 +44,45 @@ class Db(path: String) : AutoCloseable {
             // has to be relaxed for a large importer run, relax it FOR THAT RUN, not for the
             // steady state, and amend spec 02 §7.
             st.execute("PRAGMA synchronous=FULL")
+            // Server scan 2026-10-26 (F5) — ZEROED FREE SPACE, deliberately.
+            //
+            // A plain DELETE or an in-place UPDATE returns the old cell to the page's free space (or
+            // the page to the freelist) with its bytes intact, so the content stays readable in the
+            // file until that space happens to be reused. For this database the deleted content is
+            // key material: escrow blobs sealed to a RETIRED org recovery key (purgeRetiredEscrowLegacy,
+            // the F57 re-seal), the verifier + wrappedUvk a password change or recovery replaces, the
+            // grants' key columns a vault purge blanks. Spec 04 §4 promises the rotation "contains" a
+            // stolen recovery sheet; without this the retired-key blobs survived in the live file and
+            // in every backup taken from it.
+            //
+            // secure_delete=ON makes SQLite overwrite freed content with zeros on every delete/update,
+            // and [checkpointTruncate] (called by the key-destruction paths after their tx) flushes the
+            // WAL into the main file and truncates it, so no older page image survives in the -wal.
+            // The cost is a memset per freed cell — unmeasurable next to the fsync FULL already pays.
+            // Pinned by DbDurabilityTest. (purgeHibpCache set it per-run before this; it now finds it on.)
+            st.execute("PRAGMA secure_delete=ON")
         }
         migrate()
+    }
+
+    /**
+     * Flush the WAL into the main file and truncate it to zero bytes. Called OUTSIDE a tx by the
+     * paths that destroy or replace key material (server scan 2026-10-26, F5): with secure_delete the
+     * main file's copy is zeroed, but the WAL frames written before the destroying tx still carry the
+     * old page images until a checkpoint overwrites and truncates them. One connection, so no reader
+     * can hold the checkpoint back today; the result row is read anyway (review item 4) so the day a
+     * second connection appears (a backup tool, `VACUUM INTO`) a checkpoint that could not complete
+     * is at least said on stderr instead of silently voiding the guarantee.
+     */
+    fun checkpointTruncate() = lock.withLock {
+        conn.createStatement().use { st ->
+            st.executeQuery("PRAGMA wal_checkpoint(TRUNCATE)").use { rs ->
+                if (rs.next()) {
+                    val busy = rs.getInt(1); val log = rs.getInt(2); val done = rs.getInt(3)
+                    if (busy != 0 || done != log) System.err.println("[andvari] WARNING: wal_checkpoint(TRUNCATE) incomplete (busy=$busy, frames=$log, checkpointed=$done) — key-material residue may remain in the WAL")
+                }
+            }
+        }
     }
 
     /** Serialized read-write transaction. */

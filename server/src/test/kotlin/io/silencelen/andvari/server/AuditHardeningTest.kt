@@ -358,13 +358,22 @@ class AuditHardeningTest : P4TestSupport() {
         // The function itself stays generic (honors whatever list it's given — an all-CF deployment
         // can opt CF-Connecting-Ip back in via env), so the ordering rules below use an explicit list.
         val trusted = listOf("CF-Connecting-IP", "X-Forwarded-For")
-        fun of(vararg h: Pair<String, String>): (String) -> String? = { name -> h.toMap()[name] }
+        fun of(vararg h: Pair<String, String>): (String) -> List<String>? = { name -> h.filter { it.first == name }.map { it.second }.takeIf { it.isNotEmpty() } }
 
         // Non-loopback peer: headers are NEVER trusted (LAN spoof-proof).
         assertEquals("10.0.0.5", pickClientIp(false, of("CF-Connecting-IP" to "203.0.113.9"), trusted, "10.0.0.5"))
         // Loopback peer: first trusted header wins; XFF contributes its rightmost entry.
         assertEquals("203.0.113.9", pickClientIp(true, of("CF-Connecting-IP" to "203.0.113.9", "X-Forwarded-For" to "6.6.6.6, 198.51.100.7"), trusted, "127.0.0.1"))
         assertEquals("198.51.100.7", pickClientIp(true, of("X-Forwarded-For" to "6.6.6.6, 198.51.100.7"), trusted, "127.0.0.1"))
+        // Server scan 2026-10-26 (F8): a proxy that APPENDS its own X-Forwarded-For line (HAProxy
+        // `option forwardfor`) puts the real client in the LAST line; the client's own line comes
+        // first. ktor's `header()` returned the first line, so the client named its own ip.
+        assertEquals(
+            "198.51.100.7",
+            pickClientIp(true, of("X-Forwarded-For" to "203.0.113.5", "X-Forwarded-For" to "6.6.6.6, 198.51.100.7"), trusted, "127.0.0.1"),
+        )
+        // Same rule for a non-XFF header: the last occurrence is the trusted proxy's.
+        assertEquals("198.51.100.8", pickClientIp(true, of("CF-Connecting-IP" to "203.0.113.5", "CF-Connecting-IP" to "198.51.100.8"), trusted, "127.0.0.1"))
         // Hostnames (would DNS-resolve), blanks, and loopback literals all fall through.
         assertEquals("127.0.0.1", pickClientIp(true, of("X-Forwarded-For" to "evil.example.com"), trusted, "127.0.0.1"))
         assertEquals("127.0.0.1", pickClientIp(true, of("CF-Connecting-IP" to "   "), trusted, "127.0.0.1"))

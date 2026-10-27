@@ -83,6 +83,17 @@ drill happened to run. An org-key rotation is a config change, so at every start
 each `escrow_legacy` row whose fingerprint is not the current one (one audit row `escrow_legacy_purged`
 per account), and the admin download joins `escrow_legacy` on the current fingerprint, so a row an older
 build left behind, or a database restored across a rotation, is never served even before that purge.
+The purge (and every other path that destroys or replaces key material: the `PUT /escrow/self`
+re-seal, a password change, a self or admin recovery, a member-recovery piece rotation (§6), a vault
+purge) runs on a connection with
+`PRAGMA secure_delete=ON` and is followed by `PRAGMA wal_checkpoint(TRUNCATE)` (server scan
+2026-10-26 F5): a plain `DELETE`/`UPDATE` only returns the old cells to free space with their
+bytes intact, so the retired-key blobs stayed carvable out of the live file, its WAL and every
+later backup, and a thief holding the retired sheet was not actually contained by the
+re-ceremony. With both, the live file and the WAL hold no retired-key bytes once the purge has
+run. **Backups taken BEFORE the rotation still hold the retired-key blobs**: the incident
+response for a stolen sheet includes rotating those backups out (or re-encrypting them under a
+key the thief does not hold), not only the re-ceremony.
 Because that purge keys on the configured string, the server checks at load that
 `ANDVARI_RECOVERY_FINGERPRINT` is the SHA-256 of `ANDVARI_RECOVERY_PUBKEY` (§1) and REFUSES TO START
 otherwise (A10 review LOW-2): a typo'd fingerprint would refuse every member's re-seal and purge every

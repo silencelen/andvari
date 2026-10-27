@@ -354,13 +354,25 @@ cache OFF.
   audited.
 - `rejected` (audit 2026-09-13 H03) — a `put` the server can never apply AS
   SENT, answered per mutation with a `reason`: `unknown_attachment` (an `attachmentIds`
-  entry names no stored attachment), `attachment_mismatch` (it exists but is bound to a
-  different item or vault — §9), `item_attachment_quota` (the referenced total exceeds
+  entry names no stored attachment — or, since server scan 2026-10-26 F10, one that exists
+  in ANOTHER vault, so the reason never confirms a foreign vault's holdings),
+  `attachment_mismatch` (it exists in this vault but is bound to a different item — §9), `item_attachment_quota` (the referenced total exceeds
   `itemAttachmentsMaxBytes`), `item_too_large` (the blob exceeds the operator's per-item
   cap, `ANDVARI_ITEM_MAX_BYTES`, default 2 MiB of stored base64url), or
   `user_item_quota` (the put would GROW the pusher's live item ciphertext — across every
   vault they hold a grant to — past `ANDVARI_USER_ITEM_QUOTA_BYTES`, default 128 MiB; a
   put that shrinks or keeps an item's size, and every delete, is never refused), or
+  `bad_mutation_id` (server scan 2026-10-26 F2 — a `mutationId` that is empty or longer than
+  64 characters; every client mints a 36-character UUID, and the server stores the id twice
+  per applied mutation for 180 days outside every quota, so an unbounded one was free storage
+  growth. Checked before the idempotency lookup, never cached, and the echoed `mutationId` is
+  truncated to 64 characters rather than reflected), `too_many_attachments` /
+  `duplicate_attachment` / `bad_attachment_id` (server scan 2026-10-26 F1 — the
+  `attachmentIds` LIST is bounded before its members are resolved: at most 256 entries, no
+  repeats, each a canonical lowercase UUID; the reference check dedups before it looks ids
+  up and the item quota counts only the blob, so one real id repeated two hundred thousand
+  times used to pass and persist an 8 MiB list that every co-member's next full pull then
+  materialised. The same three are thrown as `400` on `POST /items/{id}/restore`), or
   `bad_item_id` (2026-10, security review — a `put` OR `delete` whose `itemId` or `vaultId`
   is not a canonical lowercase UUID: an itemId is handed to every other member of the vault
   by `/items/deleted` and `/sync` and becomes a path segment of THEIR authenticated
@@ -638,7 +650,12 @@ strips them degrades every client to the poll path (correct, just slower).
   unknown-email / no-row / wrong-secret is what keeps the route from being an account
   oracle instead. They stay **hard-refused on the break-glass twin origin** (`403`) but
   are internet-reachable on single-origin instances (posture: spec 05 R10, T11).
-- Client IP (rate keys + audit rows): the **rightmost** `X-Forwarded-For` entry — the
+- Client IP (rate keys + audit rows): the **rightmost** `X-Forwarded-For` entry **of the
+  LAST header line** (server scan 2026-10-26 F8: a front that appends its forwarding header
+  as a separate line, as HAProxy's `option forwardfor` does, puts the real client in the
+  last line after the client's own; reading the first line let a caller name its own rate
+  key and audit ip. For every trusted header the last occurrence is the one read; the
+  merging fronts produce one line and are unchanged) — the
   **sole default trusted header** — and **only when the direct TCP peer falls inside the
   operator-declared trusted-proxy set** (`ANDVARI_TRUSTED_PROXY_CIDRS`, default
   `127.0.0.0/8,::1/128` — loopback only, i.e. the pre-2026-09-13 rule verbatim, so every
@@ -673,7 +690,16 @@ strips them degrades every client to the poll path (correct, just slower).
   policy `attachmentMaxBytes` / `userAttachmentsMaxBytes`), records
   `{ size, sha256(ciphertext), header }`, and never parses content. Idempotent per
   attachmentId: identical bytes → the stored meta; different bytes →
-  `400 attachment_id_taken`.
+  `400 attachment_id_taken`. An id that already exists in a vault OTHER than the one named
+  by `vaultId` answers the GET route's `403 no_grant` and writes an `attachment_cross_vault`
+  audit row (server scan 2026-10-26 F10); on push the same case is reported as
+  `unknown_attachment`, never `attachment_mismatch`. **Accepted LOW residual:** attachment
+  ids are one global namespace, so a fresh id must insert (`200`) and whoever holds a
+  foreign id still learns "exists" (`403`) vs "gone" (`200`). Ids are unguessable, so only a
+  former member of that vault can hold one, and an honest client never posts under another
+  vault (copy/move mints fresh ids; the plan retry re-posts the same (id, item, vault)
+  triple, spec 07 §4) — hence the audit row, a free anomaly signal. Closing it needs a
+  vault-scoped id namespace (schema + file layout), an owner call.
 - Uploads are additionally bounded per user by a concurrent-upload cap (429 when
   exceeded) and by in-flight `.part` bytes counted toward `userAttachmentsMaxBytes`
   mid-stream (413); the commit-time quota check remains authoritative.
