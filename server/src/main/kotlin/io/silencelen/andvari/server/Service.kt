@@ -503,11 +503,24 @@ class Service(
                 throw Unauthorized()
             }
         } else if (publicOrigin) {
-            // Rows 3+5 (spec 03 §2, unchanged): via the public break-glass origin an account without
-            // TOTP enrolled cannot log in at all — regardless of totpRequired, there is no
-            // restricted-session hatch on the emergency origin. Not a backoff failure: the password
-            // above was CORRECT; this is a policy refusal, not guessing surface.
+            // Rows 3+5 (spec 03 §2): via the public break-glass origin an account without TOTP
+            // enrolled cannot log in at all — regardless of totpRequired, there is no
+            // restricted-session hatch on the emergency origin.
+            //
+            // This refusal COUNTS toward the email backoff (server scan 2026-10-26 F7, owner decision
+            // 2026-10-26). The old code exempted it ("the password was CORRECT; a policy refusal, not
+            // guessing surface") — but the refusal is only ever reached by a correct password, so to
+            // an attacker holding the email it IS the oracle: a 403 here confirms the master
+            // password with no second factor presented, and an exempt branch let that be probed at
+            // the flat per-IP rate from as many addresses as a botnet has. Counting it binds the
+            // probe to the same per-email ladder as a wrong password or a missing code (the
+            // `totp_required` branch above already counts). The cost — a legitimate un-enrolled
+            // member who keeps retrying the emergency origin locks their own email for up to 15 min
+            // on every origin — is the trade the original author declined; the owner took it.
+            // The enrolled-account `totp_required` half of F7 remains: it is the signal every client
+            // uses to show the code field, so it waits for the always-ask-for-code wire change.
             repo.audit("login_fail_totp", user.userId, null, ip, "not_enrolled")
+            loginBackoff.fail(req.email)
             throw Forbidden("public_login_requires_totp")
         } else if (config.totpRequired) {
             // Row 4: instance requires TOTP, user not yet enrolled → the login SUCCEEDS into a

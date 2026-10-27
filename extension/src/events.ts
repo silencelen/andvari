@@ -120,7 +120,6 @@ export function startEvents(deps: EventsDeps): EventsHandle {
       let registered = false; // per socket: a reconnect must prove ITSELF (web client.ts parity)
       sock.onopen = () => {
         if (closed || ws !== sock) return;
-        attempts = 0; // healthy again — future drops restart the backoff from 1 s
         // The 101 is transport, NOT registration (gate fix, audit 2026-09-13 wave 3; spec 03 §6,
         // and the web client.ts events() twin fixed in the same pass). `onopen` fires on the
         // upgrade, but the server registers the socket with its notifier only when the route
@@ -129,9 +128,12 @@ export function startEvents(deps: EventsDeps): EventsHandle {
         // that change's bell rings nobody: the vault stays stale until some unrelated later
         // bell. So this is only a PROBE — the server's echo loop starts after register(), so
         // the first "pong" proves the bell can reach us, and the catch-up runs there instead.
-        // Backoff reset stays on the 101: a socket that upgraded is healthy transport,
-        // registered or not. If a server never echoed (none does — the echo is spec 03 §6),
-        // the extension would degrade to the 5-min resync alarm floor, never to an error.
+        // The backoff reset waits for that pong too (security review 2026-10, A17 item 3; web
+        // client.ts parity): a socket that upgrades and dies before the server answered is a
+        // failed cycle. Resetting on the 101 let a worker whose sockets die within a second
+        // re-mint tickets at 1–2/s, hit the server's per-account ticket bucket (60/min) and
+        // throttle itself. If a server never echoed (none does — the echo is spec 03 §6), the
+        // extension would degrade to the 5-min resync alarm floor, never to an error.
         try {
           sock.send("ping");
         } catch {
@@ -151,6 +153,7 @@ export function startEvents(deps: EventsDeps): EventsHandle {
           // follow are the plain no-ops they always were, and a reconnect starts over at false.
           if (!registered) {
             registered = true;
+            attempts = 0; // healthy again — a REGISTERED socket restarts the backoff from 1 s
             scheduleBell(); // catch-up: bells missed while down, now that one can reach us
           }
           return;
