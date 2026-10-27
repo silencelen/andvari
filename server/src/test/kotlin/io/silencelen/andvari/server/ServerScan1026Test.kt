@@ -40,7 +40,7 @@ import kotlin.test.assertTrue
  *  F4  changePassword / recoverySelfSetup / putPersonalWrap verify-then-write    → compare-and-swap
  *  F5  retired-key escrow blobs survive the rotation purge in free pages + WAL   → secure_delete + checkpoint
  *  F8  pickClientIp read only the FIRST X-Forwarded-For line                     → AuditHardeningTest
- *  F10 attachment upload distinguished a foreign vault's id (`attachment_id_taken`) → uniform `no_grant`
+ *  F10 attachment upload named a foreign vault's id (`attachment_id_taken`)      → GET's `no_grant` + audit (residual: exists vs gone)
  *  F11 PUT /usage, PUT /escrow/self, POST /events/ticket had no rate bucket     → per-user buckets
  */
 class ServerScan1026Test : P4TestSupport() {
@@ -299,11 +299,13 @@ class ServerScan1026Test : P4TestSupport() {
         assertEquals(0L, if (wal.exists()) wal.length() else 0L, "wal_checkpoint(TRUNCATE) leaves an empty -wal")
     }
 
-    // ---- F10: a foreign vault's attachment id is indistinguishable from a missing one ----
+    // ---- F10: a foreign vault's attachment id gets the GET route's refusal and an audit row ----
+    // (The exists-vs-gone bit itself is an accepted residual: a fresh id must insert. See spec 03 §8.)
 
     @Test
-    fun f10_uploadUnderOwnVault_withAnotherVaultsAttachmentId_isAUniformNoGrant() = testApplication {
-        application { andvariModule(buildServices(config(), Notifier())) }
+    fun f10_uploadUnderOwnVault_withAnotherVaultsAttachmentId_isNoGrant_andAudited() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
         val client = jsonClient(this)
         val owner = VirtualClient("f10a@x.com", "owner password one one")
         client.register(owner, bootstrapToken)
@@ -322,6 +324,12 @@ class ServerScan1026Test : P4TestSupport() {
         val probe = client.uploadAttachment(other, attId, other.newItemId(), enc.header + enc.ciphertext)
         assertEquals(HttpStatusCode.Forbidden, probe.status, probe.bodyAsText())
         assertEquals("no_grant", errorOf(probe))
+        val anomalies = services.repo.db.read { c -> c.queryAll("SELECT meta FROM audit WHERE type='attachment_cross_vault' AND userId=?", other.userId) { it.getString(1) } }
+        assertEquals(listOf("$attId:${other.personalVaultId}"), anomalies, "the honest-unreachable branch is audited, and the audit survived the 403")
+        // The push sibling reports the foreign row as unknown, not as a mismatch.
+        val push = client.push(other, putMutation(other, other.newItemId(), """{"type":"note","name":"probe"}""", 0, listOf(attId)))
+        assertEquals("rejected", push.results[0].status)
+        assertEquals("unknown_attachment", push.results[0].reason)
         // Same vault, different bytes: still the honest client's `attachment_id_taken` (plan retry, spec 07).
         val other2 = Attachments.encrypt(crypto, crypto.randomBytes(32), crypto.randomBytes(64))
         val taken = client.uploadAttachment(owner, attId, owner.newItemId(), other2.header + other2.ciphertext)

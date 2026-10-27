@@ -753,6 +753,7 @@ class Service(
         // — so it marked every address holding an account (all accounts get a recovery row at
         // register). Rows follow login's F20 shape: an unknown address is fully anonymous (naming it
         // would make the row itself the oracle), a known one is attributed with what went wrong.
+        requireEmailShape(req.email) // F3 sibling: length-only, before any lookup (no state is kept here)
         val known = repo.userByEmail(req.email)
         val user = known?.takeIf { it.status == "active" }
         val row = user?.let { repo.memberRecoveryRow(it.userId) }
@@ -853,6 +854,9 @@ class Service(
             repo.audit("recovery_self_setup_fail", p.userId, p.deviceId, ip, "credential_changed")
             throw Unauthorized("credential_changed")
         }
+        // F5 (server scan 2026-10-26, review item 2): the §F.3.3 rotation replaces the UVK sealed to a
+        // possibly-compromised phrase — the same replaced-credential class as a password change.
+        repo.db.checkpointTruncate()
         return pieceId
     }
 
@@ -1478,7 +1482,11 @@ class Service(
         var total = 0L
         for (aid in ids.distinct()) {
             val row = attachments.rowById(c, aid) ?: return "unknown_attachment"
-            if (row.itemId != itemId || row.vaultId != vaultId) return "attachment_mismatch"
+            // F10 (server scan 2026-10-26): a row in ANOTHER vault is reported exactly like no row at
+            // all — `attachment_mismatch` is kept for the same-vault/other-item case only, so the
+            // reason never says whether a foreign vault still holds an id the pusher once saw.
+            if (row.vaultId != vaultId) return "unknown_attachment"
+            if (row.itemId != itemId) return "attachment_mismatch"
             total += row.size
         }
         if (total > attachments.maxCipherBytes(policy().itemAttachmentsMaxBytes)) return "item_attachment_quota"

@@ -81,8 +81,10 @@ Pick one:
 | **`network_mode: host`** on the app service | nothing | the proxy's hop is genuinely loopback; no CIDR needed, and the default header applies. |
 
 Whichever front you run, it must either overwrite the client's `X-Forwarded-For`, merge
-into it (one line, the real client appended last — cloudflared, tailscale serve, Caddy
-and nginx all do this), or append its own header *line* (HAProxy's `option forwardfor`).
+into it (one line, the real client appended last — cloudflared, tailscale serve and Caddy
+do this by default; nginx only with `proxy_set_header X-Forwarded-For
+$proxy_add_x_forwarded_for`, stock nginx adds nothing), or append its own header *line*
+(HAProxy's `option forwardfor`).
 The server reads the rightmost entry of the **last** line, which is the one your proxy
 wrote in every one of those shapes. A front that leaves the client's header untouched
 and adds nothing is not a trusted proxy and must not be named in the CIDR list.

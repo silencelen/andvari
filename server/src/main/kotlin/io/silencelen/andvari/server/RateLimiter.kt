@@ -91,8 +91,7 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
      */
     private fun key(email: String): String {
         val normalised = email.trim().lowercase().encodeToByteArray()
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(normalised)
-        return digest.joinToString("") { "%02x".format(it) }
+        return io.silencelen.andvari.core.crypto.Bytes.toHexLower(java.security.MessageDigest.getInstance("SHA-256").digest(normalised))
     }
 
     /** True while the key is locked out — check BEFORE any verifier work (it's the cheap gate). */
