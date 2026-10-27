@@ -922,6 +922,7 @@ export class ApiClient {
           }
         };
         sock.onmessage = (ev) => {
+          if (closed) return; // a frame after close()/revoked must not reset the ladder or fire onOpen (extension parity)
           if (ev.data === "pong") {
             // The echo loop runs after the server's notifier.register(): the first pong is
             // the proof the bell can reach this socket. Exactly once per socket.

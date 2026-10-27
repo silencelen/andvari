@@ -485,7 +485,9 @@ replay). The backoff ladder resets only on a **registered** socket — the first
 below, not the 101 (security review 2026-10, A17): a socket that upgrades and dies
 before the server answered is a failed attempt, so a client whose sockets keep dying
 within a second climbs to the 60 s cap instead of re-minting a ticket every second and
-running into the per-account `POST /events/ticket` bucket (§8, 60/min). **A text frame `ping` from the client is echoed as the text frame `pong`** — an
+running into the per-account `POST /events/ticket` bucket (§8, 60/min). The explicit
+resets — tab-visible in the web client, unlock and the 5-min alarm in the extension —
+still zero the ladder and dial at once; each is bounded by its trigger, not by the network. **A text frame `ping` from the client is echoed as the text frame `pong`** — an
 app-level keepalive (the extension's service worker needs JS-visible traffic) that is
 also the **registration proof**: the server registers a socket with its notifier only
 when the route body runs, after the 101, so a change committed in that window rings

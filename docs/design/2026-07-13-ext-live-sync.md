@@ -203,11 +203,14 @@ Binding behavior (web `client.ts events()` parity except where stated):
    must abort — web `if (closed) return` parity).
 2. Mint result: `null` → return (no timer, no socket; a later `kick()` starts a fresh cycle).
    Throw → `scheduleReconnect()`. Ticket → `makeSocket(wsUrl + "?ticket=" + encodeURIComponent(t))`.
-3. `onopen`: `attempts = 0`; send the registration probe `"ping"` (try/catch — a socket that cannot
-   send is about to close); start keepalive `setInterval` — `send("ping")` iff `readyState === 1`.
-   NO `scheduleBell()` here (amended 2026-09-13, §4).
-4. `onmessage`: `"pong"` → the registration proof; the FIRST one per socket calls `scheduleBell()`
-   (the catch-up), later ones are no-ops. Everything else: `JSON.parse` inside try/catch (garbage is
+3. `onopen`: send the registration probe `"ping"` (try/catch — a socket that cannot send is about
+   to close); start keepalive `setInterval` — `send("ping")` iff `readyState === 1`. NO
+   `scheduleBell()` here (amended 2026-09-13, §4) and NO `attempts = 0` (amended 2026-10-26: the 101
+   is transport, not proof the server answered — a socket that upgrades and dies unanswered is a
+   failed cycle, and resetting here let a flapping worker re-mint a ticket every second into the
+   server's 60/min per-account ticket bucket).
+4. `onmessage`: `"pong"` → the registration proof; the FIRST one per socket sets `attempts = 0` and
+   calls `scheduleBell()` (the catch-up), later ones are no-ops. Everything else: `JSON.parse` inside try/catch (garbage is
    silently ignored — web parity). `type === "rev"` → `scheduleBell()`. `type === "revoked"` → set `closed`,
    clear ALL timers, close socket, fire `onRevoked()` exactly once. No reconnect ever follows a
    revoked frame (the server closes right after — `Notifier.notifyRevokedDevice`).
@@ -216,8 +219,8 @@ Binding behavior (web `client.ts events()` parity except where stated):
    (paired onclose recovers) — web parity.
 6. `scheduleReconnect()`: no-op if `closed` or a timer is pending.
    `base = min(60_000, 1_000 · 2^min(attempts, 6))`; `delay = base/2 + rand() · base/2`;
-   `attempts++`; `setTimeout(connect, delay)`. Cap 60 s; `attempts` resets ONLY on successful open
-   and on `kick(true)`. No stop-after-N (a silent permanent stop is a stale-until-restart bug);
+   `attempts++`; `setTimeout(connect, delay)`. Cap 60 s; `attempts` resets ONLY on a socket's first
+   `pong` and on `kick(true)`. No stop-after-N (a silent permanent stop is a stale-until-restart bug);
    SW death naturally rate-limits long outages to a few attempts per 5-min wake.
 7. `kick(reset)`: no-op if `closed`. `reset === true` → cancel pending backoff timer, `attempts = 0`,
    then connect if no socket/in-flight. Else → connect only if no socket, no in-flight, AND no
