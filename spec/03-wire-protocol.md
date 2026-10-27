@@ -361,6 +361,17 @@ cache OFF.
   `user_item_quota` (the put would GROW the pusher's live item ciphertext — across every
   vault they hold a grant to — past `ANDVARI_USER_ITEM_QUOTA_BYTES`, default 128 MiB; a
   put that shrinks or keeps an item's size, and every delete, is never refused), or
+  `bad_mutation_id` (server scan 2026-10-26 F2 — a `mutationId` that is empty or longer than
+  64 characters; every client mints a 36-character UUID, and the server stores the id twice
+  per applied mutation for 180 days outside every quota, so an unbounded one was free storage
+  growth. Checked before the idempotency lookup, never cached, and the echoed `mutationId` is
+  truncated to 64 characters rather than reflected), `too_many_attachments` /
+  `duplicate_attachment` / `bad_attachment_id` (server scan 2026-10-26 F1 — the
+  `attachmentIds` LIST is bounded before its members are resolved: at most 256 entries, no
+  repeats, each a canonical lowercase UUID; the reference check dedups before it looks ids
+  up and the item quota counts only the blob, so one real id repeated two hundred thousand
+  times used to pass and persist an 8 MiB list that every co-member's next full pull then
+  materialised. The same three are thrown as `400` on `POST /items/{id}/restore`), or
   `bad_item_id` (2026-10, security review — a `put` OR `delete` whose `itemId` or `vaultId`
   is not a canonical lowercase UUID: an itemId is handed to every other member of the vault
   by `/items/deleted` and `/sync` and becomes a path segment of THEIR authenticated
@@ -638,7 +649,12 @@ strips them degrades every client to the poll path (correct, just slower).
   unknown-email / no-row / wrong-secret is what keeps the route from being an account
   oracle instead. They stay **hard-refused on the break-glass twin origin** (`403`) but
   are internet-reachable on single-origin instances (posture: spec 05 R10, T11).
-- Client IP (rate keys + audit rows): the **rightmost** `X-Forwarded-For` entry — the
+- Client IP (rate keys + audit rows): the **rightmost** `X-Forwarded-For` entry **of the
+  LAST header line** (server scan 2026-10-26 F8: a front that appends its forwarding header
+  as a separate line, as HAProxy's `option forwardfor` does, puts the real client in the
+  last line after the client's own; reading the first line let a caller name its own rate
+  key and audit ip. For every trusted header the last occurrence is the one read; the
+  merging fronts produce one line and are unchanged) — the
   **sole default trusted header** — and **only when the direct TCP peer falls inside the
   operator-declared trusted-proxy set** (`ANDVARI_TRUSTED_PROXY_CIDRS`, default
   `127.0.0.0/8,::1/128` — loopback only, i.e. the pre-2026-09-13 rule verbatim, so every
@@ -673,7 +689,12 @@ strips them degrades every client to the poll path (correct, just slower).
   policy `attachmentMaxBytes` / `userAttachmentsMaxBytes`), records
   `{ size, sha256(ciphertext), header }`, and never parses content. Idempotent per
   attachmentId: identical bytes → the stored meta; different bytes →
-  `400 attachment_id_taken`.
+  `400 attachment_id_taken`. An id that already exists in a vault OTHER than the one named
+  by `vaultId` answers `403 no_grant`, exactly as the GET route answers a foreign id (server
+  scan 2026-10-26 F10): the distinct `attachment_id_taken` told a removed shared-vault
+  member whether a file they once synced still existed. Ids are unguessable, so an honest
+  client never collides across vaults; `attachment_id_taken` is kept only within the
+  caller's own vault, where the plan retry depends on it (spec 07 §4).
 - Uploads are additionally bounded per user by a concurrent-upload cap (429 when
   exceeded) and by in-flight `.part` bytes counted toward `userAttachmentsMaxBytes`
   mid-stream (413); the commit-time quota check remains authoritative.
