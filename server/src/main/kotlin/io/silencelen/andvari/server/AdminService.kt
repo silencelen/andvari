@@ -168,21 +168,26 @@ class AdminService(private val repo: Repo, private val config: Config) {
     }
 
     /** Upload recovery-cli output (spec 04 §4): set temp creds + force change + revoke sessions. */
-    fun applyRecovery(req: RecoveryUpload, byUserId: String) = repo.db.tx { c ->
-        // L1 (spec 05 T1/T8): the admin recovery bundle sets a login verifier + kdfParams exactly like
-        // register / change / self-recovery — floor it too, so no password-set path can persist a
-        // brute-forceable verifier. recovery-cli emits KdfParams.DEFAULT (at-floor) so this is a no-op
-        // for the honest producer; it fails closed only on a hand-edited sub-floor bundle.
-        requireKdfFloor(req.tempKdfParams, config)
-        requireKdfSaltB64(req.tempKdfSalt) // R26: the bundle's salt is served to prelogin like any other
-        val exists = c.queryOne("SELECT userId FROM users WHERE userId=?", req.userId) { it.getString(1) }
-            ?: throw BadRequest("no_such_user")
-        c.exec(
-            """UPDATE users SET verifier=?, wrappedUvk=?, kdfSalt=?, kdfParams=?, mustChangePassword=1, status='active' WHERE userId=?""",
-            ServerCrypto.hashVerifier(req.tempAuthKey), req.tempWrappedUvk, req.tempKdfSalt, encodeParams(req.tempKdfParams), req.userId,
-        )
-        c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), req.userId)
-        repo.auditOn(c, "recovery_apply", byUserId, null, null, req.userId)
+    fun applyRecovery(req: RecoveryUpload, byUserId: String) {
+        repo.db.tx { c ->
+            // L1 (spec 05 T1/T8): the admin recovery bundle sets a login verifier + kdfParams exactly like
+            // register / change / self-recovery — floor it too, so no password-set path can persist a
+            // brute-forceable verifier. recovery-cli emits KdfParams.DEFAULT (at-floor) so this is a no-op
+            // for the honest producer; it fails closed only on a hand-edited sub-floor bundle.
+            requireKdfFloor(req.tempKdfParams, config)
+            requireKdfSaltB64(req.tempKdfSalt) // R26: the bundle's salt is served to prelogin like any other
+            val exists = c.queryOne("SELECT userId FROM users WHERE userId=?", req.userId) { it.getString(1) }
+                ?: throw BadRequest("no_such_user")
+            c.exec(
+                """UPDATE users SET verifier=?, wrappedUvk=?, kdfSalt=?, kdfParams=?, mustChangePassword=1, status='active' WHERE userId=?""",
+                ServerCrypto.hashVerifier(req.tempAuthKey), req.tempWrappedUvk, req.tempKdfSalt, encodeParams(req.tempKdfParams), req.userId,
+            )
+            c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), req.userId)
+            repo.auditOn(c, "recovery_apply", byUserId, null, null, req.userId)
+        }
+        // F5: the replaced verifier + wrappedUvk are the credentials of the account being recovered
+        // FROM a compromise — flush and truncate the WAL so their page images do not outlive the tx.
+        repo.db.checkpointTruncate()
     }
 
     /** Design §2.5: the escrow blob + the identity file the recovery CLI checks it against + the

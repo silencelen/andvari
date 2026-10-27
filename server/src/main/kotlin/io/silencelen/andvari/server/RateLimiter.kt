@@ -82,7 +82,18 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
      */
     @Volatile internal var clock: () -> Long = ::now
 
-    private fun key(email: String) = email.trim().lowercase()
+    /**
+     * The state key is a SHA-256 of the normalised email, never the email itself (server scan
+     * 2026-10-26, F3): the email is attacker-chosen and was bounded only by the login route's 256 KiB
+     * body cap, and the sweep below does not engage until [PRUNE_AT] entries — so a few thousand
+     * unique ~250 KB "emails" pinned gigabytes of heap. A digest key is 64 chars whatever arrives,
+     * and the route additionally refuses an email over [EMAIL_MAX_CHARS] before it gets here.
+     */
+    private fun key(email: String): String {
+        val normalised = email.trim().lowercase().encodeToByteArray()
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(normalised)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
 
     /** True while the key is locked out — check BEFORE any verifier work (it's the cheap gate). */
     fun blocked(email: String): Boolean {

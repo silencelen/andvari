@@ -37,6 +37,9 @@ class DbDurabilityTest {
             // 2=FULL, 3=EXTRA. Anything but 2 means an acknowledged commit can vanish on a
             // power cut inside the checkpoint window (H84).
             assertEquals("2", pragma(db, "synchronous"), "PRAGMA synchronous must be FULL (2) — see Db.kt's H84 note")
+            // Server scan 2026-10-26 (F5): freed cells are zeroed, so deleted key material (retired-key
+            // escrow blobs, replaced verifiers, purged grants) does not linger in free space or backups.
+            assertEquals("1", pragma(db, "secure_delete"), "PRAGMA secure_delete must be ON — see Db.kt's F5 note")
             // FULL is only the whole story while the journal is WAL: the two PRAGMAs are set
             // together and reasoned about together.
             assertEquals("wal", pragma(db, "journal_mode").lowercase())
