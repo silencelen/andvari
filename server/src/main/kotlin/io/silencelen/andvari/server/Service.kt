@@ -431,10 +431,10 @@ class Service(
     //   enrolled?  totpRequired  publicOrigin  →  result
     //   yes        any           any              TOTP verified, ALWAYS (origin-independent)
     //   no         false         no               password-only login (reference default)
-    //   no         false         yes              403 public_login_requires_totp (break-glass unchanged)
+    //   no         false         yes              403 public_login_requires_totp (counts toward §2.5)
     //   no         true          no               login OK → RESTRICTED session (mustEnrollTotp=true)
     //   no         true          yes              403 public_login_requires_totp (no restricted hatch
-    //                                             on the emergency origin)
+    //                                             on the emergency origin; counts toward §2.5)
     fun login(req: LoginRequest, ip: String, publicOrigin: Boolean = false, clientVersion: String? = null): SessionResponse {
         // Server scan 2026-10-26 (F3): a length-only gate BEFORE any lookup or backoff state — an
         // email no mailbox can have is refused without touching the account table, so the 400 is

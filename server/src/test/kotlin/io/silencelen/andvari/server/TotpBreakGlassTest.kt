@@ -107,6 +107,10 @@ class TotpBreakGlassTest : P4TestSupport() {
         val client = jsonClient(this)
         val vc = VirtualClient("bg3@x.com", "break glass password three")
         client.register(vc, bootstrapToken)
+        // Freeze the backoff's clock (H97): the 5th-failure lock is 1 s of ITS time, and the three blocked
+        // round-trips below must land inside it whatever the build host is doing.
+        val t0 = services.service.loginBackoff.clock()
+        services.service.loginBackoff.clock = { t0 }
 
         repeat(5) { n ->
             val denied = client.publicLogin(vc) // distinct IP per attempt: the per-IP bucket is not what locks
@@ -120,11 +124,10 @@ class TotpBreakGlassTest : P4TestSupport() {
         assertEquals(HttpStatusCode.TooManyRequests, internalBlocked.status)
         assertEquals("rate_limited", errorOf(internalBlocked))
 
-        // The 5th-failure lock is 2^0 = 1 s (MultiTenantEndpointTest pins the ladder); advance the
-        // backoff's clock past it instead of sleeping (H97). The correct password on the internal origin
-        // then logs in — and that success clears the ladder, so one more public refusal is a plain 403.
-        val realClock = services.service.loginBackoff.clock
-        services.service.loginBackoff.clock = { realClock() + 1_500 }
+        // The 5th-failure lock is 2^0 = 1 s (MultiTenantEndpointTest pins the ladder); advance the frozen
+        // clock past it. The correct password on the internal origin then logs in — and that success
+        // clears the ladder, so one more public refusal is a plain 403.
+        services.service.loginBackoff.clock = { t0 + 1_500 }
         val ok = client.internalLogin(vc)
         assertEquals(HttpStatusCode.OK, ok.status, ok.bodyAsText())
         assertEquals(HttpStatusCode.Forbidden, client.publicLogin(vc).status)
