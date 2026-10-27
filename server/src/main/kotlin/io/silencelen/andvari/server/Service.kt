@@ -256,6 +256,7 @@ class Service(
 
     // ---- prelogin ----
     fun prelogin(email: String): PreloginResponse {
+        requireEmailShape(email)
         // policy() (a DB read + decode) is computed on BOTH branches so the unknown-email
         // path is not measurably heavier than the known one — an asymmetric cost here would
         // be a timing oracle that partly defeats the fake-salt anti-enumeration (spec 05 T11).
@@ -435,6 +436,10 @@ class Service(
     //   no         true          yes              403 public_login_requires_totp (no restricted hatch
     //                                             on the emergency origin)
     fun login(req: LoginRequest, ip: String, publicOrigin: Boolean = false, clientVersion: String? = null): SessionResponse {
+        // Server scan 2026-10-26 (F3): a length-only gate BEFORE any lookup or backoff state — an
+        // email no mailbox can have is refused without touching the account table, so the 400 is
+        // not an account oracle (it depends on nothing but the submitted string's length).
+        requireEmailShape(req.email)
         // §2.5: per-account exponential backoff keyed on the NORMALIZED submitted email — existing
         // account or not (the prelogin fake-salt anti-enumeration discipline: a throttle that only
         // guarded real accounts would itself be an account oracle). Checked before verifier work;
@@ -667,14 +672,50 @@ class Service(
         }
         requireKdfFloor(req.newKdfParams)
         requireKdfSalt(req.newKdfSalt) // R26: same bound as register — the salt is served to prelogin
-        repo.db.tx { c ->
-            c.exec(
-                "UPDATE users SET verifier=?, kdfSalt=?, kdfParams=?, wrappedUvk=?, mustChangePassword=0 WHERE userId=?",
-                ServerCrypto.hashVerifier(req.newAuthKey), req.newKdfSalt, encodeParams(req.newKdfParams), req.newWrappedUvk, p.userId,
+        credentialWritePreTxProbe?.invoke()
+        // Server scan 2026-10-26 (F4): the verify above ran against a SNAPSHOT, outside any lock —
+        // the same verify-then-write shape login closed (server F5, LoginRevocationRaceTest). A
+        // self-recovery commit, an admin recovery or the member's own change from another device
+        // that lands between that verify and this tx replaces the verifier and revokes every
+        // session; an attacker holding the OLD password and a live token could then land this
+        // write AFTER the remediation and own the only valid credentials. So the write is a
+        // compare-and-swap on the credential epoch (the verifier string: every password-set path
+        // writes a fresh argon2 string) and requires the acting session to still be live. Zero
+        // rows = someone else moved the account first; nothing is written.
+        val changed = repo.db.tx { c ->
+            val n = c.exec(
+                """UPDATE users SET verifier=?, kdfSalt=?, kdfParams=?, wrappedUvk=?, mustChangePassword=0
+                   WHERE userId=? AND verifier=? AND EXISTS(SELECT 1 FROM sessions WHERE sessionId=? AND userId=? AND revokedAt IS NULL)""",
+                ServerCrypto.hashVerifier(req.newAuthKey), req.newKdfSalt, encodeParams(req.newKdfParams), req.newWrappedUvk,
+                p.userId, u.verifier, p.sessionId, p.userId,
             )
+            if (n != 1) return@tx false
             c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND sessionId<>? AND revokedAt IS NULL", now(), p.userId, p.sessionId)
             repo.auditOn(c, "password_change", p.userId, p.deviceId, ip)
+            true
         }
+        if (!changed) {
+            // Audited in its own tx, like the other failure branch; the meta names the race so an
+            // incident review can tell it from a wrong current password.
+            repo.audit("password_change_fail", p.userId, p.deviceId, ip, "credential_changed")
+            throw Unauthorized("credential_changed")
+        }
+        // F5: the old verifier + wrappedUvk were overwritten in place; flush them out of the WAL.
+        repo.db.checkpointTruncate()
+    }
+
+    /**
+     * Test seam (server scan 2026-10-26, F4): runs between the out-of-lock credential verify and the
+     * write tx in [changePassword], [recoverySelfSetup] and [putPersonalWrap] — exactly the window the
+     * compare-and-swap exists for. The twin of [loginPreMintProbe]. Never set in production.
+     */
+    @Volatile internal var credentialWritePreTxProbe: (() -> Unit)? = null
+
+    /** F3: a length-only bound on a client-submitted email before it is used as a lookup key or a
+     *  backoff key — RFC 5321's 254, the bound invites already apply. Independent of the account
+     *  table, so the 400 says nothing about whether the address exists. */
+    private fun requireEmailShape(email: String) {
+        if (email.isEmpty() || email.length > EMAIL_MAX_CHARS) throw BadRequest("invalid_email")
     }
 
     // ---- per-member self-service recovery (design 2026-07-12 §F.3) ----
@@ -761,6 +802,9 @@ class Service(
             c.exec("UPDATE sessions SET revokedAt=? WHERE userId=? AND revokedAt IS NULL", now(), userId)
             repo.auditOn(c, "recovery_self_commit", userId, null, ip)
         }
+        // F5 (server scan 2026-10-26): this is the remediation path for a compromised password —
+        // the verifier + wrappedUvk it replaced must not linger in the WAL.
+        repo.db.checkpointTruncate()
         return userId // M8: the route pushes {revoked} + closes every one of this user's sockets (all sessions revoked)
     }
 
@@ -780,7 +824,13 @@ class Service(
         }
         val block = requireMemberRecovery(req.memberRecovery)
         val pieceId = ServerCrypto.newToken()
-        repo.db.tx { c ->
+        credentialWritePreTxProbe?.invoke()
+        val committed = repo.db.tx { c ->
+            // F4 (server scan 2026-10-26): the same compare-and-swap as changePassword — the password
+            // verified above must still be the account's, and this session still live, or an attacker
+            // with the old password could replace the member's recovery piece right after the member
+            // (or an admin) rotated them out. Nothing is written when the check fails.
+            if (!credentialEpochHolds(c, p, u.verifier)) return@tx false
             // Stamp pieceId + setupDeviceId on insert AND on-conflict update: every setup mints a fresh
             // id for the piece it commits, and records which device committed it (the legacy-confirm scope).
             c.exec(
@@ -797,9 +847,26 @@ class Service(
             // CURRENT piece" and flips to 1 ONLY in /recovery/self/confirm after the type-back (§2.2).
             c.exec("UPDATE users SET recoveryConfirmed=0 WHERE userId=?", p.userId)
             repo.auditOn(c, "recovery_self_setup", p.userId, p.deviceId, ip)
+            true
+        }
+        if (!committed) {
+            repo.audit("recovery_self_setup_fail", p.userId, p.deviceId, ip, "credential_changed")
+            throw Unauthorized("credential_changed")
         }
         return pieceId
     }
+
+    /**
+     * F4: inside a write tx, true iff the account's verifier is still [verifier] (the string the
+     * caller just verified a password against — the credential epoch) AND the acting session is
+     * unrevoked. SQLite serialises write txs, so a remediation either committed before this read
+     * (refused) or runs after this tx (and revokes this session with the rest).
+     */
+    private fun credentialEpochHolds(c: Connection, p: Principal, verifier: String): Boolean =
+        c.queryOne(
+            "SELECT 1 FROM users u JOIN sessions s ON s.userId=u.userId WHERE u.userId=? AND u.verifier=? AND s.sessionId=? AND s.revokedAt IS NULL",
+            p.userId, verifier, p.sessionId,
+        ) { 1 } != null
 
     /**
      * §F.9 capture confirmation — the enroll happy-path and the vault-entry gate's type-back. Authenticated
@@ -1004,15 +1071,25 @@ class Service(
             }
             true
         } ?: false
+        if (reauthed) credentialWritePreTxProbe?.invoke()
+        var epochMoved = false
         repo.db.tx { c ->
             if (repo.grantRole(c, p.userId, put.vaultId) == null) throw Forbidden("no_grant")
             val existing = c.queryOne("SELECT vaultId FROM personal_wrap WHERE userId=?", p.userId) { it.getString(1) }
             if (existing != null && !reauthed) throw Conflict("personal_wrap_exists")
+            // F4 (server scan 2026-10-26): a re-authenticated REPLACE is a password-gated write and
+            // gets the same compare-and-swap as changePassword; the first-time set carries no password
+            // and so has no epoch to hold. Flag + throw after the tx so the failure audit persists.
+            if (reauthed && !credentialEpochHolds(c, p, u.verifier)) { epochMoved = true; return@tx }
             c.exec(
                 "INSERT INTO personal_wrap(userId,vaultId,wrappedVk,updatedAt) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET vaultId=excluded.vaultId, wrappedVk=excluded.wrappedVk, updatedAt=excluded.updatedAt",
                 p.userId, put.vaultId, put.wrappedVk, now(),
             )
             repo.auditOn(c, if (existing == null) "personal_wrap_set" else "personal_wrap_redesignate", p.userId, p.deviceId, ip, put.vaultId)
+        }
+        if (epochMoved) {
+            repo.audit("personal_wrap_reauth_fail", p.userId, p.deviceId, ip, "credential_changed")
+            throw Unauthorized("credential_changed")
         }
     }
 
@@ -1177,6 +1254,7 @@ class Service(
             // Same rule as applyPut: every referenced attachment must exist, be bound to this
             // item+vault, and fit the quota. Shipped clients always restore with [] (the delete
             // dropped the rows), but the payload is client-supplied — never persist it unchecked.
+            attachmentListShapeReason(upload.attachmentIds)?.let { throw BadRequest(it) }
             validateAttachmentRefs(c, itemId, existing.vaultId, upload.attachmentIds)
             // F6: the same item cap and quota as push, in this route's thrown 413 form (a single
             // direct request with no queue behind it). A tombstone holds no blob, so the whole
@@ -1216,6 +1294,16 @@ class Service(
     }
 
     private fun applyMutation(c: Connection, principal: Principal, m: Mutation, affected: MutableSet<String>, filesToUnlink: MutableList<String>, deniedMetas: MutableList<String>, quota: ItemQuota): MutationResult {
+        // Server scan 2026-10-26 (F2): the client-chosen mutationId is persisted TWICE per applied
+        // mutation (the `mutations` primary key + its index, and again inside resultJson) for 180
+        // days, outside every quota, and a no-op delete in the caller's own vault is `applied` and
+        // cached like any other — so an 8 MiB id was ~24 MiB of SQLite growth per request. Every
+        // client mints a 36-char UUID; anything past MUTATION_ID_MAX_CHARS is a per-mutation
+        // `rejected` (never cached) BEFORE the idempotency lookup, and the echo is truncated so the
+        // response does not reflect the oversized string either.
+        if (m.mutationId.isEmpty() || m.mutationId.length > MUTATION_ID_MAX_CHARS) {
+            return MutationResult(m.mutationId.take(MUTATION_ID_MAX_CHARS), "rejected", reason = "bad_mutation_id")
+        }
         // Idempotency: replay the stored result verbatim.
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->
             rs.getString(1)
@@ -1295,6 +1383,15 @@ class Service(
         // and carries on. `serverItem` is the server's current row (a tombstone when a peer
         // deleted the item) for the client's reconcile. The throw survives only where the
         // request itself is malformed (put_without_item / bad_op / batch_too_large).
+        // Server scan 2026-10-26 (F1): the LIST is bounded before its members are resolved. The
+        // reference check dedups before looking ids up, and the item quota counts only the blob, so
+        // one real id repeated two hundred thousand times passed with a single lookup and wrote an
+        // 8 MiB JSON list into `items.attachmentIds` — outside every quota, and materialised into
+        // every co-member's next full pull. Same per-mutation `rejected`, same reasoning as H03:
+        // nothing about a re-send can make such a list valid.
+        attachmentListShapeReason(item.attachmentIds)?.let { reason ->
+            return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = reason)
+        }
         checkAttachmentRefs(c, m.itemId, m.vaultId, item.attachmentIds)?.let { reason ->
             return MutationResult(m.mutationId, "rejected", serverItem = existing, reason = reason)
         }
@@ -1362,6 +1459,20 @@ class Service(
      * `item_attachment_quota`) or null when the refs are good — the push path turns a reason
      * into a per-mutation `rejected` (H03), the restore path into its thrown status.
      */
+    /**
+     * F1 (server scan 2026-10-26): the shape of an `attachmentIds` list, checked BEFORE
+     * [checkAttachmentRefs] resolves its members: at most [ITEM_ATTACHMENTS_MAX] entries
+     * (`too_many_attachments`), no duplicates (`duplicate_attachment`), every entry in the canonical
+     * UUID form the upload route already enforces on the id it stores (`bad_attachment_id`). A list
+     * that passes is at most ~10 KB of JSON, so it needs no quota of its own.
+     */
+    private fun attachmentListShapeReason(ids: List<String>): String? = when {
+        ids.size > ITEM_ATTACHMENTS_MAX -> "too_many_attachments"
+        ids.size != ids.toHashSet().size -> "duplicate_attachment"
+        ids.any { !UUID_RE.matches(it) } -> "bad_attachment_id"
+        else -> null
+    }
+
     private fun checkAttachmentRefs(c: Connection, itemId: String, vaultId: String, ids: List<String>): String? {
         if (ids.isEmpty()) return null
         var total = 0L

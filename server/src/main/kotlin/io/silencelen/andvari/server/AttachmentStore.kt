@@ -178,7 +178,14 @@ class AttachmentStore(
                 val existing = rowById(c, attachmentId)
                 if (existing != null) {
                     part.delete()
-                    if (existing.sha256 != sha || existing.itemId != itemId || existing.vaultId != vaultId) throw BadRequest("attachment_id_taken")
+                    // Server scan 2026-10-26 (F10): a row in a vault the caller is NOT writing to is
+                    // answered exactly like the GET route answers a foreign id (`403 no_grant`, spec 03
+                    // §8) — never the distinct `attachment_id_taken`, which told a removed shared-vault
+                    // member whether a file they once synced still exists. Ids are unguessable, so the
+                    // only way to collide across vaults is to hold the id already; an honest client
+                    // never does this (its retry re-posts the same (id, item, vault) triple).
+                    if (existing.vaultId != vaultId) throw Forbidden("no_grant")
+                    if (existing.sha256 != sha || existing.itemId != itemId) throw BadRequest("attachment_id_taken")
                     return@tx AttachmentMeta(existing.attachmentId, existing.itemId, existing.vaultId, existing.size, existing.sha256, existing.createdAt)
                 }
                 if (userBytes(c, userId) + cipherBytes > maxCipherBytes(policy.userAttachmentsMaxBytes)) {
