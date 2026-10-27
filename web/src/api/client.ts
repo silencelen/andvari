@@ -843,9 +843,14 @@ export class ApiClient {
    * server has always echoed as "pong" (spec 03 §6 — the extension's keepalive rides the
    * same echo), and reports `onOpen` on the FIRST pong: the echo loop starts after
    * register(), so a pong proves the registration. The catch-up pull therefore runs after
-   * the socket can ring, which closes the window instead of narrowing it. Backoff reset and
-   * the "back up" signal still key off the raw 101 — a socket that upgraded is healthy
-   * transport, registered or not. A 401/403 at ticket mint means the session itself is dead
+   * the socket can ring, which closes the window instead of narrowing it. The backoff reset
+   * ALSO waits for the first pong (security review 2026-10, A17 item 3): a socket that
+   * upgrades and dies before the server ever answered is a failed cycle, not a healthy one.
+   * Resetting on the 101 let a tab whose sockets die within a second (a proxy with a short
+   * idle timeout, a half-broken network) re-mint tickets at 1–2 per second — enough to hit
+   * the server's per-account ticket bucket (60/min) and then be throttled for the whole tab,
+   * a self-inflicted outage. Only the "back up" signal keys off the raw 101.
+   * A 401/403 at ticket mint means the session itself is dead
    * (the client already tried a token refresh): reconnection stops and `onRevoked`
    * fires so the consumer drops to the lock screen — with kind "expired", because a
    * dead session is usually plain expiry; only the server's explicit `revoked` frame
@@ -908,9 +913,8 @@ export class ApiClient {
         ws = sock;
         let registered = false; // per socket: a reconnect proves itself again
         sock.onopen = () => {
-          attempts = 0; // healthy again — future drops restart the backoff from 1 s
           clearDown();
-          // Registration probe (see the doc comment): onOpen waits for the echo.
+          // Registration probe (see the doc comment): onOpen AND the backoff reset wait for the echo.
           try {
             sock.send("ping");
           } catch {
@@ -918,11 +922,13 @@ export class ApiClient {
           }
         };
         sock.onmessage = (ev) => {
+          if (closed) return; // a frame after close()/revoked must not reset the ladder or fire onOpen (extension parity)
           if (ev.data === "pong") {
             // The echo loop runs after the server's notifier.register(): the first pong is
             // the proof the bell can reach this socket. Exactly once per socket.
             if (!registered) {
               registered = true;
+              attempts = 0; // healthy again — a REGISTERED socket restarts the backoff from 1 s
               onOpen?.();
             }
             return;

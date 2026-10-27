@@ -173,12 +173,52 @@ describe("ApiClient.events reconnection", () => {
     await vi.advanceTimersByTimeAsync(4_000);
     await flush();
     expect(FakeWS.instances).toHaveLength(4);
-    // A successful open resets the ladder: next drop retries after 1 s again.
+    // A REGISTERED open (101 + pong) resets the ladder: next drop retries after 1 s again.
     sock(3).onopen?.();
+    sock(3).pong();
     sock(3).onclose?.();
     await vi.advanceTimersByTimeAsync(1_000);
     await flush();
     expect(FakeWS.instances).toHaveLength(5);
+    close();
+  });
+
+  /**
+   * Security review 2026-10 (A17 item 3): the 101 alone used to reset the ladder, so a tab whose
+   * sockets die before the server ever answers (short proxy idle timeout, half-broken network)
+   * re-minted a ticket every ~1 s and hit the server's 60/min per-account ticket bucket — then
+   * every reconnect 429'd, a self-inflicted outage. An unanswered socket is a FAILED cycle.
+   */
+  it("a socket that upgrades but dies before the registration pong keeps climbing the backoff", async () => {
+    const close = makeClient().events(vi.fn(), vi.fn());
+    await flush();
+    // Five cycles that each upgrade and die unanswered: 1, 2, 4, 8, 16 s — never back to 1 s.
+    for (const [delay, instancesAfter] of [
+      [1_000, 2],
+      [2_000, 3],
+      [4_000, 4],
+      [8_000, 5],
+      [16_000, 6],
+    ] as const) {
+      sock(instancesAfter - 2).onopen?.();
+      sock(instancesAfter - 2).onclose?.();
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      await flush();
+      expect(FakeWS.instances).toHaveLength(instancesAfter - 1); // the 101 bought no credit
+      await vi.advanceTimersByTimeAsync(1);
+      await flush();
+      expect(FakeWS.instances).toHaveLength(instancesAfter);
+    }
+    expect(mintCount).toBe(6); // 31 s of flapping = 6 tickets, not 31
+    // The first answered socket restores the 1 s floor.
+    const last = sock(FakeWS.instances.length - 1);
+    const before = FakeWS.instances.length;
+    last.onopen?.();
+    last.pong();
+    last.onclose?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(FakeWS.instances).toHaveLength(before + 1);
     close();
   });
 
