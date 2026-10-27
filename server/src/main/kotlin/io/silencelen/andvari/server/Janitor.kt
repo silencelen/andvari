@@ -279,6 +279,10 @@ class Janitor(
             true
         }
         if (purged) {
+            // Server scan 2026-10-26 (F5): the blanked grant key columns and deleted ciphertext were
+            // zeroed in the main file by secure_delete; flush + truncate the WAL so no pre-purge page
+            // image survives there either. Outside the tx, before the file unlinks.
+            repo.db.checkpointTruncate()
             // Post-commit, outside the DB lock, in small batches. Failures are left to the
             // hourly attachment orphan sweep (rows are gone, so the files are orphans).
             files.chunked(UNLINK_BATCH).forEach { batch -> batch.forEach { runCatching { attachments.file(it).delete() } } }
