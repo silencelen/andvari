@@ -4,6 +4,60 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.29.1 (2026-10-26) — the server keeps its own bounds · fleet 0.29.1, extension 0.29.1
+
+*Security review 2026-10 continued with a scan of the server alone, at 0.28.1, and an adversarial
+review of every fix. Nothing in it changes what the server can read: it still holds only ciphertext.
+What it found is a set of places where the server trusted a well-behaved client to stay within
+bounds it never enforced, two places where a correct answer said more than it should, and one where
+deleted key material lingered on disk. No shipped client is affected by the new limits; you should
+notice nothing, except the two items listed first.*
+
+**What you will notice**
+- **Emergency (break-glass) origin: repeatedly signing in with an account that has no one-time code
+  enrolled now counts toward the same temporary email lockout as repeated wrong passwords.** Before,
+  that refusal was exempt, so a correct password could be confirmed from any number of addresses
+  without ever presenting a code. Enroll a code before relying on the emergency origin.
+- **Changing your password, replacing your recovery phrase and re-designating your personal vault
+  take effect only if your password was not changed by another device, a recovery or an admin in the
+  meantime.** Otherwise the request is refused with `credential_changed` and nothing is written; sign
+  in again and retry.
+
+**Also fixed**
+- The server refuses an item whose attachment list is longer than 256 entries, repeats an id, or
+  names an id in a non-canonical form, and a push whose mutation id is empty or longer than 64
+  characters, before storing anything. No shipped client sends either shape.
+- An attachment id that belongs to another vault is answered the same way as an unknown one on a
+  push; an upload under such an id is refused and recorded in the audit log.
+- A sign-in or pre-login with an email address longer than 254 characters is refused up front.
+- The web app and the browser extension restart their live-update reconnect delay only once the
+  server has actually answered on the new connection. A connection that kept dying right after
+  opening used to reconnect every second and could run into the server's per-account limit.
+
+**For self-hosters**
+- **Deleted key material is zeroed on disk.** The database runs with `secure_delete` on, and every
+  path that destroys or replaces key material (an org-key rotation's purge of retired escrow blobs,
+  a re-seal, a password change, a recovery, a vault purge) flushes and truncates the write-ahead log
+  afterwards. Backups taken before a rotation still contain the retired-key blobs: rotate them out
+  as part of a stolen-sheet response.
+- The server reads the client address from the LAST `X-Forwarded-For` line a trusted proxy sends,
+  so a front that appends its own header line (HAProxy `option forwardfor`) is handled like one
+  that merges. `docs/self-hosting.md` says what a front must do.
+- `PUT /usage`, `PUT /escrow/self` and `POST /events/ticket` are rate-limited per account
+  (60, 10 and 60 per minute).
+- The schema stays at v15 and the minimum client version is not raised: the compatibility window
+  stays open.
+
+**Under the hood, for readers**
+- *Credential epoch (spec 03 §5):* every password-set path writes a fresh salted verifier, so the
+  verifier string is the epoch. The password-gated writes compare-and-swap on it and on a live
+  session inside the one write transaction; a lost race is audited as `credential_changed`.
+- *Accepted residuals (spec 05 T11, R4):* for an enrolled account, a correct password without a code
+  still answers `totp_required` before the uniform 401, because every client renders the code field
+  off that signal; always asking for a code is a wire change deferred to the next format-changing
+  release. Attachment ids are one global namespace, so a former member can still learn whether an id
+  it once knew still exists; closing that needs vault-scoped ids.
+
 ## 0.29.0 (2026-10-23) — what a web page can reach · fleet 0.29.0, extension 0.29.0
 
 *Security review 2026-10 scanned the whole repository at 0.28.1, then reviewed every fix adversarially
