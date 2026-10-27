@@ -182,7 +182,7 @@ compromised admin session must not be able to open your front door):
 | `ANDVARI_FORCE_HSTS` | `1` ⇒ send HSTS on every response. Set it once https works end-to-end; `bringup.sh --caddy` sets it for you (an explicit `0` is never overwritten). |
 | `ANDVARI_LOGIN_RATE_PER_MIN` | Per-IP login attempts/min (default 5, flat on every origin). An email-keyed exponential backoff after repeated failures is always on. |
 | `ANDVARI_STRICT_ENV` | `1` (bring-up default) ⇒ an unknown or invalid `ANDVARI_*` variable **kills boot** instead of logging a warning — typos fail loudly at the healthz wait. |
-| `ANDVARI_PUBLIC_HOSTNAME` | **Leave unset** (single-origin, the default). Setting it arms the opt-in dual-origin *break-glass* régime: requests arriving under that exact hostname get an emergency hardened origin (TOTP mandatory, no register/refresh, `signupMode=closed`). Only for deployments that deliberately keep a separate primary + emergency topology. |
+| `ANDVARI_PUBLIC_HOSTNAME` | **Leave unset** (single-origin, the default). Setting it arms the opt-in dual-origin *break-glass* régime: requests arriving under that exact hostname get an emergency hardened origin (TOTP mandatory, no register/refresh, `signupMode=closed`). Only for deployments that deliberately keep a separate primary + emergency topology. A member without TOTP enrolled who keeps trying the emergency origin trips the same email lockout as repeated wrong passwords (up to 15 min, on every origin) — enroll TOTP first. |
 
 Timer-ish policy values an admin can set in-app (auto-lock, clipboard clear) are
 **clamped on the client side** (auto-lock ≤ 15 min, clipboard ≤ 5 min) — a server,

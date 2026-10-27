@@ -143,7 +143,15 @@ cache OFF.
   enrollment completes (single enforcement point beside the principal check). On the
   **opt-in break-glass twin origin** an unenrolled account is refused outright
   (`403 public_login_requires_totp`) — no restricted-session hatch on the emergency
-  origin.
+  origin. **That refusal counts toward the §2.5 email backoff** (server scan 2026-10-26
+  F7): it is reached only by a CORRECT password, so to an attacker who holds the email it
+  confirms the master password without a second factor, and while it was exempt it could
+  be probed at the flat per-IP rate from every address a botnet has. The trade is that an
+  un-enrolled member who keeps retrying the emergency origin locks their own email for up
+  to 15 min on every origin. The enrolled-account `totp_required` answer still confirms a
+  password before the code (accepted for now: every client keys the code field off it;
+  closing it means always asking for a code, a wire change deferred to the next
+  format-changing release — spec 05 T11).
 - Tokens are opaque 256-bit random, transported as base64url, stored server-side as
   `sha256(token)`. Access: 1 h. Refresh: 30 d, **rotating** — `POST /auth/refresh
   { refreshToken }` → new pair, old refresh token single-use; reuse of a consumed
@@ -473,7 +481,11 @@ socket is closed `1009` (too big). The upgrade request itself is under the 256 K
 **Liveness:** browser clients reconnect a dropped bell with exponential backoff (1 s
 doubling to a 60 s cap, jittered), minting a fresh single-use ticket per attempt, and
 pull `/sync` on every (re)open to recover bells missed while down (the notifier has no
-replay). **A text frame `ping` from the client is echoed as the text frame `pong`** — an
+replay). The backoff ladder resets only on a **registered** socket — the first `pong`
+below, not the 101 (security review 2026-10, A17): a socket that upgrades and dies
+before the server answered is a failed attempt, so a client whose sockets keep dying
+within a second climbs to the 60 s cap instead of re-minting a ticket every second and
+running into the per-account `POST /events/ticket` bucket (§8, 60/min). **A text frame `ping` from the client is echoed as the text frame `pong`** — an
 app-level keepalive (the extension's service worker needs JS-visible traffic) that is
 also the **registration proof**: the server registers a socket with its notifier only
 when the route body runs, after the 101, so a change committed in that window rings
@@ -633,7 +645,9 @@ strips them degrades every client to the poll path (correct, just slower).
   After 5 consecutive failures keyed on the **normalized submitted email** (existing
   account or not — extending the prelogin fake-salt anti-enumeration discipline so
   throttling is not an account oracle), an exponential delay `2^(n-5)` s capped at
-  900 s applies uniformly, reset on success. `/client-policy` carries a per-IP bucket
+  900 s applies uniformly, reset on success; a wrong password, a missing/wrong/replayed TOTP
+  code and the break-glass origin's `public_login_requires_totp` refusal all count as a
+  failure (§2 — the last since server scan 2026-10-26 F7). `/client-policy` carries a per-IP bucket
   (~60/min, §1.1). Per-account keys also exist on vault-create, user-lookup and the
   §11 lifecycle buckets (`vault_destructive`/`vault_recovery`). On the **opt-in
   break-glass twin origin** (the request `Host` header — minus any `:port` and trailing
