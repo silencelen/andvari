@@ -73,7 +73,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
 }
 
@@ -116,4 +115,8 @@ dependencies {
     // patch LOWER (1.13.0) than the app resolves (1.13.1) — two versions of the same library
     // across the two APKs, for no reason anyone chose. Pin it to what the app actually ships.
     androidTestImplementation("androidx.core:core:1.13.1")
+}
+
+kotlin {
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }

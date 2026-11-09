@@ -416,5 +416,5 @@ class RemovalProofV2Test {
     private fun uuid(): String = io.silencelen.andvari.core.crypto.Bytes.uuidV4FromBytes(crypto.randomBytes(16))
 
     @Suppress("DEPRECATION")
-    private fun createTempDir(): File = kotlin.io.createTempDir("a7-")
+    private fun createTempDir(): File = java.nio.file.Files.createTempDirectory("a7-").toFile()
 }
