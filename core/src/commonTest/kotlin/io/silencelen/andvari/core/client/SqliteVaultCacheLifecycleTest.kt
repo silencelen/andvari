@@ -1,5 +1,7 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.newTempDir
+import io.silencelen.andvari.core.deleteDir
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.TransferRecord
@@ -7,8 +9,6 @@ import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
 import kotlinx.serialization.json.Json
-import java.io.File
-import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -23,10 +23,11 @@ import kotlin.test.assertTrue
  * clear()-preserves-safety-state, and the account-mismatch full wipe.
  */
 class SqliteVaultCacheLifecycleTest {
-    private val tmp = Files.createTempDirectory("andvari-cache-v2").toFile()
+    private val tmp = newTempDir("andvari-cache-v2")
+    private var nextDb = 0
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    private fun newPath(): String = File(tmp, "vault-${System.nanoTime()}.db").absolutePath
+    private fun newPath(): String = "$tmp/vault-${nextDb++}.db"
 
     private fun mutation(id: String, vaultId: String) = Mutation(id, "delete", "item-$id", vaultId, 3, null)
 
