@@ -277,7 +277,7 @@ object AccountState {
             m.entries.map { ConsumedNonce(it.key, it.value) }
                 .sortedWith(compareByDescending<ConsumedNonce> { it.issuedAt }.thenBy { it.nonce })
                 .take(NONCE_CAP)
-        }.toSortedMap()
+        }.sortedByKey()
 
         val localSeq = local?.seq ?: -1
         val servedSeq = served?.seq ?: -1
@@ -319,8 +319,8 @@ object AccountState {
         val seq = maxOf(localSeq, servedSeq, highWater, 0)
         return Merged(
             AccountStateDoc(
-                VERSION, userId, seq, contacts, tombstones.toSortedMap(), fp, cappedNonces,
-                issued, issuedTomb.toSortedMap(), ownedLive.toSortedMap(), ownedTomb.toSortedMap(), memberReceived.toSortedMap(),
+                VERSION, userId, seq, contacts, tombstones.sortedByKey(), fp, cappedNonces,
+                issued, issuedTomb.sortedByKey(), ownedLive.sortedByKey(), ownedTomb.sortedByKey(), memberReceived.sortedByKey(),
                 personal,
             ),
             rollback,
@@ -361,29 +361,29 @@ object AccountState {
         val t = maxOf(at, existing, doc.issuedTombstones[k] ?: -1L)
         return doc.copy(
             issuedGrants = doc.issuedGrants.filterNot { it.vaultId == vaultId && it.userId == userId },
-            issuedTombstones = (doc.issuedTombstones + (k to t)).toSortedMap(),
+            issuedTombstones = (doc.issuedTombstones + (k to t)).sortedByKey(),
         )
     }
 
     /** Record that this account owns [vaultId] (created it, accepted it, or confirmed it with a reauth; A6b). */
     fun withOwned(doc: AccountStateDoc, vaultId: String, at: Long): AccountStateDoc {
         val t = maxOf(at, (doc.ownedTombstones[vaultId] ?: -1L) + 1, doc.ownedVaults[vaultId] ?: -1L)
-        return doc.copy(ownedVaults = (doc.ownedVaults + (vaultId to t)).toSortedMap())
+        return doc.copy(ownedVaults = (doc.ownedVaults + (vaultId to t)).sortedByKey())
     }
 
     /** Record that some device of this account received [vaultIds] as a member (A1b, LOW-R). Add-only. */
     fun withMemberReceived(doc: AccountStateDoc, vaultIds: Collection<String>, at: Long): AccountStateDoc {
         val m = doc.memberReceived.toMutableMap()
         for (id in vaultIds) m[id] = maxOf(m[id] ?: at, at)
-        return doc.copy(memberReceived = m.toSortedMap())
+        return doc.copy(memberReceived = m.sortedByKey())
     }
 
     /** Tombstone ownership of [vaultId]: the account transferred it away or left it (A6b). */
     fun withoutOwned(doc: AccountStateDoc, vaultId: String, at: Long): AccountStateDoc {
         val t = maxOf(at, doc.ownedVaults[vaultId] ?: -1L, doc.ownedTombstones[vaultId] ?: -1L)
         return doc.copy(
-            ownedVaults = (doc.ownedVaults - vaultId).toSortedMap(),
-            ownedTombstones = (doc.ownedTombstones + (vaultId to t)).toSortedMap(),
+            ownedVaults = (doc.ownedVaults - vaultId).sortedByKey(),
+            ownedTombstones = (doc.ownedTombstones + (vaultId to t)).sortedByKey(),
         )
     }
 
@@ -407,7 +407,7 @@ object AccountState {
             m.entries.map { ConsumedNonce(it.key, it.value) }
                 .sortedWith(compareByDescending<ConsumedNonce> { it.issuedAt }.thenBy { it.nonce })
                 .take(NONCE_CAP)
-        }.toSortedMap()
+        }.sortedByKey()
         return doc.copy(consumedNonces = capped)
     }
 
@@ -425,7 +425,7 @@ object AccountState {
         if (prev != null) at = if (prev == c.copy(verifiedAt = prev.verifiedAt)) maxOf(at, prev.verifiedAt) else maxOf(at, prev.verifiedAt + 1)
         return doc.copy(
             contacts = (doc.contacts.filter { it.userId != c.userId } + c.copy(verifiedAt = at)).sortedBy { it.userId },
-            contactTombstones = doc.contactTombstones.filterKeys { it != c.userId }.toSortedMap(),
+            contactTombstones = doc.contactTombstones.filterKeys { it != c.userId }.sortedByKey(),
         )
     }
 
@@ -439,7 +439,10 @@ object AccountState {
         val t = maxOf(at, pinnedAt, doc.contactTombstones[userId] ?: Long.MIN_VALUE)
         return doc.copy(
             contacts = doc.contacts.filter { it.userId != userId },
-            contactTombstones = (doc.contactTombstones + (userId to t)).toSortedMap(),
+            contactTombstones = (doc.contactTombstones + (userId to t)).sortedByKey(),
         )
     }
 }
+
+/** A map iterating in key order, which the canonical encoding of the state doc depends on. */
+private fun <V> Map<String, V>.sortedByKey(): Map<String, V> = keys.sorted().associateWith { getValue(it) }

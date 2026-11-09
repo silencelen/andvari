@@ -1,0 +1,6 @@
+package = io.silencelen.andvari.core.client.sqlite
+headers = sqlite3.h
+headerFilter = sqlite3.h
+linkerOpts = -lsqlite3
+# Text is bound with an explicit byte length, so this one must take a raw pointer.
+noStringConversion = sqlite3_bind_text

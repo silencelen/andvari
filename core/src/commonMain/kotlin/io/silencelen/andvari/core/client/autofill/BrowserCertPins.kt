@@ -60,6 +60,6 @@ object BrowserCertPins {
             "com.microsoft.emmx", "com.brave.browser", "com.opera.browser", "com.opera.gx",
             "com.vivaldi.browser", "com.duckduckgo.mobile.android", "com.kiwibrowser.browser",
             "org.torproject.torbrowser",
-        )) putIfAbsent(p, emptySet())
+        )) getOrPut(p) { emptySet() }
     }
 }
