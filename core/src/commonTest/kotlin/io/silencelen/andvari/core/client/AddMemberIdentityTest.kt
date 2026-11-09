@@ -196,7 +196,7 @@ class AddMemberIdentityTest {
     }
 
     @Test
-    fun `the ceremony records the typed email, normalised - no typed email records none`() = runBlocking {
+    fun `the ceremony records the typed email - normalised - no typed email records none`() = runBlocking {
         val owner = enroll("q00-owner")
         val bea = enroll("q00-bea")
         val (engine, _, _) = ownerWithCreatedVault(owner)
@@ -207,7 +207,7 @@ class AddMemberIdentityTest {
     }
 
     @Test
-    fun `pure check - match, mismatch, legacy, another pin claiming the typed email`() {
+    fun `pure check - match - mismatch - legacy - another pin claiming the typed email`() {
         val b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         val c = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
         val pinB = Contact(b, "x", "Bea", 1, Contact.METHOD_TYPED, email = "bea@example.com")
@@ -236,7 +236,7 @@ class AddMemberIdentityTest {
     }
 
     @Test
-    fun `legacy pin - add REFUSED with no override, re-verify with the typed email then match and add works`() = runBlocking {
+    fun `legacy pin - add REFUSED with no override - re-verify with the typed email then match and add works`() = runBlocking {
         val owner = enroll("q00-owner")
         val bea = enroll("q00-bea")
         val carl = enroll("q00-carl")
