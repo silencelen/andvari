@@ -7,6 +7,9 @@ import { cpSync, mkdirSync, rmSync } from "node:fs";
 // RELEASE=1 → minified, no sourcemaps (what gets zipped for /downloads).
 // Default = debuggable dev build for load-unpacked iteration.
 const release = process.env.RELEASE === "1";
+// TARGET=firefox → the Firefox manifest (background.scripts event page); TARGET=safari → the Safari
+// manifest (non-persistent page, for the iOS app's Safari Web Extension); default = Chrome (SW).
+const target = process.env.TARGET === "firefox" || process.env.TARGET === "safari" ? process.env.TARGET : "chrome";
 
 rmSync("dist", { recursive: true, force: true }); // no stale entry/sourcemap leftovers in the zip
 mkdirSync("dist", { recursive: true });
@@ -28,11 +31,11 @@ await esbuild.build({
   logLevel: "info",
   minify: release,
   sourcemap: !release,
+  // buildtarget.ts reads this: the App Store-distributed Safari build has no self-update channel.
+  define: { __ANDVARI_TARGET__: JSON.stringify(target) },
 });
 
-// TARGET=firefox → the Firefox manifest (background.scripts event page); default = Chrome (SW).
-const firefox = process.env.TARGET === "firefox";
-cpSync(firefox ? "manifest.firefox.json" : "manifest.json", "dist/manifest.json");
+cpSync({ firefox: "manifest.firefox.json", safari: "manifest.safari.json", chrome: "manifest.json" }[target], "dist/manifest.json");
 cpSync("popup.html", "dist/popup.html");
 cpSync("options.html", "dist/options.html"); // wave-3 options_ui page; <link>s popup.css for the theme
 cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html + options.html <link> it
@@ -41,4 +44,4 @@ cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backs
 cpSync("connector.html", "dist/connector.html"); // 0.17.0 biometric ceremony window; loads dist/connector.js + popup.css
 cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png
 cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip
-console.log(`built → dist/ (${firefox ? "Firefox" : "Chrome"}${release ? ", release" : ""}; Load unpacked: extension/dist)`);
+console.log(`built → dist/ (${target}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

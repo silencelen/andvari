@@ -71,6 +71,7 @@ import { armGate, withRedeemInFlight } from "./locksequence";
 import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
+import { selfUpdateChannelAllowed } from "./buildtarget";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -2004,6 +2005,8 @@ async function checkForUpdate(force = false): Promise<void> {
     }
     // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
     if (!updatesEnabled()) return;
+    // The Safari build updates through the App Store: no poll, no banner, no download links.
+    if (!selfUpdateChannelAllowed()) return;
     // Reference-instance scope (2026-07-18 arming; multi-tenant §9): the pinned key signs OUR
     // `/downloads` only, so the channel runs solely against the shipped default origin. A
     // self-host/custom origin gets NO fetch and NO quiet marker — the exact fail-closed-quiet

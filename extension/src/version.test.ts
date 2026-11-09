@@ -37,15 +37,17 @@ test("malformed input never nags", () => {
   assert.equal(isNewerVersion("  ", "0.7.0"), false);
 });
 
-// The version lives in THREE hand-edited files (manifest.json, manifest.firefox.json, package.json)
+// The version lives in FOUR hand-edited files (manifest.json, manifest.firefox.json, manifest.safari.json, package.json)
 // and is also the runtime X-Andvari-Client version now — a forgotten bump would ship a firefox zip
 // named with the chrome version but containing the stale one, or send a mislabelled client header.
 // package.mjs :8-17 refuses the drift at package time; this catches it at test time too.
-test("manifest.json, manifest.firefox.json and package.json versions are in lockstep", () => {
+test("manifest.json, manifest.firefox.json, manifest.safari.json and package.json versions are in lockstep", () => {
   const versionOf = (rel: string): string => JSON.parse(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf-8")).version;
   const chrome = versionOf("../manifest.json");
   const firefox = versionOf("../manifest.firefox.json");
+  const safari = versionOf("../manifest.safari.json");
   const pkg = versionOf("../package.json");
   assert.equal(firefox, chrome, "manifest.firefox.json version must match manifest.json");
+  assert.equal(safari, chrome, "manifest.safari.json version must match manifest.json");
   assert.equal(pkg, chrome, "package.json version must match manifest.json");
 });
