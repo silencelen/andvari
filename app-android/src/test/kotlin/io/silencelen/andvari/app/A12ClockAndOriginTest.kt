@@ -1,5 +1,6 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.client.session.*
 import io.silencelen.andvari.core.model.ClientPolicy
 import java.io.File
 import kotlin.test.Test
@@ -15,7 +16,7 @@ import kotlin.test.assertTrue
  */
 class A12ClockAndOriginTest {
     private val day = 24L * 60 * 60 * 1000
-    private val window = QuickUnlock.WINDOW_MS
+    private val window = QuickUnlockRules.WINDOW_MS
     private val stamp = 1_700_000_000_000L
 
     // ---- row 74: the monotonic check is never skipped because the wall clock moved ----
@@ -23,7 +24,7 @@ class A12ClockAndOriginTest {
     /** Same boot, 40 days of real uptime since the stamp, and the holder wound the wall clock back
      *  to stamp+1d. The phone sat dormant, so the high-water mark never advanced past stamp+1d, and
      *  the app reached the server once, a day after the stamp (a real, honest anchor). */
-    private fun steppedBackSameBoot() = QuickUnlock.FreshnessInputs(
+    private fun steppedBackSameBoot() = QuickUnlockRules.FreshnessInputs(
         nowMs = stamp + day,
         elapsedNowMs = 45 * day,
         stampWallMs = stamp,
@@ -36,25 +37,25 @@ class A12ClockAndOriginTest {
     @Test
     fun aSteppedBackWallClockCannotReopenTheWindowWithinOneBoot() {
         assertFalse(
-            QuickUnlock.isFreshPure(steppedBackSameBoot()),
+            QuickUnlockRules.isFreshPure(steppedBackSameBoot()),
             "40 days of monotonic uptime is stale whatever the wall clock says",
         )
     }
 
     @Test
     fun theBootCountIdentifiesTheBootNotTheClock() {
-        val i = steppedBackSameBoot().copy(bootCountNow = 7, stampBootCount = 7)
-        assertFalse(QuickUnlock.isFreshPure(i), "same boot count = same boot, so the monotonic delta governs")
+        val i = steppedBackSameBoot().copy(bootIdNow = "7", stampBootId = "7")
+        assertFalse(QuickUnlockRules.isFreshPure(i), "same boot count = same boot, so the monotonic delta governs")
         // And within the window, the same boot with a stepped clock is fresh on monotonic evidence.
         val short = i.copy(elapsedNowMs = 6 * day)
-        assertTrue(QuickUnlock.isFreshPure(short))
+        assertTrue(QuickUnlockRules.isFreshPure(short))
         // Monotonic regression within one boot (by count) distrusts.
-        assertFalse(QuickUnlock.isFreshPure(short.copy(elapsedNowMs = 4 * day)))
+        assertFalse(QuickUnlockRules.isFreshPure(short.copy(elapsedNowMs = 4 * day)))
     }
 
     @Test
     fun aRealRebootStillNeedsTheServerAnchor() {
-        val crossBoot = QuickUnlock.FreshnessInputs(
+        val crossBoot = QuickUnlockRules.FreshnessInputs(
             nowMs = stamp + day,
             elapsedNowMs = 60_000,
             stampWallMs = stamp,
@@ -62,17 +63,17 @@ class A12ClockAndOriginTest {
             stampBootRefMs = stamp - 5 * day,
             highWaterWallMs = stamp + day,
             serverFloorMs = 0L,
-            bootCountNow = 8,
-            stampBootCount = 7,
+            bootIdNow = "8",
+            stampBootId = "7",
         )
-        assertFalse(QuickUnlock.isFreshPure(crossBoot), "no anchor after a reboot: password")
-        assertTrue(QuickUnlock.isFreshPure(crossBoot.copy(serverFloorMs = stamp + day)))
-        assertFalse(QuickUnlock.isFreshPure(crossBoot.copy(serverFloorMs = stamp + window)))
+        assertFalse(QuickUnlockRules.isFreshPure(crossBoot), "no anchor after a reboot: password")
+        assertTrue(QuickUnlockRules.isFreshPure(crossBoot.copy(serverFloorMs = stamp + day)))
+        assertFalse(QuickUnlockRules.isFreshPure(crossBoot.copy(serverFloorMs = stamp + window)))
     }
 
     @Test
     fun aWallClockEarlierThanTheStampFailsClosed() {
-        val justBefore = QuickUnlock.FreshnessInputs(
+        val justBefore = QuickUnlockRules.FreshnessInputs(
             nowMs = stamp - 20_000, // 20 s before the enrolment stamp, inside the old 5-minute skew allowance
             elapsedNowMs = 5 * day + 10_000, // and inside the boot-reference tolerance, so it read as "same boot"
             stampWallMs = stamp,
@@ -81,12 +82,12 @@ class A12ClockAndOriginTest {
             highWaterWallMs = stamp,
             serverFloorMs = 0L,
         )
-        assertFalse(QuickUnlock.isFreshPure(justBefore), "a clock earlier than the stamp is a rollback: password")
+        assertFalse(QuickUnlockRules.isFreshPure(justBefore), "a clock earlier than the stamp is a rollback: password")
     }
 
     @Test
     fun anHonestSteadyDeviceIsUnaffected() {
-        val honest = QuickUnlock.FreshnessInputs(
+        val honest = QuickUnlockRules.FreshnessInputs(
             nowMs = stamp + day,
             elapsedNowMs = 6 * day,
             stampWallMs = stamp,
@@ -94,10 +95,10 @@ class A12ClockAndOriginTest {
             stampBootRefMs = stamp - 5 * day,
             highWaterWallMs = stamp + day,
             serverFloorMs = 0L,
-            bootCountNow = 3,
-            stampBootCount = 3,
+            bootIdNow = "3",
+            stampBootId = "3",
         )
-        assertTrue(QuickUnlock.isFreshPure(honest))
+        assertTrue(QuickUnlockRules.isFreshPure(honest))
     }
 
     // ---- q06: the restore point never moves to a pending origin ----
@@ -144,7 +145,7 @@ class A12ClockAndOriginTest {
     fun aStalePolicyAbortsTheReset() {
         val p = ClientPolicy()
         assertEquals(p, requireCurrentPolicy(p, applied = true))
-        assertFailsWith<java.io.InterruptedIOException> { requireCurrentPolicy(p, applied = false) }
+        assertFailsWith<kotlinx.io.IOException> { requireCurrentPolicy(p, applied = false) }
     }
 
     @Test

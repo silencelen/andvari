@@ -1,5 +1,6 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.client.session.*
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertFalse

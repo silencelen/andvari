@@ -1,5 +1,6 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.client.session.*
 import io.silencelen.andvari.core.client.EnrollLink
 import java.io.File
 import kotlin.test.Test

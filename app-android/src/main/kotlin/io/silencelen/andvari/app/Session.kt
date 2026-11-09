@@ -5,8 +5,9 @@ import io.silencelen.andvari.app.autofill.AppSignerBindings
 import android.os.SystemClock
 import android.provider.Settings
 import io.silencelen.andvari.core.client.Tokens
+import io.silencelen.andvari.core.client.session.PendingServer
+import io.silencelen.andvari.core.client.session.QuickUnlockRules
 import io.silencelen.andvari.core.model.AccountKeys
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import kotlin.math.max
@@ -25,26 +26,6 @@ data class Session(
 ) {
     fun tokens() = Tokens(accessToken, refreshToken)
 }
-
-/**
- * The persisted "an invite-driven server switch is UNCOMMITTED" marker (design 2026-07-15
- * §4.3, breaker B2-6/B2-9). Its mere presence is the source of truth for "pending": while it
- * exists the switch to [origin] is NOT trusted as the new default — enrollment success clears it
- * (the commit, §4.1 rule 3) and a Discard reverts to [previousOrigin] and clears it.
- *
- * Written BEFORE `register` so a crash between register and the commit is reconciled at the next
- * launch ("Finish setting up at <origin> / Discard"). [previousOrigin] is the Android-specific
- * addition to the design's `{origin, email?, ts}` — this app keeps a single global session slot,
- * so a revert needs to know where to return. [email] is captured at register time (the address to
- * sign in as if register already succeeded before the crash).
- */
-@Serializable
-data class PendingServer(
-    val origin: String,
-    val previousOrigin: String,
-    val email: String? = null,
-    val ts: Long,
-)
 
 /**
  * Persistence layout (design 2026-07-15 §4.2 — (origin, userId) namespacing):
@@ -347,8 +328,8 @@ class SessionStore(context: Context) {
      * caller cannot accidentally re-trigger by asking twice.
      */
     fun notePasswordUnlockCouldHaveBeenBiometric(): Boolean {
-        val next = reofferDecision(
-            ReofferInputs(
+        val next = QuickUnlockRules.reofferDecision(
+            QuickUnlockRules.ReofferInputs(
                 dismissed = quickUnlockOfferDismissed,
                 unlocks = quickUnlockPasswordUnlocks,
                 reoffers = quickUnlockReoffers,
@@ -641,41 +622,6 @@ class SessionStore(context: Context) {
     }
 
     companion object {
-        /** Password unlocks a biometric could have served before the offer returns (design §7.1).
-         *  Three, not one: the point is that the user has PAID the cost repeatedly, not merely
-         *  that time has passed. */
-        const val QU_REOFFER_AFTER = 3
-
-        /** Hard cap on re-offers. Two, so the lifetime worst case is three cards total — the
-         *  original one plus two — and a user who declines all three is never asked again. */
-        const val QU_REOFFER_MAX = 2
-
-        /** Inputs to [reofferDecision] — the persisted triple, nothing else. */
-        data class ReofferInputs(val dismissed: Boolean, val unlocks: Int, val reoffers: Int)
-
-        /** What to persist, and whether the offer re-opens. */
-        data class ReofferOutcome(val unlocks: Int, val reoffers: Int, val reoffer: Boolean)
-
-        /**
-         * Whether repeated password unlocks have earned the enrollment offer another showing —
-         * pure, so [ReofferInputsTest] pins every boundary without SharedPreferences (the
-         * [QuickUnlock.isFreshPure] idiom).
-         *
-         * The three properties that matter, none of which is obvious from the call site:
-         *  - a VISIBLE offer never counts (nothing to re-open, and counting would let a single
-         *    ignored card burn the whole budget);
-         *  - the counter RESETS on each re-offer, so the cost must be paid again to earn the next;
-         *  - past [QU_REOFFER_MAX] it is inert forever — the no-nag-loop property the original
-         *    one-and-done design was protecting, kept rather than traded away.
-         */
-        fun reofferDecision(i: ReofferInputs): ReofferOutcome {
-            if (!i.dismissed) return ReofferOutcome(i.unlocks, i.reoffers, false)
-            if (i.reoffers >= QU_REOFFER_MAX) return ReofferOutcome(i.unlocks, i.reoffers, false)
-            val n = i.unlocks + 1
-            return if (n < QU_REOFFER_AFTER) ReofferOutcome(n, i.reoffers, false)
-            else ReofferOutcome(0, i.reoffers + 1, true)
-        }
-
         // Wave-4 public default (design §5.5/§6): the reference instance, reachable from ANY network.
         // RELEASE-GATED — a build carrying this must not ship until the reference origin is promoted to
         // full service (§6.3 live /client-policy probe) + the §7.4 env flip; otherwise a migrated install

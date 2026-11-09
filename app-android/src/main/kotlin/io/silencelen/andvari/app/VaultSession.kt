@@ -3,20 +3,9 @@ package io.silencelen.andvari.app
 import android.os.SystemClock
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
-import io.silencelen.andvari.core.client.ClientPolicyClamps
+import io.silencelen.andvari.core.client.session.clampAutoLockSeconds
 import io.silencelen.andvari.core.client.SyncEngine
 import kotlinx.coroutines.sync.Mutex
-
-/**
- * The B1-1 auto-lock clamp (design 2026-07-15 §2.3): `autoLockSeconds` arrives from an
- * UNAUTHENTICATED endpoint on an UNTRUSTED server, and it governs THIS device's exposure
- * window — CLIENT-FLOOR-ONLY. Effective value = clamp into `[floor, AUTO_LOCK_MAX_SECONDS]`;
- * a server-supplied 0/negative (which used to mean "never lock") clamps to the CEILING, so a
- * hostile server cannot disable auto-lock. Single source ceiling: core [ClientPolicyClamps].
- */
-internal fun clampAutoLockSeconds(seconds: Int): Int =
-    if (seconds <= 0) ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS
-    else minOf(seconds, ClientPolicyClamps.AUTO_LOCK_MAX_SECONDS)
 
 /**
  * Process-wide holder for the unlocked vault (`AndvariApi`/`Account`/`SyncEngine`), shared
