@@ -10,10 +10,11 @@ const version = JSON.parse(readFileSync("manifest.json", "utf8")).version;
 // The version lives in three hand-edited files; a forgotten bump would silently ship a
 // firefox zip NAMED with the chrome version but CONTAINING the stale one. Refuse drift.
 const ffVersion = JSON.parse(readFileSync("manifest.firefox.json", "utf8")).version;
+const safariVersion = JSON.parse(readFileSync("manifest.safari.json", "utf8")).version;
 const pkgVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
-if (version !== ffVersion || version !== pkgVersion) {
+if (version !== ffVersion || version !== safariVersion || version !== pkgVersion) {
   throw new Error(
-    `version drift: manifest.json=${version} manifest.firefox.json=${ffVersion} package.json=${pkgVersion} — bump all three`,
+    `version drift: manifest.json=${version} manifest.firefox.json=${ffVersion} manifest.safari.json=${safariVersion} package.json=${pkgVersion} — bump all four`,
   );
 }
 // Security review 2026-10 (the A16 review): a release of this tree must be newer than the last release without the A15
