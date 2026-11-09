@@ -9,6 +9,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import io.silencelen.andvari.core.client.Account
+import io.silencelen.andvari.core.client.session.QuickUnlockRules
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.KdfUpgrade
@@ -45,21 +46,6 @@ object QuickUnlock {
     /** Blob schema version; an unknown `v` on disk is treated as corrupt → wipe + password. */
     private const val BLOB_V = 1
 
-    /** 30-day periodic-full-password window (spec 01 §8.1). Calendar-shaped, evaluated on the
-     *  monotonic high-water wall clock (A2), not raw wall time. */
-    internal const val WINDOW_MS = 30L * 24 * 60 * 60 * 1000
-
-    // (A2's CLOCK_SKEW_MS allowance is gone — security review 2026-10, A12 row 74: a wall clock
-    // earlier than the stamp at all is a rollback and fails closed; see [isFreshPure].)
-
-    /** A2: tolerance on the derived boot reference (wall − elapsedRealtime) drift for deciding
-     *  "same boot, clock steady" so the extra monotonic-delta guard applies. */
-    internal const val BOOT_SKEW_MS = 60L * 1000
-
-    /** A4: the last-seen client policy must be fresher than this for quick unlock to be eligible;
-     *  an admin who flips `offlineCacheAllowed=false` must reach the device within a bounded window
-     *  even if only the autofill overlay ever runs. */
-    internal const val POLICY_STALE_MS = 7L * 24 * 60 * 60 * 1000
 
     private const val GCM_TAG_BITS = 128
     private const val KEYSTORE = "AndroidKeyStore"
@@ -125,9 +111,7 @@ object QuickUnlock {
      *    must periodically re-confirm the policy before trusting a durable unlock secret).
      */
     fun isEligible(context: Context, store: SessionStore): Boolean {
-        if (!store.cacheAllowed) return false
-        val policyAt = store.policyFetchedAt
-        if (policyAt <= 0L || System.currentTimeMillis() - policyAt >= POLICY_STALE_MS) return false
+        if (!QuickUnlockRules.policyPermits(store.cacheAllowed, store.policyFetchedAt, System.currentTimeMillis())) return false
         return hasStrongBiometric(context)
     }
 
@@ -149,8 +133,8 @@ object QuickUnlock {
         val now = System.currentTimeMillis()
         val elapsedNow = android.os.SystemClock.elapsedRealtime()
         val highWater = store.bumpHighWater(now) // monotonically non-decreasing
-        return isFreshPure(
-            FreshnessInputs(
+        return QuickUnlockRules.isFreshPure(
+            QuickUnlockRules.FreshnessInputs(
                 nowMs = now,
                 elapsedNowMs = elapsedNow,
                 stampWallMs = store.lastFullPasswordUnlockAt(userId),
@@ -158,88 +142,12 @@ object QuickUnlock {
                 stampBootRefMs = store.stampBootRefMs(userId),
                 highWaterWallMs = highWater,
                 serverFloorMs = store.serverTimeFloorMs,
-                bootCountNow = store.bootCountNow(),
-                stampBootCount = store.stampBootCount(userId),
+                bootIdNow = store.bootCountNow().takeIf { it >= 0 }?.toString(),
+                stampBootId = store.stampBootCount(userId).takeIf { it >= 0 }?.toString(),
             ),
         )
     }
 
-    /** Pure inputs for [isFreshPure], extracted so the clock-safety logic is unit-testable
-     *  without Android/Keystore. */
-    data class FreshnessInputs(
-        val nowMs: Long,
-        val elapsedNowMs: Long,
-        val stampWallMs: Long,
-        val stampElapsedMs: Long,
-        val stampBootRefMs: Long,
-        val highWaterWallMs: Long,
-        /** Last SERVER-attested wall time (monotonic). The only clock the device holder can't set. */
-        val serverFloorMs: Long,
-        /** A12 (row 74): `Settings.Global.BOOT_COUNT` now, and at the stamp; -1 = unknown (a stamp
-         *  written before A12, or a ROM that does not expose it). Boot identity comes from HERE,
-         *  never from the settable wall clock. */
-        val bootCountNow: Int = -1,
-        val stampBootCount: Int = -1,
-    )
-
-    /**
-     * A1: a zero stamp (never a real full-password unlock, or cleared) is NOT fresh.
-     * A2: a future stamp fails closed (stale); the window is measured on the highest clock we
-     *     have any reason to trust; and within one boot with a steady clock the monotonic
-     *     `elapsedRealtime` delta must ALSO be under 30 days (and never regress).
-     *
-     * Review 2026-07-10 [2] — the cross-boot hole. `highWaterWallMs` only ratchets from the
-     * DEVICE clock as this app observes it, so a dormant phone freezes it; a reboot resets
-     * `elapsedRealtime`, voiding the monotonic cross-check. An attacker holding the device could
-     * then set the clock to a moment INSIDE the window and quick-unlock forever — exactly what
-     * A2 exists to prevent. Elapsed time simply CANNOT be bounded from an attacker-settable
-     * clock alone. So:
-     *   - SAME boot  → the monotonic clock proves duration; trust it (plus the wall-clock guards).
-     *   - CROSS boot → require a server-attested anchor taken AFTER the stamp
-     *                  (`serverFloorMs > stampWallMs`) and measure the window against THAT.
-     *                  With no such anchor we cannot prove how long the device sat powered off,
-     *                  so we fail CLOSED: the master password is required.
-     * Practical effect: the first unlock after a reboot uses the master password unless the app
-     * has since reached the server (the policy fetch on start advances the floor) — the same
-     * before-first-unlock posture Android itself takes, for one honest password entry.
-     */
-    fun isFreshPure(i: FreshnessInputs): Boolean {
-        if (i.stampWallMs <= 0L) return false
-        // A12 (row 74): a wall clock earlier than the stamp is a rollback — fail closed, no allowance.
-        if (i.nowMs < i.stampWallMs) return false
-        // `nowMs` is attacker-settable; the floor is not. Never let a rollback shrink the window.
-        val effectiveNow = max(max(i.nowMs, i.highWaterWallMs), i.serverFloorMs)
-        if (effectiveNow - i.stampWallMs >= WINDOW_MS) return false
-
-        // Security review 2026-10 (A12, row 74): the monotonic check used to be skipped exactly when
-        // the wall clock was the problem — "same boot" was derived from `wall − elapsedRealtime`, so
-        // stepping the clock back made a same-boot device look rebooted, and the cross-boot branch
-        // then accepted any server anchor taken shortly after the stamp, however long ago that was.
-        //
-        // (1) A belt that holds in EVERY case: if elapsedRealtime has advanced 30 days past the
-        //     stamp's, the stamp is at least 30 days old. Same boot, that is the real duration; after
-        //     a reboot it means this boot alone has run 30 days, all of it after the stamp. Either way
-        //     stale, whatever the wall clock claims.
-        if (i.elapsedNowMs >= i.stampElapsedMs && i.elapsedNowMs - i.stampElapsedMs >= WINDOW_MS) return false
-        // (2) Boot identity from the boot COUNT when both sides know it; the clock-derived reference
-        //     is only the fallback for stamps written before A12.
-        val bootKnown = i.bootCountNow >= 0 && i.stampBootCount >= 0
-        val sameBoot = if (bootKnown) {
-            i.bootCountNow == i.stampBootCount
-        } else {
-            val currentBootRef = i.nowMs - i.elapsedNowMs
-            abs(currentBootRef - i.stampBootRefMs) <= BOOT_SKEW_MS
-        }
-        if (sameBoot) {
-            // Same boot, wall clock not stepped: the monotonic clock is authoritative and cheap.
-            if (i.elapsedNowMs < i.stampElapsedMs) return false // monotonic went backwards → distrust
-            if (i.elapsedNowMs - i.stampElapsedMs >= WINDOW_MS) return false
-            return true
-        }
-        // Cross-boot: the only trustworthy duration evidence is a server contact AFTER the stamp.
-        if (i.serverFloorMs <= i.stampWallMs) return false // no anchor → duration unknowable → password
-        return i.serverFloorMs - i.stampWallMs < WINDOW_MS
-    }
 
     // ---- wipe ----
 

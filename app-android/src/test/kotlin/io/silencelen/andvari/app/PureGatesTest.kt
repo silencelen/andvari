@@ -1,5 +1,6 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.client.session.*
 import androidx.compose.ui.text.input.ImeAction
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.HouseholdCopy
@@ -14,7 +15,7 @@ import kotlin.test.assertTrue
 
 /**
  * The module's security-critical gates were all deliberately extracted as PURE functions ("so the
- * clock-safety logic is unit-testable without Android/Keystore", [QuickUnlock.FreshnessInputs]'s
+ * clock-safety logic is unit-testable without Android/Keystore", [QuickUnlockRules.FreshnessInputs]'s
  * own KDoc) — and then none of them were pinned. This is that missing suite: plain kotlin.test,
  * no Android framework, alongside the existing three under `testDebugUnitTest`.
  *
@@ -23,14 +24,14 @@ import kotlin.test.assertTrue
  */
 class PureGatesTest {
 
-    // ---- A2 biometric freshness (QuickUnlock.isFreshPure) ----
+    // ---- A2 biometric freshness (QuickUnlockRules.isFreshPure) ----
 
-    private val window = QuickUnlock.WINDOW_MS
+    private val window = QuickUnlockRules.WINDOW_MS
     private val day = 24L * 60 * 60 * 1000
 
     /** A steady same-boot device: stamped [stampAgeMs] ago, wall and monotonic clocks agreeing. */
     private fun sameBoot(stampAgeMs: Long, nowMs: Long = 1_700_000_000_000L, serverFloorMs: Long = 0L) =
-        QuickUnlock.FreshnessInputs(
+        QuickUnlockRules.FreshnessInputs(
             nowMs = nowMs,
             elapsedNowMs = 5 * day,
             stampWallMs = nowMs - stampAgeMs,
@@ -42,21 +43,21 @@ class PureGatesTest {
 
     @Test
     fun freshWithinTheWindowOnASteadySameBootDevice() {
-        assertTrue(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = day)))
-        assertTrue(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = window - 1)))
+        assertTrue(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = day)))
+        assertTrue(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = window - 1)))
     }
 
     @Test
     fun staleAtAndPastTheWindow() {
-        assertFalse(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = window)))
-        assertFalse(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = window + day)))
+        assertFalse(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = window)))
+        assertFalse(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = window + day)))
     }
 
     @Test
     fun noStampIsNeverFresh() {
         // A1: never a real full-password unlock (or the stamp was cleared) → password.
-        assertFalse(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = day).copy(stampWallMs = 0L)))
-        assertFalse(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = day).copy(stampWallMs = -1L)))
+        assertFalse(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = day).copy(stampWallMs = 0L)))
+        assertFalse(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = day).copy(stampWallMs = -1L)))
     }
 
     @Test
@@ -66,7 +67,7 @@ class PureGatesTest {
         // wall clock back 39 days and the monotonic clock only ever ran for one. The one thing
         // they can't rewind is the high-water mark this app already advanced to stamp+40d, and
         // that is what the window must be measured against.
-        val rolled = QuickUnlock.FreshnessInputs(
+        val rolled = QuickUnlockRules.FreshnessInputs(
             nowMs = stamp + day,
             elapsedNowMs = 10 * day,
             stampWallMs = stamp,
@@ -75,19 +76,19 @@ class PureGatesTest {
             highWaterWallMs = stamp + 40 * day,
             serverFloorMs = 0L,
         )
-        assertFalse(QuickUnlock.isFreshPure(rolled))
+        assertFalse(QuickUnlockRules.isFreshPure(rolled))
         // Sanity: with the high-water mark still at "now", the very same inputs ARE fresh — so the
         // assertion above is testing the ratchet, not some other guard.
-        assertTrue(QuickUnlock.isFreshPure(rolled.copy(highWaterWallMs = stamp + day)))
+        assertTrue(QuickUnlockRules.isFreshPure(rolled.copy(highWaterWallMs = stamp + day)))
         // …and a stamp in the FUTURE (the clock rolled back PAST it) fails closed too.
-        assertFalse(QuickUnlock.isFreshPure(sameBoot(stampAgeMs = -day)))
+        assertFalse(QuickUnlockRules.isFreshPure(sameBoot(stampAgeMs = -day)))
     }
 
     @Test
     fun sameBootMonotonicRegressionDistrusts() {
         // Wall clock inside the window, but elapsedRealtime went BACKWARDS → distrust.
         val i = sameBoot(stampAgeMs = day).let { it.copy(stampElapsedMs = it.elapsedNowMs + 1) }
-        assertFalse(QuickUnlock.isFreshPure(i))
+        assertFalse(QuickUnlockRules.isFreshPure(i))
     }
 
     @Test
@@ -95,7 +96,7 @@ class PureGatesTest {
         // Review 2026-07-10 [2]: a reboot voids the monotonic cross-check, so with no
         // server-attested time taken AFTER the stamp the elapsed duration is unknowable.
         val now = 1_700_000_000_000L
-        val crossBoot = QuickUnlock.FreshnessInputs(
+        val crossBoot = QuickUnlockRules.FreshnessInputs(
             nowMs = now,
             elapsedNowMs = 60_000, // just booted
             stampWallMs = now - day,
@@ -104,20 +105,20 @@ class PureGatesTest {
             highWaterWallMs = now,
             serverFloorMs = 0L,
         )
-        assertFalse(QuickUnlock.isFreshPure(crossBoot))
+        assertFalse(QuickUnlockRules.isFreshPure(crossBoot))
         // A floor that predates the stamp is not an anchor either.
-        assertFalse(QuickUnlock.isFreshPure(crossBoot.copy(serverFloorMs = now - 2 * day)))
+        assertFalse(QuickUnlockRules.isFreshPure(crossBoot.copy(serverFloorMs = now - 2 * day)))
         // A floor taken AFTER the stamp and within the window IS the trustworthy evidence.
-        assertTrue(QuickUnlock.isFreshPure(crossBoot.copy(serverFloorMs = now)))
+        assertTrue(QuickUnlockRules.isFreshPure(crossBoot.copy(serverFloorMs = now)))
         // A far-older stamp stays stale across the reboot even WITH an anchor.
-        assertFalse(QuickUnlock.isFreshPure(crossBoot.copy(stampWallMs = now - 2 * window, serverFloorMs = now)))
+        assertFalse(QuickUnlockRules.isFreshPure(crossBoot.copy(stampWallMs = now - 2 * window, serverFloorMs = now)))
     }
 
     @Test
     fun theServerFloorWinsOverAnAttackerSetClock() {
         // now/highWater rolled back inside the window, but the server saw a later time.
         val now = 1_700_000_000_000L
-        val i = QuickUnlock.FreshnessInputs(
+        val i = QuickUnlockRules.FreshnessInputs(
             nowMs = now,
             elapsedNowMs = 40 * day,
             stampWallMs = now - day,
@@ -126,7 +127,7 @@ class PureGatesTest {
             highWaterWallMs = now,
             serverFloorMs = now + window, // server-attested: far past the stamp's window
         )
-        assertFalse(QuickUnlock.isFreshPure(i))
+        assertFalse(QuickUnlockRules.isFreshPure(i))
     }
 
     // ---- B1-1 hostile-server auto-lock clamp (the desktop OriginNamespaceTest twin) ----

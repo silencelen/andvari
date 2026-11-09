@@ -1,5 +1,6 @@
 package io.silencelen.andvari.app.autofill
 
+import io.silencelen.andvari.core.client.session.*
 import android.content.Context
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -10,9 +11,6 @@ import io.silencelen.andvari.app.PersonalDeviceState
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
-import io.silencelen.andvari.app.sessionBelongsTo
-import io.silencelen.andvari.app.sessionElsewhere
-import io.silencelen.andvari.app.clampAutoLockSeconds
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException

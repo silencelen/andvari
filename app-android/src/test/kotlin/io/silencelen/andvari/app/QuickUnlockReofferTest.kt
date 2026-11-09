@@ -1,9 +1,10 @@
 package io.silencelen.andvari.app
 
-import io.silencelen.andvari.app.SessionStore.Companion.QU_REOFFER_AFTER
-import io.silencelen.andvari.app.SessionStore.Companion.QU_REOFFER_MAX
-import io.silencelen.andvari.app.SessionStore.Companion.ReofferInputs
-import io.silencelen.andvari.app.SessionStore.Companion.reofferDecision
+import io.silencelen.andvari.core.client.session.QuickUnlockRules
+import io.silencelen.andvari.core.client.session.QuickUnlockRules.QU_REOFFER_AFTER
+import io.silencelen.andvari.core.client.session.QuickUnlockRules.QU_REOFFER_MAX
+import io.silencelen.andvari.core.client.session.QuickUnlockRules.ReofferInputs
+import io.silencelen.andvari.core.client.session.QuickUnlockRules.reofferDecision
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -11,7 +12,7 @@ import kotlin.test.assertTrue
 
 /**
  * The quick-unlock re-offer decision (design 2026-08-23 §7.1), pinned pure — the
- * [QuickUnlock.isFreshPure] idiom, so every boundary is testable without SharedPreferences.
+ * [QuickUnlockRules.isFreshPure] idiom, so every boundary is testable without SharedPreferences.
  *
  * Why this exists at all: the enrollment offer was one-and-done, and "Not now" silenced it
  * forever. That was correct while backgrounding did not lock — the user typed their master
