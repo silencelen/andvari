@@ -1,5 +1,7 @@
 package io.silencelen.andvari.core.client
 
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -43,7 +45,7 @@ class AndvariApiRefreshTest {
     /** Strict server sim: exactly one valid access/refresh pair at a time; presenting a
      *  stale refresh token trips [reusedRefresh], mirroring the real reuse-revocation. */
     private class FakeAuth {
-        private val lock = Any()
+        private val lock = SynchronizedObject()
         private var counter = 0
         var validAccess = "access-0"
             private set
