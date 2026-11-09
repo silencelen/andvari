@@ -65,12 +65,12 @@ class UriMatchIdnaVectorTest {
     @Test
     fun aPlantedPathologicalHost_returnsPromptly() {
         fun fast(label: String, block: () -> Unit) {
-            val t = System.nanoTime()
+            val t = kotlin.time.TimeSource.Monotonic.markNow()
             block()
-            val ms = (System.nanoTime() - t) / 1_000_000
+            val ms = t.elapsedNow().inWholeMilliseconds
             assertTrue(ms < 250, "$label took $ms ms")
         }
-        val cjk = buildString { for (i in 0 until 20000) appendCodePoint(0x4e00 + i) }
+        val cjk = buildString { for (i in 0 until 20000) append((0x4e00 + i).toChar()) }
         // Warm the classes so the first measurement is not JIT/classload time.
         UriMatch.normalizeHost("https://example.com"); Psl.resolve("example.com")
         fast("50k dots then a letter") { UriMatch.normalizeHost("https://" + ".".repeat(50000) + "x") }

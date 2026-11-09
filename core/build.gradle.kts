@@ -41,6 +41,7 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
+            implementation(libs.ktor.client.mock) // fake engine for AndvariApi tests
         }
         // The lazysodium adapter is one file compiled into both JVM-family targets;
         // the com.goterl.lazysodium API is identical across the two artifacts.
@@ -59,7 +60,6 @@ kotlin {
         }
         jvmTest.dependencies {
             implementation(libs.ktor.client.java)
-            implementation(libs.ktor.client.mock) // fake engine for AndvariApi refresh tests
         }
         androidMain {
             kotlin.srcDir("src/jvmShared/kotlin")
