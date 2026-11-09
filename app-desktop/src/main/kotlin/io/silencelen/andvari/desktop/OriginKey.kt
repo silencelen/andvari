@@ -12,7 +12,7 @@ import io.silencelen.andvari.core.client.OriginCanon
  * ("BYTE-PARITY CONTRACT (binding)") over ~100 lines hand-copied between the two Kotlin apps,
  * guarded only by the same literals written out in two separate test modules — and the copies
  * had already drifted in shape. It is now a compile-time fact: the rules, the vectors and their
- * rationale live once in core's [OriginCanon] (`core/src/jvmShared`, compiled into both apps),
+ * rationale live once in core's [OriginCanon] (`core/src/commonMain`, compiled into both apps),
  * and these are this module's local names for them. Read the rules there; change them there.
  */
 internal fun originKey(baseUrl: String): String = OriginCanon.originKey(baseUrl)

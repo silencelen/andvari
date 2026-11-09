@@ -10,12 +10,28 @@ kotlin {
     jvm()
     androidTarget()
 
+    // iOS is built on macOS only. libsodium comes from scripts/ci/build-libsodium-ios.sh, which
+    // compiles the official release at a pinned hash into core/build/libsodium/<target>.
+    listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
+        val sodium = layout.buildDirectory.dir("libsodium/${target.name}").get().asFile
+        target.compilations.getByName("main").cinterops.create("sodium") {
+            definitionFile.set(file("src/nativeInterop/cinterop/sodium.def"))
+            includeDirs(sodium.resolve("include"))
+            extraOpts("-libraryPath", sodium.resolve("lib").path)
+        }
+        target.binaries.framework {
+            baseName = "AndvariCore"
+            isStatic = true
+        }
+    }
+
     sourceSets {
         commonMain.dependencies {
             api(libs.kotlinx.coroutines.core)
             api(libs.kotlinx.serialization.json)
             api(libs.kotlinx.datetime)
             // Client networking (the HTTP engine is provided per platform).
+            implementation(libs.kotlinx.atomicfu) // multiplatform locks
             api(libs.ktor.client.core)
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)
@@ -25,6 +41,9 @@ kotlin {
         }
         // The lazysodium adapter is one file compiled into both JVM-family targets;
         // the com.goterl.lazysodium API is identical across the two artifacts.
+        iosMain.dependencies {
+            api(libs.ktor.client.darwin)
+        }
         jvmMain {
             kotlin.srcDir("src/jvmShared/kotlin")
             dependencies {
@@ -77,6 +96,14 @@ android {
 
 // Vector-driven tests read the normative fixtures from spec/test-vectors. The dir
 // must be a declared input or Gradle marks tests UP-TO-DATE when vectors change.
+// The simulator passes SIMCTL_CHILD_X to the test process as X. It can read the host's files.
+tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimulatorTest>().configureEach {
+    environment("SIMCTL_CHILD_ANDVARI_VECTORS_DIR", rootProject.projectDir.resolve("spec/test-vectors").absolutePath)
+    inputs.dir(rootProject.projectDir.resolve("spec/test-vectors"))
+        .withPropertyName("andvariTestVectors")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
 tasks.withType<Test>().configureEach {
     systemProperty(
         "andvari.vectors.dir",

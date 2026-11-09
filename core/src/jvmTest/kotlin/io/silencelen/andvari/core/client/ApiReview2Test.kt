@@ -278,7 +278,7 @@ class ApiReview2Test {
     private val repo = File(System.getProperty("andvari.vectors.dir") ?: error("andvari.vectors.dir not set")).absoluteFile.parentFile.parentFile
 
     private fun productSources(): List<File> = listOf(
-        "core/src/commonMain", "core/src/jvmShared", "core/src/jvmMain", "core/src/androidMain",
+        "core/src/commonMain", "core/src/jvmShared", "core/src/jvmMain", "core/src/androidMain", "core/src/iosMain",
         "app-android/src/main", "app-desktop/src/main", "tools",
     ).map { File(repo, it) }.filter { it.exists() }.flatMap { root ->
         root.walkTopDown().filter { it.isFile && it.extension == "kt" && "/src/test/" !in it.path && "/build/" !in it.path }.toList()
@@ -297,7 +297,7 @@ class ApiReview2Test {
         val masterKeyAllowed = setOf(
             "core/src/commonMain/kotlin/io/silencelen/andvari/core/client/Account.kt",
             "core/src/commonMain/kotlin/io/silencelen/andvari/core/client/Export.kt",
-            "core/src/jvmShared/kotlin/io/silencelen/andvari/core/client/KdfReKeyCore.kt",
+            "core/src/commonMain/kotlin/io/silencelen/andvari/core/client/KdfReKeyCore.kt",
             // Admin tooling, not a client: the recovery CLI mints the recovered member's temporary password offline under
             // params of its own choosing, and the vector generator authors the cross-engine KDF vectors (below the floor).
             "tools/recovery-cli/src/main/kotlin/io/silencelen/andvari/recovery/Main.kt",

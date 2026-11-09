@@ -3654,7 +3654,7 @@ class DesktopState(
      * F61 KDF upgrade (spec 01 §7, design 2026-07-10 §4) — the DESKTOP ADAPTER over core
      * [KdfReKeyCore.maybeUpgrade], the same routine Android's `KdfReKey` adapts (audit H85). The
      * body used to be inlined here, justified by a comment reading "app-android is not shared" —
-     * a reason the G39 hoist had already removed: `core/src/jvmShared` compiles into both the JVM
+     * a reason the G39 hoist had already removed: `core/src/commonMain` compiles into both the JVM
      * and Android targets, so the re-key of the MASTER KEY is now written once and cannot drift
      * one-sidedly.
      *

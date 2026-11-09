@@ -1,0 +1,4 @@
+package = io.silencelen.andvari.core.crypto.sodium
+headers = sodium.h
+headerFilter = sodium.h sodium/*
+staticLibraries = libsodium.a

@@ -1,0 +1,85 @@
+# Compiles the shared Kotlin core for iOS and runs its tests on an iOS simulator, with libsodium built
+# from its signed release. No secrets, no signing: App Store builds happen elsewhere.
+name: iOS core
+
+on:
+  push:
+    branches: [ios]
+    paths:
+      - "core/**"
+      - "spec/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "scripts/ci/build-libsodium-ios.sh"
+      - ".github/workflows/ios-core.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "spec/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "scripts/ci/build-libsodium-ios.sh"
+      - ".github/workflows/ios-core.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: core on iOS simulator
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          xcodebuild -version
+          xcodebuild -version | grep -qE '^Xcode (2[6-9]|[3-9][0-9])' || { echo "need Xcode 26+"; exit 1; }
+
+      - name: Java
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore libsodium
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/libsodium
+          key: libsodium-ios-${{ hashFiles('scripts/ci/build-libsodium-ios.sh') }}
+
+      - name: Build libsodium
+        run: scripts/ci/build-libsodium-ios.sh
+
+      - name: Kotlin/Native tools cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      # gradle.properties caps the heap for small Linux hosts. Kotlin/Native links inside Gradle and needs more.
+      - name: Compile for device and link the framework
+        run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:compileKotlinIosArm64 :core:linkDebugFrameworkIosArm64
+
+      - name: Tests on the iOS simulator
+        run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:iosSimulatorArm64Test
+
+      - name: Keep the test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ios-core-tests
+          path: core/build/reports/tests
+          if-no-files-found: ignore
+          retention-days: 7

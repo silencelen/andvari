@@ -575,7 +575,7 @@ object OfflineData {
  * (AndvariViewModel.runKdfUpgrade) and the autofill overlay (detached, A6).
  *
  * The routine itself lives in core [KdfReKeyCore] (audit H85, the F37/G39 pattern): it was
- * hand-duplicated here and in the desktop's DesktopState until `core/src/jvmShared` — which
+ * hand-duplicated here and in the desktop's DesktopState until `core/src/commonMain` — which
  * compiles into both `jvmMain` and `androidMain` — made one copy reach both apps. This object
  * keeps its own name and signature so the two call sites are unchanged, and supplies the ONE
  * genuinely Android-side piece: the [SessionStore] cache gate the persisted keys pass through.
