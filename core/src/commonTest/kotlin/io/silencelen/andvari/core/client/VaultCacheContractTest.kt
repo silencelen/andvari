@@ -1,13 +1,13 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.newTempDir
+import io.silencelen.andvari.core.deleteDir
 import io.silencelen.andvari.core.model.Mutation
 import io.silencelen.andvari.core.model.PendingTransfer
 import io.silencelen.andvari.core.model.TransferRecord
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
-import java.io.File
-import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -139,14 +139,15 @@ class InMemoryVaultCacheTest : VaultCacheContractTest() {
 }
 
 class SqliteVaultCacheTest : VaultCacheContractTest() {
-    private val tmp: File = Files.createTempDirectory("andvari-cache").toFile()
-    override fun newCache(): VaultCache = sqliteVaultCache(File(tmp, "vault-${System.nanoTime()}.db").absolutePath, "u")
+    private val tmp: String = newTempDir("andvari-cache")
+    private var nextDb = 0
+    override fun newCache(): VaultCache = sqliteVaultCache("$tmp/vault-${nextDb++}.db", "u")
 
-    @AfterTest fun cleanup() { tmp.deleteRecursively() }
+    @AfterTest fun cleanup() { deleteDir(tmp) }
 
     /** Durable-only: everything survives close + reopen of the same file. */
     @Test fun survivesCloseAndReopen() {
-        val path = File(tmp, "persist.db").absolutePath
+        val path = "$tmp/persist.db"
         val c1 = sqliteVaultCache(path, "user-1")
         c1.setCursor(1234)
         c1.upsertItem(WireItem("a", "v1", 5, 1, 2, false, false, 1, listOf("x"), "blobA"), VaultItem("a", "v1", 5, 2, ItemDoc("note", "keep")))
@@ -168,7 +169,7 @@ class SqliteVaultCacheTest : VaultCacheContractTest() {
 
     /** Opening the same file under a DIFFERENT account wipes everything (defense in depth). */
     @Test fun differentAccountWipesFile() {
-        val path = File(tmp, "shared.db").absolutePath
+        val path = "$tmp/shared.db"
         val a = sqliteVaultCache(path, "alice")
         a.upsertGrant(WireGrant("v1", "alice", "owner", "wv", 1, null))
         a.enqueue(Mutation("q", "put", "i", "v1", 0, null))

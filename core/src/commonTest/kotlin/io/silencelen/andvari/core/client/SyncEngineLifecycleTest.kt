@@ -1,5 +1,8 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.testNowMs
+import io.silencelen.andvari.core.newTempDir
+import io.silencelen.andvari.core.deleteDir
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -190,7 +193,7 @@ class SyncEngineLifecycleTest {
                         calls.add("deletedVaults")
                         ok(json.encodeToString(ListSerializer(DeletedVaultSummary.serializer()), deletedList))
                     }
-                    path.endsWith("/delete") -> { calls.add("deleteVault"); ok("""{"rev":${++rev},"purgeAt":${System.currentTimeMillis() + 7L * 86_400_000}}""") }
+                    path.endsWith("/delete") -> { calls.add("deleteVault"); ok("""{"rev":${++rev},"purgeAt":${testNowMs() + 7L * 86_400_000}}""") }
                     path.endsWith("/restore") -> { calls.add("restoreVault"); ok("""{"rev":${++rev}}""") }
                     path.endsWith("/leave") -> { calls.add("leaveVault"); ok("""{"rev":${++rev}}""") }
                     path.endsWith("/transfer/accept") -> { calls.add("acceptTransfer"); ok("""{"rev":${++rev}}""") }
@@ -253,7 +256,7 @@ class SyncEngineLifecycleTest {
     fun validDeleteProof_softHidesWithAttributedNotice() = runBlocking<Unit> {
         val s = seededMember()
         val deleteId = uuid()
-        val purgeAt = System.currentTimeMillis() + 7L * 86_400_000
+        val purgeAt = testNowMs() + 7L * 86_400_000
         s.server.queue.add(
             SyncResponse(
                 6, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
@@ -280,7 +283,7 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(
             SyncResponse(
                 6, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
-                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = System.currentTimeMillis() + 1000, deleteId = uuid(), deleteProof = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")),
+                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = testNowMs() + 1000, deleteId = uuid(), deleteProof = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")),
             ),
         )
         s.engine.sync()
@@ -364,7 +367,7 @@ class SyncEngineLifecycleTest {
     fun deniedEditParked_notThrown_replayedOnRestoreWithSameMutationId() = runBlocking<Unit> {
         val s = seededMember("writer")
         val deleteId = uuid()
-        val purgeAt = System.currentTimeMillis() + 7L * 86_400_000
+        val purgeAt = testNowMs() + 7L * 86_400_000
 
         // The owner deletes mid-edit: the member's save is DENIED, then the delete lands
         // in the SAME cycle's pull (F21 one-cycle fix).
@@ -554,7 +557,7 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(
             SyncResponse(
                 7, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
-                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = System.currentTimeMillis() + 1000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
+                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = testNowMs() + 1000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
             ),
         )
         s.engine.sync()
@@ -571,7 +574,7 @@ class SyncEngineLifecycleTest {
     fun incomingOfferSurfacesOnlyAfterProofVerifies() = runBlocking<Unit> {
         val s = seededMember("writer")
         val offerId = uuid()
-        val expiresAt = System.currentTimeMillis() + 14L * 86_400_000
+        val expiresAt = testNowMs() + 14L * 86_400_000
         val goodProof = LifecycleProof.offer(crypto, s.key(), s.vaultId, offerId, s.member.userId, expiresAt, 1)
 
         s.server.queue.add(
@@ -636,8 +639,8 @@ class SyncEngineLifecycleTest {
         // so the durable cache must hand the full row back — and a restart mid-offer must
         // rebuild the consent surface from it (the row is never re-delivered while the
         // offer merely pends).
-        val tmp = java.nio.file.Files.createTempDirectory("andvari-transfer").toFile()
-        val dbPath = java.io.File(tmp, "vault.db").absolutePath
+        val tmp = newTempDir("andvari-transfer")
+        val dbPath = "$tmp/vault.db"
         val owner = enroll("owner@example.com")
         val member = enroll("member@example.com")
         val nv = owner.buildCreateSharedVault("Family")
@@ -648,7 +651,7 @@ class SyncEngineLifecycleTest {
         val key = owner.lifecycleKeyFor(vaultId)
 
         val offerId = uuid()
-        val expiresAt = System.currentTimeMillis() + 14L * 86_400_000
+        val expiresAt = testNowMs() + 14L * 86_400_000
         val proof = LifecycleProof.offer(crypto, key, vaultId, offerId, member.userId, expiresAt, 1)
         val cache1 = sqliteVaultCache(dbPath, member.userId)
         val engine1 = SyncEngine(server.api(), member, cache1)
@@ -672,7 +675,7 @@ class SyncEngineLifecycleTest {
         assertTrue(server.calls.contains("acceptTransfer"))
         assertTrue(engine2.incomingTransfers().isEmpty())
         engine2.close()
-        tmp.deleteRecursively()
+        deleteDir(tmp)
     }
 
     @Test
@@ -680,8 +683,8 @@ class SyncEngineLifecycleTest {
         // seq = cached lastTransfer.seq + 1. The server relays transferSeq+1 while the
         // proof HMAC binds the CLIENT's seq — a cache that strips lastTransfer would mint
         // seq=1 forever and every second+ offer would silently fail target verification.
-        val tmp = java.nio.file.Files.createTempDirectory("andvari-transfer-seq").toFile()
-        val dbPath = java.io.File(tmp, "vault.db").absolutePath
+        val tmp = newTempDir("andvari-transfer-seq")
+        val dbPath = "$tmp/vault.db"
         val owner = enroll("owner@example.com")
         val member = enroll("member@example.com")
         val nv = owner.buildCreateSharedVault("Family")
@@ -712,7 +715,7 @@ class SyncEngineLifecycleTest {
         val expected = LifecycleProof.offer(crypto, key, vaultId, sent.offerId, "next-owner", sent.expiresAt, 2)
         assertTrue(LifecycleProof.verify(expected, sent.proof), "the offer proof must bind seq=2 (lastTransfer.seq+1)")
         engine.close()
-        tmp.deleteRecursively()
+        deleteDir(tmp)
     }
 
     // ==== F19 move/copy copy-leg-first sequencing (design §8) ====
@@ -822,7 +825,7 @@ class SyncEngineLifecycleTest {
         // save's staged denial — the whole cycle is mutex-serialized (epoch guard as belt).
         val s = seededMember("writer")
         val deleteId = uuid()
-        val purgeAt = System.currentTimeMillis() + 7L * 86_400_000
+        val purgeAt = testNowMs() + 7L * 86_400_000
 
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
@@ -870,7 +873,7 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(
             SyncResponse(
                 8, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
-                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = System.currentTimeMillis() + 1000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
+                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = testNowMs() + 1000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
             ),
         )
         val e = assertFailsWith<ApiException> { s.engine.deleteSharedVault(s.vaultId) }
@@ -887,8 +890,8 @@ class SyncEngineLifecycleTest {
     fun stagedDenialSurvivesProcessDeath_thenParksOnTheNextPull() = runBlocking<Unit> {
         // #2: the denial→classifying-pull window must be crash-durable — process death in
         // between must not destroy the edit F21 promises to park.
-        val tmp = java.nio.file.Files.createTempDirectory("andvari-park").toFile()
-        val dbPath = java.io.File(tmp, "vault.db").absolutePath
+        val tmp = newTempDir("andvari-park")
+        val dbPath = "$tmp/vault.db"
         val owner = enroll("owner@example.com")
         val member = enroll("member@example.com")
         val nv = owner.buildCreateSharedVault("Family")
@@ -921,7 +924,7 @@ class SyncEngineLifecycleTest {
         server.queue.add(
             SyncResponse(
                 7, false, emptyList(), emptyList(), emptyList(), listOf(vaultId),
-                listOf(RemovedGrantInfo(vaultId, "deleted", purgeAt = System.currentTimeMillis() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, key, vaultId, deleteId))),
+                listOf(RemovedGrantInfo(vaultId, "deleted", purgeAt = testNowMs() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, key, vaultId, deleteId))),
             ),
         )
         engine2.sync()
@@ -943,7 +946,7 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(
             SyncResponse(
                 6, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
-                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = System.currentTimeMillis() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
+                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = testNowMs() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
             ),
         )
         s.engine.save(s.itemId, doc.copy(name = "edited in-flight"), s.vaultId) // parked, not thrown
@@ -991,7 +994,7 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(
             SyncResponse(
                 9, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
-                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = System.currentTimeMillis() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
+                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = testNowMs() + 7L * 86_400_000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
             ),
         )
         s.engine.sync()

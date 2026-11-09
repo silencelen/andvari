@@ -20,7 +20,7 @@ import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
-import java.io.IOException
+import kotlinx.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith

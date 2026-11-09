@@ -1,5 +1,8 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.testNowMs
+import io.silencelen.andvari.core.newTempDir
+import io.silencelen.andvari.core.deleteDir
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -24,7 +27,6 @@ import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
-import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -99,9 +101,9 @@ class RemovalProofV2Test {
 
     private inner class Seed(val owner: Account, val member: Account, val server: FakeServer, val cache: VaultCache, var engine: SyncEngine, val vaultId: String, val vault: WireVault, val grant: WireGrant, val item: WireItem) {
         val key: ByteArray get() = owner.lifecycleKeyFor(vaultId)
-        fun removedV2(nonce: String = LifecycleProof.newNonce(crypto), at: Long = System.currentTimeMillis(), target: String = member.userId) =
+        fun removedV2(nonce: String = LifecycleProof.newNonce(crypto), at: Long = testNowMs(), target: String = member.userId) =
             RemovedGrantInfo(vaultId, "removed", removeProof = LifecycleProof.removeV2(crypto, key, vaultId, target, nonce, at), removeNonce = nonce, proofV = 2, issuedAt = at)
-        fun leftV2(nonce: String = LifecycleProof.newNonce(crypto), at: Long = System.currentTimeMillis()) =
+        fun leftV2(nonce: String = LifecycleProof.newNonce(crypto), at: Long = testNowMs()) =
             RemovedGrantInfo(vaultId, "left", removeProof = LifecycleProof.leave(crypto, key, vaultId, member.userId, nonce, at), removeNonce = nonce, proofV = 2, issuedAt = at)
         fun deliver(info: RemovedGrantInfo?) {
             server.queue.add(SyncResponse(++server.rev + 10, false, emptyList(), emptyList(), emptyList(), listOf(vaultId), listOfNotNull(info)))
@@ -184,7 +186,7 @@ class RemovalProofV2Test {
 
     @Test
     fun aProofIssuedBeforeThisDevicesLiveSinceIsAnAnomaly() {
-        val before = System.currentTimeMillis()
+        val before = testNowMs()
         val s = seeded()
         val liveSince = s.cache.liveSince(s.vaultId)
         assertNotNull(liveSince)
@@ -196,7 +198,7 @@ class RemovalProofV2Test {
     @Test
     fun aProofIssuedInTheFutureIsAnAnomaly() {
         val s = seeded()
-        s.deliver(s.removedV2(at = System.currentTimeMillis() + RemovalProof.SKEW_MS + 60_000))
+        s.deliver(s.removedV2(at = testNowMs() + RemovalProof.SKEW_MS + 60_000))
         assertEquals("anomaly", s.notice().kind)
     }
 
@@ -239,7 +241,7 @@ class RemovalProofV2Test {
     @Test
     fun aReplayAfterAReAddIsRejectedOnADeviceThatSawTheReAdd() {
         val s = seeded()
-        val info = s.removedV2(at = System.currentTimeMillis())
+        val info = s.removedV2(at = testNowMs())
         s.deliver(info)
         assertEquals("removed", s.notice().kind)
         s.reAdd()
@@ -251,7 +253,7 @@ class RemovalProofV2Test {
     @Test
     fun anOldProofAfterAReAddFailsTheWindowEvenWithoutTheConsumedRecord() {
         val s = seeded()
-        val old = System.currentTimeMillis() - 3 * RemovalProof.SKEW_MS
+        val old = testNowMs() - 3 * RemovalProof.SKEW_MS
         // The removal this proof belonged to was never seen here (consumed nowhere); the device saw the vault go live
         // again only now, so an issuedAt from before that cannot verify.
         s.deliver(RemovedGrantInfo(s.vaultId, "removed"))
@@ -266,7 +268,7 @@ class RemovalProofV2Test {
     fun theConsumedSetSurvivesARestartAndMergesIntoAccountState() {
         val dir = createTempDir()
         try {
-            val cache = sqliteVaultCache(File(dir, "c.db").absolutePath, "member")
+            val cache = sqliteVaultCache("$dir/c.db", "member")
             val s = seeded(cache)
             val info = s.removedV2()
             s.deliver(info)
@@ -275,7 +277,7 @@ class RemovalProofV2Test {
             assertNotNull(s.server.accountState)
             // Restart: a new engine over the same durable cache.
             cache.close()
-            val reopened = sqliteVaultCache(File(dir, "c.db").absolutePath, "member")
+            val reopened = sqliteVaultCache("$dir/c.db", "member")
             assertEquals<List<String?>?>(listOf(info.removeNonce), reopened.consumedNonces()[s.vaultId]?.map { it.nonce })
             val restarted = SyncEngine(s.server.api(), s.member, reopened)
             restarted.hydrate()
@@ -285,7 +287,7 @@ class RemovalProofV2Test {
             assertEquals("replay-denied", s.notice().kind)
             reopened.close()
         } finally {
-            dir.deleteRecursively()
+            deleteDir(dir)
         }
     }
 
@@ -337,7 +339,7 @@ class RemovalProofV2Test {
 
     @Test
     fun liveSinceIgnoresServerInput() {
-        val before = System.currentTimeMillis()
+        val before = testNowMs()
         // The server claims the vault and grant are ancient (createdAt / addedAt / rev): none of it is liveSince.
         val s = seeded()
         val live = s.cache.liveSince(s.vaultId)!!
@@ -366,7 +368,7 @@ class RemovalProofV2Test {
     fun consumeAndMoveToHoldingAreAtomic() {
         val dir = createTempDir()
         try {
-            val cache = FailOnceCursor(sqliteVaultCache(File(dir, "c.db").absolutePath, "member"))
+            val cache = FailOnceCursor(sqliteVaultCache("$dir/c.db", "member"))
             val s = seeded(cache)
             val info = s.removedV2()
             cache.armed = true
@@ -382,7 +384,7 @@ class RemovalProofV2Test {
             assertEquals<List<String?>?>(listOf(info.removeNonce), cache.consumedNonces()[s.vaultId]?.map { it.nonce })
             assertEquals("removed", s.notice().kind)
         } finally {
-            dir.deleteRecursively()
+            deleteDir(dir)
         }
     }
 
@@ -396,7 +398,7 @@ class RemovalProofV2Test {
         assertNotNull(body)
         assertEquals(2, body.proofV)
         assertTrue(LifecycleProof.isV2Nonce(body.nonce!!))
-        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "left", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), emptySet(), body.issuedAt!! - 1, System.currentTimeMillis())
+        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "left", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), emptySet(), body.issuedAt!! - 1, testNowMs())
         assertEquals(RemovalProof.Verdict.VALID, d.verdict)
     }
 
@@ -409,12 +411,12 @@ class RemovalProofV2Test {
         assertEquals(s.member.userId, target)
         assertNotNull(body)
         assertEquals(2, body.proofV)
-        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "removed", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), emptySet(), body.issuedAt!! - 1, System.currentTimeMillis())
+        val d = RemovalProof.decide(crypto, s.key, s.vaultId, s.member.userId, "removed", body.proofV, body.proof, body.nonce, body.issuedAt, emptySet(), emptySet(), body.issuedAt!! - 1, testNowMs())
         assertEquals(RemovalProof.Verdict.VALID, d.verdict)
     }
 
     private fun uuid(): String = io.silencelen.andvari.core.crypto.Bytes.uuidV4FromBytes(crypto.randomBytes(16))
 
     @Suppress("DEPRECATION")
-    private fun createTempDir(): File = java.nio.file.Files.createTempDirectory("a7-").toFile()
+    private fun createTempDir(): String = newTempDir("a7-")
 }

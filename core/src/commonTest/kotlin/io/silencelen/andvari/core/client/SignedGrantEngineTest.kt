@@ -1,5 +1,6 @@
 package io.silencelen.andvari.core.client
 
+import io.silencelen.andvari.core.testNowMs
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -1135,7 +1136,7 @@ class SignedGrantEngineTest {
         feed(w, rev, null).copy(full = false, removedGrants = listOf(w.vaultId), removedGrantsInfo = listOfNotNull(info))
 
     private fun validRemoval(w: World, nonce: String = LifecycleProof.newNonce(crypto)): RemovedGrantInfo {
-        val at = System.currentTimeMillis()
+        val at = testNowMs()
         val key = w.owner.account.lifecycleKeyFor(w.vaultId)
         return RemovedGrantInfo(w.vaultId, "removed", removeProof = LifecycleProof.removeV2(crypto, key, w.vaultId, w.member.userId, nonce, at), removeNonce = nonce, proofV = 2, issuedAt = at)
     }
