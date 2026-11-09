@@ -442,7 +442,7 @@ class SurfacePinsTest {
         // The routine that derives a new master key, re-wraps the UVK and calls
         // `PUT /account/password` lived here as a hand-copy of Android's, under a comment
         // justifying itself with "app-android is not shared" — a reason the G39 hoist had already
-        // removed. It now lives once in core KdfReKeyCore (core/src/jvmShared compiles into both
+        // removed. It now lives once in core KdfReKeyCore (core/src/commonMain compiles into both
         // the JVM and Android targets) and is exercised by core's KdfReKeyCoreTest; this pin is
         // the wiring that suite cannot see.
         assertTrue(state.contains("KdfReKeyCore.maybeUpgrade("), "runKdfUpgrade must delegate to core")

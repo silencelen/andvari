@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
  * Audit H85 — the phone's half of the F61 re-key hoist, pinned at the source level.
  *
  * The routine that derives a new master key, re-wraps the UVK and calls `PUT /account/password`
- * now lives once, in core `KdfReKeyCore` (`core/src/jvmShared`, which compiles into BOTH the JVM
+ * now lives once, in core `KdfReKeyCore` (`core/src/commonMain`, which compiles into BOTH the JVM
  * and Android targets), and is exercised by `core`'s `KdfReKeyCoreTest`. What CANNOT be checked
  * from there is the wiring: that this module still routes through it instead of quietly growing a
  * second copy — the exact shape the audit found, where Android and the desktop had written the

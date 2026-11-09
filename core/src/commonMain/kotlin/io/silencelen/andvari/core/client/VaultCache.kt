@@ -58,7 +58,7 @@ data class HeldVaultRecord(
 
 /**
  * Offline persistence port for the client (spec 02 §8). The durable impl is
- * [SqliteVaultCache] (jvmShared, both native targets): it stores item envelopes,
+ * [SqliteVaultCache] (commonMain, every native client): it stores item envelopes,
  * grant/vault rows, the sync cursor, and the outbound queue — all ciphertext or
  * server-visible metadata (⊆ the spec 02 §5 table); the decrypted working set stays
  * in memory in every impl. [InMemoryVaultCache] remains for tests and web parity.

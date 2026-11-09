@@ -15,7 +15,7 @@ class ItemSealRoutingTest {
     private val repo = File(System.getProperty("andvari.vectors.dir") ?: error("andvari.vectors.dir not set")).absoluteFile.parentFile.parentFile
 
     private fun productSources(): List<File> = listOf(
-        "core/src/commonMain", "core/src/jvmShared", "core/src/jvmMain", "core/src/androidMain",
+        "core/src/commonMain", "core/src/jvmShared", "core/src/jvmMain", "core/src/androidMain", "core/src/iosMain",
         "app-android/src/main", "app-desktop/src/main", "tools",
     ).map { File(repo, it) }.filter { it.exists() }.flatMap { root ->
         root.walkTopDown().filter { it.isFile && it.extension == "kt" && "/src/test/" !in it.path && "/build/" !in it.path }.toList()
