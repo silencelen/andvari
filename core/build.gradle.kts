@@ -19,6 +19,9 @@ kotlin {
             includeDirs(sodium.resolve("include"))
             extraOpts("-libraryPath", sodium.resolve("lib").path)
         }
+        target.compilations.getByName("main").cinterops.create("sqlite3") {
+            definitionFile.set(file("src/nativeInterop/cinterop/sqlite3.def"))
+        }
         target.binaries.framework {
             baseName = "AndvariCore"
             isStatic = true

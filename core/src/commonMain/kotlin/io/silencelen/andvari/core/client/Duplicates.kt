@@ -112,11 +112,11 @@ object Duplicates {
         for (raw in doc.login?.uris ?: emptyList()) {
             val saved = UriMatch.parseSavedUri(raw) ?: continue
             when (saved) {
-                is SavedUri.AndroidApp -> out.putIfAbsent("app:${saved.pkg}", "app:${saved.pkg}")
+                is SavedUri.AndroidApp -> out.getOrPut("app:${saved.pkg}") { "app:${saved.pkg}" }
                 is SavedUri.Web -> {
                     val r = Psl.resolve(saved.host)
                     val key = if (r is PslResult.Registrable) r.domain else saved.host
-                    out.putIfAbsent(key, siteLabel(key, raw))
+                    out.getOrPut(key) { siteLabel(key, raw) }
                 }
             }
         }

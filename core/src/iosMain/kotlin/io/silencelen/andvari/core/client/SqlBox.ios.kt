@@ -2,12 +2,14 @@
 
 package io.silencelen.andvari.core.client
 
+import cnames.structs.sqlite3
+import cnames.structs.sqlite3_stmt
+import io.silencelen.andvari.core.client.sqlite.*
 import kotlinx.cinterop.*
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSString
 import platform.Foundation.create
 import platform.Foundation.stringByDeletingLastPathComponent
-import platform.sqlite3.*
 
 /** SQLite's "copy this buffer" destructor sentinel; the C macro does not cross cinterop. */
 private val TRANSIENT = (-1L).toCPointer<CFunction<(COpaquePointer?) -> Unit>>()

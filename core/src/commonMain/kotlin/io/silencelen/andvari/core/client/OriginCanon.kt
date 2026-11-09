@@ -47,7 +47,7 @@ object OriginCanon {
     /** The pinned canonical origin form (see the header). Total: never throws. */
     fun canonicalOrigin(url: String): String {
         val trimmed = url.trim().trimEnd('/')
-        val uri = runCatching { java.net.URI(trimmed) }.getOrNull()
+        val uri = parseUriParts(trimmed)
         val scheme = uri?.scheme?.lowercase()
         val host = uri?.host?.lowercase() // URI keeps IPv6 brackets ("[::1]") — fine, deterministic
         if (scheme == null || host.isNullOrEmpty()) return trimmed.lowercase()
@@ -67,7 +67,7 @@ object OriginCanon {
      */
     fun canonicalServerOrigin(input: String): String? {
         val trimmed = input.trim().trimEnd('/')
-        val uri = runCatching { java.net.URI(trimmed) }.getOrNull() ?: return null
+        val uri = parseUriParts(trimmed) ?: return null
         val scheme = uri.scheme?.lowercase() ?: return null
         if (scheme != "https" && scheme != "http") return null
         if (uri.userInfo != null) return null // `user[:pass]@` — the phishing vector; refuse outright
