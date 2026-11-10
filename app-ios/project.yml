@@ -35,6 +35,7 @@ targets:
         UILaunchScreen: {}
         ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSFaceIDUsageDescription: andvari uses Face ID to unlock your vault.
     entitlements:
       path: Andvari/Andvari.entitlements
       properties:
