@@ -22,11 +22,12 @@ internal object AccountDeletion {
     const val AUDIT_RETENTION_MS = 90 * Service.DAY_MS
 
     /**
-     * Audit types KEPT for [AUDIT_RETENTION_MS] when their row names the deleted account — re-keyed to the pseudonym.
+     * Audit types KEPT for [AUDIT_RETENTION_MS] whenever their row names the deleted account — re-keyed to the pseudonym.
      * The owner's list was "sign-ins, revocations, the deletion itself"; read as the account's security record:
-     * authentication, credential and second-factor changes, recovery, denied-write intrusion signals, the deletion's own
-     * rows, and the account's ADMIN actions on the instance (who it invited, disabled, revoked, recovered, whose backstop
-     * blob it pulled, which policy it set) — the history an incident review of the instance would ask for.
+     * authentication, credential and second-factor changes, recovery, denied-write intrusion signals, the REVOCATIONS it
+     * made (a member removed, a vault deleted, a vault left — whatever vault they name), the deletion's own rows, and the
+     * account's ADMIN actions on the instance (who it invited, disabled, revoked, recovered, whose backstop blob it pulled,
+     * which policy it set) — the history an incident review of the instance would ask for.
      */
     val RETAINED_AUDIT_TYPES: Set<String> = setOf(
         // sign-in and sessions
@@ -38,6 +39,8 @@ internal object AccountDeletion {
         "recovery_self_verify", "recovery_self_verify_fail", "recovery_self_commit", "recovery_self_setup", "recovery_self_setup_fail",
         // intrusion signals
         "push_denied", "attachment_cross_vault",
+        // revocations it made
+        "vault_member_remove", "vault_member_leave", "vault_delete",
         // the deletion itself
         "account_delete", "account_delete_denied", "account_delete_reauth_fail",
         // admin actions on the instance
@@ -46,22 +49,40 @@ internal object AccountDeletion {
     )
 
     /**
-     * Audit types DELETED with the account when their row names it: its own vault, item and sharing activity, lookups
-     * and the recovery-capture confirmations — activity about data that no longer exists, kept by nobody. (Types written
-     * with no userId, like `vault_purge` and `vault_transfer_expire`, never name the account; they are listed so the
-     * classification test sees every type the server writes.) A type in neither set is a build failure: see
-     * AccountDeletionTest, which reads every audit type out of the server sources.
+     * Audit types about one VAULT's data: kept under the pseudonym, for the same [AUDIT_RETENTION_MS], when the vault they
+     * name outlives the deletion — an item the account purged from a shared vault's trash, a file it uploaded there, a
+     * transfer of a vault someone else now owns: the data is still there, so is the record of who touched it — and
+     * deleted with the account when they name a vault this deletion purges (activity about data that no longer exists).
+     * The vault is the meta's leading id ([vaultNamedBy]); for `attachment_upload`, whose meta leads with the ATTACHMENT
+     * id, it is that attachment's row. (`vault_purge` and `vault_transfer_expire` are written with no userId and never
+     * name the account; they are listed so the classification test sees every type the server writes.)
      */
-    val DROPPED_AUDIT_TYPES: Set<String> = setOf(
-        "vault_create", "vault_delete", "vault_restore", "vault_rename", "vault_purge",
-        "vault_member_add", "vault_member_role", "vault_member_remove", "vault_member_leave",
+    val VAULT_SCOPED_AUDIT_TYPES: Set<String> = setOf(
+        "vault_create", "vault_restore", "vault_rename", "vault_purge",
+        "vault_member_add", "vault_member_role",
         "vault_grant_reissue", "vault_grant_self_wrap",
         "vault_transfer_offer", "vault_transfer_accept", "vault_transfer_cancel", "vault_transfer_expire",
         "attachment_upload", "item_restore", "item_purge",
         "personal_wrap_set", "personal_wrap_redesignate",
+    )
+
+    /**
+     * Audit types DELETED with the account when their row names it: lookups and the recovery-capture confirmations, which
+     * are about no data that outlives it. A type in none of the three sets is a build failure: AccountDeletionTest reads
+     * every audit type out of the server sources (and at run time such a row would be deleted, never kept).
+     */
+    val DROPPED_AUDIT_TYPES: Set<String> = setOf(
         "user_lookup", "user_identity_lookup",
         "recovery_self_confirm", "recovery_self_confirm_unbound", "recovery_self_confirm_stale",
     )
+
+    /** The vault a [VAULT_SCOPED_AUDIT_TYPES] row names: its meta's leading id, or — for `attachment_upload`, whose meta is
+     *  `<attachmentId>:<bytes>` — the vault of that attachment's row (gone with a purged vault, so such a row is dropped).
+     *  Null when the meta names none. */
+    private fun vaultNamedBy(c: Connection, type: String, meta: String?): String? {
+        val head = meta?.substringBefore(':')?.takeIf { UUID_RE.matches(it) } ?: return null
+        return if (type == "attachment_upload") c.queryOne("SELECT vaultId FROM attachments WHERE attachmentId=?", head) { it.getString(1) } else head
+    }
 
     /**
      * What blocks deleting [userId] right now (empty = nothing). Read inside the deletion's tx (and by the preview):
@@ -199,16 +220,27 @@ internal object AccountDeletion {
         for (table in PER_ACCOUNT_TABLES) c.exec("DELETE FROM $table WHERE userId=?", userId)
 
         // 7. Audit. The pseudonym replaces the userId wherever it appears in meta (other accounts' rows: an admin's
-        //    user_disable, an owner's vault_member_add), then the account's own rows are either re-keyed to the pseudonym
-        //    (RETAINED_AUDIT_TYPES) or deleted. No row names the email (spec 02 §5); after this, none names the userId.
+        //    user_disable, an owner's vault_member_add), then each of the account's own rows is either re-keyed to the
+        //    pseudonym — a RETAINED type, or a VAULT_SCOPED one naming a vault that outlives this deletion — or deleted.
+        //    The vault ids come from meta, which the replace above leaves alone (a vaultId is never the userId). No row
+        //    names the email (spec 02 §5); after this, none names the userId.
         val pseudonym = uuid()
         c.exec("UPDATE audit SET meta=replace(meta, ?, ?) WHERE instr(meta, ?) > 0", userId, pseudonym, userId)
-        val kept = RETAINED_AUDIT_TYPES.toList()
-        c.exec(
-            "UPDATE audit SET userId=? WHERE userId=? AND type IN (${kept.joinToString(",") { "?" }})",
-            pseudonym, userId, *kept.toTypedArray(),
-        )
-        c.exec("DELETE FROM audit WHERE userId=?", userId)
+        val purged = owned.toSet()
+        val keep = ArrayList<Long>()
+        val drop = ArrayList<Long>()
+        val mine = c.queryAll("SELECT id, type, meta FROM audit WHERE userId=?", userId) { rs -> Triple(rs.getLong(1), rs.getString(2), rs.getString(3)) }
+        for ((id, type, meta) in mine) {
+            val kept = when (type) {
+                in RETAINED_AUDIT_TYPES -> true
+                in VAULT_SCOPED_AUDIT_TYPES -> vaultNamedBy(c, type, meta)?.let { it !in purged } ?: false
+                else -> false
+            }
+            (if (kept) keep else drop) += id
+        }
+        for (chunk in keep.chunked(ID_CHUNK)) c.exec("UPDATE audit SET userId=? WHERE id IN (${chunk.joinToString(",") { "?" }})", pseudonym, *chunk.toTypedArray())
+        for (chunk in drop.chunked(ID_CHUNK)) c.exec("DELETE FROM audit WHERE id IN (${chunk.joinToString(",") { "?" }})", *chunk.toTypedArray())
+        c.exec("DELETE FROM audit WHERE userId=?", userId) // belt: nothing is left naming it
 
         // 8. The account row, last.
         val removed = c.exec("DELETE FROM users WHERE userId=?", userId)
@@ -242,4 +274,7 @@ internal object AccountDeletion {
     /** The per-account tables keyed by userId alone (each a FK child of users). A new one must be added here, or the
      *  user row's delete fails on its foreign key and the whole deletion rolls back — loud, never a silent leftover. */
     private val PER_ACCOUNT_TABLES = listOf("escrow", "escrow_legacy", "member_recovery", "usage_ledger", "account_state", "personal_wrap")
+
+    /** Audit row ids per statement in the re-key / delete pass (well under SQLite's bound-parameter limit). */
+    private const val ID_CHUNK = 500
 }

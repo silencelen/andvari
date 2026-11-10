@@ -1056,8 +1056,12 @@ table, `retired_ids` (below; spec 02 §5).
   fresh random UUIDv4 **pseudonym** — not derived from the userId or the email, and stored nowhere as a mapping, so
   nothing on the server reverses it; shaped like a userId so every client's id grammar (spec 05 R18) renders it. The
   account's own rows of the retained security types (sign-in, session, credential, second-factor, recovery, denied-write,
-  admin-action and deletion types; the list is `AccountDeletion.RETAINED_AUDIT_TYPES`) are re-keyed to the pseudonym; its
-  other rows (vault, item, sharing activity, lookups) are deleted; the userId is replaced by the pseudonym in every other
+  admin-action and deletion types, and the revocations it made — `vault_member_remove`, `vault_member_leave`,
+  `vault_delete`; the list is `AccountDeletion.RETAINED_AUDIT_TYPES`) are re-keyed to the pseudonym. Its vault, item and
+  sharing activity is re-keyed too when the vault the row names OUTLIVES the deletion — an item it purged from a shared
+  vault's trash, a file it uploaded there, the history of a vault it handed over: the data is still there, and so is the
+  record of who touched it — and deleted when the vault is one this deletion purges (`VAULT_SCOPED_AUDIT_TYPES`). Its
+  lookups and recovery-capture confirmations are deleted. The userId is replaced by the pseudonym in every other
   account's row that names it in meta, and those rows keep the ordinary retention. The deletion's own row is
   `account_delete` (userId = the pseudonym, meta `vaults=N,left=M`). The janitor deletes every row under a pseudonym
   **90 days after that account's deletion** (the `account_delete` row is the clock); the ordinary rule deletes audit rows

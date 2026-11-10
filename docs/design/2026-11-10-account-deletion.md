@@ -276,16 +276,26 @@ revocations, the deletion itself", read as the account's security record:
   `totp_enroll`, `totp_rotate`, `totp_disable`, `totp_verify_fail`, `totp_setup_reauth_fail`;
 - self-service recovery: `recovery_self_verify(_fail)`, `recovery_self_commit`, `recovery_self_setup(_fail)`;
 - intrusion signals: `push_denied`, `attachment_cross_vault`;
+- the revocations it made: `vault_member_remove`, `vault_member_leave`, `vault_delete` — whatever vault they name;
 - the deletion: `account_delete`, `account_delete_denied`, `account_delete_reauth_fail`;
 - the account's admin actions on the instance: `invite_create`, `user_disable(_denied)`, `device_revoke(_denied)`,
   `recovery_apply`, `escrow_admin_read`, `escrow_legacy_dropped`, `escrow_legacy_purged`, `policy_update`.
 
-**Deleted with the account** (`DROPPED_AUDIT_TYPES`): its vault, item and sharing activity (`vault_*`, `attachment_upload`,
-`item_restore`, `item_purge`), the personal-wrap designation, lookups (`user_lookup`, `user_identity_lookup`) and the
-recovery-capture confirmations — activity about data that no longer exists.
+**Kept for 90 days while the vault they name outlives the deletion** (`VAULT_SCOPED_AUDIT_TYPES`): its other vault,
+item and sharing activity (`vault_create`, `vault_rename`, `vault_member_add`/`_role`, the grant re-issue and self-wrap,
+`vault_transfer_*`, `item_restore`, `item_purge`, `attachment_upload`, the personal-wrap designation). A row naming a vault
+this deletion does NOT purge — another member's vault, a vault it handed over — is re-keyed to the pseudonym like a
+retained one: the data is still there, so is the record of who touched it (a writer who hard-purged a shared vault's trash
+and then deleted the account must not erase that it did). A row naming a vault this deletion purges is deleted with the
+account. The vault is the meta's leading id; `attachment_upload`'s meta leads with the attachment id, so its vault is that
+attachment's row — gone with a purged vault, so such a row is deleted. (Independent review, 2026-11-10: the first cut
+deleted all of these rows outright, revocations included.)
 
-A type in neither set fails the build: `AccountDeletionTest.everyAuditTypeTheServerWrites_isClassifiedRetainedOrDropped`
-reads every audit type out of the server sources.
+**Deleted with the account** (`DROPPED_AUDIT_TYPES`): lookups (`user_lookup`, `user_identity_lookup`) and the
+recovery-capture confirmations — about no data that outlives it.
+
+A type in none of the three sets fails the build: `AccountDeletionTest.everyAuditTypeTheServerWrites_isClassifiedRetainedOrDropped`
+reads every audit type out of the server sources (and asserts the sets are disjoint).
 
 **Other accounts' rows** that name the account in meta (an admin's `user_disable`, an owner's `vault_member_add`, a
 `user_lookup` that found it) keep their ordinary 365-day retention with the userId replaced by the pseudonym
