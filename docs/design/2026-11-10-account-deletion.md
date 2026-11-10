@@ -34,10 +34,10 @@ from the set of accounts on a server, and admin is an instance-wide role (`users
 | Personal vault, and every vault only the account holds | **Purged now**, with the janitor's own statements (shared code, §6.2): items become ciphertext-free tombstones, archived versions and attachment rows go, every grant's key material on the vault is blanked, the blob files are unlinked from disk. The vault row stays as a purged tombstone (a vaultId is never recycled). |
 | A shared vault the account soft-deleted and is still in grace | Purged now too: nobody else can restore it (restore is the deleting owner's alone), so there is nothing to wait for. |
 | Memberships in other people's vaults | Grant row removed — the leave. Items the account wrote there stay: they belong to the vault. |
-| Transfer offers naming the account | Cleared, vault rev bumped, audited as a system action (`vault_transfer_cancel`, meta `<vault>:target_deleted`). |
+| Transfer offers naming the account | Cleared, vault rev bumped, audited as a system action (`vault_transfer_cancel`, meta `<vault>:target_deleted`, no userId and no ip — the request's address is the deleted account's, and the row outlives its 90 days). |
 | Escrow + retained escrow, recovery piece, usage ledger, account state, personal wrap | Rows deleted. Admin recovery and self-service recovery of the account become impossible, by intent. |
 | Invites | Every invite row naming the account's address (pending ones it received and the one it registered with — each carries the email in plaintext), and every **unused** invite it minted as an admin. |
-| Audit | Re-keyed to a fresh random pseudonym (security types) or deleted (activity types); the account's id is replaced by the pseudonym in every other row's meta; the janitor deletes the pseudonym's rows 90 days after the deletion (§9). |
+| Audit | Re-keyed to a fresh random pseudonym (security types) or deleted (activity types); the account's id is replaced by the pseudonym in every other row's meta, and each of its device ids by a fresh id of its own in every row; the janitor deletes the pseudonym's rows 90 days after the deletion (§9). |
 | The user row | Deleted, last. The email can register again — as a brand-new account, through a new invite (registration is invite-only). |
 | The ids it leaves behind | Retired for good: the SHA-256 of the deleted userId and of the audit pseudonym go into `retired_ids` (schema v16), and register refuses both as `user_id_taken` — the client chooses its userId, so without this the old id could be registered again (reviving lookups of it), or the pseudonym (whose rows the 90-day purge would then erase from the new account). |
 
@@ -242,9 +242,17 @@ write transactions totally. Each race therefore resolves one of two ways, and bo
 
 A request that authenticated before the commit and writes an audit row after it (a queued push's `push_denied`, a racing
 sign-out) would re-introduce the raw userId into the trail the deletion just scrubbed. `Repo.auditOn` therefore stores a
-row naming a user the table no longer holds with `userId NULL` and meta prefixed `deleted_account` — the event is kept,
-the id is not. One primary-key lookup per audit row; every live caller names an existing user or none. The deletion's
-own row is written through the one exempt writer, `auditPseudonymOn`.
+row naming a user the table no longer holds with `userId`, `deviceId` and `ip` NULL and meta prefixed `deleted_account` —
+the event is kept, nothing that names the account is (the device id is one the deletion replaced; the address would
+outlive the 90 days the account's own rows keep one, since this row has no pseudonym for the purge to find). One
+primary-key lookup per audit row; every live caller names an existing user or none. The deletion's own row is written
+through the one exempt writer, `auditPseudonymOn`.
+
+The admin routes that take an id name it only when it exists: `escrow_admin_read` writes the target id, or
+`no_such_user` when no account has it (the check runs in the transaction that writes the row, so a deletion either
+committed first or re-keys the row with the rest); `user_disable_denied` writes `no_such_user` without the id;
+`device_revoke_denied` writes no deviceId. An admin screen opened before the deletion therefore cannot write a deleted
+id back. (Independent review, 2026-11-10: the first cut wrote the asked-for ids, and the belt kept the device id.)
 
 The test seam `Service.accountDeletePreTxProbe` sits exactly in the window between the gate and the transaction, so the
 tests drive these interleavings deterministically rather than hoping for them (AccountDeletionRaceTest).
@@ -301,6 +309,15 @@ reads every audit type out of the server sources (and asserts the sets are disjo
 `user_lookup` that found it) keep their ordinary 365-day retention with the userId replaced by the pseudonym
 (`replace(meta, userId, pseudonym)`): they are those accounts' history.
 
+**Device ids** go the way of the userId. Each device in the account's `devices` rows gets a fresh random id of its own,
+written over that device id in every audit row naming it — the account's kept rows, and other accounts' (an admin's
+`device_revoke` of it) — so "these events came from one device" still reads, without naming an id the account's old
+clients, backups and log lines share with the trail. The `account_delete` row carries the deleting device's new id.
+Only the `devices` table says which devices were the account's: a row of the account can name ANOTHER account's device
+(a `device_revoke` it made as an admin), and that id is left alone. The mapping is stored nowhere, like the pseudonym's;
+device ids are minted by the server (`uuid()` at session issue, never chosen by a client), so unlike the userId and the
+pseudonym (§2, `retired_ids`) they need no retirement.
+
 **No row ever held the email** (spec 02 §5: audit rows carry no emails of existing users; `register` and `invite_create`
 carry a token-hash prefix). The invite rows that did hold it are deleted (§6.1).
 
@@ -310,7 +327,7 @@ instant) and goes with the rest. The window runs from the **deletion**, not from
 starts from a deletion needs the events just before it.
 
 **Outside the database**: every audit line also went to stdout → journald → the operator's log pipeline with the raw
-userId (never the email). Those copies follow the operator's log retention; the server cannot recall them. Recorded as a
+userId and device id (never the email). Those copies follow the operator's log retention; the server cannot recall them. Recorded as a
 residual (spec 05 R19).
 
 ## 10. Spec conflicts and how they are resolved
@@ -377,7 +394,8 @@ the household's vault and its members untouched, every token dead, the vaultId n
 again as a new account with a new salt); both refusal kinds, their audit rows and their resolutions (transfer, delete,
 a second admin; the only account deleting itself); the gate (typed email, a wrong proof, TOTP before the password, a
 replayed code after a refused attempt, the hourly bucket, the break-glass origin); the WebSocket `revoked` frame and the
-co-member's bell; the offer clear; the pseudonymised trail and its 90-day purge; the straggler belt; invites; the
+co-member's bell; the offer clear; the pseudonymised trail and its 90-day purge; the device-id pseudonyms (another
+account's device left alone); the straggler belt; an admin screen's stale ids not written back; invites; the
 audit-type classification tripwire; and the races — a share, a push + upload and a password change landing between the
 gate and the transaction, plus pushes, pulls and a second deletion racing for real. Web (vitest): the client methods and
 their wire shapes, the blocked-response parsing, the flow logic and error sentences, the card's static render, the local

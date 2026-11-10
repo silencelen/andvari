@@ -555,8 +555,11 @@ strips them degrades every client to the poll path (correct, just slower).
 - `POST /admin/users/{id}/disable` — disables the account + revokes its sessions.
   Refuses with `400 last_admin` if the target is the only ACTIVE admin (an
   instance-wide lockout, recoverable only by DB surgery) and `400 no_such_user` for an
-  unknown target; both refusals are audited (`user_disable_denied`). `POST
-  /admin/devices/{id}/revoke`, `GET /admin/users/{id}/devices` — per-user device list
+  unknown target; both refusals are audited (`user_disable_denied`, meta `<userId>/last_admin`
+  or `no_such_user` — an id that names no account is never written, as it may be a deleted
+  account's, §13). `POST /admin/devices/{id}/revoke` (an unknown id → `404 no_such_device`,
+  audited `device_revoke_denied` with no deviceId, for the same reason), `GET
+  /admin/users/{id}/devices` — per-user device list
   (feeds the revocation UI). Each row carries, beside the device's own fields,
   **`live: Boolean`** and **`signedOutAt: Long?`** (both additive — an older client
   decodes the object unchanged). "Live" is **derived**, not a column: the device is not
@@ -578,7 +581,8 @@ strips them degrades every client to the poll path (correct, just slower).
   other admin call — audit type **`escrow_admin_read`**, `userId` = the admin, `meta` =
   the target user id (audit H61: the route shipped for the web admin's "Download backstop
   key" without a row, so a hijacked admin session could pull every member's blob and leave
-  no trail).
+  no trail), or `no_such_user` when no account has that id — checked in the transaction
+  that writes the row, so a deleted account's id (§13) is never written back.
 - `POST /admin/escrow/drill { passed: [{ userId, sealedSha256 }] }` → `{ dropped: [userId],
   kept: [userId] }` (admin; ≤ 1000 rows; rate-bucketed per admin) — the escrow drill hook
   (spec 04 §4): for each row whose account's CURRENT escrow blob hashes (hex SHA-256 of the
@@ -1033,14 +1037,16 @@ table, `retired_ids` (below; spec 02 §5).
     cleared) — a `vaultId` is still never recycled.
   - **Memberships elsewhere are dropped as a leave would**: the account's grant rows go (spec 02 §7's grant-retention
     rule excepts a deleted account's own rows, which reference the deleted user row); the items it wrote there stay. A
-    transfer offer naming the account is cleared, with a vault rev bump (audited `vault_transfer_cancel`, userId null,
-    meta `<vaultId>:target_deleted`). Co-members get a `rev` bell.
+    transfer offer naming the account is cleared, with a vault rev bump (audited `vault_transfer_cancel`, userId and ip
+    null — the row is the vault's history and outlives the 90 days below —, meta `<vaultId>:target_deleted`). Co-members
+    get a `rev` bell.
   - The account's `escrow`, retained `escrow_legacy`, `member_recovery`, `usage_ledger`, `account_state` and
     `personal_wrap` rows are deleted: neither recovery path (spec 04) survives a deletion.
   - Every invite row naming the account's address (pending or used) and every unused invite it minted as an admin
     (identified through its own `invite_create` rows) is deleted, and `vaults.deletedBy` is cleared wherever it still
     names the account (a vault it deleted that was purged before, or one it deleted, restored and handed over): after the
-    deletion no column of the database holds the account's userId or address.
+    deletion no column of the database holds the account's userId, its address or the id of any of its devices (audit,
+    below).
   - The user row goes last. The address can then register again, through a new invite, as a **new account** — new
     userId, new keys, an empty vault; nothing of the old one is reachable from it. Lookups of the old account answer
     `404 no_such_user`.
@@ -1062,11 +1068,18 @@ table, `retired_ids` (below; spec 02 §5).
   vault's trash, a file it uploaded there, the history of a vault it handed over: the data is still there, and so is the
   record of who touched it — and deleted when the vault is one this deletion purges (`VAULT_SCOPED_AUDIT_TYPES`). Its
   lookups and recovery-capture confirmations are deleted. The userId is replaced by the pseudonym in every other
-  account's row that names it in meta, and those rows keep the ordinary retention. The deletion's own row is
-  `account_delete` (userId = the pseudonym, meta `vaults=N,left=M`). The janitor deletes every row under a pseudonym
-  **90 days after that account's deletion** (the `account_delete` row is the clock); the ordinary rule deletes audit rows
-  365 days after they were written. A row a racing request writes after the deletion naming the gone userId is stored
-  without it (userId null, meta prefixed `deleted_account`). No audit row carries an email (spec 02 §5).
+  account's row that names it in meta, and those rows keep the ordinary retention. Each of the account's device ids
+  (its rows in `devices`) is replaced, in every row naming it — its own and other accounts', such as an admin's
+  `device_revoke` —, by a fresh random id of its own, the same in each row, so a kept record still shows which events
+  came from one device; a device id in the account's rows that names ANOTHER account's device (a revocation it made as
+  an admin) is left alone. The deletion's own row is `account_delete` (userId = the pseudonym, deviceId = the deleting
+  device's new id, meta `vaults=N,left=M`). The janitor deletes every row under a pseudonym **90 days after that
+  account's deletion** (the `account_delete` row is the clock); the ordinary rule deletes audit rows 365 days after they
+  were written. A row a racing request writes after the deletion naming the gone userId is stored without anything that
+  names the account (userId, deviceId and ip null, meta prefixed `deleted_account`), and an admin route given an id that
+  names no account or device records the attempt without the id (`escrow_admin_read`, `user_disable_denied`,
+  `device_revoke_denied`), so a screen opened before the deletion does not write a deleted id back. No audit row
+  carries an email (spec 02 §5).
 
   **Rate limit:** `account_delete:{userId}`, 5 per hour (each attempt is a memory-hard verify, and each reauth route is
   another password guess for a session holder); a request carrying a code also draws on `totp_verify:{userId}` (§2).

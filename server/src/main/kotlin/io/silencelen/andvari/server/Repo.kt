@@ -572,14 +572,18 @@ class Repo(val db: Db) {
     // deletion pseudonymises the account's audit trail inside its own tx, but a request that authenticated BEFORE that
     // tx committed (a push queued behind the lock, a sign-out racing it) still reaches this method afterwards with the
     // raw userId — and would write it back into the trail the deletion just scrubbed, where the 90-day purge never
-    // finds it. Such a row is kept (it is still a security event) without the id: userId NULL and meta prefixed
-    // [DELETED_ACCOUNT_META]. One PK lookup per audit row; every live caller names an existing user or none.
+    // finds it. Such a row is kept (it is still a security event) without anything that names the account: userId,
+    // deviceId and ip NULL (the device is one the deletion pseudonymised, and the row outlives the 90 days the
+    // deletion's own rows keep an address), meta prefixed [DELETED_ACCOUNT_META]. One PK lookup per audit row; every
+    // live caller names an existing user or none.
     fun auditOn(c: Connection, type: String, userId: String?, deviceId: String?, ip: String?, meta: String? = null) {
         val gone = userId != null && c.queryOne("SELECT 1 FROM users WHERE userId=?", userId) { 1 } == null
         val uid = if (gone) null else userId
+        val dev = if (gone) null else deviceId
+        val addr = if (gone) null else ip
         val m = if (!gone) meta else if (meta == null) DELETED_ACCOUNT_META else "$DELETED_ACCOUNT_META:$meta"
-        c.exec("INSERT INTO audit(at,type,userId,deviceId,ip,meta) VALUES(?,?,?,?,?,?)", now(), type, uid, deviceId, ip, m)
-        AuditLog.log(type, uid, deviceId, ip, m)
+        c.exec("INSERT INTO audit(at,type,userId,deviceId,ip,meta) VALUES(?,?,?,?,?,?)", now(), type, uid, dev, addr, m)
+        AuditLog.log(type, uid, dev, addr, m)
     }
 
     /** The ONE writer of a row whose userId names no user: account deletion's own `account_delete` row, under the
