@@ -8,8 +8,6 @@ import androidx.compose.runtime.setValue
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
@@ -87,7 +85,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -661,22 +658,12 @@ class AndvariViewModel(
         super.onCleared()
     }
 
-    /** §4.2 layout: `<noBackup>/ns/<originKey>/<userId>/vault-<userId>.db` (userId fragment
-     *  path-safe-laundered — it is server-supplied). Writers mkdirs at the use site. */
-    private fun cacheFile(originKey: String, userId: String) =
-        File(OriginNamespace.dir(cacheDir, originKey, userId), "vault-${OriginNamespace.pathSafe(userId)}.db")
-
     private fun deleteCache(originKey: String, userId: String) {
         OfflineData.deleteVaultCache(cacheDir, originKey, userId)
     }
 
-    /** Live policy if known, else the persisted last-known value (offline cold start). */
-    private fun cacheAllowed(): Boolean = _ui.value.policy?.offlineCacheAllowed ?: store.cacheAllowed
-
-    /** Persist accountKeys for offline unlock ONLY when the policy permits it (spec 02 §8). */
-    private fun persistAccountKeys(keys: io.silencelen.andvari.core.model.AccountKeys) {
-        if (cacheAllowed()) store.saveAccountKeys(keys) else store.clearAccountKeys()
-    }
+    // The cache rule (the live policy if known, else the persisted last-known value) and the offline copy of
+    // the account keys are core's now: PolicyCoordinator.cacheAllowed and SessionBinder.persistAccountKeys.
 
     /**
      * Enforce offlineCacheAllowed=false (policy flip): drop the vault DB, cached keys AND the
@@ -685,10 +672,11 @@ class AndvariViewModel(
      * §4.2 (design 2026-07-15, B2-3): [originKey] is the namespace of the origin whose POLICY
      * VERDICT is being enforced — captured by the caller beside its probe, BEFORE any await, so
      * a verdict landing after a racing setBaseUrl still purges the origin it came from and a
-     * probe of server B can never touch server A's namespace.
+     * probe of server B can never touch server A's namespace. The rules are core's
+     * [PolicyCoordinator.purgeForbidden]; with a live engine the cache file goes when it closes.
      */
     private fun purgeOfflineData(originKey: String, userId: String) {
-        OfflineData.purgeCacheForbidden(cacheDir, store, originKey, userId)
+        coordinator.purgeForbidden(originKey, userId)
     }
 
     /**
@@ -715,16 +703,14 @@ class AndvariViewModel(
     }
 
     private fun refreshQuickUnlockState() {
-        val userId = store.load()?.userId
-        val eligible = QuickUnlock.isEligible(appContext, store)
-        val enrolled = userId != null && QuickUnlock.isEnrolled(cacheDir, store.currentOriginKey(), userId)
-        val fresh = enrolled && userId != null && QuickUnlock.isFresh(store, userId)
+        // Survey gap 6: the gates the ladder itself enforces before any prompt ([UnlockLadder.quickStatus]).
+        val q = ladder.quickStatus(store.load()?.userId)
         _ui.value = _ui.value.copy(
-            quickUnlockEligible = eligible,
-            quickUnlockEnrolled = enrolled,
-            quickUnlockFresh = fresh,
+            quickUnlockEligible = q.eligible,
+            quickUnlockEnrolled = q.enrolled,
+            quickUnlockFresh = q.fresh,
             // Post-unlock one-time offer card: only while an unlocked session exists.
-            quickUnlockOffer = eligible && !enrolled && !store.quickUnlockOfferDismissed && VaultSession.get() != null,
+            quickUnlockOffer = q.eligible && !q.enrolled && !store.quickUnlockOfferDismissed && VaultSession.get() != null,
         )
     }
 
@@ -795,74 +781,35 @@ class AndvariViewModel(
     }
 
     /**
-     * Quick unlock from the Unlock screen: recover the UVK behind BiometricPrompt, then unlock via
-     * the UVK path. Same token/mutex skeleton as [unlock] minus the KDF/stamp (a quick unlock is
-     * never a full-password unlock, A1/§7). identityPub verification still runs inside
-     * `Account.unlockWithUvk` — a mismatch hard-fails; a stale/foreign UVK wipes the blob (§5).
+     * Quick unlock from the Unlock screen: the shared ladder ([UnlockLadder.unlockWithQuick]) checks the
+     * gates, shows BiometricPrompt and unlocks via the UVK path, with the same mutex and token rules as
+     * [unlock] minus the KDF and the stamp (a quick unlock is never a full-password unlock, A1/§7).
+     * identityPub verification still runs inside `Account.unlockWithUvk`: a mismatch hard-fails; a stale or
+     * foreign UVK wipes the enrollment (§5). This maps what it came to onto the screen.
      */
-    fun unlockWithBiometric(activity: FragmentActivity) = op {
+    fun unlockWithBiometric(activity: FragmentActivity) = op(timeoutMs = null) { // H10: the ladder bounds each server leg, past the prompt, which waits on a person
         val session = store.load() ?: throw IllegalStateException("no session")
-        if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) { // A14 (F8)
-            _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
-            return@op
-        }
-        val userId = session.userId
-        val originKey = store.currentOriginKey() // §4.2: this unlock's namespace, captured before any await
-        val uvk = when (val r = QuickUnlock.recoverUvk(activity, cacheDir, originKey, userId)) {
-            is QuickUnlock.Recover.Ok -> r.uvk
-            is QuickUnlock.Recover.Fallback -> { _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
-            is QuickUnlock.Recover.Wiped -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
-        }
-        VaultSession.unlockMutex.withLock {
-            VaultSession.get()?.let { toVault(); return@op } // adopt a winner instead of a 2nd holder
-            val a = newApi(session.tokens())
-            val keys = try {
-                a.accountKeys().also { persistAccountKeys(it) }
-            } catch (e: IOException) {
-                store.loadAccountKeys() ?: run { a.close(); throw e }
-            } catch (e: ApiException) {
-                a.close()
-                // F26: a definitive rejection is a session-end — explain it on the Unlock
-                // surface (B6: a dead token is a plain 401 here; there is no revoked variant).
-                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, originKey, userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
-                throw e
-            } catch (t: Throwable) { a.close(); throw t }
-            val acct = try {
-                withContext(Dispatchers.Default) { Account.unlockWithUvk(userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(session.email, userId)) }
-                    .also { store.recordSelfIdentityPub(userId, session.email, it) }
-            } catch (t: Throwable) {
-                a.close()
-                // §5: seed won't open under the recovered UVK → wipe (stale/foreign); an identityPub
-                // MISMATCH is a security fault — keep the blob (evidence) and hard-fail.
-                if (t is CryptoException && t.message?.contains("identity key mismatch") != true) QuickUnlock.wipe(cacheDir, originKey, userId)
-                throw t
-            }
-            try {
-                bind(a, acct, VaultSession.UnlockProvenance.QUICK)
-                _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
-            } catch (t: Throwable) {
-                if (VaultSession.get()?.api !== a) a.close()
-                throw t
+        when (val r = ladder.unlockWithQuick(session, ActivityHost(activity), UnlockOptions(firstSync = { syncNow(it) }))) {
+            is UnlockResult.Elsewhere -> _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(r.sessionOrigin)) // A14 (F8)
+            // Gap 6: a gate refused it before any prompt (the screen offered the button from older flags).
+            is UnlockResult.QuickUnavailable -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false) }
+            is UnlockResult.QuickFallback -> _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason)
+            is UnlockResult.QuickWiped -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason) }
+            is UnlockResult.Adopted -> toVault() // another unlock won the mutex: land on its session
+            // F26: a definitive rejection is a session-end — explain it on the Unlock surface (B6: a dead
+            // token is a plain 401 here; there is no revoked variant). The ladder purged the namespace.
+            is UnlockResult.Revoked -> { _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED); throw r.cause }
+            is UnlockResult.Failed -> throw r.cause
+            UnlockResult.EndedBeforeLanding -> sessionEndedBeforeLanding()
+            is UnlockResult.Unlocked -> {
+                _ui.value = _ui.value.copy(escrowStale = r.keys.escrowStale, escrowFingerprint = r.keys.escrowFingerprint)
+                refreshQuickUnlockState()
+                toVault()
+                showFirstSync(r.firstSync)
             }
         }
-        runCatching { syncNow(engine!!) }.onFailure {
-            if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
-            else throw it
-        }
-        refreshQuickUnlockState()
-        toVault()
     }
 
-    /**
-     * Record a freshly-fetched policy everywhere it's enforced: UI state, the persisted
-     * offline fallbacks, and the process-wide auto-lock gate (shared with autofill).
-     *
-     * [originKey] is REQUIRED (§4.2): the persisted mirrors are per-origin, and every caller
-     * captures the key of the origin it PROBED beside the probe itself (before any await) — a
-     * probe result landing after a racing setBaseUrl still files under the origin it came from,
-     * never under whatever happens to be current. The timer window is CLAMPED (§2.3/B1-1)
-     * before it is persisted or armed — a hostile server cannot disable or stretch auto-lock.
-     */
     // Security review 2026-10 (A12, row 80 — the desktop shape exists here too): every policy reply
     // must belong to the origin the app dials NOW and to the visit it was started in. A late reply
     // from an abandoned origin used to land in the single in-memory policy and the process-wide
@@ -871,25 +818,35 @@ class AndvariViewModel(
     private val probeFence = OriginProbeFence()
     private var probeJob: Job? = null
 
+    /** The shared policy and purge rules (see [PolicyCoordinator]). Holds [probeFence] itself so its
+     *  checks and the ones this class makes for sign-in and enroll are one fence. */
+    private val coordinator = PolicyCoordinator(store, AndroidOfflineArtifacts(cacheDir), VaultSession, AndroidClocks, probeFence) {
+        viewModelScope.launch { checkIdleLock() } // the rejection is recorded on VaultSession; land it now rather than at the next tick
+    }
+
+    /** The shared session clients and the manual server switch with its policy probe (core). */
+    private val clients = SessionClients(AndroidHttpClients, store, coordinator)
+    private val serverSwitch = ServerSwitch(store, VaultSession, coordinator, clients, CLEARTEXT_EXEMPT_HOSTS)
+
+    /** The shared bind and the one unlock ladder (core): [unlock] and [unlockWithBiometric] climb it, as the
+     *  autofill overlay does; sign-in and enroll bind through [binder]. */
+    private val binder = SessionBinder(store, VaultSession, coordinator, AndroidNamespaceStorage(cacheDir), AndroidClocks)
+    private val ladder = UnlockLadder(store, VaultSession, coordinator, clients, binder, AndroidQuickUnlockKeys(appContext, cacheDir), AndroidClocks)
+
+    /** Sign-in and same-origin enroll, and the §F.9 recovery capture (core): this maps what they come to onto the screen. */
+    private val entry = SessionEntry(store, VaultSession, coordinator, clients, binder)
+    private val capture = RecoveryCapture(VaultSession)
+
     /** A12 (row 80): one policy fetch under a whole-call bound (a timeout reads as unreachable). */
-    private suspend fun boundedPolicy(probe: AndvariApi): ClientPolicy =
-        withTimeoutOrNull(POLICY_PROBE_TIMEOUT_MS) { probe.clientPolicy() }
-            ?: throw java.io.InterruptedIOException("policy probe timed out")
+    private suspend fun boundedPolicy(probe: AndvariApi): ClientPolicy = coordinator.boundedPolicy(probe)
 
     /** A12 (row 80): the probe tagged at launch is still the current origin's current visit. */
-    private fun probeIsCurrent(tag: OriginProbeFence.Tag): Boolean = probeFence.isCurrent(tag, store.currentOriginKey())
+    private fun probeIsCurrent(tag: OriginProbeFence.Tag): Boolean = coordinator.probeIsCurrent(tag)
 
-    /** Returns false (and writes NOTHING) when [tag] is stale — A12 (row 80). */
+    /** Mirrors the policy (see [PolicyCoordinator.applyPolicy]) and into UI state; false, with NOTHING written, when [tag] is stale — A12 (row 80). */
     private fun applyPolicy(p: ClientPolicy, tag: OriginProbeFence.Tag): Boolean {
-        if (!probeIsCurrent(tag)) return false
-        val originKey = tag.originKey
+        if (!coordinator.applyPolicy(p, tag)) return false
         _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
-        store.setCacheAllowed(originKey, p.offlineCacheAllowed)
-        val autoLock = clampAutoLockSeconds(p.autoLockSeconds) // B1-1: [floor, AUTO_LOCK_MAX_SECONDS]
-        store.setAutoLockSeconds(originKey, autoLock)
-        store.setPolicyFetchedAt(originKey, System.currentTimeMillis()) // A4: quick-unlock eligibility freshness
-        store.bumpServerTimeFloor(originKey, p.serverTime) // A2 (review [2]): the one clock the holder cannot set — per-origin
-        VaultSession.setAutoLockSeconds(autoLock)
         return true
     }
 
@@ -1003,8 +960,13 @@ class AndvariViewModel(
 
     private fun needsUpdate(): Int = engine?.needsUpdateCount() ?: 0
 
-    private fun newApi(tokens: Tokens? = null, origin: String = store.baseUrl): AndvariApi =
-        AndvariApi(origin, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
+    private fun newApi(tokens: Tokens? = null, origin: String = store.baseUrl, owner: TokenOwner = tokenOwnerFor(tokens, origin)): AndvariApi =
+        AndvariApi(origin, androidHttpClient(), tokens, { store.updateTokensFor(owner, it) }, onSessionRejected = coordinator::onRefreshRefused) // platform defaults to "android"
+
+    /** The stored session a client built from [tokens] writes its rotations into: the one holding those
+     *  tokens. A tokenless client (a probe, or a sign-in before its commit) writes into none. */
+    private fun tokenOwnerFor(tokens: Tokens?, origin: String): TokenOwner =
+        TokenOwner(origin, tokens?.let { t -> store.load()?.takeIf { it.tokens() == t }?.userId }, heldRefreshToken = tokens?.refreshToken)
 
     fun start() {
         viewModelScope.launch {
@@ -1025,28 +987,15 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), baseUrl = store.baseUrl)
             }
             val session = store.load()
-            // §4.2: capture the PROBED origin's key beside the probe (newApi() reads the same
-            // baseUrl) — the async verdict below purges/persists under THIS key, so a racing
-            // setBaseUrl can never redirect it onto another origin's namespace.
-            val originKey = store.currentOriginKey()
-            val tag = probeFence.tag(originKey) // A12 (row 80): this visit's probe, tagged before the await
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { boundedPolicy(probe) }
-                    .onSuccess { p ->
-                        // UI state + persisted fallbacks + auto-lock gate — only if still current.
-                        if (!applyPolicy(p, tag)) return@onSuccess
-                        // Policy may forbid the durable cache; honor it the moment we learn it,
-                        // deleting any existing file (spec 02 §8) — but only when no live engine holds
-                        // it (when bound, a later lock/rebind enforces the purge safely). Scoped to
-                        // the probed origin's namespace ONLY (§4.2).
-                        if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(originKey, session.userId)
-                    }
-                    // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
-                    // honestly (the policy itself stays last-known for the offline gates).
-                    .onFailure { if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policyFetchFailed = true) }
-            } finally {
-                probe.close()
+            // The shared probe (core ServerSwitch.probePolicy): tagged before the await, applied only if
+            // still current (A12 row 80), and a forbidding answer purges the probed origin's namespace,
+            // the live-engine case included (the file goes when the engine closes; spec 02 §8, §4.2).
+            when (val probed = serverSwitch.probePolicy()) {
+                is PolicyProbe.Applied -> showPolicy(probed.policy)
+                // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
+                // honestly (the policy itself stays last-known for the offline gates).
+                is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policyFetchFailed = true)
+                PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
             }
             if (!bound) {
                 _ui.value = _ui.value.copy(
@@ -1061,19 +1010,16 @@ class AndvariViewModel(
     }
 
     fun setBaseUrl(url: String) {
-        val newUrl = url.trim().removeSuffix("/")
-        // §4.1 rule 1 (B1-5 — HARD MUST): a REAL origin change drops the old origin's access+refresh
-        // tokens and in-memory unlock state BEFORE the probe below fires, so the client rebuilt for
-        // the new origin (newApi() reads the just-changed baseUrl) can never replay the old bearer
-        // token — no `Authorization` header crosses a baseUrl change ([inheritedTokensAcrossSwitch]).
-        // A no-op canonical re-entry keeps the session. Old-origin NAMESPACED material (cached keys,
-        // vault cache, quick-unlock) is PRESERVED (§4.2/B2-7 — a switch is not a wipe); only the
-        // single global session slot is cleared, via [SessionStore.clearSessionTokens].
-        val drop = switchDropsSession(store.baseUrl, newUrl)
-        store.baseUrl = newUrl
+        afterOriginMove(serverSwitch.moveTo(url.trim().removeSuffix("/")))
+    }
+
+    /**
+     * The UI half of an origin move (core [ServerSwitch.moveTo] did the rest: §4.1 rule 1's session drop,
+     * tokens before origin, and the stale fence). A dropped session's in-flight secrets die with it; then
+     * the new origin's policy is probed so the recovery fingerprint and the pins update at once.
+     */
+    private fun afterOriginMove(drop: Boolean) {
         if (drop) {
-            VaultSession.lock() // close the old origin's api/engine before any request goes to the new one
-            store.clearSessionTokens()
             // In-flight secret material belongs to the old origin's session — it must not survive
             // into the new one (mirrors lock()/signOut()'s zeroize discipline).
             zeroPendingRecovery(); zeroPendingRecover(); pendingCaptureAuthKey = null
@@ -1091,39 +1037,27 @@ class AndvariViewModel(
             mustChangePassword = if (drop) false else _ui.value.mustChangePassword,
         )
         // Re-fetch policy against the new server so the recovery fingerprint / pins update
-        // immediately (no app restart needed).
-        // §4.2 — THE call site the namespacing exists for: this probes the JUST-SET origin, so
-        // a forbidding answer purges the NEW origin's (empty) namespace and can no longer
-        // destroy the previous server's offline data + account keys. The key is captured here,
-        // synchronously with the baseUrl write, so a second setBaseUrl racing this in-flight
-        // probe still lands the verdict on the origin that produced it.
-        val originKey = store.currentOriginKey()
-        // A12 (row 80): every earlier probe — above all one still in flight against the origin
-        // just left — is stale from here on, and the in-flight one is cancelled.
-        probeFence.advance()
+        // immediately (no app restart needed). §4.2 — THE call site the namespacing exists for: this
+        // probes the JUST-SET origin, so a forbidding answer purges the NEW origin's (empty) namespace
+        // and can no longer destroy the previous server's offline data + account keys. A12 (row 80):
+        // the move made every earlier probe stale; the one still in flight against the origin just
+        // left is cancelled too.
         probeJob?.cancel()
-        val tag = probeFence.tag(originKey)
         probeJob = viewModelScope.launch {
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { boundedPolicy(probe) }
-                    .onSuccess { p ->
-                        if (!applyPolicy(p, tag)) return@onSuccess
-                        // Same policy enforcement as start(): a forbidding server purges ITS OWN
-                        // namespace for the stored session's user — never another origin's.
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
-                    }
-                    // A deliberate URL change invalidates the old server's policy (null stays
-                    // right) — and the probe against the NEW one failed, so say so (N2 §3);
-                    // Welcome must never claim the new server has no recovery key.
-                    .onFailure {
-                        if (it is kotlinx.coroutines.CancellationException) throw it
-                        if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
-                    }
-            } finally {
-                probe.close()
+            when (val probed = serverSwitch.probePolicy()) {
+                is PolicyProbe.Applied -> showPolicy(probed.policy)
+                // A deliberate URL change invalidates the old server's policy (null stays right) — and
+                // the probe against the NEW one failed, so say so (N2 §3); Welcome must never claim the
+                // new server has no recovery key.
+                is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
+                PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
             }
         }
+    }
+
+    /** A probe's policy, into UI state (core already applied it where it is enforced). */
+    private fun showPolicy(p: ClientPolicy) {
+        _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
     }
 
     // ---- Wave-3 endpoint switch + anti-phishing trust gate (design 2026-07-15 §4) ----
@@ -1136,15 +1070,14 @@ class AndvariViewModel(
         // (`https://real.host@evil.example` shows a reassuring host while the HTTP stack dials evil.example
         // → authKey phishing on the next sign-in). canonicalServerOrigin returns the bare canonical origin
         // the gate shows AND dials, or null to refuse.
-        val target = OriginNamespace.canonicalServerOrigin(url)
-        if (target == null) {
-            _ui.value = _ui.value.copy(error = "Enter a server address like https://example.org — no username, path, or query.")
-            return
+        when (val address = serverSwitch.prepare(url)) {
+            ServerAddress.Invalid ->
+                _ui.value = _ui.value.copy(error = "Enter a server address like https://example.org — no username, path, or query.")
+            is ServerAddress.Current -> setBaseUrl(address.origin)
+            is ServerAddress.NeedsGate -> _ui.value = _ui.value.copy(
+                trustGate = TrustGatePrompt(address.render, enrollment = false, action = TrustGateAction.ManualSwitch(address.origin)),
+            )
         }
-        if (!switchDropsSession(store.baseUrl, target)) { setBaseUrl(target); return }
-        _ui.value = _ui.value.copy(
-            trustGate = TrustGatePrompt(trustGateRender(target), enrollment = false, action = TrustGateAction.ManualSwitch(target)),
-        )
     }
 
     /** A foreign-origin enroll link was entered (design §4.4): show the Trust Gate (ENROLLMENT
@@ -1213,24 +1146,14 @@ class AndvariViewModel(
     private fun commitManualSwitch(target: String) {
         _ui.value = _ui.value.copy(trustGate = null, busy = true, error = null)
         viewModelScope.launch {
-            val probe = AndvariApi(target, HttpClient(OkHttp))
-            // try/catch rather than runCatching: a cancelled scope (the activity going away
-            // mid-probe) must NOT read as a probe verdict and commit a switch on the way out.
-            val failure = try {
-                probe.clientPolicy()
-                null
-            } catch (c: kotlinx.coroutines.CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                t
-            } finally {
-                probe.close()
-            }
-            if (switchProbeReachable(failure)) {
-                _ui.value = _ui.value.copy(busy = false)
-                setBaseUrl(target) // unchanged from here: drop tokens, re-probe, land on Welcome
-            } else {
-                fail(failure!!) // session, unlock state and old origin all intact
+            // Core ServerSwitch.connect: a tokenless, bounded probe (H10: busy is held across it), and
+            // only a target that answered becomes the origin.
+            when (val r = serverSwitch.connect(target)) {
+                is SwitchResult.Switched -> {
+                    _ui.value = _ui.value.copy(busy = false)
+                    afterOriginMove(r.droppedSession) // drop tokens, re-probe, land on Welcome
+                }
+                is SwitchResult.Unreachable -> fail(r.cause) // session, unlock state and old origin all intact
             }
         }
     }
@@ -1286,19 +1209,14 @@ class AndvariViewModel(
     fun retryPolicy() {
         if (_ui.value.busy) return
         _ui.value = _ui.value.copy(busy = true)
-        val originKey = store.currentOriginKey() // §4.2: captured beside the probe it scopes
-        val tag = probeFence.tag(originKey) // A12 (row 80)
         viewModelScope.launch {
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { boundedPolicy(probe) }
-                    .onSuccess { p ->
-                        if (!applyPolicy(p, tag)) return@onSuccess
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
-                    }
-                    .onFailure { if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policyFetchFailed = true) }
+            try {
+                when (val probed = serverSwitch.probePolicy()) { // core: tagged, fenced, purges a forbidding origin
+                    is PolicyProbe.Applied -> showPolicy(probed.policy)
+                    is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policyFetchFailed = true)
+                    PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
+                }
             } finally {
-                probe.close()
                 _ui.value = _ui.value.copy(busy = false)
             }
         }
@@ -1382,181 +1300,95 @@ class AndvariViewModel(
 
     fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
-    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
-        // §4.3 B2-6 (sink guard — the authoritative backstop for the pending-state sign-in lockout):
-        // an uncommitted pendingServer marker means store.baseUrl is OPTIMISTICALLY pointed at an
-        // unverified invite origin (enroll-success is what clears the marker). Deriving a master-password
-        // authKey (prelogin salt + deriveAuthKey below) against that origin is exactly the offline-crack
-        // leak B2-6 exists to stop. The UI hides sign-in in the pending/reconcile states, but this backstops
-        // ANY path that leaves the marker set with the controls re-exposed (e.g. reconcile Finish→Cancel) —
-        // route back to the reconcile choice instead of signing in against the foreign origin.
-        store.pendingServer?.let {
-            _ui.value = _ui.value.copy(busy = false, pendingReconcile = it, error = null)
-            return@op
-        }
-        // A14 review N4: the origin and probe generation this sign-in's client is bound to, captured with
-        // the client (as enrollOp does). login() answers whoever this client dialed; the session is saved
-        // under THAT origin, and only while nothing moved the app away from it meanwhile.
-        val opOrigin = store.baseUrl
-        val opTag = probeFence.tag(store.currentOriginKey())
-        val a = newApi(origin = opOrigin)
-        try {
-            val pre = a.prelogin(email)
-            // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
-            val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
-            val s = try {
-                a.login(LoginRequest(email, authKey, Account.deviceInfo(android.os.Build.MODEL ?: "android"), totp = totp))
-            } catch (e: ApiException) {
-                when (e.code) {
-                    "totp_required", "bad_totp_code" -> {
-                        a.close()
-                        _ui.value = _ui.value.copy(
-                            busy = false,
-                            loginTotpRequired = true,
-                            // ux-copy--7: the wrong-code half re-minted its own shorter sentence
-                            // beside the canon constant that exists to unify exactly it (see
-                            // HouseholdCopy.BAD_TOTP_CODE's own KDoc — "unifying android's shorter
-                            // variant"). Reference it. The FIRST line stays surface-local: this is
-                            // the control-flow reveal of the code field, not the error slot
-                            // TOTP_CODE_NEEDED is the fallback for.
-                            error = if (totp == null) "Enter the 6-digit code from your authenticator." else HouseholdCopy.BAD_TOTP_CODE,
-                        )
-                        return@op
-                    }
-                    // #23: public_login_requires_totp no longer needs a re-minted message —
-                    // op's forSignInError mapper carries the canonical break-glass sentence.
-                    else -> throw e
-                }
-            }
-            // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
-            val acct = withContext(Dispatchers.Default) { Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.selfIdentityPub(email, s.userId)) }
-            // A14 review N4, second layer: if the app was moved while login and the KDF ran, these tokens
-            // are not for the origin it now dials. Do not commit: revoke them at the origin that issued
-            // them (this client's own), drop them, and say so. (No pending switch existed at the start.)
-            if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey()))) {
-                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
-                a.close()
-                _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(opOrigin))
+    // H10: no whole-op bound. Each call that waits on the server is bounded on its own up to the bind (core
+    // [SessionEntry.signIn]), the KDF runs to completion either way, and past the bind the session is live, so the
+    // user lands whatever happens.
+    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }, timeoutMs = null) {
+        val r = when (val outcome = entry.signIn(email, password, totp, firstSync = { syncNow(it) })) {
+            is SignInResult.SignedIn -> outcome
+            // §4.3 B2-6 (sink guard): an uncommitted pendingServer marker means the app is OPTIMISTICALLY pointed at
+            // an unverified invite origin. The UI hides sign-in in the pending/reconcile states, but this backstops
+            // ANY path that leaves the marker set with the controls re-exposed (e.g. reconcile Finish→Cancel) — route
+            // back to the reconcile choice instead of signing in against the foreign origin.
+            is SignInResult.PendingSwitch -> { _ui.value = _ui.value.copy(busy = false, pendingReconcile = outcome.pending, error = null); return@op }
+            is SignInResult.TotpRequired -> {
+                _ui.value = _ui.value.copy(
+                    busy = false,
+                    loginTotpRequired = true,
+                    // ux-copy--7: the wrong-code half references the canon constant that exists to unify it (see
+                    // HouseholdCopy.BAD_TOTP_CODE's own KDoc). The FIRST line stays surface-local: this is the
+                    // control-flow reveal of the code field, not the error slot TOTP_CODE_NEEDED is the fallback for.
+                    error = if (outcome.codeWasWrong) HouseholdCopy.BAD_TOTP_CODE else "Enter the 6-digit code from your authenticator.",
+                )
                 return@op
             }
-            store.recordSelfIdentityPub(s.userId, email, acct)
-            store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
-            persistAccountKeys(s.accountKeys)
-            bind(a, acct)
-            // F58: a recovery TEMP password logs in with mustChangePassword=true — persist it
-            // (only a login/register response carries the flag) and raise the blocking banner.
-            store.mustChangePassword = s.mustChangePassword
-            _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowNeedsV2 = s.accountKeys.escrowNeedsV2, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
-            // A1: stamp the 30-day window on a real full-password unlock; A6/§7: F61 rides online.
-            store.stampFullPasswordUnlock(s.userId)
-            // §F.9 gate decision: the server says this account's recovery piece was never durably
-            // CONFIRMED — an interrupted reveal or a migration account.
-            val gate = s.accountKeys.recoveryConfirmed != true
-            // F61 re-key NEVER under a pending capture gate: the detached re-key rotates the login
-            // verifier, which would strand the gate's stashed reauth proof (PUT /recovery/self-setup
-            // re-verifies it) in a permanent 401 Retry loop. The rare upgrade defers to the next
-            // (confirmed) sign-in/unlock, like the quick-unlock defer (§F.3).
-            if (!gate) runKdfUpgrade(s.userId, password, s.accountKeys)
-            syncNow(engine!!)
-            // §F.9 vault-entry capture gate (desktop signIn / web SignIn parity): route into the
-            // capture flow INSTEAD of the vault; the login authKey derived above is the
-            // fresh-reauth proof PUT /recovery/self-setup requires.
-            if (gate) startRecoveryCapture(authKey) else toVault()
-        } catch (t: Throwable) {
-            // F74: no throw path (prelogin/KDF/login/Account.unlock) may leak the transient
-            // client. Once bind() succeeded the api is VaultSession-OWNED — never close it
-            // here (the success-path token-holder the live session uses).
-            if (VaultSession.get()?.api !== a) a.close()
-            throw t
+            // A14 review N4: the app moved while login and the KDF ran; the session was revoked where it was issued.
+            is SignInResult.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(outcome.origin)); return@op }
+            SignInResult.EndedBeforeLanding -> { sessionEndedBeforeLanding(); return@op }
+            // #23: public_login_requires_totp needs no re-minted message — op's forSignInError mapper carries the
+            // canonical break-glass sentence.
+            is SignInResult.Failed -> throw outcome.cause
         }
+        // §7.1: the evidence for re-offering quick unlock (a full-password sign-in with a session bound).
+        notePasswordUnlockForQuickUnlockOffer()
+        // F58: a recovery TEMP password raises the blocking banner (core persisted the flag).
+        _ui.value = _ui.value.copy(escrowStale = r.keys.escrowStale, escrowNeedsV2 = r.keys.escrowNeedsV2, escrowFingerprint = r.keys.escrowFingerprint, mustChangePassword = r.mustChangePassword)
+        // §F.9: the account's recovery piece was never durably CONFIRMED (an interrupted reveal or a migration
+        // account) when core hands over the capture proof — the login authKey, the fresh reauth PUT
+        // /recovery/self-setup requires.
+        val proof = r.captureProof
+        // F61 re-key NEVER under a pending capture gate: the detached re-key rotates the login verifier, which would
+        // strand the gate's stashed reauth proof in a permanent 401 Retry loop. The rare upgrade defers to the next
+        // (confirmed) sign-in/unlock, like the quick-unlock defer (§F.3).
+        if (proof == null) runKdfUpgrade(r.unlocked.account.userId, password, r.keys)
+        // §F.9 vault-entry capture gate (desktop signIn / web SignIn parity): route into the capture flow INSTEAD of
+        // the vault.
+        if (proof != null) startRecoveryCapture(proof) else toVault()
+        showFirstSync(r.firstSync)
     }
 
-    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError) {
+    // H10: no whole-op bound, as for signIn: the ladder bounds each server call, and past the bind the user lands.
+    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError, timeoutMs = null) {
         val session = store.load() ?: throw IllegalStateException("no session")
-        // A14 (F8): a stored session's tokens go only to its own origin — refuse, never "repair".
-        if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) {
-            _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
-            return@op
+        // The shared ladder ([UnlockLadder.unlockWithPassword]): the A14 origin check, the unlock mutex shared with
+        // the autofill unlock (both reuse this session's refresh token; a concurrent refresh would consume it twice
+        // and revoke the whole device), adopting a winner, the offline fallback to cached keys, the purge on a
+        // definitive rejection, the bind, the A1 stamp, and the bounded first sync outside the mutex.
+        val r = when (val climbed = ladder.unlockWithPassword(session, password, UnlockOptions(firstSync = { syncNow(it) }))) {
+            is UnlockResult.Unlocked -> climbed
+            is UnlockResult.Elsewhere -> { _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(climbed.sessionOrigin)); return@op }
+            is UnlockResult.Adopted -> { toVault(); return@op } // autofill (or another tap) unlocked while we waited
+            // Definitive rejection: this device's session is dead (e.g. the web password change revoked every
+            // other session, spec 03 §3); the ladder purged it, including the persisted F58 flag. Mirror the clear
+            // into UI state, and say WHY on the Unlock/sign-in surface (F26 session-end reason).
+            is UnlockResult.Revoked -> { _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED); throw climbed.cause }
+            is UnlockResult.Failed -> throw climbed.cause
+            UnlockResult.EndedBeforeLanding -> { sessionEndedBeforeLanding(); return@op }
+            is UnlockResult.QuickUnavailable, is UnlockResult.QuickFallback, is UnlockResult.QuickWiped -> error("not a password unlock outcome")
         }
-        val originKey = store.currentOriginKey() // §4.2: the server this unlock talks to
-
-        // §F.9: set when this unlock must land in the capture gate — the FRESH accountKeys said
-        // recoveryConfirmed=false. Decided inside the mutex (where the keys are in scope), acted
-        // on after the sync below; the gate's authKey derivation (an extra argon2id) deliberately
-        // runs OUTSIDE the mutex so the autofill unlock path is never serialized behind it.
-        var gateKeys: AccountKeys? = null
-        // Serialize with the autofill unlock path: both reuse this session's refresh token,
-        // and a concurrent refresh would consume it twice → whole-device revocation.
-        VaultSession.unlockMutex.withLock {
-            // If autofill (or another tap) already unlocked while we waited, adopt that
-            // session instead of building a second token-holder.
-            VaultSession.get()?.let { toVault(); return@op }
-            val a = newApi(session.tokens())
-            // Offline unlock (spec 02 §8): fall back to the cached accountKeys when the
-            // network is unreachable; a definitive auth rejection wipes the cache instead.
-            var online = false
-            val keys = try {
-                a.accountKeys().also { online = true; persistAccountKeys(it) }
-            } catch (e: IOException) {
-                store.loadAccountKeys() ?: run { a.close(); throw e }
-            } catch (e: ApiException) {
-                a.close()
-                // Definitive rejection: this device's session is dead (e.g. the web password
-                // change revoked every other session, spec 03 §3) — wipe it, including the
-                // persisted F58 flag (store.clear()); mirror the clear into UI state, and say
-                // WHY on the Unlock/sign-in surface (F26 session-end reason). §4.2: the 401
-                // came from THIS origin — only its namespace is purged.
-                if (e.status == 401) { purgeOfflineData(originKey, session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
-                throw e
-            } catch (t: Throwable) {
-                a.close(); throw t // F74: a generic throw must never leak the transient client
-            }
-            val acct = try {
-                // KDF off the Main thread (argon2id 64 MiB — the unlock spinner must animate).
-                withContext(Dispatchers.Default) { Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.email, session.userId)) }
-                    .also { store.recordSelfIdentityPub(session.userId, session.email, it) }
-            } catch (t: Throwable) { a.close(); throw t }
-            // F74 (review [1]): bind() itself can throw — sqliteVaultCache open + SyncEngine
-            // hydrate() do raw cache reads, and a corrupt vault-<userId>.db throws there. The
-            // ownership guard preserves the never-close-the-adopted-holder invariant: once
-            // VaultSession has adopted `a`, it owns it and lock() closes it.
-            try {
-                bind(a, acct)
-                _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowNeedsV2 = keys.escrowNeedsV2, escrowFingerprint = keys.escrowFingerprint)
-                // A1: stamp on EVERY full-password unlock, including offline ones.
-                store.stampFullPasswordUnlock(session.userId)
-                // §F.9 gate decision (desktop unlock parity): only FRESH keys may gate — an
-                // offline unlock (cached keys) deliberately skips it rather than stranding
-                // offline vault access behind an unreachable server (the self-setup PUT needs
-                // the network anyway); the flag re-gates the next online unlock.
-                if (online && keys.recoveryConfirmed != true) gateKeys = keys
-                // A6/§7: F61 re-key only when this unlock actually reached the server — and NEVER
-                // under a pending capture gate: the detached re-key rotates the login verifier,
-                // which would strand the gate's stashed reauth proof (self-setup re-verifies it)
-                // in a permanent 401 Retry loop. It defers to the next (confirmed) unlock.
-                if (online && gateKeys == null) runKdfUpgrade(session.userId, password, keys)
-            } catch (t: Throwable) {
-                if (VaultSession.get()?.api !== a) a.close()
-                throw t
-            }
-        }
-        // Tolerate an offline sync — hydrate() already populated the cached vault.
-        runCatching { syncNow(engine!!) }.onFailure {
-            if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
-            else throw it
-        }
-        // §F.9 vault-entry capture gate — see signIn. Unlock never derived a login authKey (it
-        // opens the UVK locally), so derive one ONLY when the gate actually fires: accountKeys'
-        // kdfSalt/kdfParams are the same user-row values prelogin serves, so this authKey verifies
-        // against the same server-side login verifier. One extra argon2id pass (off the Main
-        // thread), paid only on the rare unconfirmed path.
-        val gk = gateKeys
-        if (gk != null) {
+        val keys = r.keys
+        _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowNeedsV2 = keys.escrowNeedsV2, escrowFingerprint = keys.escrowFingerprint)
+        // §7.1: the evidence for re-offering quick unlock (a full-password unlock with a session bound).
+        notePasswordUnlockForQuickUnlockOffer()
+        // §F.9 gate decision (desktop unlock parity): only FRESH keys may gate — an offline unlock (cached keys)
+        // deliberately skips it rather than stranding offline vault access behind an unreachable server (the
+        // self-setup PUT needs the network anyway); the flag re-gates the next online unlock.
+        val gate = r.online && keys.recoveryConfirmed != true
+        // A6/§7: F61 re-key only when this unlock actually reached the server — and NEVER under a pending capture
+        // gate: the detached re-key rotates the login verifier, which would strand the gate's stashed reauth proof
+        // (self-setup re-verifies it) in a permanent 401 Retry loop. It defers to the next (confirmed) unlock.
+        if (r.online && !gate) runKdfUpgrade(session.userId, password, keys)
+        // §F.9 vault-entry capture gate — see signIn. Unlock never derived a login authKey (it opens the UVK
+        // locally), so derive one ONLY when the gate actually fires: accountKeys' kdfSalt/kdfParams are the same
+        // user-row values prelogin serves, so this authKey verifies against the same server-side login verifier.
+        // One extra argon2id pass (off the Main thread), paid only on the rare unconfirmed path.
+        if (gate) {
             // A9 (M-1): the gate's proof goes through the one fenced in-session derivation (the unlock KDF fence, and
             // only the salt this session just unlocked with — these ARE that session's keys).
-            val authKey = withContext(Dispatchers.Default) { requireNotNull(account) { "locked" }.reauthAuthKey(password, gk) }
+            val authKey = withContext(Dispatchers.Default) { requireNotNull(account) { "locked" }.reauthAuthKey(password, keys) }
             startRecoveryCapture(authKey)
         } else toVault()
+        showFirstSync(r.firstSync)
     }
 
     // internal (A5c): the raw in-person evidence names the module-private [InviteProvenance]; the form is the only caller.
@@ -1583,7 +1415,7 @@ class AndvariViewModel(
         // password is the one irreversible outcome of this screen.
         if (_ui.value.busy) return
         if (!Strength.meetsMasterPasswordFloor(password)) {
-            _ui.value = _ui.value.copy(error = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols.")
+            _ui.value = _ui.value.copy(error = WEAK_MASTER_PASSWORD)
             return
         }
         // CR-06 / spec 04 §2(3) / TM-T10: capture the policy the UI gate just validated the typed
@@ -1615,132 +1447,42 @@ class AndvariViewModel(
         inPersonEntry: String = "",
         inPersonAffirmed: Boolean = false,
         inviteProvenance: InviteProvenance = InviteProvenance.Typed,
-    ) = op(mapError = HouseholdCopy::forEnrollError) {
-        // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
-        // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
-        // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).
-        // CR-06: use the gate-time policy snapshot threaded from enroll() — NOT a fresh
-        // _ui.value.policy re-read — so this same instance backs both the re-assert below and
-        // the seal's recoveryFingerprint/kdfParams. The fallback fetch only fires when the gate
-        // had none (the waived path still needs the policy's kdfParams; required-typed always has
-        // a fingerprint by the UI gate, so gatePolicy is non-null there).
-        val policy = gatePolicy ?: run {
-            val probe = newApi()
-            try { probe.clientPolicy() } finally { probe.close() }
+    ) = op(mapError = HouseholdCopy::forEnrollError, timeoutMs = null) { // H10: as signIn — per-call bounds, then always the reveal
+        // Core [SessionEntry.enroll]: CR-06's gate-time policy snapshot (threaded from enroll(), never a fresh
+        // re-read) backs both the typed-sheet re-assert and the escrow seal; A5c's in-person verdict is re-derived
+        // there from the raw inputs; the per-member recovery piece is generated, committed inside register(), and
+        // held for the shown-once reveal below.
+        val request = EnrollRequest(invite, email, name, password, waived, typedShortFp, gatePolicy, affirmedRfp, linkPayload, inPersonEntry, inPersonAffirmed, inviteProvenance)
+        val r = when (val outcome = entry.enroll(request, firstSync = { syncNow(it) })) {
+            is EnrollOutcome.Enrolled -> outcome
+            EnrollOutcome.WeakPassword -> { _ui.value = _ui.value.copy(busy = false, error = WEAK_MASTER_PASSWORD); return@op }
+            // An explicit curated error write (not check()) so the sentence reaches the user itself, never via a
+            // generic mapper.
+            EnrollOutcome.AnchorMismatch -> { _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters."); return@op }
+            is EnrollOutcome.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(outcome.origin)); return@op }
+            // The session (and the pending switch commit with it) happened; the phrase died with the session.
+            EnrollOutcome.EndedBeforeLanding -> { _ui.value = _ui.value.copy(pendingSwitch = null); sessionEndedBeforeLanding(); return@op }
+            is EnrollOutcome.Failed -> throw outcome.cause
         }
-        // Typed-sheet ceremony re-assert at the STATE layer against the policy this enroll actually
-        // seals to (CR-06 / spec 04 §2(3); mirrors DesktopState.enrollOp — 4th sighting of the
-        // frame-stale class, the TM-T10 escrow-redirect defense): a policy swap between the
-        // composition-time UI gate and this seal would otherwise leave a one-frame-stale submit
-        // passing the UI gate against the OLD server's fingerprint. The escrow attestation MUST
-        // bind to the org being enrolled into. required-typed only — waived (`waived == true`)
-        // seals NO org escrow, so there is no fingerprint to attest. An explicit curated error
-        // write (not check()) so the sentence reaches the user itself, never via a generic mapper.
-        // A5: the required-affirm leg compares the link's rfp at FULL length (a machine value), and only
-        // on in-person evidence; the typed-sheet leg keeps the 32-hex human compare.
-        // A5c: that evidence is RE-DERIVED here from the raw inputs (provenance, the typed code, the
-        // first-person affirmation) — the composable's own verdict is not consulted.
-        val inPersonVerified = inPersonVerdict(createCryptoProvider(), linkPayload, inPersonEntry, inPersonAffirmed, inviteProvenance)
-        val anchorOk = if (affirmedRfp != null) inPersonVerified && affirmRfpMatches(affirmedRfp, policy.recoveryFingerprint)
-        else Escrow.shortFormMatches(typedShortFp, policy.recoveryFingerprint)
-        if (!waived && !anchorOk) {
-            _ui.value = _ui.value.copy(busy = false, error = "The recovery-sheet check no longer matches this server — re-verify the printed sheet's first 32 characters.")
-            return@op
-        }
-        // A14 (F8): the origin, pending switch and probe generation this enroll's client is bound to.
-        // register() answers whoever this client dialed; the session is saved under THAT origin, and
-        // only while nothing moved the app away from it meanwhile.
-        val opOrigin = store.baseUrl
-        val opPending = store.pendingServer
-        val opTag = probeFence.tag(store.currentOriginKey())
-        val a = newApi(origin = opOrigin)
-        // §F.4/§F.7: the per-member recovery piece is generated by enroll() and committed inside
-        // register(); it is held here transiently so the shown-once gate (below) can reveal it.
-        var recoverySecret: ByteArray? = null
-        // Piece-binding (design 2026-07-13): the register-committed piece's opaque id — the enroll
-        // path's BOUND confirm presents it (stashed beside the secret below, dropped together).
-        var recoveryPieceId: String? = null
-        try {
-            // §F.1 posture (client-derived, [enrollPosture]): `waived` seals NO org escrow — pass
-            // recoveryPublicKey = null and Account.enroll skips the blob entirely (the server
-            // rejects escrow on a waived invite; the account gets the self-service piece only, no
-            // admin backstop). `required-typed` keeps the verified-fingerprint ceremony exactly as
-            // before: the user TYPED the sheet's short form (EnrollForm gate re-checked at submit)
-            // and Account.enroll refuses a fetched pubkey whose fingerprint doesn't match the
-            // policy value that check anchored. The org key isn't even fetched when waived.
-            val recoveryPub = if (waived) null else Bytes.fromB64(a.recoveryPubkey())
-            // Key generation + KDF are CPU-bound (argon2id) — off the Main thread. EnrollResult
-            // destructures to (request, account, recoverySecret) — the 3rd is the SHOWN-ONCE piece.
-            val (req, acct, secret) = withContext(Dispatchers.Default) {
-                Account.enroll(
-                    inviteToken = invite, email = email, displayName = name.ifBlank { email.substringBefore('@') },
-                    password = password, params = policy.kdfParams,
-                    recoveryPublicKey = recoveryPub,
-                    // The seal's verified fingerprint is the human-anchored value: the in-person link's full rfp,
-                    // or the advertised fingerprint the typed 32 hex matched. Account.enroll refuses a served
-                    // key whose fingerprint differs from it in full (A4 binding, A5 anchor).
-                    recoveryFingerprint = if (waived) null else (affirmedRfp ?: policy.recoveryFingerprint),
-                    deviceName = android.os.Build.MODEL ?: "android",
-                )
-            }
-            recoverySecret = secret
-            // §4.3 B2-9 crash marker: on a PENDING invite switch, capture the enrolling email in the
-            // marker BEFORE register — a crash between register success and the commit below is then
-            // reconciled at next launch with the address to sign in as. No-op on a same-origin enroll
-            // (no marker). baseUrl already points at the pending origin, so register hits the right one.
-            store.pendingServer?.let { store.pendingServer = it.copy(email = email) }
-            val s = a.register(req)
-            // A14 (F8), second layer: the switch is frozen while this op runs, but if the app was
-            // moved anyway this account is not the one it now points at. Do not commit: revoke the
-            // tokens at the origin that issued them (this client's own), drop them, and say so.
-            if (!enrollStillBound(opOrigin, opPending, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey()))) {
-                runCatching { withTimeoutOrNull(5_000) { a.logout() } }
-                a.close()
-                secret.fill(0); recoverySecret = null
-                _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(opOrigin))
-                return@op
-            }
-            recoveryPieceId = s.recoveryPieceId
-            store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
-            persistAccountKeys(s.accountKeys)
-            store.recordSelfIdentityPub(s.userId, email, acct)
-            bind(a, acct)
-            // §4.1 rule 3 (B2-6): enrollment SUCCEEDED — COMMIT the pending invite switch. Clearing
-            // the uncommitted marker is the commit (baseUrl already points here), and it leaves the
-            // pending Welcome state. A same-origin enroll has no marker/pendingSwitch — both no-op.
-            if (store.pendingServer != null) store.pendingServer = null
-            _ui.value = _ui.value.copy(pendingSwitch = null)
-            // F58: symmetric with signIn — a register response carries the flag too (false
-            // for a fresh enrollment, but the wire says so, not us).
-            store.mustChangePassword = s.mustChangePassword
-            _ui.value = _ui.value.copy(escrowStale = s.accountKeys.escrowStale, escrowFingerprint = s.accountKeys.escrowFingerprint, mustChangePassword = s.mustChangePassword)
-            // A1: a fresh enrollment typed the master password — stamp the window (already on the
-            // policy KDF params, so no F61 re-key is due).
-            store.stampFullPasswordUnlock(s.userId)
-            // No breach check on the new master password (security review 2026-10, root cause C):
-            // its SHA-1 prefix would go to this server, which also receives the login authKey.
-        } catch (t: Throwable) {
-            // F74: same rule as signIn — close the transient client on ANY pre-bind throw,
-            // never the VaultSession-owned success-path holder.
-            if (VaultSession.get()?.api !== a) a.close()
-            throw t
-        }
-        syncNow(engine!!)
-        // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
-        // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
-        // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
-        // once the user types it back. (Past the try `recoverySecret` is always non-null; the
-        // null-guard keeps this total should a future refactor break that.)
-        val secret = recoverySecret
-        if (secret == null) { toVault(); return@op }
-        pendingRecoverySecret = secret
-        pendingRecoveryPieceId = recoveryPieceId
+        // §4.1 rule 3 (B2-6): enrollment SUCCEEDED and core committed a pending invite switch; leave the pending
+        // Welcome state. A same-origin enroll has no pendingSwitch — a no-op.
+        _ui.value = _ui.value.copy(pendingSwitch = null)
+        notePasswordUnlockForQuickUnlockOffer() // §7.1, as for every full-password session
+        _ui.value = _ui.value.copy(escrowStale = r.keys.escrowStale, escrowFingerprint = r.keys.escrowFingerprint, mustChangePassword = r.mustChangePassword)
+        // No breach check on the new master password (security review 2026-10, root cause C): its SHA-1 prefix
+        // would go to this server, which also receives the login authKey.
+        // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a member who never
+        // SEES it is silently unrecoverable. Hold it transiently and route to the shown-once reveal+confirm gate
+        // (RecoverySetup) instead of the vault; the gate zeroes it once the user types it back.
+        pendingRecoverySecret = r.recoverySecret
+        pendingRecoveryPieceId = r.pieceId
         _ui.value = _ui.value.copy(
             screen = Screen.RecoverySetup,
-            recoveryPhrase = MemberRecovery.displayForm(secret),
+            recoveryPhrase = MemberRecovery.displayForm(r.recoverySecret),
             recoverySetupWaived = waived, // §F.4 posture copy: stark "gone forever" when waived
             busy = false, error = null,
         )
+        showFirstSync(r.firstSync)
     }
 
     // Shown-once recovery secret (design §F.7): the RAW 32 bytes of a recovery piece — a fresh
@@ -1823,17 +1565,12 @@ class AndvariViewModel(
     private fun markRecoveryConfirmed(pieceId: String?) {
         val a = api ?: return
         viewModelScope.launch {
-            try {
-                a.recoverySelfConfirm(pieceId)
-            } catch (e: ApiException) {
-                if (e.status == 409 && e.code == "recovery_piece_stale") {
-                    // Static copy only (§F.7) — the phrase this enrollee just saved is already
-                    // dead (a concurrent setup rotated it). toVault deliberately keeps `notice`.
-                    _ui.value = _ui.value.copy(notice = RECOVERY_PHRASE_REPLACED_NOTICE)
-                }
-                // else: proceed unconfirmed — the vault-entry gate re-fires later and heals.
-            } catch (_: Throwable) {
-                // Network failure: proceed unconfirmed (the flag can be re-set on a later capture).
+            // Core [RecoveryCapture.confirmEnrolled]; any other failure proceeds unconfirmed — the vault-entry gate
+            // re-fires later and heals.
+            if (capture.confirmEnrolled(a, pieceId) == CaptureConfirm.Stale) {
+                // Static copy only (§F.7) — the phrase this enrollee just saved is already dead (a concurrent setup
+                // rotated it). toVault deliberately keeps `notice`.
+                _ui.value = _ui.value.copy(notice = RECOVERY_PHRASE_REPLACED_NOTICE)
             }
         }
     }
@@ -1873,46 +1610,35 @@ class AndvariViewModel(
      * previously-written-but-unconfirmed phrase — the screen copy says so.
      */
     private fun runRecoveryCapture() {
-        val a = api ?: return
-        val acct = account ?: return
+        val live = VaultSession.get() ?: return
         val authKey = pendingCaptureAuthKey ?: return
         _ui.value = _ui.value.copy(recoveryCaptureError = null, busy = true)
         viewModelScope.launch {
-            try {
-                val setup = acct.setupMemberRecovery(authKey)
-                var committed = false
-                val resp = try {
-                    a.recoverySelfSetup(setup.request).also { committed = true }
-                } finally {
-                    // §F.7 discipline: a failed commit must not leave the raw secret alive.
-                    if (!committed) setup.recoverySecret.fill(0)
+            // Core [RecoveryCapture.setup]: bounded per call (busy is held across the PUT, and busy defers the idle
+            // lock); a failed commit zeroes the secret; the B1 identity gate keeps a torn-down session's phrase out
+            // of whatever session renders next.
+            when (val r = capture.setup(live, authKey)) {
+                is CaptureSetup.Ready -> {
+                    pendingRecoverySecret = r.secret
+                    pendingRecoveryPieceId = r.pieceId // null on a pre-binding server rollback ⇒ legacy device-scoped confirm
+                    _ui.value = _ui.value.copy(
+                        busy = false,
+                        screen = Screen.RecoverySetup,
+                        recoveryPhrase = MemberRecovery.displayForm(r.secret),
+                        // Fielded gate accounts enrolled under `required` (or migration-era with org escrow), and
+                        // AccountKeys deliberately carries no posture — the required copy ("admin can also help")
+                        // is the honest default here (desktop parity).
+                        recoverySetupWaived = false,
+                    )
                 }
-                // B1 identity gate: a hard lock / sign-out mid-commit tore this session down — the
-                // fresh phrase must not leak into whatever session renders next.
-                if (account !== acct) { setup.recoverySecret.fill(0); _ui.value = _ui.value.copy(busy = false); return@launch }
-                pendingRecoverySecret = setup.recoverySecret
-                pendingRecoveryPieceId = resp.pieceId // null on a pre-binding server rollback ⇒ legacy device-scoped confirm
-                _ui.value = _ui.value.copy(
-                    busy = false,
-                    screen = Screen.RecoverySetup,
-                    recoveryPhrase = MemberRecovery.displayForm(setup.recoverySecret),
-                    // Fielded gate accounts enrolled under `required` (or migration-era with org
-                    // escrow), and AccountKeys deliberately carries no posture — the required copy
-                    // ("admin can also help") is the honest default here (desktop parity).
-                    recoverySetupWaived = false,
-                )
-            } catch (t: Throwable) {
-                if (t is UpgradeRequiredException) {
-                    // A8 parity: a 426 mid-gate must raise the blocking upgrade screen — a static
-                    // Retry loop against a version-pinned server is a dead end.
-                    _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
-                    return@launch
-                }
-                if (account !== acct) { _ui.value = _ui.value.copy(busy = false); return@launch } // torn down mid-flight — nothing to report
+                CaptureSetup.SessionEnded -> _ui.value = _ui.value.copy(busy = false) // torn down mid-flight — nothing to report
+                // A8 parity: a 426 mid-gate must raise the blocking upgrade screen — a static Retry loop against a
+                // version-pinned server is a dead end.
+                CaptureSetup.UpgradeRequired -> _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
                 // Static copy only — NEVER interpolate anything near secret material (§F.7).
-                _ui.value = _ui.value.copy(
+                is CaptureSetup.Failed -> _ui.value = _ui.value.copy(
                     busy = false,
-                    recoveryCaptureError = if (t is IOException) {
+                    recoveryCaptureError = if (r.offline) {
                         "Can't reach the server right now — check your connection and try again."
                     } else {
                         "Couldn't set up your recovery phrase just now — try again in a moment."
@@ -1922,14 +1648,10 @@ class AndvariViewModel(
         }
     }
 
-    /** [confirmCaptureGate]'s three server verdicts — decided in the coroutine, acted on after the
-     *  B1 identity re-check (the decision must never navigate a torn-down session). */
-    private enum class ConfirmOutcome { Confirmed, Stale, Failed }
-
     /**
      * Piece-binding (design 2026-07-13 §3): the capture gate's BOUND + AWAITED confirm — the
      * type-back matched, so present the pieceId this gate's setup minted and only open the vault
-     * once the server answers. Outcomes:
+     * once the server answers (core [RecoveryCapture.confirm]). Outcomes:
      *  - 200 → captured: zero the secret+pieceId, drop the reauth proof, land the vault.
      *  - 409 recovery_piece_stale → the phrase JUST typed is DEAD (another device's setup rotated
      *    it away mid-gate). Zero it, raise the static replaced-phrase notice, and re-run
@@ -1942,35 +1664,23 @@ class AndvariViewModel(
      */
     private fun confirmCaptureGate() {
         if (_ui.value.busy) return // in-flight confirm; the reveal's button is busy-gated too
-        val a = api
-        val acct = account
-        if (a == null || acct == null) {
-            // Session torn down under the reveal (autofill hard-lock): the next checkIdleLock tick
-            // locks this screen (zeroing the secret); never navigate a dead session into the vault.
-            return
-        }
+        // Session torn down under the reveal (autofill hard-lock): the next checkIdleLock tick locks this screen
+        // (zeroing the secret); never navigate a dead session into the vault.
+        val live = VaultSession.get() ?: return
         val pieceId = pendingRecoveryPieceId
         _ui.value = _ui.value.copy(busy = true)
         viewModelScope.launch {
-            val outcome = try {
-                a.recoverySelfConfirm(pieceId)
-                ConfirmOutcome.Confirmed
-            } catch (e: ApiException) {
-                if (e.status == 409 && e.code == "recovery_piece_stale") ConfirmOutcome.Stale else ConfirmOutcome.Failed
-            } catch (_: Throwable) {
-                ConfirmOutcome.Failed
-            }
-            // B1 identity gate: torn down mid-confirm — lock()/signOut() own the cleanup.
-            if (account !== acct) { _ui.value = _ui.value.copy(busy = false); return@launch }
-            when (outcome) {
-                ConfirmOutcome.Stale -> {
+            when (capture.confirm(live, pieceId)) {
+                // B1 identity gate: torn down mid-confirm — lock()/signOut() own the cleanup.
+                CaptureConfirm.SessionEnded -> _ui.value = _ui.value.copy(busy = false)
+                CaptureConfirm.Stale -> {
                     // §3 stale rule: zero the dead phrase together with its id, say so (statically),
                     // and re-run setup + reveal under the held reauth proof.
                     zeroPendingRecovery()
                     _ui.value = _ui.value.copy(busy = false, screen = Screen.RecoveryCapture, recoveryPhrase = null, recoveryReplacedNotice = true)
                     runRecoveryCapture()
                 }
-                ConfirmOutcome.Confirmed, ConfirmOutcome.Failed -> {
+                CaptureConfirm.Confirmed, CaptureConfirm.Failed -> {
                     zeroPendingRecovery()
                     pendingCaptureAuthKey = null // the gate is resolved — the reauth proof dies here
                     toVault()
@@ -2068,7 +1778,7 @@ class AndvariViewModel(
                 // owns nothing. Zero the parsed bytes and die: landing would stash a raw secret
                 // + live single-use ticket that no screen consumes and nothing ever zeroes.
                 if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
-                val resp = a.recoverySelfVerify(email.trim(), authKey)
+                val resp = runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfVerify(email.trim(), authKey) } // H10: busy is held across it
                 if (_ui.value.screen !== wizard) { secret.fill(0); return@launch } // cancelled mid-POST: the ticket dies unstashed with this frame
                 zeroPendingRecover() // any earlier attempt's bytes die before the fresh stash
                 pendingRecoverSecret = secret
@@ -2135,7 +1845,7 @@ class AndvariViewModel(
                 // Phase 1 just proved the server reachable: re-probe lazily, exactly when phase 2
                 // needs the params (enrollOp's idiom). clientPolicy() runs the H1 KDF floor fence
                 // (spec 05 T1); a failed probe surfaces through recoverResetError below.
-                val policy = _ui.value.policy ?: a.clientPolicy().let { requireCurrentPolicy(it, applyPolicy(it, policyTag)) } // A12 review LOW-2
+                val policy = _ui.value.policy ?: boundedPolicy(a).let { requireCurrentPolicy(it, applyPolicy(it, policyTag)) } // A12 review LOW-2; H10
                 // §F.7 cancel fence (recoverVerify's twin), re-checked after EVERY await: system
                 // back isn't busy-gated, and once THIS wizard instance is gone the continuation
                 // must zero its alias and die without touching UI state. The pendingRecover*
@@ -2147,7 +1857,7 @@ class AndvariViewModel(
                 // Cancelled during the derivation (cancelRecover may even have zeroed `secret`
                 // mid-read, making `commit` garbage): the reset is abandoned — NEVER post it.
                 if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
-                a.recoverySelfCommit(commit)
+                runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfCommit(commit) } // H10: busy is held across it
                 // Past the point of no return: the commit LANDED and revoked EVERY session of the
                 // recovered account — even when a cancel won the POST race just now. If that
                 // account is this device's stored session, its persisted tokens/keys/cache are
@@ -2160,7 +1870,7 @@ class AndvariViewModel(
                     // §4.2: the commit ran against the origin captured at entry (newApi() dialed
                     // it), and the stored session it just revoked belongs there — purge that
                     // namespace only.
-                    OfflineData.purgeRevoked(cacheDir, store, originKey, session.userId)
+                    coordinator.purgeRevoked(originKey, session.userId)
                 }
                 if (cancelled) return@launch // …but the wizard is gone: no screen/notice to paint
                 val next = store.load()?.takeIf { it.accessToken.isNotEmpty() }?.let { Screen.Unlock(it.email) } ?: Screen.Welcome
@@ -2228,7 +1938,7 @@ class AndvariViewModel(
      */
     private fun boundVault(itemId: String): String? = _ui.value.items.firstOrNull { it.itemId == itemId }?.vaultId
 
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError) {
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError, timeoutMs = BoundedOps.attachmentMs(uploads.sumOf { it.data.size.toLong() })) { // H10: scaled to the bytes
         // F18 + INV-EDIT (root cause A §5.1, A1b): for a NEW item [vaultId] is the vault picker's
         // choice (null = personal). For an EXISTING item it is REQUIRED and must be the vault the
         // editor was bound to when it opened ([editorVaultId], or the planned item's vault for the
@@ -2427,8 +2137,16 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0, copyVaultId = vaultId, copyOpVaultId = vaultId)
         viewModelScope.launch {
             try {
-                val copied = e.copyAllToPersonal(vaultId) { done, total ->
-                    _ui.value = _ui.value.copy(copyProgress = done to total)
+                // Audit H10: the rescue copy re-uploads every attachment of every item in the vault
+                // under busy + the copy gate (both defer the idle lock). Scaled over the bytes plus
+                // one flat window per item, capped; a timeout surfaces as the canon's unreachable
+                // copy, and the memoized gestures make a re-run converge rather than duplicate.
+                val bytes = e.items().filter { it.vaultId == vaultId }.sumOf { i -> i.doc.attachments.sumOf { it.size } }
+                val count = e.items().count { it.vaultId == vaultId }
+                val copied = runBounded(BoundedOps.rescueCopyMs(bytes, count)) {
+                    e.copyAllToPersonal(vaultId) { done, total ->
+                        _ui.value = _ui.value.copy(copyProgress = done to total)
+                    }
                 }
                 // A4: copyVaultId stays — the surviving note is named through it.
                 _ui.value = _ui.value.copy(
@@ -2516,7 +2234,12 @@ class AndvariViewModel(
                 val memo = moveGestures[gKey]
                 val g = if (memo != null && memo.sourceRev == current.rev) memo
                         else e.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[gKey] = it }
-                e.runGesture(g, { done, total -> _ui.value = _ui.value.copy(moveProgress = done to total) })
+                // Audit H10: the gesture re-uploads the item's attachments under busy; scaled to their
+                // bytes. A timeout lands in the transient branch below: the memoized gesture
+                // survives, so Retry replays the same ids instead of duplicating.
+                runBounded(BoundedOps.attachmentMs(current.doc.attachments.sumOf { it.size })) {
+                    e.runGesture(g, { done, total -> _ui.value = _ui.value.copy(moveProgress = done to total) })
+                }
                 moveGestures.remove(gKey)
                 val target = e.vaultInfos().find { it.vaultId == targetVaultId }?.name ?: "the other vault"
                 // Completion is VM state (#7): close the picker + notice, whatever
@@ -2572,6 +2295,12 @@ class AndvariViewModel(
         // Mid-reveal gets NO grace: leaving a secret on an unattended screen is the wrong trade.
         val idleReason = if (pendingRecoverySecret != null) REASON_IDLE_RECOVERY else REASON_IDLE
         if (VaultSession.get() == null) {
+            // A definitive rejection ended the session, whichever client heard it (the autofill unlock binds
+            // sessions this screen adopts). It is over, not idle: the sign-in surface, with the reason.
+            if (VaultSession.takeRejected()) {
+                endRejectedSession()
+                return
+            }
             // Locked underneath us (autofill gate) — reflect it in the UI. Trash was missing
             // from this list (IA audit): a Trash screen left open must kick to lock like
             // every other unlocked view. Idle-class reason (F26): the autofill gate only
@@ -2615,7 +2344,11 @@ class AndvariViewModel(
             // N2 §3/B4: deliberately NO onFailure — the poll must never flip policyFetchFailed
             // (that flag belongs to the enroll-feeding fetches; the last-known policy stays
             // live here for the offline gates). Success still clears it via applyPolicy.
-            runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it, tag) }
+            runCatching { current.api.clientPolicy() }.onSuccess { p ->
+                // Spec 02 §8 / spec 01 §8.1: a forbidding policy is enforced on every successful fetch,
+                // this poll included. The session keeps running, on a cache whose file goes at its close.
+                if (applyPolicy(p, tag) && !p.offlineCacheAllowed) purgeOfflineData(originKey, current.account.userId)
+            }
             try {
                 syncNow(current.engine)
                 if (VaultSession.get() !== current) { // locked/rebound mid-sync — publish nothing stale
@@ -2770,7 +2503,11 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(importBusy = true, importError = null, importRetryable = true, importProgress = 0 to plan.items.size)
         viewModelScope.launch {
             try {
-                engine!!.importAll(plan.items, onProgress = { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }, vaultId = dest)
+                // Audit H10: bounded per pushed batch, so importBusy (which defers the idle lock) has an
+                // end. A timeout is an IOException → the retryable branch: the same plan replays idempotently.
+                runBounded(BoundedOps.importMs(plan.items.size)) {
+                    engine!!.importAll(plan.items, onProgress = { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }, vaultId = dest)
+                }
                 // The destination can be deleted INTO GRACE mid-import: denials park (F21) and
                 // importAll returns normally — success copy telling the user to delete the CSV
                 // would then be a lie. A held/gone destination is not a success.
@@ -2988,7 +2725,7 @@ class AndvariViewModel(
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val plain = engine!!.downloadAttachment(ref)
+                    val plain = runBounded(BoundedOps.attachmentMs(ref.size)) { engine!!.downloadAttachment(ref) } // H10
                     try { write(plain) } finally { plain.fill(0) }
                 }
                 _ui.value = _ui.value.copy(busy = false, notice = "Saved ${ref.name}")
@@ -3011,7 +2748,8 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, error = null, notice = null)
         viewModelScope.launch {
             val offline = try {
-                syncNow(e); false
+                // H10: bounded — this sync runs under busy; a stall reads as offline (IOException, below).
+                runBounded(BoundedOps.FLAT_MS) { syncNow(e) }; false
             } catch (t: IOException) {
                 true // offline is fine — export the cached snapshot, visibly dated
             } catch (t: Throwable) {
@@ -3162,7 +2900,8 @@ class AndvariViewModel(
         for (p in plan.included) {
             var bytes: ByteArray? = null
             for (attempt in 0 until 2) {
-                bytes = runCatching { current.engine.downloadAttachment(p.ref) }.getOrNull()
+                // H10: under busy, so bounded per attachment; a timeout falls into the skip-by-name path below.
+                bytes = runCatching { runBounded(BoundedOps.attachmentMs(p.ref.size)) { current.engine.downloadAttachment(p.ref) } }.getOrNull()
                 if (bytes != null) break
             }
             if (bytes == null) fetchFailed.add(p.ref.name) else fetched.add(p to bytes)
@@ -3252,7 +2991,7 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, error = null, notice = null)
         viewModelScope.launch {
             val offline = try {
-                syncNow(e); false
+                runBounded(BoundedOps.FLAT_MS) { syncNow(e) }; false // H10, as backupBegin
             } catch (t: IOException) {
                 true
             } catch (t: Throwable) {
@@ -3410,6 +3149,9 @@ class AndvariViewModel(
         // Everything a dead session must stop showing lives in ONE place (see sessionCleared);
         // lock() adds only what is genuinely its own — where it lands.
         _ui.value = _ui.value.sessionCleared(reason).copy(screen = Screen.Unlock(store.load()?.email ?: ""))
+        // Survey gap 6: the Unlock screen's quick-unlock flags are recomputed for the screen it lands on, not
+        // carried from the session that just ended (a purge or a lapsed window may have changed them).
+        refreshQuickUnlockState()
     }
 
     /** F26: [reason] is non-null only when a dead session FORCES a sign-out (no such caller
@@ -3473,6 +3215,9 @@ class AndvariViewModel(
                 store.clearFullPasswordStamp(originKey, it)
             }
             store.clear()
+            // A refusal heard during this sign-out (its logout's refresh) was this sign-out ending: not a
+            // second event to report once the user is already on Welcome.
+            VaultSession.takeRejected()
             // The shared clear-set (sessionCleared) plus sign-out's OWN fields: it lands on
             // Welcome rather than Unlock, ends the busy op, and drops the account-scoped state a
             // lock deliberately keeps.
@@ -3483,6 +3228,30 @@ class AndvariViewModel(
                 upgradeRequired = null, // A9 escape: sign-out must LIFT the 426 block — copy() would otherwise carry it forward and re-brick over Welcome
             )
         }
+    }
+
+    /**
+     * A definitive in-session rejection (spec 01 §8.1, spec 02 §8): the server refused this session's
+     * refresh. [PolicyCoordinator.onRefreshRefused] has already locked it, purged its data and recorded
+     * the rejection on [VaultSession]; [checkIdleLock] consumes that here, whichever client heard it.
+     * The in-flight secrets die as on a sign-out, and the user lands on the sign-in surface with the F26
+     * session-end reason, never on an Unlock screen for a session that no longer exists.
+     */
+    private fun endRejectedSession() {
+        pendingBackupRequest = null
+        zeroPendingRecovery()
+        zeroPendingRecover()
+        pendingCaptureAuthKey = null
+        closeEditor()
+        importDismiss()
+        moveGestures.clear()
+        movePickerMode = null
+        movePickerItemId = null
+        _ui.value = _ui.value.sessionCleared(REASON_SESSION_ENDED).copy(
+            screen = Screen.Welcome, busy = false,
+            quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
+            mustChangePassword = false, // the purge dropped the persisted F58 flag with the session
+        )
     }
 
     // ---- settings / server TOTP ----
@@ -4028,7 +3797,7 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, totpMessage = null)
         viewModelScope.launch {
             try {
-                block()
+                runBounded(BoundedOps.FLAT_MS) { block() } // H10
             } catch (t: Throwable) {
                 // #23: the shared canon covers bad_totp_code (its authenticator-hint wording
                 // deliberately unifies android's old shorter variant) and never leaks raw text.
@@ -4038,32 +3807,6 @@ class AndvariViewModel(
     }
 
     // ---- helpers ----
-    private fun bind(a: AndvariApi, acct: Account, provenance: VaultSession.UnlockProvenance = VaultSession.UnlockProvenance.PASSWORD) {
-        // Durable cache unless policy forbids it (then delete any existing file). Hydrate
-        // the working set from disk BEFORE the first sync so a cold/offline start shows data.
-        // Prefer the live policy; fall back to the persisted last-known value when offline
-        // (a policy-forbidden device cold-starting offline must NOT recreate the cache).
-        val allowed = _ui.value.policy?.offlineCacheAllowed ?: store.cacheAllowed
-        val originKey = store.currentOriginKey() // §4.2: the session binds to the current origin's namespace
-        val cache = if (allowed) {
-            sqliteVaultCache(cacheFile(originKey, acct.userId).apply { parentFile?.mkdirs() }.absolutePath, acct.userId)
-        } else {
-            deleteCache(originKey, acct.userId); InMemoryVaultCache()
-        }
-        // A5b (M-1): the personal wrap this device authenticated lives OUTSIDE the cache (which may be in memory,
-        // or purged), so a withheld wrap stays an anomaly across restarts.
-        val newEngine = SyncEngine(a, acct, cache, deviceState = PersonalDeviceState.open(cacheDir, originKey, acct.userId)).also { it.hydrate() }
-        // Root cause A §8.5 (A5): once the migration stores the personal wrap, carry it into the cached
-        // account keys so an offline cold start knows the personal vault without the network.
-        newEngine.onPersonalWrapStored = { w -> store.loadAccountKeys()?.let { persistAccountKeys(it.copy(personalWrap = w)) } }
-        // VaultSession closes any previously-bound engine/api (defensive: never two conns).
-        VaultSession.bind(a, acct, newEngine, provenance)
-        // §7.1: the ONE place a full-password unlock completes with a session bound, so the
-        // evidence count cannot double-fire for a single unlock. QUICK unlocks are excluded by
-        // provenance — they are the outcome the offer exists to produce, not a cost to record.
-        if (provenance == VaultSession.UnlockProvenance.PASSWORD) notePasswordUnlockForQuickUnlockOffer()
-    }
-
     /** Sync + record the wall-clock time of the last SUCCESS — the timestamp the spec 07
      *  offline-export note shows ("vault as of last sync <time>"). */
     private suspend fun syncNow(e: SyncEngine) {
@@ -4080,6 +3823,27 @@ class AndvariViewModel(
         // on every poll of this device (web and the extension already fold those ids in).
         VaultSession.get()?.let { s ->
             if (s.engine === e) UsageRecorder.flushWithPrune(s, e.liveItemIds())
+        }
+    }
+
+    /**
+     * Review round 2: the session this op bound ended during its first sync — most likely a definitive
+     * rejection (an unlock on cached keys by a device revoked since). There is nothing to land on: the
+     * idle check routes a rejection to the sign-in surface (unless the coordinator's own post already
+     * did), and any other end to wherever a lock lands. Never the vault, the gate or a reveal.
+     */
+    private fun sessionEndedBeforeLanding() {
+        _ui.value = _ui.value.copy(busy = false)
+        checkIdleLock()
+    }
+
+    /** What the landing screen also says about its first sync. After the landing, which clears `error`. */
+    private fun showFirstSync(first: FirstSync) {
+        when (first) {
+            FirstSync.Done -> {}
+            FirstSync.Offline -> _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
+            FirstSync.UpgradeRequired -> _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+            is FirstSync.Failed -> _ui.value = _ui.value.copy(error = first.message)
         }
     }
 
@@ -4100,12 +3864,23 @@ class AndvariViewModel(
 
     /** [mapError] is the #23 context seam: sign-in/unlock/save/sync ops pass their
      *  [HouseholdCopy] mapper so a failure reads right for ITS surface; everything else
-     *  takes the general [HouseholdCopy.forError]. */
-    private fun op(mapError: (Throwable) -> String = HouseholdCopy::forError, block: suspend () -> Unit) {
+     *  takes the general [HouseholdCopy.forError].
+     *
+     *  Audit H10 (the desktop fix): every op runs under a whole-call bound, because [UiState.busy]
+     *  defers the idle lock and a server that accepts the connection and then never answers must
+     *  not hold the vault unlocked past the policy window. A timeout surfaces as an IOException,
+     *  so the callers' "can't reach the server" mappings apply. [timeoutMs] defaults to
+     *  [BoundedOps.FLAT_MS]; byte-carrying legs scale it, and a null is reserved for an op that
+     *  waits on a person (the biometric prompt) and bounds its own server legs instead. */
+    private fun op(
+        mapError: (Throwable) -> String = HouseholdCopy::forError,
+        timeoutMs: Long? = BoundedOps.FLAT_MS,
+        block: suspend () -> Unit,
+    ) {
         _ui.value = _ui.value.copy(busy = true, error = null)
         viewModelScope.launch {
             try {
-                block()
+                if (timeoutMs != null) runBounded(timeoutMs) { block() } else block()
             } catch (e: UpgradeRequiredException) {
                 // A8: a 426 is not a per-action error — this build is too old for the server's
                 // minVersion pin. Raise the blocking upgrade screen (A9), not a dismissable toast.
@@ -4128,6 +3903,9 @@ class AndvariViewModel(
  * screens render these constants instead of re-typing the sentence at the call site.
  */
 internal const val BACK_ON_THE_LIST = "Back on the list."
+
+/** F60: the master-password floor's sentence, said before enroll starts and on core's [EnrollOutcome.WeakPassword]. */
+internal const val WEAK_MASTER_PASSWORD = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
 internal const val MERGE_DIDNT_FINISH =
     "The merge didn't finish — any removed copy is in Deleted items. Check the cluster and try again."
 

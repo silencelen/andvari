@@ -4,28 +4,22 @@ import android.content.Context
 import io.silencelen.andvari.app.autofill.AppSignerBindings
 import android.os.SystemClock
 import android.provider.Settings
+import io.silencelen.andvari.core.client.SelfIdentityPin
 import io.silencelen.andvari.core.client.Tokens
+import io.silencelen.andvari.core.client.session.OriginStore
+import io.silencelen.andvari.core.client.session.PasswordStamp
 import io.silencelen.andvari.core.client.session.PendingServer
 import io.silencelen.andvari.core.client.session.QuickUnlockRules
+import io.silencelen.andvari.core.client.session.SessionPersistence
+import io.silencelen.andvari.core.client.session.StoredSession
+import io.silencelen.andvari.core.client.session.sessionBelongsTo
+import io.silencelen.andvari.core.client.session.sessionOriginForBackfill
 import io.silencelen.andvari.core.model.AccountKeys
 import kotlinx.serialization.json.Json
 import java.io.File
-import kotlin.math.max
 
-/**
- * Non-secret session persisted across launches (SharedPreferences). Tokens are here
- * (MVP); the vault KEY is NEVER stored — a relaunch re-prompts for the master
- * password (spec 01 §8; Keystore-wrapped quick-unlock is a follow-up).
- */
-data class Session(
-    val baseUrl: String,
-    val userId: String,
-    val email: String,
-    val accessToken: String,
-    val refreshToken: String,
-) {
-    fun tokens() = Tokens(accessToken, refreshToken)
-}
+/** The stored session (SharedPreferences), shared with core. See [StoredSession]. */
+typealias Session = StoredSession
 
 /**
  * Persistence layout (design 2026-07-15 §4.2 — (origin, userId) namespacing):
@@ -44,11 +38,11 @@ data class Session(
  *    re-open another origin's expired cross-boot window.
  *
  * The implicit `var` accessors read/write the CURRENT origin's namespace; the explicit
- * `(originKey, …)` variants exist for the purge paths ([OfflineData]) and for policy-probe
+ * `(originKey, …)` variants exist for the purge paths (core `PolicyCoordinator`) and for policy-probe
  * callbacks that captured their origin BEFORE an await (a probe of server B landing after the
  * user re-pointed at C must still write/purge under B — never under whatever is current).
  */
-class SessionStore(context: Context) {
+class SessionStore(context: Context) : SessionPersistence {
     private val prefs = context.getSharedPreferences("andvari", Context.MODE_PRIVATE)
     // A12 (row 74): read-only use — the boot count for quick-unlock freshness.
     private val appContext: Context = context.applicationContext ?: context
@@ -81,14 +75,21 @@ class SessionStore(context: Context) {
         // the constructor is the one choke point all of them share.
         migrateDefaultOnce(context.noBackupFilesDir)
         adoptNamespacesOnce(context.noBackupFilesDir)
+        // F8: a stored session now owns its origin. After the default-URL rewrite above, so a
+        // session carried over a migrated default takes the origin the app actually dials.
+        backfillSessionOrigin()
         // A11 (q08): bind a pre-A11 self-identity pin to the saved session's email (after the adoption, so it
         // lands in the namespace the app will read).
         runCatching { bindLegacySelfIdentity() }
     }
 
-    var baseUrl: String
+    override var baseUrl: String
         get() = prefs.getString("baseUrl", DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         set(v) = prefs.edit().putString("baseUrl", v).apply()
+
+    override fun moveOrigin(origin: String) {
+        baseUrl = origin
+    }
 
     /**
      * The uncommitted invite-switch marker ([PendingServer]) or null. GLOBAL (not namespaced):
@@ -96,7 +97,7 @@ class SessionStore(context: Context) {
      * origin, not any origin's cached material — so the §4.2 adoption sweep deliberately leaves it
      * alone. Null clears it; a non-null value round-trips as JSON.
      */
-    var pendingServer: PendingServer?
+    override var pendingServer: PendingServer?
         get() = prefs.getString("pendingServer", null)
             ?.let { runCatching { json.decodeFromString(PendingServer.serializer(), it) }.getOrNull() }
         set(v) = if (v == null) prefs.edit().remove("pendingServer").apply()
@@ -154,7 +155,7 @@ class SessionStore(context: Context) {
      * device's next unlock 401s → sign-out → a fresh login returns false and overwrites it.
      * GLOBAL: it belongs to the single active session, and dies with it in [clear].
      */
-    var mustChangePassword: Boolean
+    override var mustChangePassword: Boolean
         get() = prefs.getBoolean("mustChangePassword", false)
         set(v) = prefs.edit().putBoolean("mustChangePassword", v).apply()
 
@@ -184,16 +185,9 @@ class SessionStore(context: Context) {
      * per-origin: it ratchets from the device's own observed time, and cross-origin influence
      * can only push it FORWARD — toward expiry, the safe direction.
      */
-    var highWaterWallMs: Long
+    override var highWaterWallMs: Long
         get() = prefs.getLong("qu_highWater", 0L)
         set(v) = prefs.edit().putLong("qu_highWater", v).apply()
-
-    /** Advance and return the high-water mark; never decreases. */
-    fun bumpHighWater(nowMs: Long): Long {
-        val hw = max(highWaterWallMs, nowMs)
-        if (hw != highWaterWallMs) highWaterWallMs = hw
-        return hw
-    }
 
     /**
      * A2 hardening (review 2026-07-10 [2]): the last SERVER-ATTESTED wall time (`ClientPolicy
@@ -277,7 +271,7 @@ class SessionStore(context: Context) {
     /** Drop a user's full-password stamp in the CURRENT origin's namespace (sign-out / revocation). */
     fun clearFullPasswordStamp(userId: String) = clearFullPasswordStamp(currentOriginKey(), userId)
 
-    /** Explicit-origin form — the purge paths ([OfflineData]) scope by the key they were given. */
+    /** Explicit-origin form — the purge paths (core `PolicyCoordinator`) scope by the key they were given. */
     fun clearFullPasswordStamp(originKey: String, userId: String) {
         prefs.edit()
             .remove(ns(originKey, "qu_stampWall_$userId"))
@@ -353,7 +347,7 @@ class SessionStore(context: Context) {
 
     /** When the last SUCCESSFUL sync finished (unix ms; 0 = unknown) — the timestamp the
      *  spec 07 offline-export note shows ("vault as of last sync <time>"). */
-    var lastSyncAt: Long
+    override var lastSyncAt: Long
         get() = prefs.getLong("lastSyncAt", 0L)
         set(v) = prefs.edit().putLong("lastSyncAt", v).apply()
 
@@ -367,10 +361,17 @@ class SessionStore(context: Context) {
         get() = prefs.getLong("autofillDebugUntil", 0L)
         set(v) = prefs.edit().putLong("autofillDebugUntil", v).apply()
 
-    fun load(): Session? {
+    /**
+     * The stored session, carrying the origin that issued it. F8: [baseUrl] was read from the global
+     * key here, so the `sessionBelongsTo` check compared the live origin with itself and passed
+     * by construction. A session with no origin of its own is never handed out: [backfillSessionOrigin]
+     * gave every legacy session one at construction, and the save/clear pair keeps the two together.
+     */
+    override fun load(): Session? {
         val userId = prefs.getString("userId", null) ?: return null
+        val origin = prefs.getString(SESSION_ORIGIN, null) ?: return null
         return Session(
-            baseUrl = baseUrl,
+            baseUrl = origin,
             userId = userId,
             email = prefs.getString("email", "") ?: "",
             accessToken = prefs.getString("accessToken", "") ?: "",
@@ -378,22 +379,30 @@ class SessionStore(context: Context) {
         )
     }
 
-    fun save(s: Session) {
-        // A14 review N5: another account saved over this one starts with no app-fill bindings.
-        val prior = prefs.getString("userId", null)
-        if (!prior.isNullOrEmpty() && prior != s.userId) runCatching { AppSignerBindings.clearAll(appContext) }
-        prefs.edit()
-            .putString("baseUrl", s.baseUrl)
-            .putString("userId", s.userId)
-            .putString("email", s.email)
-            .putString("accessToken", s.accessToken)
-            .putString("refreshToken", s.refreshToken)
-            .apply()
+    override fun save(s: Session) {
+        synchronized(SESSION_LOCK) {
+            // A14 review N5: another account saved over this one starts with no app-fill bindings.
+            val prior = prefs.getString("userId", null)
+            if (!prior.isNullOrEmpty() && prior != s.userId) runCatching { AppSignerBindings.clearAll(appContext) }
+            prefs.edit()
+                .putString("baseUrl", s.baseUrl)
+                .putString(SESSION_ORIGIN, s.baseUrl) // F8: in one transaction with the tokens it belongs to
+                .putString("userId", s.userId)
+                .putString("email", s.email)
+                .putString("accessToken", s.accessToken)
+                .putString("refreshToken", s.refreshToken)
+                .apply()
+        }
     }
 
-    fun updateTokens(t: Tokens?) {
-        if (t == null) { clear(); return }
-        prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).apply()
+    override fun updateTokens(t: Tokens?) {
+        synchronized(SESSION_LOCK) {
+            if (t == null) { clear(); return }
+            // commit(), not apply(): the server has already spent the old refresh token, so a process death
+            // that lost this write would replay it at the next refresh and revoke the device. The refresh
+            // stores its pair off the main thread (AndvariApi), so this never blocks the UI.
+            prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).commit()
+        }
     }
 
     /**
@@ -403,12 +412,16 @@ class SessionStore(context: Context) {
      * Stored in the CURRENT origin's namespace (§4.2): this is exactly the "account keys"
      * material the origin-blind purge used to destroy cross-server.
      */
-    fun saveAccountKeys(keys: AccountKeys) {
-        prefs.edit().putString(ns(currentOriginKey(), "accountKeys"), json.encodeToString(AccountKeys.serializer(), keys)).apply()
+    fun saveAccountKeys(keys: AccountKeys) = saveAccountKeys(currentOriginKey(), keys)
+
+    private fun saveAccountKeys(originKey: String, keys: AccountKeys) {
+        prefs.edit().putString(ns(originKey, "accountKeys"), json.encodeToString(AccountKeys.serializer(), keys)).apply()
     }
 
-    fun loadAccountKeys(): AccountKeys? =
-        prefs.getString(ns(currentOriginKey(), "accountKeys"), null)?.let { runCatching { json.decodeFromString(AccountKeys.serializer(), it) }.getOrNull() }
+    fun loadAccountKeys(): AccountKeys? = loadAccountKeys(currentOriginKey())
+
+    private fun loadAccountKeys(originKey: String): AccountKeys? =
+        prefs.getString(ns(originKey, "accountKeys"), null)?.let { runCatching { json.decodeFromString(AccountKeys.serializer(), it) }.getOrNull() }
             // H1 cache belt (spec 05 T1): evict a cache poisoned pre-fix with sub-floor / absurd KDF
             // params -> null = cache miss -> the caller refetches through the fenced AndvariApi.
             ?.takeIf { runCatching { io.silencelen.andvari.core.client.KdfUpgrade.requireServerKdfParams(it.kdfParams) }.isSuccess }
@@ -461,16 +474,18 @@ class SessionStore(context: Context) {
      * "the session's origin" is the current `baseUrl` (nothing changes it mid-session today;
      * wave 3's switch flow clears tokens itself before any repoint).
      */
-    fun clear() {
-        // A14 review N5: every path that ends the session lands here (sign-out, a definitive 401, the
-        // revocation purge, a refused refresh) — the apps this member confirmed end with it.
-        runCatching { AppSignerBindings.clearAll(appContext) }
-        val ok = currentOriginKey()
-        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
-            .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed"))
-            // A fresh account starts with a full offer budget — it never inherits the previous
-            // account's dismissals or its evidence count.
-            .remove(ns(ok, "quickUnlockPasswordUnlocks")).remove(ns(ok, "quickUnlockReoffers")).apply()
+    override fun clear() {
+        synchronized(SESSION_LOCK) {
+            // A14 review N5: every path that ends the session lands here (sign-out, a definitive 401, the
+            // revocation purge, a refused refresh) — the apps this member confirmed end with it.
+            runCatching { AppSignerBindings.clearAll(appContext) }
+            val ok = currentOriginKey()
+            prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN)
+                .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed"))
+                // A fresh account starts with a full offer budget — it never inherits the previous
+                // account's dismissals or its evidence count.
+                .remove(ns(ok, "quickUnlockPasswordUnlocks")).remove(ns(ok, "quickUnlockReoffers")).apply()
+        }
     }
 
     /**
@@ -480,10 +495,98 @@ class SessionStore(context: Context) {
      * is not a wipe, so the old origin's cached account keys / vault cache / quick-unlock survive
      * for an A→B→A round trip (§4.2/B2-7). Callers change [baseUrl] around this.
      */
-    fun clearSessionTokens() {
-        runCatching { AppSignerBindings.clearAll(appContext) } // A14 review N5: a server switch ends the session too
-        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken")
-            .remove("mustChangePassword").apply()
+    override fun clearSessionTokens() {
+        synchronized(SESSION_LOCK) {
+            runCatching { AppSignerBindings.clearAll(appContext) } // A14 review N5: a server switch ends the session too
+            prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN)
+                .remove("mustChangePassword").apply()
+        }
+    }
+
+    /**
+     * F8: give a session saved by a build that kept no origin of its own one, or drop it when that
+     * cannot be done safely (the pure rule and its reasoning: [sessionOriginForBackfill]). Idempotent:
+     * a session with an origin is left alone, and a dropped one has no identity left to backfill.
+     */
+    private fun backfillSessionOrigin() {
+        synchronized(SESSION_LOCK) {
+            if (prefs.getString("userId", null) == null || prefs.contains(SESSION_ORIGIN)) return
+            val origin = sessionOriginForBackfill(baseUrl, pendingServer)
+            if (origin != null) prefs.edit().putString(SESSION_ORIGIN, origin).apply()
+            else clearSessionTokens()
+        }
+    }
+
+    /**
+     * Review round 2: the compare and the write in one step. Every writer of the stored session holds the
+     * same lock (process-wide: the main app and the autofill entry points each build their own store over
+     * one preferences file), so a concurrent save or clear cannot slip between the check and the write.
+     */
+    override fun replaceTokensIf(origin: String, userId: String, expectedRefreshToken: String, t: Tokens?): Boolean {
+        synchronized(SESSION_LOCK) {
+            val s = load() ?: return false
+            if (s.userId != userId || !sessionBelongsTo(s.baseUrl, origin) || s.refreshToken != expectedRefreshToken) return false
+            updateTokens(t) // null ends the session, as a refused refresh always has
+            return true
+        }
+    }
+
+    // ---- the per-origin store (ns.<originKey>. prefix) ----
+
+    override fun origin(key: String): OriginStore = PrefsOriginStore(key)
+
+    /** One origin's view of the ns.<originKey>. prefix, under exactly the keys documented on the
+     *  class. Android keeps one accountKeys slot per origin, so its keys ignore the user. */
+    private inner class PrefsOriginStore(private val key: String) : OriginStore {
+        override var cacheAllowed: Boolean
+            get() = cacheAllowed(key)
+            set(v) = setCacheAllowed(key, v)
+
+        override var autoLockSeconds: Int
+            get() = autoLockSeconds(key)
+            set(v) = setAutoLockSeconds(key, v)
+
+        override var policyFetchedAt: Long
+            get() = policyFetchedAt(key)
+            set(v) = setPolicyFetchedAt(key, v)
+
+        override var serverTimeFloorMs: Long
+            get() = serverTimeFloorMs(key)
+            set(v) = prefs.edit().putLong(ns(key, "qu_serverFloor"), v).apply()
+
+        override fun loadAccountKeys(userId: String): AccountKeys? = this@SessionStore.loadAccountKeys(key)
+
+        override fun saveAccountKeys(userId: String, keys: AccountKeys) = this@SessionStore.saveAccountKeys(key, keys)
+
+        override fun clearAccountKeys(userId: String) = this@SessionStore.clearAccountKeys(key)
+
+        override fun passwordStamp(userId: String): PasswordStamp? {
+            val wall = prefs.getLong(ns(key, "qu_stampWall_$userId"), 0L)
+            if (wall <= 0L) return null
+            return PasswordStamp(
+                wallMs = wall,
+                monotonicMs = prefs.getLong(ns(key, "qu_stampElapsed_$userId"), 0L),
+                bootRefMs = prefs.getLong(ns(key, "qu_stampBoot_$userId"), 0L),
+                bootId = prefs.getInt(ns(key, "qu_stampBootCount_$userId"), -1).takeIf { it >= 0 }?.toString(),
+            )
+        }
+
+        override fun setPasswordStamp(userId: String, stamp: PasswordStamp) {
+            prefs.edit()
+                .putLong(ns(key, "qu_stampWall_$userId"), stamp.wallMs)
+                .putLong(ns(key, "qu_stampElapsed_$userId"), stamp.monotonicMs)
+                .putLong(ns(key, "qu_stampBoot_$userId"), stamp.bootRefMs)
+                .putInt(ns(key, "qu_stampBootCount_$userId"), stamp.bootId?.toIntOrNull() ?: -1)
+                .apply()
+        }
+
+        override fun clearPasswordStamp(userId: String) = clearFullPasswordStamp(key, userId)
+
+        /** As [selfIdentityPub]: the legacy pin is bound to its email before every use (A11, q08). */
+        override fun identityPins(): SelfIdentityPin.KeyValueStore {
+            bindLegacySelfIdentity()
+            return selfIdentityStore(key)
+        }
     }
 
     /**
@@ -627,6 +730,11 @@ class SessionStore(context: Context) {
         // full service (§6.3 live /client-policy probe) + the §7.4 env flip; otherwise a migrated install
         // lands on the break-glass régime that refuses refresh/recovery/sharing and demands TOTP.
         const val DEFAULT_BASE_URL = "https://andvari.monahanhosting.com"
+        /** F8: the origin that issued the stored session. Written and removed with the session. */
+        private const val SESSION_ORIGIN = "sessionOrigin"
+
+        /** Review round 2: held by every writer of the stored session, across every store in the process. */
+        private val SESSION_LOCK = Any()
         // Historical SHIPPED defaults — kept ONLY as migrateDefaultOnce match-targets (never dialed;
         // §5.5 release-gate carve-out for the tailnet/LAN literals).
         private const val LEGACY_LAN_DEFAULT = "http://192.168.2.122:8080"
