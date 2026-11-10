@@ -2169,6 +2169,108 @@ class Service(
         return CreateVaultResponse(rev)
     }
 
+    // ---- account deletion (spec 03 §13; design docs/design/2026-11-10-account-deletion.md) ----
+
+    /**
+     * Test seam (the [credentialWritePreTxProbe] twin): runs in [deleteAccount] after the out-of-lock gate (typed email,
+     * TOTP code, master-password verify) and BEFORE the deletion tx opens — exactly the window a push, a share, a
+     * transfer accept or a password change from another device can commit in. AccountDeletionTest drives those races
+     * through it deterministically. Never set in production.
+     */
+    @Volatile internal var accountDeletePreTxProbe: (() -> Unit)? = null
+
+    /** GET /account/delete/preview: a snapshot of what a deletion would do now (the deletion re-checks in its own tx). */
+    fun accountDeletePreview(p: Principal): io.silencelen.andvari.core.model.AccountDeletePreview = repo.db.read { c ->
+        val totp = c.queryOne("SELECT totpSecret FROM users WHERE userId=?", p.userId) { it.getString(1) != null } ?: throw Unauthorized()
+        io.silencelen.andvari.core.model.AccountDeletePreview(
+            blockers = AccountDeletion.blockers(c, p.userId),
+            deletedVaults = AccountDeletion.ownedVaults(c, p.userId),
+            leftVaults = AccountDeletion.memberVaults(c, p.userId),
+            totpRequired = totp,
+        )
+    }
+
+    private sealed interface DeleteTx {
+        data object CredentialChanged : DeleteTx
+        data object TotpReplay : DeleteTx
+        class Blocked(val blockers: List<io.silencelen.andvari.core.model.AccountDeleteBlocker>) : DeleteTx
+        class Done(val outcome: AccountDeletion.Outcome, val rev: Long) : DeleteTx
+    }
+
+    /**
+     * POST /account/delete. The gate, in order, all OUTSIDE the writer lock:
+     *  1. [io.silencelen.andvari.core.model.AccountDeleteRequest.confirmEmail] must be the account's address (trimmed,
+     *     lowercased) — `400 confirm_email_mismatch`: the typed confirmation binds on every client, not only the polite ones;
+     *  2. an account with server TOTP enrolled must send the current code (`400 totp_code_required`); a wrong or used one is
+     *     `400 bad_totp_code`, audited `totp_verify_fail` — the rotation gate's codes. The factor is checked BEFORE the
+     *     password on purpose: a session holder without the factor never reaches the password check, so this route is no
+     *     password oracle for a stolen session (spec 05 T11's F7 class);
+     *  3. the fresh master-password proof: `currentAuthKey` verified against the login verifier exactly as a password change
+     *     verifies it — `403 reauth_failed` on a miss (the first-TOTP-enrollment gate's code; a 401 would send the client
+     *     into a token refresh), audited `account_delete_reauth_fail`.
+     * Then ONE tx: the credential epoch must still hold (the verified password is still the account's and this session
+     * is still live — else `401 credential_changed`, the changePassword race rule), the TOTP step is consumed (a replay
+     * racing this one loses), the refusal rules are evaluated ([AccountDeletion.blockers] — `409 account_delete_blocked`
+     * with the list, audited `account_delete_denied`, committed before the throw), and only then is everything deleted
+     * ([AccountDeletion.deleteRows]). After commit: the WAL is truncated (verifiers, wrapped keys, escrow and item
+     * ciphertext were destroyed in place), the purged blob files are unlinked, co-members are rung. The route revokes the
+     * account's sockets.
+     */
+    suspend fun deleteAccount(p: Principal, req: io.silencelen.andvari.core.model.AccountDeleteRequest, ip: String): io.silencelen.andvari.core.model.AccountDeleteResponse {
+        val u = repo.userById(p.userId) ?: throw Unauthorized()
+        if (req.confirmEmail.trim().lowercase() != u.email.lowercase()) throw BadRequest("confirm_email_mismatch")
+        var step: Long? = null
+        val secret = u.totpSecret
+        if (secret != null) {
+            val code = req.totp?.takeIf { it.isNotBlank() } ?: throw BadRequest("totp_code_required")
+            step = verifyTotpCode(secret, code, u.totpLastStep) ?: throw totpVerifyFail(p.userId, ip, "account_delete")
+        }
+        if (!ServerCrypto.verify(u.verifier, req.currentAuthKey)) {
+            repo.audit("account_delete_reauth_fail", p.userId, p.deviceId, ip)
+            throw Forbidden("reauth_failed")
+        }
+        accountDeletePreTxProbe?.invoke()
+        val t = now()
+        val result = repo.db.tx<DeleteTx> { c ->
+            if (!credentialEpochHolds(c, p, u.verifier)) return@tx DeleteTx.CredentialChanged
+            if (step != null && c.exec("UPDATE users SET totpLastStep=? WHERE userId=? AND totpLastStep<?", step, p.userId, step) != 1) {
+                return@tx DeleteTx.TotpReplay
+            }
+            val blockers = AccountDeletion.blockers(c, p.userId)
+            if (blockers.isNotEmpty()) {
+                repo.auditOn(c, "account_delete_denied", p.userId, p.deviceId, ip, blockers.joinToString(",") { it.kind })
+                return@tx DeleteTx.Blocked(blockers)
+            }
+            // Re-read the row inside the tx: the email and status it deletes by are the ones this tx sees.
+            val current = c.queryOne("SELECT * FROM users WHERE userId=?", p.userId) { rs -> userRowPublic(rs) }
+                ?: return@tx DeleteTx.CredentialChanged
+            DeleteTx.Done(AccountDeletion.deleteRows(c, repo, current, p.deviceId, ip, t), repo.currentRev(c))
+        }
+        return when (result) {
+            DeleteTx.CredentialChanged -> {
+                // Own tx, like the other failure rows; names the race so a review can tell it from a wrong password.
+                repo.audit("account_delete_reauth_fail", p.userId, p.deviceId, ip, "credential_changed")
+                throw Unauthorized("credential_changed")
+            }
+            DeleteTx.TotpReplay -> throw totpVerifyFail(p.userId, ip, "account_delete_replay")
+            is DeleteTx.Blocked -> throw AccountDeleteBlocked(result.blockers)
+            is DeleteTx.Done -> {
+                // F5: verifier, wrappedUvk, escrow blobs, the recovery piece, grant key material and item ciphertext were
+                // destroyed in place — flush the WAL so no page image of them outlives the tx.
+                repo.db.checkpointTruncate()
+                // Post-commit unlink with the push path's TOCTOU guard: re-check row absence and unlink inside one short
+                // read, so an idempotent re-upload of the same id that committed meanwhile keeps its file. Chunked so a
+                // large account never holds the lock for the whole unlink. A crash before this leaves rowless files the
+                // hourly orphan sweep removes after its TTL.
+                result.outcome.files.chunked(UNLINK_CHUNK).forEach { chunk ->
+                    repo.db.read { c -> chunk.forEach { if (attachments.rowById(c, it) == null) attachments.file(it).delete() } }
+                }
+                if (result.outcome.notify.isNotEmpty()) onChange(result.outcome.notify, result.rev)
+                io.silencelen.andvari.core.model.AccountDeleteResponse(t)
+            }
+        }
+    }
+
     // ---- helpers ----
     private class IssuedSession(val deviceId: String, val access: String, val refresh: String)
 
@@ -2230,5 +2332,7 @@ class Service(
         /** Base64url cap for a v2 `signedGrant` (root cause A §1.5): 48 B seal overhead + a ≤ 1125 B frame
          *  (101 B header + a ≤ 1024 B statement) is ≤ 1564 B, ≤ 2086 chars; real grants are ~600. */
         internal const val SIGNED_GRANT_MAX = 2100
+        /** Blob files unlinked per short DB read after an account deletion commits. */
+        private const val UNLINK_CHUNK = 50
     }
 }
