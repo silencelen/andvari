@@ -456,7 +456,7 @@ spec violation.
 | items | the Item row of §1 — ids, rev, server timestamps, flags, formatVersion, attachmentIds, ciphertext blob, ciphertext byte size |
 | item_versions | itemId, rev, blob, formatVersion, archivedAt (bounded to the newest 10 per item, §7) |
 | changes | rev, kind, entityId, vaultId, at — the global sync feed (pure metadata; reveals per-vault write timing/volume) |
-| mutations | (deviceId, mutationId) → resultJson, createdAt, userId — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content. userId (schema v17) is the pushing account: the janitor prunes a device row long before its journal rows, and an account deletion (spec 03 §13) must still find them |
+| mutations | (deviceId, mutationId) → resultJson, createdAt, userId — idempotency replay cache; resultJson holds per-mutation status/rev, no vault content. userId (schema v17, indexed) is the pushing account: the janitor prunes a device row long before its journal rows, and an account deletion (spec 03 §13) must still find them |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
 | escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
 | usage_ledger | userId, **sealedUsage** (the per-user "last used" map sealed under the VK(personal)-derived usageKey (§2/§8.2) — ciphertext, opaque; AD `andvari/v1\|usage\|{userId}`, §2), updatedAt — the staleness-ranking input (§8.2). ONE aggregate blob by design, never per-item rows: the server sees THAT a user's ledger changed and its size, never WHICH login |
