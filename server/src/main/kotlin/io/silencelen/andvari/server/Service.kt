@@ -1374,9 +1374,10 @@ class Service(
         // mutationId must be re-evaluated against the live attachment rows — a client that
         // re-uploads the missing attachment and re-sends the SAME put must be allowed to land.
         if (result.status != "denied" && result.status != "rejected") {
+            // userId (schema v17): the journal outlives a pruned device row, and account deletion finds the rows by account.
             c.exec(
-                "INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES(?,?,?,?)",
-                principal.deviceId, m.mutationId, json.encodeToString(MutationResult.serializer(), result), now(),
+                "INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt,userId) VALUES(?,?,?,?,?)",
+                principal.deviceId, m.mutationId, json.encodeToString(MutationResult.serializer(), result), now(), principal.userId,
             )
         }
         return result

@@ -335,6 +335,11 @@ class SharedVaultTest : P4TestSupport() {
                        platform TEXT NOT NULL, name TEXT NOT NULL, clientVersion TEXT, createdAt INTEGER NOT NULL,
                        lastSeenAt INTEGER, revokedAt INTEGER)""",
                 )
+                // v1-shaped mutations journal so the v17 migration (ADD COLUMN userId, account deletion) has a table to extend.
+                st.executeUpdate(
+                    """CREATE TABLE mutations(deviceId TEXT NOT NULL, mutationId TEXT NOT NULL, resultJson TEXT NOT NULL,
+                       createdAt INTEGER NOT NULL, PRIMARY KEY(deviceId, mutationId))""",
+                )
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
                 st.executeUpdate("INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES('th','e@x.com',0,1,9)")
                 st.executeUpdate("INSERT INTO users(userId,email,displayName,kdfSalt,kdfParams,verifier,wrappedUvk,identityPub,encryptedIdentitySeed,createdAt) VALUES('u','e@x.com','n','s','p','vf','wu','ip','eis',1)")
@@ -349,7 +354,7 @@ class SharedVaultTest : P4TestSupport() {
                 val s = c.queryOne("SELECT sealedVk FROM grants WHERE userId='u'") { rs -> rs.getString(1) }
                 v to s
             }
-            assertEquals("16", version)
+            assertEquals("17", version)
             assertNull(sealed, "the pre-existing v2 grant reads back sealedVk=NULL")
             db.read { c ->
                 // v6 recovery migration landed: member_recovery table + invites.escrowPolicy default.
@@ -364,7 +369,7 @@ class SharedVaultTest : P4TestSupport() {
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("16", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("17", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

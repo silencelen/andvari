@@ -598,6 +598,93 @@ class AccountDeletionTest : LifecycleTestSupport() {
     }
 
     @Test
+    fun aPrunedDevicesId_isPseudonymisedToo_andItsJournalRowsGo() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("admin@x.com", "pruned device admin password")
+        client.register(admin, bootstrapToken)
+        val u = client.enrollSecond(admin, "pruned@x.com", "pruned device member password")
+
+        // Two more devices of U, each pushing once (a journal row apiece).
+        suspend fun anotherDevice(): Pair<String, String> {
+            val resp = client.post("/api/v1/auth/login") {
+                contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0")
+                setBody(io.silencelen.andvari.core.model.LoginRequest(u.email, u.authKey, io.silencelen.andvari.core.model.DeviceInfo("test", "another device")))
+            }
+            assertEquals(HttpStatusCode.OK, resp.status, resp.bodyAsText())
+            val s = json.decodeFromString(io.silencelen.andvari.core.model.SessionResponse.serializer(), resp.bodyAsText())
+            val push = client.post("/api/v1/sync/push") {
+                contentType(ContentType.Application.Json); authed(s.accessToken)
+                setBody(io.silencelen.andvari.core.model.PushRequest(listOf(putMutation(u, uuid(), "from another device", 0))))
+            }
+            assertEquals(HttpStatusCode.OK, push.status, push.bodyAsText())
+            return s.deviceId to s.accessToken
+        }
+        val (logged, _) = anotherDevice() // its login row outlives its device row
+        val (silent, _) = anotherDevice() // its login row is past the audit year too: only its journal rows still tie it to U
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/admin/devices/$logged/revoke") { authed(admin) }.status) // the admin's row names it
+        // Both are signed out for good and the janitor prunes their device rows (rule e2) while their other rows live on.
+        services.repo.db.tx { c ->
+            c.exec("DELETE FROM sessions WHERE deviceId IN (?, ?)", logged, silent)
+            c.exec("DELETE FROM audit WHERE deviceId=? AND userId=?", silent, u.userId)
+        }
+        assertEquals(2L, services.janitor.pruneOrphanDevices(now() + 91 * Service.DAY_MS))
+        assertEquals(0, services.count("SELECT COUNT(*) FROM devices WHERE deviceId IN (?, ?)", logged, silent))
+        assertEquals(2, services.count("SELECT COUNT(*) FROM mutations WHERE userId=? AND deviceId IN (?, ?)", u.userId, logged, silent), "journal rows carry the account (v17)")
+
+        assertEquals(HttpStatusCode.OK, client.deleteAccount(u).status)
+        val pseudonym = client.auditRows(admin, "account_delete").single().userId!!
+
+        // Neither pruned device's id is left anywhere, and their journal rows went with the account.
+        assertEquals(emptyList(), services.cellsContaining(logged))
+        assertEquals(emptyList(), services.cellsContaining(silent))
+        assertEquals(0, services.count("SELECT COUNT(*) FROM mutations WHERE userId=? OR deviceId IN (?, ?)", u.userId, logged, silent))
+        // The pruned device's kept login row and the admin's revocation of it name one fresh id.
+        val renamed = services.repo.auditQuery(0, "login", pseudonym, 10).single().deviceId!!
+        assertEquals(renamed, services.repo.auditQuery(0, "device_revoke", admin.userId, 10).single().deviceId)
+        assertNotEquals(logged, renamed)
+    }
+
+    @Test
+    fun theV17Upgrade_attributesJournalRowsToTheirDevicesAccount_whereTheDeviceStillExists() {
+        val path = File(tmpDir, "v17-${System.nanoTime()}.db").absolutePath
+        Db(path).close()
+        // The shape a v16 server left: journal rows with no account, one of a device that still exists, one of a pruned one.
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
+            c.createStatement().use { st ->
+                st.executeUpdate("INSERT INTO devices(deviceId,userId,platform,name,createdAt) VALUES('dev-live','acct-1','test','n',1)")
+                st.executeUpdate("INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES('dev-live','m1','{}',1)")
+                st.executeUpdate("INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES('dev-pruned','m2','{}',1)")
+                st.executeUpdate("UPDATE meta SET value='16' WHERE key='schemaVersion'")
+            }
+        }
+        Db(path).use { db ->
+            db.read { c ->
+                assertEquals("17", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertEquals("acct-1", c.queryOne("SELECT userId FROM mutations WHERE mutationId='m1'") { it.getString(1) })
+                assertNull(c.queryOne("SELECT userId FROM mutations WHERE mutationId='m2'") { it.getString(1) }, "a pruned device's row has no account to take")
+            }
+        }
+    }
+
+    @Test
+    fun anAuditRowNamesItsWritersOwnDeviceOrNone_exceptTheForeignDeviceTypes() {
+        // Step 5 of the deletion takes the deviceId of every audit row the account wrote as one of its own devices, except
+        // FOREIGN_DEVICE_AUDIT_TYPES. A new audit write that names some OTHER device (an admin action's target) must be
+        // listed there, or a deletion would rename another account's device.
+        val dir = listOf(File("src/main/kotlin/io/silencelen/andvari/server"), File("server/src/main/kotlin/io/silencelen/andvari/server")).firstOrNull { it.isDirectory }
+        assertNotNull(dir, "server sources not found from ${File(".").absolutePath}")
+        val call = Regex("""audit(?:On)?\(\s*(?:c,\s*)?"([a-z_]+)",\s*([^,]+),\s*([^,]+),""")
+        val writersOwn = setOf("null", "p.deviceId", "principal.deviceId", "session.deviceId", "s.deviceId", "actor?.deviceId")
+        val writes = dir.walkTopDown().filter { it.extension == "kt" }.flatMap { f -> call.findAll(f.readText()).map { it.groupValues[1] to it.groupValues[3].trim() } }.toList()
+        assertTrue(writes.size >= 50, "the scan found only ${writes.size} audit writes — did the call shape change?")
+        val foreign = writes.filter { (_, device) -> device !in writersOwn }.map { it.first }.toSet()
+        assertTrue("device_revoke" in foreign, "the scan must see the admin revoke's target device: $foreign")
+        assertTrue(AccountDeletion.FOREIGN_DEVICE_AUDIT_TYPES.containsAll(foreign), "list in FOREIGN_DEVICE_AUDIT_TYPES: ${foreign - AccountDeletion.FOREIGN_DEVICE_AUDIT_TYPES}")
+    }
+
+    @Test
     fun anAdminActingOnADeletedAccountsIds_recordsTheAttempt_withoutWritingTheIdsBack() = testApplication {
         val services = buildServices(config(), Notifier())
         application { andvariModule(services) }

@@ -1021,6 +1021,11 @@ class VaultLifecycleTest : LifecycleTestSupport() {
                        platform TEXT NOT NULL, name TEXT NOT NULL, clientVersion TEXT, createdAt INTEGER NOT NULL,
                        lastSeenAt INTEGER, revokedAt INTEGER)""",
                 )
+                // v1-shaped mutations journal so the v17 migration (ADD COLUMN userId, account deletion) has a table to extend.
+                st.executeUpdate(
+                    """CREATE TABLE mutations(deviceId TEXT NOT NULL, mutationId TEXT NOT NULL, resultJson TEXT NOT NULL,
+                       createdAt INTEGER NOT NULL, PRIMARY KEY(deviceId, mutationId))""",
+                )
                 st.executeUpdate("INSERT INTO vaults(vaultId,type,rev,metaBlob,createdAt) VALUES('v','shared',1,'m',1)")
                 st.executeUpdate("INSERT INTO grants(vaultId,userId,role,wrappedVk,rev) VALUES('v','u','owner','wv',1)")
                 st.executeUpdate("INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES('th','e@x.com',0,1,9)")
@@ -1032,7 +1037,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
 
         Db(dbFile.absolutePath).use { db ->
             db.read { c ->
-                assertEquals("16", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertEquals("17", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
                 // Pre-v4 rows read back NULL lifecycle state, transferSeq=0.
                 val v = c.queryOne("SELECT deletedAt, purgeAt, purgedAt, deleteId, transferSeq, pendingOfferId FROM vaults WHERE vaultId='v'") { rs ->
                     listOf(rs.getObject(1), rs.getObject(2), rs.getObject(3), rs.getObject(4), rs.getLong(5), rs.getObject(6))
@@ -1058,7 +1063,7 @@ class VaultLifecycleTest : LifecycleTestSupport() {
         }
         // Re-opening is idempotent (already migrated — the ALTERs do not re-run).
         Db(dbFile.absolutePath).use { db ->
-            assertEquals("16", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
+            assertEquals("17", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } })
         }
     }
 }

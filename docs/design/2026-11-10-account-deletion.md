@@ -184,7 +184,7 @@ In `AccountDeletion.deleteRows` (server), inside the caller's `db.tx`, after the
 | `users` | the row is deleted **last**, after every row that references it (FK); `check(removed == 1)` |
 | `sessions` | every row of the account (and of its devices) deleted — before `devices` (FK) |
 | `devices` | every row of the account deleted |
-| `mutations` | the idempotency rows of the account's devices deleted (journal of devices that no longer exist) |
+| `mutations` | the idempotency rows of every device of the account deleted (journal of devices that no longer exist): by the `userId` column (schema v17) and by the device-id set of §9, which reaches devices the janitor already pruned |
 | `grants` | (a) on each purged vault: every row's key material blanked (`wrappedVk=''`, `sealedVk=NULL`, `signedGrant=NULL`) — other accounts' revoked rows are retained, as at a janitor purge; (b) every row whose `userId` is the account deleted (owner rows of purged vaults, member rows elsewhere — the leave —, revoked rows) |
 | `vaults` | purged vaults: `metaBlob=''`, `deletedAt`/`purgeAt` set if unset, `purgedAt=now`, `deletedBy=NULL` (it named the account), pending-offer fields cleared. Vaults whose pending offer names the account: offer cleared, rev bumped. Every OTHER vault whose `deletedBy` names the account (one it deleted that the janitor already purged, or one it deleted, restored — restore keeps the column — and handed over): `deletedBy=NULL`; nothing reads the column. A test scans every TEXT column of every table for the deleted userId and address afterwards |
 | `items` | purged vaults: skeletal tombstones (`deleted=1`, `blob=NULL`, `blobSize=0`, `attachmentIds='[]'`, `conflict=0`, `updatedAt=now`, **no rev bump**); they age out through the 30-day tombstone rule. Items the account wrote into other vaults: untouched |
@@ -201,8 +201,9 @@ In `AccountDeletion.deleteRows` (server), inside the caller's `db.tx`, after the
 transaction as the invite, meta = the token-hash prefix — is the record, and it outlives every invite (365-day audit
 retention vs a ≤ 72 h invite), so `DELETE FROM invites WHERE usedAt IS NULL AND substr(tokenHash,1,12) IN (SELECT meta
 FROM audit WHERE type='invite_create' AND userId=?)` is complete. It runs before the audit pass re-keys those rows. No
-column was added for it (a `createdBy` column would have needed a spec 02 §5 row and its own scrubbing); the one schema
-change of this feature is v16's `retired_ids` table.
+column was added for it (a `createdBy` column would have needed a spec 02 §5 row and its own scrubbing). The schema
+changes of this feature are v16's `retired_ids` table and v17's `mutations.userId` (§9: the journal outlives a pruned
+device row).
 
 ### 6.2 One purge, shared with the janitor
 
@@ -312,14 +313,22 @@ reads every audit type out of the server sources (and asserts the sets are disjo
 `user_lookup` that found it) keep their ordinary 365-day retention with the userId replaced by the pseudonym
 (`replace(meta, userId, pseudonym)`): they are those accounts' history.
 
-**Device ids** go the way of the userId. Each device in the account's `devices` rows gets a fresh random id of its own,
-written over that device id in every audit row naming it — the account's kept rows, and other accounts' (an admin's
-`device_revoke` of it) — so "these events came from one device" still reads, without naming an id the account's old
-clients, backups and log lines share with the trail. The `account_delete` row carries the deleting device's new id.
-Only the `devices` table says which devices were the account's: a row of the account can name ANOTHER account's device
-(a `device_revoke` it made as an admin), and that id is left alone. The mapping is stored nowhere, like the pseudonym's;
-device ids are minted by the server (`uuid()` at session issue, never chosen by a client), so unlike the userId and the
-pseudonym (§2, `retired_ids`) they need no retirement.
+**Device ids** go the way of the userId. Each device of the account gets a fresh random id of its own, written over
+that device id in every audit row naming it — the account's kept rows, and other accounts' (an admin's `device_revoke`
+of it) — so "these events came from one device" still reads, without naming an id the account's old clients, backups
+and log lines share with the trail. The `account_delete` row carries the deleting device's new id. The set of the
+account's devices is gathered from everywhere that still ties one to it, because the janitor prunes a session-less
+device row after 90 days while its audit rows live 365 and its journal rows 180: its `devices` rows; the deviceId on
+its own audit rows, except `AccountDeletion.FOREIGN_DEVICE_AUDIT_TYPES` (`device_revoke`, `device_revoke_denied`, whose
+deviceId is the TARGET of an admin action — another account's device, left alone); and its `mutations` rows, which
+carry the pushing account since schema v17 (existing rows were attributed from their device rows at the upgrade). A
+source-scanning test keeps every other audit write naming its writer's own device or none. The journal rows of the
+whole set are deleted. The mapping is stored nowhere, like the pseudonym's; device ids are minted by the server
+(`uuid()` at session issue, never chosen by a client), so unlike the userId and the pseudonym (§2, `retired_ids`) they
+need no retirement. Left over: a journal row written before the v17 upgrade by a device pruned before it, whose every
+audit row has also aged out, names nothing the database can tie to an account; it ages out within 180 days of the
+upgrade. (Independent review, 2026-11-10: the first cut read only the `devices` table, so pruned devices kept their
+ids.)
 
 **No row ever held the email** (spec 02 §5: audit rows carry no emails of existing users; `register` and `invite_create`
 carry a token-hash prefix). The invite rows that did hold it are deleted (§6.1).
@@ -411,8 +420,9 @@ the household's vault and its members untouched, every token dead, the vaultId n
 again as a new account with a new salt); both refusal kinds, their audit rows and their resolutions (transfer, delete,
 a second admin; the only account deleting itself); the gate (typed email, a wrong proof, TOTP before the password, a
 replayed code after a refused attempt, the hourly bucket, the break-glass origin); the WebSocket `revoked` frame and the
-co-member's bell; the offer clear; the pseudonymised trail and its 90-day purge; the device-id pseudonyms (another
-account's device left alone); the straggler belt; an admin screen's stale ids not written back; invites; the
+co-member's bell; the offer clear; the pseudonymised trail and its 90-day purge; the device-id pseudonyms (a pruned
+device's too, its journal rows deleted, another account's device left alone, the v17 upgrade's attribution, and a
+source scan of which audit writes name a foreign device); the straggler belt; an admin screen's stale ids not written back; invites; the
 audit-type classification tripwire; and the races — a share, a push + upload and a password change landing between the
 gate and the transaction, plus pushes, pulls and a second deletion racing for real. Web (vitest): the client methods and
 their wire shapes, the blocked-response parsing, a 5xx or non-JSON reply read as unknown, the flow logic (an unknown
