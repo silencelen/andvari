@@ -1013,9 +1013,10 @@ deletion is the most destructive of the sit-at-home operations §8 and §10–§
     retries; a vault in its grace window no longer blocks (it is purged with the account, below).
   - `last_admin` (`others`) — the account is an active admin, **no other account is an active admin**, and `others ≥ 1`
     other accounts exist, whatever their status (a disabled account comes back only through an admin's recovery
-    upload). The instance's only account may delete itself; the instance is then empty, and its operator re-bootstraps
-    it. andvari makes admins only at invite time, so this is resolved by inviting a new admin account (or recovering a
-    disabled admin).
+    upload). The instance's only account may delete itself: every invite row goes with it (the used bootstrap row
+    included), and the operator re-bootstraps the empty instance — the next start with `ANDVARI_BOOTSTRAP_TOKEN` set
+    mints a fresh bootstrap invite, and a start that finds no account clears any invite row first. andvari makes
+    admins only at invite time, so this is resolved by inviting a new admin account (or recovering a disabled admin).
   A client MUST show a `kind` it does not know as a blocker it cannot explain, and MUST NOT offer to proceed past it.
 
   **Effect.**

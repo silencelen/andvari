@@ -155,7 +155,10 @@ Evaluated inside the deletion transaction (and, as a snapshot, by the preview), 
 Why `last_admin` counts disabled accounts: a disabled account comes back only through an admin's recovery upload, so an
 instance with disabled accounts and no admin strands them exactly as one with active members would. An instance whose
 **only** account deletes itself is left empty, not stranded: its operator re-bootstraps it (`ANDVARI_BOOTSTRAP_TOKEN`,
-seeded at the next start).
+seeded at the next start). For that to hold, the deletion of the LAST account also deletes every remaining invite row —
+the used `*` row it registered through would otherwise count, for `seedBootstrap`, as "an invite exists" and block the
+re-mint silently until the janitor pruned it (~33 days) — and `seedBootstrap` itself now clears every invite row when it
+finds no account, before minting (the belt for a database emptied any other way, or by an older build).
 
 Known limitation, recorded here and in the report: andvari has **no "promote to admin" route** — admin is set only on
 the invite — and an existing member's address cannot be invited (`email_taken`). So the last-admin blocker is resolved
@@ -185,7 +188,7 @@ In `AccountDeletion.deleteRows` (server), inside the caller's `db.tx`, after the
 | `attachments` | purged vaults' rows deleted (ids collected for the post-commit unlink) |
 | `changes` | one row per membership dropped (as a leave records one, so the co-members' bell carries a fresh rev) and one per offer cleared; otherwise untouched |
 | `escrow`, `escrow_legacy`, `member_recovery`, `usage_ledger`, `account_state`, `personal_wrap` | the account's row deleted (each a FK child of `users`: a new per-account table not added to the list fails the user delete on its foreign key and rolls everything back — loud, never a silent leftover) |
-| `invites` | rows with the account's email deleted; unused rows it minted deleted (below) |
+| `invites` | rows with the account's email deleted; unused rows it minted deleted (below); when it was the instance's last account, every row (§5) |
 | `audit` | §9 |
 | `removal_nonces`, `policies`, `meta` | untouched (vault-keyed random nonces; instance config) |
 
