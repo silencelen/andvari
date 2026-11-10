@@ -353,6 +353,11 @@ class Service(
             val userId = req.userId
             if (!UUID_RE.matches(userId)) throw BadRequest("bad_user_id")
             if (c.queryOne("SELECT userId FROM users WHERE userId=?", userId) { it.getString(1) } != null) throw BadRequest("user_id_taken")
+            // Account deletion (spec 03 §13): the client chooses its userId, so an id a deleted account left behind — its
+            // own, or the pseudonym its retained audit rows carry — is refused exactly like a live one. Re-registering the
+            // old id would revive every lookup of it; registering the pseudonym would hand the new account rows the
+            // 90-day purge then erases (schema v16, `retired_ids`).
+            if (AccountDeletion.isRetired(c, userId)) throw BadRequest("user_id_taken")
             // H62: a colliding personal vaultId is a refusal (the sibling's vault_id_taken), not a
             // PRIMARY KEY violation logged as a 500. Inside the tx like user_id_taken, where it is
             // ordered against any concurrent insert of the same id.

@@ -224,9 +224,20 @@ internal object AccountDeletion {
         // 9. The deletion's own row, under the pseudonym, ids-free.
         repo.auditPseudonymOn(c, "account_delete", pseudonym, deviceId, ip, "vaults=${owned.size},left=${left.size}")
 
+        // 10. Both ids are retired for good: neither the old userId nor the pseudonym may ever name a new account (register
+        //     answers `user_id_taken`). Kept as a digest — no column names the deleted userId.
+        for (id in listOf(userId, pseudonym)) c.exec("INSERT OR IGNORE INTO retired_ids(idHash) VALUES(?)", retiredIdHash(id))
+
         notify -= userId
         return Outcome(pseudonym, files, notify, owned.size, left.size)
     }
+
+    /** `retired_ids.idHash` for [id]: lowercase-hex SHA-256 of its UTF-8 text (schema v16). */
+    fun retiredIdHash(id: String): String = sha256HexUtf8(id)
+
+    /** True when [id] was retired by an account deletion — the deleted userId or its audit pseudonym (spec 03 §13). */
+    fun isRetired(c: Connection, id: String): Boolean =
+        c.queryOne("SELECT 1 FROM retired_ids WHERE idHash=?", retiredIdHash(id)) { 1 } != null
 
     /** The per-account tables keyed by userId alone (each a FK child of users). A new one must be added here, or the
      *  user row's delete fails on its foreign key and the whole deletion rolls back — loud, never a silent leftover. */

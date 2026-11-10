@@ -979,7 +979,8 @@ Self-service, from inside the app (store policy: Google Play User Data, App Stor
 "no admin lifecycle route" rule; disabling (§7) stays the admin tool. Both routes are authenticated (a §2.6 restricted
 session is refused like every route: enroll, then delete), `enforceVersion`'d, and **refused on the break-glass twin
 origin** (`403 account_delete_public_disabled`): the emergency origin exists to read a vault from somewhere hostile, and
-deletion is the most destructive of the sit-at-home operations §8 and §10–§12 already keep off it. No schema change.
+deletion is the most destructive of the sit-at-home operations §8 and §10–§12 already keep off it. Schema v16 adds one
+table, `retired_ids` (below; spec 02 §5).
 
 - **`GET /account/delete/preview`** → `{ blockers: [AccountDeleteBlocker], deletedVaults: [vaultId], leftVaults:
   [vaultId], totpRequired }`. A snapshot of what a deletion would do now, so a client can show the blockers and the
@@ -1043,6 +1044,11 @@ deletion is the most destructive of the sit-at-home operations §8 and §10–§
   - The user row goes last. The address can then register again, through a new invite, as a **new account** — new
     userId, new keys, an empty vault; nothing of the old one is reachable from it. Lookups of the old account answer
     `404 no_such_user`.
+  - **Both ids are retired for good.** The client chooses its userId at `POST /auth/register` (the AEAD ADs bind it), so
+    the deleted userId and the audit pseudonym (below) are kept as lowercase-hex SHA-256 in `retired_ids`, and register
+    refuses either as `400 user_id_taken`, exactly like a live one: re-registering the old id would revive every lookup
+    of it, and an account registered under the pseudonym would have its own security rows erased by the 90-day purge.
+    The digest answers "was this id retired?" only for someone who already holds the id, and the table keeps no date.
   - Key material and ciphertext were destroyed in place, so the WAL is checkpointed and truncated after the commit (the
     spec 04 §3 rule for every key-destruction path).
 
