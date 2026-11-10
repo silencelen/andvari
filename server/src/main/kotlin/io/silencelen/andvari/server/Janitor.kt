@@ -10,7 +10,9 @@ package io.silencelen.andvari.server
  * ([SESSION_RETENTION_MS]) and then the device rows those sessions were the last evidence
  * of (H25 — same horizon, session-less rows only), the mutation-dedup journal ([MUTATION_RETENTION_MS]),
  * audit rows ([AUDIT_RETENTION_MS]) and dead invites ([INVITE_RETENTION_MS]). The old (i),
- * stale hibp_cache rows, went with the table itself in schema v11 (Db.purgeHibpCache).
+ * stale hibp_cache rows, went with the table itself in schema v11 (Db.purgeHibpCache); the
+ * current (i) prunes a deleted account's pseudonymised audit rows 90 days after the deletion
+ * (spec 03 §13, design 2026-11-10-account-deletion).
  * The changes fence REUSES the item-tombstone horizon by construction: any cursor old
  * enough to have missed a purged tombstone is behind the fence too, so it gets 410 → full
  * resync instead of resurrecting deletions.
@@ -61,6 +63,8 @@ class Janitor(
         val prunedAudit: Long,
         val prunedInvites: Long,
         val dryRun: Boolean,
+        /** (i) rows of deleted accounts past their 90-day window (design 2026-11-10). */
+        val prunedDeletedAccountAudit: Long = 0,
     )
 
     suspend fun sweep(nowMs: Long = now()): SweepResult = SweepResult(
@@ -74,6 +78,7 @@ class Janitor(
         prunedAudit = pruneOldAudit(nowMs),
         prunedInvites = pruneOldInvites(nowMs),
         dryRun = config.janitorDryRun,
+        prunedDeletedAccountAudit = pruneDeletedAccountAudit(nowMs),
     )
 
     // ---- (c) F49: item-tombstone retention (30 days) ----
@@ -210,6 +215,20 @@ class Janitor(
     fun pruneOldAudit(nowMs: Long): Long =
         prune("audit", "audit row(s) past 365d", "at<?", nowMs - AUDIT_RETENTION_MS)
 
+    /**
+     * (i) Account deletion (spec 03 §13, design 2026-11-10): a deleted account's security events were kept under a fresh
+     * pseudonym (its own rows' userId), and they go [AccountDeletion.AUDIT_RETENTION_MS] after the DELETION — the
+     * window an incident review that starts from the deletion needs, whatever the age of the events themselves. The
+     * deletion's own `account_delete` row carries the pseudonym and the instant, so it is the clock; it matches its own
+     * predicate and goes with the rest. Rows of OTHER accounts that mention the pseudonym in meta (an admin's
+     * `user_disable`, an owner's `vault_member_add`) are those accounts' history and keep the ordinary rule (g).
+     */
+    fun pruneDeletedAccountAudit(nowMs: Long): Long = prune(
+        "audit", "deleted-account audit row(s) past 90d",
+        "userId IN (SELECT userId FROM audit WHERE type='account_delete' AND at<?)",
+        nowMs - AccountDeletion.AUDIT_RETENTION_MS,
+    )
+
     /** (h) Dead invites: used >30d ago, or expired >30d ago (the admin UI lists only live ones). */
     fun pruneOldInvites(nowMs: Long): Long {
         val cutoff = nowMs - INVITE_RETENTION_MS
@@ -250,26 +269,14 @@ class Janitor(
         val files = mutableListOf<String>()
         val purged = repo.db.tx { c ->
             if (c.queryOne(guard, vaultId, nowMs) { 1 } == null) return@tx false
-            // Collect blob paths BEFORE deleting the rows; unlink happens post-commit.
-            files += c.queryAll("SELECT attachmentId FROM attachments WHERE vaultId=?", vaultId) { it.getString(1) }
-            c.exec(
-                "DELETE FROM item_versions WHERE itemId IN (SELECT itemId FROM items WHERE vaultId=?) AND EXISTS($guard)",
-                vaultId, vaultId, nowMs,
-            )
-            c.exec("DELETE FROM attachments WHERE vaultId=? AND EXISTS($guard)", vaultId, vaultId, nowMs)
-            // Skeletal tombstones: ciphertext gone, NO rev bump. updatedAt is restamped to the
-            // purge instant so rule (c) gives every skeletal row the FULL tombstone horizon from
-            // PURGE (an idle item's stale mtime would otherwise age it out on the next sweep) —
-            // then they age out like any tombstone; retention story in the class header.
-            c.exec(
-                "UPDATE items SET deleted=1, conflict=0, blob=NULL, blobSize=0, attachmentIds='[]', updatedAt=? WHERE vaultId=? AND EXISTS($guard)",
-                nowMs, vaultId, vaultId, nowMs,
-            )
-            // Blanket wipe of ALL grants' key material — active AND previously-revoked
-            // (a removed member's sealedVk must not survive the purge). Every column that can carry
-            // the VK: wrappedVk, the v1 sealedVk, and the v14 signedGrant (q43 — it was added after
-            // this statement was written, and a new key-carrier column must be added HERE too).
-            c.exec("UPDATE grants SET wrappedVk='', sealedVk=NULL, signedGrant=NULL WHERE vaultId=? AND EXISTS($guard)", vaultId, vaultId, nowMs)
+            // The destructive statements live in Repo.purgeVaultContents, shared with account deletion (design
+            // 2026-11-10) so a new key-carrier column is blanked by both: archived versions + attachment rows go
+            // (blob paths collected first; unlink happens post-commit), item rows become skeletal tombstones with
+            // NO rev bump and updatedAt restamped to the purge instant (rule (c) then gives every skeletal row the
+            // FULL tombstone horizon from PURGE — retention story in the class header), and ALL grants' key
+            // material is wiped, active AND previously-revoked (a removed member's sealedVk must not survive the
+            // purge; the v14 signedGrant too — q43). Every statement carries this guard as an EXISTS clause.
+            files += repo.purgeVaultContents(c, vaultId, nowMs, guard, vaultId, nowMs)
             val stamped = c.exec(
                 "UPDATE vaults SET metaBlob='', purgedAt=? WHERE vaultId=? AND deletedAt IS NOT NULL AND purgeAt<=? AND purgedAt IS NULL",
                 nowMs, vaultId, nowMs,

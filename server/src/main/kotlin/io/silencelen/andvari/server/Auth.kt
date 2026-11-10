@@ -33,6 +33,10 @@ class ResyncRequired : Exception()
 class Conflict(val reason: String) : Exception()
 class Gone(val reason: String) : Exception()
 
+// Account deletion (spec 03 §13): the refusal carries WHAT blocks it — the vaults the caller owns that other
+// accounts still use, or the last-admin role — so StatusPages answers 409 `account_delete_blocked` with the list.
+class AccountDeleteBlocked(val blockers: List<io.silencelen.andvari.core.model.AccountDeleteBlocker>) : Exception()
+
 // Upstream (HIBP relay) failure → 502: distinct from a client-input 400 so "HIBP is down"
 // never reads as "your prefix was malformed" (polish audit 2026-07-27 bug-server--2).
 class BadGateway(val reason: String) : Exception()

@@ -30,6 +30,9 @@ fun decodeParams(text: String): KdfParams = json.decodeFromString(KdfParams.seri
 
 fun now(): Long = System.currentTimeMillis()
 
+/** The meta prefix [Repo.auditOn] writes in place of a userId that names no user any more (account deletion). */
+const val DELETED_ACCOUNT_META = "deleted_account"
+
 /** hexLower(sha256(utf8(s))) — the accept-proof wrap binding (spec 03 §11); matches
  *  LifecycleProof.accept's `Bytes.toHexLower(crypto.sha256(wrappedVk.encodeToByteArray()))`. */
 fun sha256HexUtf8(s: String): String =
@@ -522,6 +525,33 @@ class Repo(val db: Db) {
         return ids
     }
 
+    /**
+     * The destructive half of a vault purge (spec 02 §7) — ONE statement list shared by the janitor's post-grace purge
+     * ([Janitor.purgeVault]) and account deletion ([AccountDeletion.deleteRows]), so a column that can carry a vault
+     * key or ciphertext is added to both by being added here. Inside the caller's tx: archived versions and attachment
+     * rows go, item rows become ciphertext-free skeletal tombstones (deleted=1, blob=NULL, NO rev bump — revoked members
+     * receive nothing — and updatedAt restamped to [nowMs] so the 30-day tombstone rule gives them the full horizon from
+     * the purge), and EVERY grant's key material on the vault is blanked, active and previously-revoked alike
+     * (wrappedVk='' — the NOT NULL sentinel —, the v1 sealedVk, the v14 signedGrant). The vault row itself is stamped by
+     * the caller, which owns that decision.
+     *
+     * Every statement carries `AND EXISTS([guard])`: the janitor passes its in-tx due-check so a purge can never run
+     * against a vault a racing restore just revived (the fence its header describes); account deletion has already
+     * decided inside the same tx and passes the always-true default. Returns the purged attachment ids — the caller
+     * unlinks their blob files only AFTER its tx commits (a rollback must leave every file in place).
+     */
+    fun purgeVaultContents(c: Connection, vaultId: String, nowMs: Long, guard: String = "SELECT 1", vararg guardArgs: Any?): List<String> {
+        val files = c.queryAll("SELECT attachmentId FROM attachments WHERE vaultId=?", vaultId) { it.getString(1) }
+        c.exec("DELETE FROM item_versions WHERE itemId IN (SELECT itemId FROM items WHERE vaultId=?) AND EXISTS($guard)", vaultId, *guardArgs)
+        c.exec("DELETE FROM attachments WHERE vaultId=? AND EXISTS($guard)", vaultId, *guardArgs)
+        c.exec(
+            "UPDATE items SET deleted=1, conflict=0, blob=NULL, blobSize=0, attachmentIds='[]', updatedAt=? WHERE vaultId=? AND EXISTS($guard)",
+            nowMs, vaultId, *guardArgs,
+        )
+        c.exec("UPDATE grants SET wrappedVk='', sealedVk=NULL, signedGrant=NULL WHERE vaultId=? AND EXISTS($guard)", vaultId, *guardArgs)
+        return files
+    }
+
     fun archiveVersion(c: Connection, item: WireItem) {
         if (item.blob == null) return
         c.exec(
@@ -537,9 +567,26 @@ class Repo(val db: Db) {
 
     // audit — auditOn(c,…) when already inside a tx (avoids nested-tx autocommit corruption);
     // audit(…) opens its own tx for standalone callers.
+    //
+    // Account deletion (spec 03 §13, design 2026-11-10): a row never names a user the users table no longer holds. The
+    // deletion pseudonymises the account's audit trail inside its own tx, but a request that authenticated BEFORE that
+    // tx committed (a push queued behind the lock, a sign-out racing it) still reaches this method afterwards with the
+    // raw userId — and would write it back into the trail the deletion just scrubbed, where the 90-day purge never
+    // finds it. Such a row is kept (it is still a security event) without the id: userId NULL and meta prefixed
+    // [DELETED_ACCOUNT_META]. One PK lookup per audit row; every live caller names an existing user or none.
     fun auditOn(c: Connection, type: String, userId: String?, deviceId: String?, ip: String?, meta: String? = null) {
-        c.exec("INSERT INTO audit(at,type,userId,deviceId,ip,meta) VALUES(?,?,?,?,?,?)", now(), type, userId, deviceId, ip, meta)
-        AuditLog.log(type, userId, deviceId, ip, meta)
+        val gone = userId != null && c.queryOne("SELECT 1 FROM users WHERE userId=?", userId) { 1 } == null
+        val uid = if (gone) null else userId
+        val m = if (!gone) meta else if (meta == null) DELETED_ACCOUNT_META else "$DELETED_ACCOUNT_META:$meta"
+        c.exec("INSERT INTO audit(at,type,userId,deviceId,ip,meta) VALUES(?,?,?,?,?,?)", now(), type, uid, deviceId, ip, m)
+        AuditLog.log(type, uid, deviceId, ip, m)
+    }
+
+    /** The ONE writer of a row whose userId names no user: account deletion's own `account_delete` row, under the
+     *  deleted account's fresh pseudonym (spec 03 §13), which [auditOn]'s belt would otherwise strip. */
+    internal fun auditPseudonymOn(c: Connection, type: String, pseudonym: String, deviceId: String?, ip: String?, meta: String?) {
+        c.exec("INSERT INTO audit(at,type,userId,deviceId,ip,meta) VALUES(?,?,?,?,?,?)", now(), type, pseudonym, deviceId, ip, meta)
+        AuditLog.log(type, pseudonym, deviceId, ip, meta)
     }
 
     fun audit(type: String, userId: String?, deviceId: String?, ip: String?, meta: String? = null) {

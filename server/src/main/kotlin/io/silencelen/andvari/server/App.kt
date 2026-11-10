@@ -403,6 +403,11 @@ fun Application.andvariModule(services: Services) {
                 is BadRequest -> call.respond(HttpStatusCode.BadRequest, ApiError(cause.reason, "bad request"))
                 is NotFound -> call.respond(HttpStatusCode.NotFound, ApiError(cause.reason, "not found"))
                 is Conflict -> call.respond(HttpStatusCode.Conflict, ApiError(cause.reason, "conflict"))
+                // spec 03 §13: the house error shape plus WHAT blocks the deletion (additive field).
+                is AccountDeleteBlocked -> call.respond(
+                    HttpStatusCode.Conflict,
+                    io.silencelen.andvari.core.model.AccountDeleteBlockedError("account_delete_blocked", "account deletion is blocked", cause.blockers),
+                )
                 is Gone -> call.respond(HttpStatusCode.Gone, ApiError(cause.reason, "gone"))
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
@@ -745,6 +750,35 @@ fun Application.andvariModule(services: Services) {
             if (!limiter.allow("totp_verify:${p.userId}", 5, 60_000)) throw RateLimited()
             service.totpDisable(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp(config))
             call.respond(service.totpStatus(p.userId))
+        }
+
+        // ---- account deletion (spec 03 §13; design docs/design/2026-11-10-account-deletion.md) ----
+        // Both routes: authenticated (a §2.6 TOTP-restricted session is refused like every other route — enroll, then
+        // delete), version-pinned like the §11 lifecycle routes, and REFUSED on the break-glass twin origin: deleting an
+        // account is the most destructive sit-at-home operation there is, and the emergency origin exists to READ a vault
+        // from somewhere hostile, never to administer one (spec 03 §8 and §10–§12 refuse register, sharing, lifecycle and
+        // recovery there for the same reason).
+        get("/api/v1/account/delete/preview") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("account_delete_public_disabled")
+            call.respond(service.accountDeletePreview(p))
+        }
+        post("/api/v1/account/delete") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("account_delete_public_disabled")
+            // A memory-hard verify per attempt, and every reauth route a session holder can reach is one more password
+            // guess per window — so this one is per HOUR, not the password-change route's per minute: a member deletes an
+            // account once, and five typos in an hour is already a bad day.
+            if (!limiter.allow("account_delete:${p.userId}", 5, 3_600_000)) throw RateLimited()
+            val req = call.receive<io.silencelen.andvari.core.model.AccountDeleteRequest>()
+            // A code checked against the LIVE factor draws on that factor's shared budget (see the TOTP routes above).
+            if (req.totp != null && service.totpStatus(p.userId).enrolled && !limiter.allow("totp_verify:${p.userId}", 5, 60_000)) throw RateLimited()
+            val resp = service.deleteAccount(p, req, call.clientIp(config))
+            // M8: every session of the account is gone — lock and close each of its sockets (this tab's included).
+            services.notifier.notifyRevokedUser(p.userId)
+            call.respond(resp)
         }
 
         // ---- attachments (spec 02 §6: blob first, then the item update referencing it) ----
