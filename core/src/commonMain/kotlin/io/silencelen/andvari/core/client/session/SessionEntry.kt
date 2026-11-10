@@ -136,7 +136,7 @@ class SessionEntry(
     )
 
     /** Sign in at the origin the client dials. [firstSync] is the first sync after the bind (default: the engine's). */
-    suspend fun signIn(email: String, password: String, totp: String? = null, firstSync: suspend (SyncEngine) -> Unit = { it.sync() }): SignInResult {
+    suspend fun signIn(email: String, password: String, totp: String?, firstSync: suspend (SyncEngine) -> Unit): SignInResult {
         // §4.3 B2-6 (sink guard, the authoritative backstop for the pending-state sign-in lockout): an uncommitted
         // pending marker means the client is OPTIMISTICALLY pointed at an unverified invite origin (enroll success is
         // what clears the marker). Deriving a master-password authKey against that origin is exactly the
@@ -215,7 +215,7 @@ class SessionEntry(
     }
 
     /** Enroll at the origin the client dials (honouring a pending invite switch that already exists). */
-    suspend fun enroll(request: EnrollRequest, firstSync: suspend (SyncEngine) -> Unit = { it.sync() }): EnrollOutcome {
+    suspend fun enroll(request: EnrollRequest, firstSync: suspend (SyncEngine) -> Unit): EnrollOutcome {
         val r = request
         if (!Strength.meetsMasterPasswordFloor(r.password)) return EnrollOutcome.WeakPassword
         // CR-06: the policy the form's gate validated the typed sheet against; the fallback fetch only fires when

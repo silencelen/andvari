@@ -120,10 +120,18 @@ internal class FakeNamespaces : NamespaceStorage {
     override fun openVaultCache(originKey: String, userId: String): VaultCache {
         failOpen?.let { throw it }
         opened += "$originKey/$userId"
-        return InMemoryVaultCache()
+        return caches.getOrPut("$originKey/$userId") { InMemoryVaultCache() }
     }
 
     override fun deviceState(originKey: String, userId: String): DeviceState = MemoryDeviceState()
+
+    /** Caches a test filled in advance, by "originKey/userId"; any other namespace opens empty. */
+    val caches = mutableMapOf<String, VaultCache>()
+    val deleted = mutableListOf<String>()
+
+    override fun deleteVaultCache(originKey: String, userId: String) {
+        deleted += "$originKey/$userId"
+    }
 }
 
 /** The quick-unlock key wrapping, in memory: what the next prompt releases is up to the test. */
@@ -134,11 +142,27 @@ internal class FakeQuickKeys : QuickUnlockKeys {
     var prompts = 0
     var next: () -> QuickRecover = { QuickRecover.Fallback(null) }
 
+    /** What the next enrollment prompt does; by default it consents and wraps a copy of the UVK. */
+    var enrollNext: (io.silencelen.andvari.core.client.Account) -> QuickEnroll = { account ->
+        runCatching { account.uvkCopyForPlatformWrap().fill(0) }.fold({ QuickEnroll.Ok }, { QuickEnroll.Failed(null) })
+    }
+    val enrolledFor = mutableListOf<String>()
+
     override fun hasStrongBiometric() = biometric
     override fun isEnrolled(originKey: String, userId: String) = "$originKey/$userId" in enrolled
     override suspend fun recover(host: BiometricHost, originKey: String, userId: String): QuickRecover {
         prompts++
         return next()
+    }
+
+    override suspend fun enroll(host: BiometricHost, originKey: String, userId: String, account: io.silencelen.andvari.core.client.Account): QuickEnroll {
+        prompts++
+        val r = enrollNext(account)
+        if (r == QuickEnroll.Ok) {
+            enrolled += "$originKey/$userId"
+            enrolledFor += "$originKey/$userId"
+        }
+        return r
     }
 
     override fun wipe(originKey: String, userId: String) {
