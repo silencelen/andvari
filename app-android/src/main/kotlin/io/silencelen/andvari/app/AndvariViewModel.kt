@@ -163,6 +163,34 @@ internal fun freshBreachVerdicts(
 ): Map<String, Long>? = byItem?.filterKeys { id -> id !in pendingIds && scannedRev[id] != null && scannedRev[id] == liveRev(id) }
 
 /**
+ * Audit H10: what the first sync after a bind came back with. The session is already bound, so none
+ * of these is an error screen: the user lands on the vault, the capture gate or the recovery reveal,
+ * and this only decides what that screen also says.
+ */
+internal sealed interface FirstSync {
+    data object Done : FirstSync
+
+    /** Unreachable, or too slow for its bound: the vault shows what the cache holds. */
+    data object Offline : FirstSync
+
+    /** A 426: the blocking update screen takes over, as it does from any other sync. */
+    data object UpgradeRequired : FirstSync
+
+    /** The server answered and refused: the sync canon's sentence, over the landing. */
+    data class Failed(val message: String) : FirstSync
+}
+
+/** The pure half of the first-sync landing (pinned in `FirstSyncLandingTest`). A cancelled scope is not a
+ *  verdict and is rethrown; a bound's timeout is an IOException by then ([runBounded]), so it reads as offline. */
+internal fun firstSyncOutcome(failure: Throwable?): FirstSync = when (failure) {
+    null -> FirstSync.Done
+    is kotlinx.coroutines.CancellationException -> throw failure
+    is UpgradeRequiredException -> FirstSync.UpgradeRequired
+    is IOException -> FirstSync.Offline
+    else -> FirstSync.Failed(HouseholdCopy.forSyncError(failure))
+}
+
+/**
  * R08: did [freshBreachVerdicts] retire anything the scan had a verdict on? A retired verdict is a
  * NON-verdict — the row renders "—" — and the Breached tile must say so the way it says
  * "incomplete" for a failed range (H75: the state is text, never a good-tone "0"). Without this
@@ -812,17 +840,19 @@ class AndvariViewModel(
             is QuickUnlock.Recover.Fallback -> { _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
             is QuickUnlock.Recover.Wiped -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
         }
-        runBounded(BoundedOps.AUTH_OP_MS) { finishBiometricUnlock(session, originKey, uvk) }
+        finishBiometricUnlock(session, originKey, uvk)
     }
 
-    /** The network half of [unlockWithBiometric]: the legs that wait on the server, bounded together (audit H10). */
+    /** The server half of [unlockWithBiometric]. Audit H10: each call that waits on the server is bounded
+     *  on its own, and once the session is bound the user lands on the vault whatever the first sync does. */
     private suspend fun finishBiometricUnlock(session: Session, originKey: String, uvk: ByteArray) {
         val userId = session.userId
         VaultSession.unlockMutex.withLock {
             VaultSession.get()?.let { toVault(); return } // adopt a winner instead of a 2nd holder
             val a = newApi(session.tokens())
             val keys = try {
-                a.accountKeys().also { persistAccountKeys(it) }
+                // H10: bounded; a stall reads as offline (the IOException below) and opens on the cached keys.
+                runBounded(BoundedOps.FLAT_MS) { a.accountKeys() }.also { persistAccountKeys(it) }
             } catch (e: IOException) {
                 store.loadAccountKeys() ?: run { a.close(); throw e }
             } catch (e: ApiException) {
@@ -850,12 +880,10 @@ class AndvariViewModel(
                 throw t
             }
         }
-        runCatching { runBounded(BoundedOps.FLAT_MS) { syncNow(engine!!) } }.onFailure { // H10: a stalled server reads as offline
-            if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
-            else throw it
-        }
+        val first = firstSyncAfterBind { syncNow(engine!!) } // H10: bound — land whatever it does
         refreshQuickUnlockState()
         toVault()
+        showFirstSync(first)
     }
 
     // Security review 2026-10 (A12, row 80 — the desktop shape exists here too): every policy reply
@@ -1374,7 +1402,9 @@ class AndvariViewModel(
 
     fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
-    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }, timeoutMs = BoundedOps.AUTH_OP_MS) {
+    // H10: no whole-op bound. Each call that waits on the server is bounded on its own up to bind(), the KDF
+    // runs to completion either way, and past bind() the session is live, so the user lands whatever happens.
+    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }, timeoutMs = null) {
         // §4.3 B2-6 (sink guard — the authoritative backstop for the pending-state sign-in lockout):
         // an uncommitted pendingServer marker means store.baseUrl is OPTIMISTICALLY pointed at an
         // unverified invite origin (enroll-success is what clears the marker). Deriving a master-password
@@ -1393,11 +1423,11 @@ class AndvariViewModel(
         val opTag = probeFence.tag(store.currentOriginKey())
         val a = newApi(origin = opOrigin)
         try {
-            val pre = a.prelogin(email)
+            val pre = runBounded(BoundedOps.FLAT_MS) { a.prelogin(email) }
             // Argon2id (64 MiB, twice per sign-in) is CPU-bound — never on Main (ANrs/jank).
             val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
             val s = try {
-                a.login(LoginRequest(email, authKey, Account.deviceInfo(android.os.Build.MODEL ?: "android"), totp = totp))
+                runBounded(BoundedOps.FLAT_MS) { a.login(LoginRequest(email, authKey, Account.deviceInfo(android.os.Build.MODEL ?: "android"), totp = totp)) }
             } catch (e: ApiException) {
                 when (e.code) {
                     "totp_required", "bad_totp_code" -> {
@@ -1449,11 +1479,14 @@ class AndvariViewModel(
             // re-verifies it) in a permanent 401 Retry loop. The rare upgrade defers to the next
             // (confirmed) sign-in/unlock, like the quick-unlock defer (§F.3).
             if (!gate) runKdfUpgrade(s.userId, password, s.accountKeys)
-            syncNow(engine!!)
+            // H10: bound — the first sync has its own bound and no outcome of it keeps the user off the
+            // capture gate or the vault (the gate decision above must not be lost to a failed sync).
+            val first = firstSyncAfterBind { syncNow(engine!!) }
             // §F.9 vault-entry capture gate (desktop signIn / web SignIn parity): route into the
             // capture flow INSTEAD of the vault; the login authKey derived above is the
             // fresh-reauth proof PUT /recovery/self-setup requires.
             if (gate) startRecoveryCapture(authKey) else toVault()
+            showFirstSync(first)
         } catch (t: Throwable) {
             // F74: no throw path (prelogin/KDF/login/Account.unlock) may leak the transient
             // client. Once bind() succeeded the api is VaultSession-OWNED — never close it
@@ -1463,7 +1496,8 @@ class AndvariViewModel(
         }
     }
 
-    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError, timeoutMs = BoundedOps.AUTH_OP_MS) {
+    // H10: no whole-op bound, as for signIn: the server call is bounded on its own, and past bind() the user lands.
+    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError, timeoutMs = null) {
         val session = store.load() ?: throw IllegalStateException("no session")
         // A14 (F8): a stored session's tokens go only to its own origin — refuse, never "repair".
         if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) {
@@ -1488,7 +1522,8 @@ class AndvariViewModel(
             // network is unreachable; a definitive auth rejection wipes the cache instead.
             var online = false
             val keys = try {
-                a.accountKeys().also { online = true; persistAccountKeys(it) }
+                // H10: bounded; a stall reads as offline (the IOException below) and opens on the cached keys.
+                runBounded(BoundedOps.FLAT_MS) { a.accountKeys() }.also { online = true; persistAccountKeys(it) }
             } catch (e: IOException) {
                 store.loadAccountKeys() ?: run { a.close(); throw e }
             } catch (e: ApiException) {
@@ -1532,12 +1567,9 @@ class AndvariViewModel(
                 throw t
             }
         }
-        // Tolerate an offline sync — hydrate() already populated the cached vault. H10: a stalled
-        // server is bounded and reads as offline too, so the vault still opens on its cached data.
-        runCatching { runBounded(BoundedOps.FLAT_MS) { syncNow(engine!!) } }.onFailure {
-            if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
-            else throw it
-        }
+        // Tolerate an offline sync — hydrate() already populated the cached vault. H10: bound — the
+        // first sync has its own bound and no outcome of it keeps the user off the gate or the vault.
+        val first = firstSyncAfterBind { syncNow(engine!!) }
         // §F.9 vault-entry capture gate — see signIn. Unlock never derived a login authKey (it
         // opens the UVK locally), so derive one ONLY when the gate actually fires: accountKeys'
         // kdfSalt/kdfParams are the same user-row values prelogin serves, so this authKey verifies
@@ -1550,6 +1582,7 @@ class AndvariViewModel(
             val authKey = withContext(Dispatchers.Default) { requireNotNull(account) { "locked" }.reauthAuthKey(password, gk) }
             startRecoveryCapture(authKey)
         } else toVault()
+        showFirstSync(first)
     }
 
     // internal (A5c): the raw in-person evidence names the module-private [InviteProvenance]; the form is the only caller.
@@ -1608,7 +1641,7 @@ class AndvariViewModel(
         inPersonEntry: String = "",
         inPersonAffirmed: Boolean = false,
         inviteProvenance: InviteProvenance = InviteProvenance.Typed,
-    ) = op(mapError = HouseholdCopy::forEnrollError, timeoutMs = BoundedOps.AUTH_OP_MS) {
+    ) = op(mapError = HouseholdCopy::forEnrollError, timeoutMs = null) { // H10: as signIn — per-call bounds, then always the reveal
         // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
         // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
         // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).
@@ -1619,7 +1652,7 @@ class AndvariViewModel(
         // a fingerprint by the UI gate, so gatePolicy is non-null there).
         val policy = gatePolicy ?: run {
             val probe = newApi()
-            try { probe.clientPolicy() } finally { probe.close() }
+            try { boundedPolicy(probe) } finally { probe.close() }
         }
         // Typed-sheet ceremony re-assert at the STATE layer against the policy this enroll actually
         // seals to (CR-06 / spec 04 §2(3); mirrors DesktopState.enrollOp — 4th sighting of the
@@ -1661,7 +1694,7 @@ class AndvariViewModel(
             // before: the user TYPED the sheet's short form (EnrollForm gate re-checked at submit)
             // and Account.enroll refuses a fetched pubkey whose fingerprint doesn't match the
             // policy value that check anchored. The org key isn't even fetched when waived.
-            val recoveryPub = if (waived) null else Bytes.fromB64(a.recoveryPubkey())
+            val recoveryPub = if (waived) null else Bytes.fromB64(runBounded(BoundedOps.FLAT_MS) { a.recoveryPubkey() })
             // Key generation + KDF are CPU-bound (argon2id) — off the Main thread. EnrollResult
             // destructures to (request, account, recoverySecret) — the 3rd is the SHOWN-ONCE piece.
             val (req, acct, secret) = withContext(Dispatchers.Default) {
@@ -1682,7 +1715,7 @@ class AndvariViewModel(
             // reconciled at next launch with the address to sign in as. No-op on a same-origin enroll
             // (no marker). baseUrl already points at the pending origin, so register hits the right one.
             store.pendingServer?.let { store.pendingServer = it.copy(email = email) }
-            val s = a.register(req)
+            val s = runBounded(BoundedOps.FLAT_MS) { a.register(req) }
             // A14 (F8), second layer: the switch is frozen while this op runs, but if the app was
             // moved anyway this account is not the one it now points at. Do not commit: revoke the
             // tokens at the origin that issued them (this client's own), drop them, and say so.
@@ -1718,14 +1751,16 @@ class AndvariViewModel(
             if (VaultSession.get()?.api !== a) a.close()
             throw t
         }
-        syncNow(engine!!)
+        // H10: bound — the first sync has its own bound, and whatever it does the shown-once phrase is
+        // revealed next: a failed sync must never strand a committed recovery secret, unshown and unzeroed.
+        val first = firstSyncAfterBind { syncNow(engine!!) }
         // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
         // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
         // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
         // once the user types it back. (Past the try `recoverySecret` is always non-null; the
         // null-guard keeps this total should a future refactor break that.)
         val secret = recoverySecret
-        if (secret == null) { toVault(); return@op }
+        if (secret == null) { toVault(); showFirstSync(first); return@op }
         pendingRecoverySecret = secret
         pendingRecoveryPieceId = recoveryPieceId
         _ui.value = _ui.value.copy(
@@ -1734,6 +1769,7 @@ class AndvariViewModel(
             recoverySetupWaived = waived, // §F.4 posture copy: stark "gone forever" when waived
             busy = false, error = null,
         )
+        showFirstSync(first)
     }
 
     // Shown-once recovery secret (design §F.7): the RAW 32 bytes of a recovery piece — a fresh
@@ -4125,6 +4161,31 @@ class AndvariViewModel(
         // on every poll of this device (web and the extension already fold those ids in).
         VaultSession.get()?.let { s ->
             if (s.engine === e) UsageRecorder.flushWithPrune(s, e.liveItemIds())
+        }
+    }
+
+    /**
+     * Audit H10, the post-bind half of sign-in, unlock, quick unlock and enroll: the first sync, under its
+     * own bound and outside any other, so a timeout here is an IOException that reads as offline. Never
+     * throws a verdict (only a cancelled scope): the caller always goes on to land.
+     */
+    private suspend fun firstSyncAfterBind(sync: suspend () -> Unit): FirstSync {
+        val failure = try {
+            runBounded(BoundedOps.FLAT_MS) { sync() }
+            null
+        } catch (t: Throwable) {
+            t
+        }
+        return firstSyncOutcome(failure)
+    }
+
+    /** What the landing screen also says about its first sync. After the landing, which clears `error`. */
+    private fun showFirstSync(first: FirstSync) {
+        when (first) {
+            FirstSync.Done -> {}
+            FirstSync.Offline -> _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
+            FirstSync.UpgradeRequired -> _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+            is FirstSync.Failed -> _ui.value = _ui.value.copy(error = first.message)
         }
     }
 

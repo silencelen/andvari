@@ -33,8 +33,45 @@ class BoundedOpWiringTest {
     fun theBiometricPromptIsExemptAndTheNetworkLegsAreNot() {
         val unlock = span("fun unlockWithBiometric(activity: FragmentActivity) = op(", "private suspend fun finishBiometricUnlock")
         assertTrue(unlock.contains("op(timeoutMs = null)"), "the prompt is not bounded by the op")
-        assertTrue(unlock.indexOf("QuickUnlock.recoverUvk") < unlock.indexOf("runBounded(BoundedOps.AUTH_OP_MS)"), "the network half runs bounded, after the prompt")
-        assertTrue(unlock.contains("finishBiometricUnlock("))
+        assertTrue(unlock.indexOf("QuickUnlock.recoverUvk") < unlock.indexOf("finishBiometricUnlock(session, originKey, uvk)"), "the server half runs after the prompt")
+        val finish = span("private suspend fun finishBiometricUnlock", "\n    }\n")
+        assertTrue(finish.contains("runBounded(BoundedOps.FLAT_MS) { a.accountKeys() }"), "and its server call is bounded")
+    }
+
+    /**
+     * The unlock-class ops (sign-in, unlock, quick unlock, enroll) bound each server call up to bind(), not
+     * the op: a whole-op bound firing after bind() showed an error over a live session, lost the capture-gate
+     * decision and never revealed (or zeroed) a fresh enrollee's recovery phrase. Past bind() they always land.
+     */
+    @Test
+    fun theUnlockClassOpsBoundEachServerCallAndAlwaysLand() {
+        val signIn = span("fun signIn(email: String, password: String, totp: String? = null) = op(", "\n    fun unlock(email: String, password: String)")
+        assertTrue(signIn.contains("timeoutMs = null)"), "no whole-op bound: it would fire after bind()")
+        assertTrue(signIn.contains("runBounded(BoundedOps.FLAT_MS) { a.prelogin(email) }"))
+        assertTrue(signIn.contains("runBounded(BoundedOps.FLAT_MS) { a.login(LoginRequest("))
+        assertLandsAfterTheFirstSync(signIn, "if (gate) startRecoveryCapture(authKey) else toVault()")
+
+        val unlock = span("fun unlock(email: String, password: String) = op(", "\n    // internal (A5c)")
+        assertTrue(unlock.contains("timeoutMs = null)"))
+        assertTrue(unlock.contains("runBounded(BoundedOps.FLAT_MS) { a.accountKeys() }"), "a stall reads as offline and opens on the cached keys")
+        assertLandsAfterTheFirstSync(unlock, "startRecoveryCapture(authKey)")
+
+        val quick = span("private suspend fun finishBiometricUnlock", "\n    }\n")
+        assertLandsAfterTheFirstSync(quick, "toVault()")
+
+        val enroll = span("private fun enrollOp(", "\n    // Shown-once recovery secret")
+        assertTrue(enroll.contains("timeoutMs = null)"))
+        assertTrue(enroll.contains("runBounded(BoundedOps.FLAT_MS) { a.recoveryPubkey() }"))
+        assertTrue(enroll.contains("runBounded(BoundedOps.FLAT_MS) { a.register(req) }"))
+        assertTrue(enroll.contains("try { boundedPolicy(probe) } finally { probe.close() }"))
+        assertLandsAfterTheFirstSync(enroll, "screen = Screen.RecoverySetup")
+    }
+
+    private fun assertLandsAfterTheFirstSync(body: String, landing: String) {
+        val sync = body.indexOf("firstSyncAfterBind { syncNow(engine!!) }")
+        assertTrue(sync > -1, "the first sync after bind() runs under its own bound")
+        assertTrue(body.indexOf(landing, sync) > sync, "and the landing follows it whatever it did: $landing")
+        assertTrue(body.indexOf("showFirstSync(first)", sync) > sync, "what the sync could not do is said on the landing")
     }
 
     @Test
@@ -54,8 +91,7 @@ class BoundedOpWiringTest {
         )) {
             assertTrue(vm.contains(pin), "must stay bounded: $pin")
         }
-        // A stalled pre-export sync and a stalled post-unlock sync read as offline, on both paths.
+        // A stalled pre-export sync reads as offline, on both paths.
         assertTrue(Regex("""runBounded\(BoundedOps\.FLAT_MS\) \{ syncNow\(e\) \}""").findAll(vm).count() >= 2, "backupBegin and csvBegin")
-        assertTrue(Regex("""runCatching \{ runBounded\(BoundedOps\.FLAT_MS\) \{ syncNow\(engine!!\) \} \}""").findAll(vm).count() >= 2, "password and biometric unlock")
     }
 }
