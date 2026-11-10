@@ -846,6 +846,7 @@ class AndvariViewModel(
      *  on its own, and once the session is bound the user lands on the vault whatever the first sync does. */
     private suspend fun finishBiometricUnlock(session: Session, originKey: String, uvk: ByteArray) {
         val userId = session.userId
+        var boundApi: AndvariApi? = null
         VaultSession.withUnlockMutex { // H10: the wait for another unlock is bounded too
             VaultSession.get()?.let { toVault(); return } // adopt a winner instead of a 2nd holder
             val a = newApi(session.tokens())
@@ -873,6 +874,7 @@ class AndvariViewModel(
             }
             try {
                 bind(a, acct, VaultSession.UnlockProvenance.QUICK)
+                boundApi = a
                 _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowFingerprint = keys.escrowFingerprint)
             } catch (t: Throwable) {
                 if (VaultSession.get()?.api !== a) a.close()
@@ -880,6 +882,7 @@ class AndvariViewModel(
             }
         }
         val first = firstSyncAfterBind { syncNow(engine!!) } // H10: bound — land whatever it does
+        if (boundApi?.let(VaultSession::isLive) != true) { sessionEndedBeforeLanding(); return }
         refreshQuickUnlockState()
         toVault()
         showFirstSync(first)
@@ -1490,6 +1493,7 @@ class AndvariViewModel(
             // H10: bound — the first sync has its own bound and no outcome of it keeps the user off the
             // capture gate or the vault (the gate decision above must not be lost to a failed sync).
             val first = firstSyncAfterBind { syncNow(engine!!) }
+            if (!VaultSession.isLive(a)) { sessionEndedBeforeLanding(); return@op }
             // §F.9 vault-entry capture gate (desktop signIn / web SignIn parity): route into the
             // capture flow INSTEAD of the vault; the login authKey derived above is the
             // fresh-reauth proof PUT /recovery/self-setup requires.
@@ -1519,6 +1523,7 @@ class AndvariViewModel(
         // on after the sync below; the gate's authKey derivation (an extra argon2id) deliberately
         // runs OUTSIDE the mutex so the autofill unlock path is never serialized behind it.
         var gateKeys: AccountKeys? = null
+        var boundApi: AndvariApi? = null
         // Serialize with the autofill unlock path: both reuse this session's refresh token,
         // and a concurrent refresh would consume it twice → whole-device revocation.
         VaultSession.withUnlockMutex { // H10: the wait for another unlock is bounded too
@@ -1557,6 +1562,7 @@ class AndvariViewModel(
             // VaultSession has adopted `a`, it owns it and lock() closes it.
             try {
                 bind(a, acct)
+                boundApi = a
                 _ui.value = _ui.value.copy(escrowStale = keys.escrowStale, escrowNeedsV2 = keys.escrowNeedsV2, escrowFingerprint = keys.escrowFingerprint)
                 // A1: stamp on EVERY full-password unlock, including offline ones.
                 store.stampFullPasswordUnlock(session.userId)
@@ -1578,6 +1584,7 @@ class AndvariViewModel(
         // Tolerate an offline sync — hydrate() already populated the cached vault. H10: bound — the
         // first sync has its own bound and no outcome of it keeps the user off the gate or the vault.
         val first = firstSyncAfterBind { syncNow(engine!!) }
+        if (boundApi?.let(VaultSession::isLive) != true) { sessionEndedBeforeLanding(); return@op }
         // §F.9 vault-entry capture gate — see signIn. Unlock never derived a login authKey (it
         // opens the UVK locally), so derive one ONLY when the gate actually fires: accountKeys'
         // kdfSalt/kdfParams are the same user-row values prelogin serves, so this authKey verifies
@@ -1764,6 +1771,11 @@ class AndvariViewModel(
         // H10: bound — the first sync has its own bound, and whatever it does the shown-once phrase is
         // revealed next: a failed sync must never strand a committed recovery secret, unshown and unzeroed.
         val first = firstSyncAfterBind { syncNow(engine!!) }
+        if (!VaultSession.isLive(a)) {
+            recoverySecret?.fill(0) // the phrase belongs to a session that no longer exists; it is never shown
+            sessionEndedBeforeLanding()
+            return@op
+        }
         // §F.4/§F.7: the recovery piece is MANDATORY and already committed in register(), but a
         // member who never SEES it is silently unrecoverable. Hold it transiently and route to the
         // shown-once reveal+confirm gate (RecoverySetup) instead of the vault; the gate zeroes it
@@ -4195,6 +4207,17 @@ class AndvariViewModel(
             t
         }
         return firstSyncOutcome(failure)
+    }
+
+    /**
+     * Review round 2: the session this op bound ended during its first sync — most likely a definitive
+     * rejection (an unlock on cached keys by a device revoked since). There is nothing to land on: the
+     * idle check routes a rejection to the sign-in surface (unless the coordinator's own post already
+     * did), and any other end to wherever a lock lands. Never the vault, the gate or a reveal.
+     */
+    private fun sessionEndedBeforeLanding() {
+        _ui.value = _ui.value.copy(busy = false)
+        checkIdleLock()
     }
 
     /** What the landing screen also says about its first sync. After the landing, which clears `error`. */

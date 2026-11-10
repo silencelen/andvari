@@ -102,6 +102,9 @@ object AutofillUnlock {
      */
     private suspend fun syncOutsideTheMutex(r: Locked): VaultSession.Unlocked {
         runCatching { runBounded(BoundedOps.FLAT_MS) { r.unlocked.engine.sync() } }
+        // Review round 2: a definitive rejection during that sync ended the session (the coordinator
+        // purged it). Never hand a dead session to the fill: the overlay says to open andvari.
+        if (!VaultSession.isLive(r.unlocked.api)) throw ApiException(401, "session_ended", "the session ended during its first sync")
         AutofillHardLock.arm()
         return r.unlocked
     }

@@ -315,6 +315,18 @@ class VaultSessionTest {
     }
 
     @Test
+    fun isLiveFollowsTheSessionAnOpBound() {
+        val s = VaultSession(FakeClocks())
+        val mine = api()
+        s.bind(mine, account, engine().first)
+        assertTrue(s.isLive(mine))
+        s.lock()
+        assertFalse(s.isLive(mine), "locked or ended: nothing to land on")
+        s.bind(api(), account, engine().first)
+        assertFalse(s.isLive(mine), "replaced: the live session is someone else's")
+    }
+
+    @Test
     fun aQuickUnlockKeepsItsProvenanceOnTheBoundSession() {
         val s = VaultSession(FakeClocks())
         s.bind(api(), account, engine().first, VaultSession.UnlockProvenance.QUICK)
