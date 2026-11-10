@@ -13,9 +13,9 @@ import {
   checkDeletion,
   checkedResult,
   type DeleteFlowState,
+  type DeletionCardEvent,
   DELETION_MOST_LIKELY_DONE,
   deletionSummary,
-  type DeletionWatchEvent,
   emailConfirmed,
   initialFlow,
   OUTCOME_UNKNOWN,
@@ -42,8 +42,9 @@ import { Announcer, Msg } from "./Msg";
  *  DeletionOutcomeUnknownCard. App wipes the same state either way; the notice differs. */
 export type DeletionEnd = "confirmed" | "forgotten";
 
-/** What the card reports to App about its request and its check (account-delete.ts stepDeletionWatch). */
-export type DeletionTrack = DeletionWatchEvent;
+/** What the card reports to App about its request and its check (account-delete.ts stepDeletionWatch; App adds the
+ *  account the card is for). */
+export type DeletionTrack = DeletionCardEvent;
 
 export interface DeleteAccountView {
   open: boolean;
