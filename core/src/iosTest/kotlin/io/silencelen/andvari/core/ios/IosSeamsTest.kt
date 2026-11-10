@@ -1,9 +1,12 @@
+@file:OptIn(ExperimentalForeignApi::class)
+
 package io.silencelen.andvari.core.ios
 
 import io.ktor.client.request.get
 import io.silencelen.andvari.core.client.session.InMemorySecrets
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
 import io.silencelen.andvari.core.client.session.StoredSession
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.runBlocking
 import kotlinx.io.IOException
 import platform.Foundation.NSFileManager
