@@ -671,6 +671,8 @@ class Db(path: String) : AutoCloseable {
                     st.executeUpdate(
                         "UPDATE mutations SET userId=(SELECT d.userId FROM devices d WHERE d.deviceId=mutations.deviceId) WHERE userId IS NULL",
                     )
+                    // The deletion reads and deletes by it; without the index each is a scan of 180 days of pushes.
+                    st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_mutations_user ON mutations(userId)")
                     st.executeUpdate("UPDATE meta SET value='17' WHERE key='schemaVersion'")
                 }
             }

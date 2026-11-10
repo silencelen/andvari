@@ -647,25 +647,40 @@ class AccountDeletionTest : LifecycleTestSupport() {
     }
 
     @Test
-    fun theV17Upgrade_attributesJournalRowsToTheirDevicesAccount_whereTheDeviceStillExists() {
+    fun theV17Upgrade_addsTheColumnAndItsIndex_andAttributesJournalRowsWhereTheDeviceStillExists() {
         val path = File(tmpDir, "v17-${System.nanoTime()}.db").absolutePath
         Db(path).close()
-        // The shape a v16 server left: journal rows with no account, one of a device that still exists, one of a pruned one.
+        // The shape a v16 server left: the journal table WITHOUT the column or its index, and rows with no account — one of a
+        // device that still exists, one of a pruned one.
         java.sql.DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
             c.createStatement().use { st ->
+                st.executeUpdate("DROP INDEX IF EXISTS idx_mutations_user")
+                st.executeUpdate("DROP TABLE mutations")
+                st.executeUpdate(
+                    "CREATE TABLE mutations(deviceId TEXT NOT NULL, mutationId TEXT NOT NULL, resultJson TEXT NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(deviceId, mutationId))",
+                )
                 st.executeUpdate("INSERT INTO devices(deviceId,userId,platform,name,createdAt) VALUES('dev-live','acct-1','test','n',1)")
                 st.executeUpdate("INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES('dev-live','m1','{}',1)")
                 st.executeUpdate("INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt) VALUES('dev-pruned','m2','{}',1)")
                 st.executeUpdate("UPDATE meta SET value='16' WHERE key='schemaVersion'")
             }
         }
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
+            val cols = c.queryAll("SELECT name FROM pragma_table_info('mutations')") { it.getString(1) }
+            assertFalse("userId" in cols, "the fixture is a true v16 journal: $cols")
+        }
         Db(path).use { db ->
             db.read { c ->
                 assertEquals("17", c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) })
+                assertNotNull(c.queryOne("SELECT name FROM pragma_table_info('mutations') WHERE name='userId'") { it.getString(1) }, "the column is added")
+                assertNotNull(c.queryOne("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_mutations_user'") { it.getString(1) }, "with its index")
                 assertEquals("acct-1", c.queryOne("SELECT userId FROM mutations WHERE mutationId='m1'") { it.getString(1) })
                 assertNull(c.queryOne("SELECT userId FROM mutations WHERE mutationId='m2'") { it.getString(1) }, "a pruned device's row has no account to take")
             }
         }
+        // Idempotent: a restore drill that rewinds the marker re-runs v17 over an already-upgraded table.
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$path").use { c -> c.createStatement().use { it.executeUpdate("UPDATE meta SET value='16' WHERE key='schemaVersion'") } }
+        Db(path).use { db -> assertEquals("17", db.read { c -> c.queryOne("SELECT value FROM meta WHERE key='schemaVersion'") { it.getString(1) } }) }
     }
 
     @Test
