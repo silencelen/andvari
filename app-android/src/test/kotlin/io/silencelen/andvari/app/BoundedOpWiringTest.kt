@@ -67,6 +67,24 @@ class BoundedOpWiringTest {
         assertLandsAfterTheFirstSync(enroll, "screen = Screen.RecoverySetup")
     }
 
+    /**
+     * Review round 2: the unlock mutex is shared with the autofill unlock, so waiting for it is a server
+     * wait too. Every unlock path waits for it with a bound, and the autofill unlock neither calls the
+     * server unbounded while holding it nor syncs inside it.
+     */
+    @Test
+    fun theUnlockMutexIsNeverAnUnboundedWait() {
+        assertTrue(!vm.contains("unlockMutex.withLock"), "the main app's unlock paths use the bounded wait")
+        assertTrue(Regex("""VaultSession\.withUnlockMutex \{""").findAll(vm).count() == 2, "password and biometric unlock")
+        val autofill = File("src/main/kotlin/io/silencelen/andvari/app/autofill/AutofillUnlock.kt").readText()
+        assertTrue(!autofill.contains("unlockMutex.withLock"))
+        assertTrue(Regex("""VaultSession\.withUnlockMutex \{""").findAll(autofill).count() == 2, "password and quick unlock")
+        val locked = autofill.substringAfter("private suspend fun unlockLocked(").substringBefore("\n}\n")
+        assertTrue(locked.contains("coordinator.boundedPolicy(api)") && locked.contains("runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }"), "its calls under the mutex are bounded")
+        assertTrue(!locked.contains("engine.sync()"), "and its first sync is not under the mutex")
+        assertTrue(autofill.contains("runBounded(BoundedOps.FLAT_MS) { r.unlocked.engine.sync() }"), "it runs after, bounded")
+    }
+
     private fun assertLandsAfterTheFirstSync(body: String, landing: String) {
         val sync = body.indexOf("firstSyncAfterBind { syncNow(engine!!) }")
         assertTrue(sync > -1, "the first sync after bind() runs under its own bound")
