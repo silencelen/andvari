@@ -1,5 +1,6 @@
 package io.silencelen.andvari.core.client.session
 
+import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.VaultCache
 
@@ -16,6 +17,9 @@ interface NamespaceStorage {
      * last authenticated. Purges never remove it.
      */
     fun deviceState(originKey: String, userId: String): DeviceState
+
+    /** Delete the durable vault cache of [userId] at [originKey], its journal files included. Never throws. */
+    fun deleteVaultCache(originKey: String, userId: String)
 }
 
 /**
@@ -44,6 +48,13 @@ interface QuickUnlockKeys {
     /** Show the prompt over [host] and unwrap the UVK. Every prompt outcome maps to a [QuickRecover]. */
     suspend fun recover(host: BiometricHost, originKey: String, userId: String): QuickRecover
 
+    /**
+     * Wrap [account]'s UVK for [userId] at [originKey] under a fresh hardware key, once the prompt over [host] consents
+     * (spec 01 §8.1 requires a biometric at enrollment). Replaces an earlier enrollment. The UVK copy is zeroed
+     * whatever happens, and an account wiped meanwhile (the vault locked under the prompt) wraps nothing.
+     */
+    suspend fun enroll(host: BiometricHost, originKey: String, userId: String, account: Account): QuickEnroll
+
     /** Destroy the wrapped UVK and its key for one namespace. Idempotent; never throws. */
     fun wipe(originKey: String, userId: String)
 }
@@ -58,6 +69,18 @@ sealed interface QuickRecover {
 
     /** A wipe-class failure (enrollment changed, tamper, a corrupt blob): the enrollment is gone. */
     data class Wiped(val reason: String) : QuickRecover
+}
+
+/** What one enrollment prompt came to. */
+sealed interface QuickEnroll {
+    /** The UVK is wrapped. */
+    data object Ok : QuickEnroll
+
+    /** The prompt was cancelled: nothing was wrapped. */
+    data object Cancelled : QuickEnroll
+
+    /** Nothing was wrapped; [reason] says why, when it can. */
+    data class Failed(val reason: String?) : QuickEnroll
 }
 
 /** The gate that refuses a quick unlock, in the order they are checked (spec 01 §8.1, A1 to A4). */

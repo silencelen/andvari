@@ -20,7 +20,7 @@ sentence named only two of the four and the third was added without it (audit H1
 ## 1. Client identification & version pinning
 
 Every request carries `X-Andvari-Client: <platform>/<semver>` with platform ∈
-`android|windows|web|cli|extension`. If policy pins `minVersion[platform]` above the caller,
+`android|ios|windows|web|cli|extension`. If policy pins `minVersion[platform]` above the caller,
 the server answers **426** with the standard error shape (§8):
 `{ "error": "upgrade_required", "message": "min <platform> <minVersion>" }` — clients
 key on the BODY code, never the bare status (`message` is human-only; the actual pin
