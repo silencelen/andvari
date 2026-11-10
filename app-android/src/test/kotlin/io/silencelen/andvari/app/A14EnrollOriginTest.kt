@@ -80,12 +80,13 @@ class A14EnrollOriginTest {
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
         assertTrue(op.contains("val client = clients.forNewSession(opOrigin)"))
         val save = "store.save(StoredSession(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"
-        assertTrue(op.contains("$save\n            client.owner.userId = s.userId"), "the client writes tokens only into the session it committed")
+        assertTrue(op.contains("$save\n            saved = true\n            client.owner.userId = s.userId"), "the client writes tokens only into the session it committed")
         assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag)))"))
         assertFalse(op.contains("store.save(StoredSession(store.baseUrl"), "never the live origin")
         val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf(save))
-        assertTrue(abort.contains("a.logout()") && abort.contains("return SignInResult.OriginMoved(opOrigin)"),
+        assertTrue(abort.contains("revoke(a)") && abort.contains("return SignInResult.OriginMoved(opOrigin)"),
             "an unbound commit revokes at the issuer, saves nothing and says so")
+        assertTrue(body(entry, "private suspend fun revoke(", "\n    }\n").contains("withTimeoutOrNull(REVOKE_MS) { a.logout() }"), "a bounded logout at the issuer")
         assertTrue(body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "\n    }\n").contains("is SignInResult.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(outcome.origin)); return@op }"))
         assertTrue(signInOriginMoved("https://a.example").contains("https://a.example"))
     }
@@ -98,7 +99,7 @@ class A14EnrollOriginTest {
         val save = "store.save(StoredSession(opOrigin, s.userId, r.email, s.accessToken, s.refreshToken))"
         assertTrue(op.contains(save))
         val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf(save))
-        assertTrue(abort.contains("a.logout()") && abort.contains("return EnrollOutcome.OriginMoved(opOrigin)"), "an unbound commit revokes at the issuer and saves nothing")
+        assertTrue(abort.contains("revoke(a)") && abort.contains("return EnrollOutcome.OriginMoved(opOrigin)"), "an unbound commit revokes at the issuer and saves nothing")
         assertTrue(body(vm, "private fun enrollOp(", "\n    }\n").contains("is EnrollOutcome.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(outcome.origin)); return@op }"))
     }
 
