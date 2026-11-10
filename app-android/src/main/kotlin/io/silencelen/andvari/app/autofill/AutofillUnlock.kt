@@ -24,7 +24,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.IOException
 
@@ -49,14 +48,14 @@ object AutofillUnlock {
      *  upgrade simply retries at the next online full-password unlock (design §4 step 4). */
     private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    suspend fun unlock(context: Context, store: SessionStore, session: Session, password: String): VaultSession.Unlocked =
-        VaultSession.unlockMutex.withLock {
+    suspend fun unlock(context: Context, store: SessionStore, session: Session, password: String): VaultSession.Unlocked {
+        val r = VaultSession.withUnlockMutex { // H10: a bounded wait, like the main app's
             // Inside the lock: reuse the winner's session if the main app (or a prior fill/save)
             // unlocked while we waited — never mint a second token-holder that reuses the now-consumed
             // refresh token (→ device revocation). getIfFresh drops an idle-expired winner (its
             // api/token-holder is CLOSED by lock()) instead of adopting it, and we mint the
             // replacement below while still holding the mutex.
-            VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return@withLock it }
+            VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return it }
             val appContext = context.applicationContext
             val r = unlockLocked(appContext, store, session, VaultSession.UnlockProvenance.PASSWORD) { keys ->
                 Account.unlock(session.userId, password, keys, selfIdentityPub = store.selfIdentityPub(session.email, session.userId))
@@ -72,9 +71,10 @@ object AutofillUnlock {
                 val policy = r.policy
                 bgScope.launch { KdfReKey.maybeUpgrade(r.unlocked.api, store, session.userId, password, keys, policy, account) }
             }
-            AutofillHardLock.arm()
-            r.unlocked
+            r
         }
+        return syncOutsideTheMutex(r)
+    }
 
     /**
      * Quick-unlock sibling (spec 01 §8): unlock from a biometric-recovered UVK. Shares ALL of
@@ -84,14 +84,27 @@ object AutofillUnlock {
      * (AutofillUnlockActivity) recovers the UVK behind BiometricPrompt and hands it here; the
      * `Account` keeps the reference, so the caller must not reuse/zero it after.
      */
-    suspend fun unlockWithUvk(context: Context, store: SessionStore, session: Session, uvk: ByteArray): VaultSession.Unlocked =
-        VaultSession.unlockMutex.withLock {
-            VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return@withLock it }
+    suspend fun unlockWithUvk(context: Context, store: SessionStore, session: Session, uvk: ByteArray): VaultSession.Unlocked {
+        val r = VaultSession.withUnlockMutex { // H10: a bounded wait, like the main app's
+            VaultSession.getIfFresh()?.let { AutofillHardLock.arm(); return it }
             unlockLocked(context.applicationContext, store, session, VaultSession.UnlockProvenance.QUICK) { keys ->
                 Account.unlockWithUvk(session.userId, uvk, keys, selfIdentityPub = store.selfIdentityPub(session.email, session.userId))
                     .also { store.recordSelfIdentityPub(session.userId, session.email, it) }
-            }.unlocked.also { AutofillHardLock.arm() }
+            }
         }
+        return syncOutsideTheMutex(r)
+    }
+
+    /**
+     * The bound session's first sync, OUTSIDE the unlock mutex (as in the main app) and bounded (audit
+     * H10): a server that trickles bytes here must hold neither the mutex the main app's unlock waits on
+     * nor this overlay open-endedly. Best-effort; hydrate already gave the cached items.
+     */
+    private suspend fun syncOutsideTheMutex(r: Locked): VaultSession.Unlocked {
+        runCatching { runBounded(BoundedOps.FLAT_MS) { r.unlocked.engine.sync() } }
+        AutofillHardLock.arm()
+        return r.unlocked
+    }
 
     /** What [unlockLocked] surfaces so the password path can stamp + drive the F61 re-key without
      *  a second server round-trip. `online` = the accountKeys/policy came from the network (not the
@@ -126,7 +139,7 @@ object AutofillUnlock {
         // policyFetchedAt for QuickUnlock.isEligible's 7-day staleness gate. A fetch failure = offline.
         // All persisted mirrors are per-origin (§4.2), and the auto-lock window is CLAMPED (B1-1).
         var policy: ClientPolicy? = null
-        runCatching { api.clientPolicy() }.onSuccess { p ->
+        runCatching { coordinator.boundedPolicy(api) }.onSuccess { p -> // H10: held under the unlock mutex, so bounded
             policy = p
             coordinator.recordPolicy(originKey, p) // the clamped window and the per-origin mirrors
             // Policy forbids durable at-rest key material → drop THIS origin's cache + cached
@@ -137,7 +150,8 @@ object AutofillUnlock {
 
         var online = false
         val keys = try {
-            api.accountKeys().also {
+            // H10: bounded (it runs under the unlock mutex); a stall reads as offline, below.
+            runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }.also {
                 online = true
                 if (store.cacheAllowed) store.saveAccountKeys(it) else store.clearAccountKeys()
             }
@@ -184,7 +198,7 @@ object AutofillUnlock {
         // Policy forbids the durable cache: delete any existing file and the rest of this namespace's
         // durable material (spec 02 §8 / spec 01 §8.1) — scoped, and after the bind, as in the main app.
         if (!cacheAllowed) coordinator.purgeForbidden(originKey, acct.userId)
-        runCatching { engine.sync() } // best-effort; hydrate already gave cached items
+        // The first sync runs after the mutex is released: syncOutsideTheMutex.
         val unlocked = VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, provenance)
         return Locked(unlocked, keys, policy, online)
     }

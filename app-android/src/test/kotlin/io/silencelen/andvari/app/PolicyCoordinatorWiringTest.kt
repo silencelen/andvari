@@ -77,7 +77,7 @@ class PolicyCoordinatorWiringTest {
         assertTrue(purge > -1, "bind drops the blob too, not just the file")
         assertTrue(bind.indexOf("VaultSession.bind(a, acct, newEngine, provenance)") in 0 until purge, "after the bind, so a replaced engine has released the file")
         assertFalse(bind.contains("deleteCache("), "the file-only delete is the regression")
-        val af = span(autofill, "private suspend fun unlockLocked(", "runCatching { engine.sync() }")
+        val af = span(autofill, "private suspend fun unlockLocked(", "val unlocked = VaultSession.get()")
         val afPurge = af.indexOf("if (!cacheAllowed) coordinator.purgeForbidden(originKey, acct.userId)")
         assertTrue(afPurge > -1, "the autofill unlock's cache path too")
         assertTrue(af.indexOf("VaultSession.bind(api, acct, engine, provenance)") in 0 until afPurge, "and after its bind")

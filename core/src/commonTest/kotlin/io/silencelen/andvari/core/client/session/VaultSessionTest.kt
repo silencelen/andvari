@@ -15,6 +15,7 @@ import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import kotlinx.coroutines.launch
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -296,6 +297,21 @@ class VaultSessionTest {
         s.lock()
         assertEquals(1, ran)
         assertTrue(secondCache.closed)
+    }
+
+    @Test
+    fun theWaitForTheUnlockMutexIsBounded() = kotlinx.coroutines.runBlocking<Unit> {
+        val s = VaultSession(FakeClocks())
+        val holding = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        // Another component's unlock, stuck on a slow server while it holds the mutex.
+        val holder = launch { s.withUnlockMutex { holding.complete(Unit); release.await() } }
+        holding.await()
+        kotlin.test.assertFailsWith<kotlinx.io.IOException> { s.withUnlockMutex(timeoutMs = 30L) { error("must not run while another unlock holds the mutex") } }
+        release.complete(Unit)
+        holder.join()
+        assertFalse(s.unlockMutex.isLocked, "a waiter that timed out never holds the mutex")
+        assertEquals(7, s.withUnlockMutex { 7 }, "and the next unlock gets it")
     }
 
     @Test

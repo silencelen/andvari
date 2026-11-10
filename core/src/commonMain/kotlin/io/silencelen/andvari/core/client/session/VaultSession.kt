@@ -95,6 +95,21 @@ open class VaultSession(
      */
     val unlockMutex = Mutex()
 
+    /**
+     * Run [block] holding [unlockMutex], waiting at most [timeoutMs] for it (audit H10). The holder can be
+     * another component's unlock waiting on a slow server, and an unbounded wait would hold this caller —
+     * and a UI layer's busy state, which defers the idle lock — for as long as that server likes. A
+     * timed-out wait is an IOException ([runBounded]) and never leaves the mutex held.
+     */
+    suspend inline fun <T> withUnlockMutex(timeoutMs: Long = BoundedOps.FLAT_MS, block: () -> T): T {
+        runBounded(timeoutMs) { unlockMutex.lock() }
+        try {
+            return block()
+        } finally {
+            unlockMutex.unlock()
+        }
+    }
+
     // ---- inactivity auto-lock (spec 01 §8: policy.autoLockSeconds) ----
     //
     // Clock choice: [Clocks.monotonicMs] — monotonic AND keeps counting through deep sleep /

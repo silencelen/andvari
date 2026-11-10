@@ -85,7 +85,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -847,7 +846,7 @@ class AndvariViewModel(
      *  on its own, and once the session is bound the user lands on the vault whatever the first sync does. */
     private suspend fun finishBiometricUnlock(session: Session, originKey: String, uvk: ByteArray) {
         val userId = session.userId
-        VaultSession.unlockMutex.withLock {
+        VaultSession.withUnlockMutex { // H10: the wait for another unlock is bounded too
             VaultSession.get()?.let { toVault(); return } // adopt a winner instead of a 2nd holder
             val a = newApi(session.tokens())
             val keys = try {
@@ -1522,7 +1521,7 @@ class AndvariViewModel(
         var gateKeys: AccountKeys? = null
         // Serialize with the autofill unlock path: both reuse this session's refresh token,
         // and a concurrent refresh would consume it twice → whole-device revocation.
-        VaultSession.unlockMutex.withLock {
+        VaultSession.withUnlockMutex { // H10: the wait for another unlock is bounded too
             // If autofill (or another tap) already unlocked while we waited, adopt that
             // session instead of building a second token-holder.
             VaultSession.get()?.let { toVault(); return@op }
