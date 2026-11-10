@@ -133,7 +133,7 @@ class UnlockLadder(
         val permits = origin != null && QuickUnlockRules.policyPermits(origin.cacheAllowed, origin.policyFetchedAt, clocks.wallMs())
         val eligible = permits && quickKeys.hasStrongBiometric()
         val enrolled = originKey != null && userId != null && quickKeys.isEnrolled(originKey, userId)
-        val fresh = enrolled && isFresh(originKey!!, userId!!)
+        val fresh = enrolled && isFresh(originKey, userId)
         val refusal = when {
             !permits -> QuickGate.POLICY
             !eligible -> QuickGate.NO_BIOMETRIC
