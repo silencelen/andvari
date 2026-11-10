@@ -171,6 +171,10 @@ internal object AccountDeletion {
             repo.clearPendingOffer(c, vaultId, bumpVaultRev = true)
             repo.auditOn(c, "vault_transfer_cancel", null, null, ip, "$vaultId:target_deleted")
         }
+        // 3b. `deletedBy` can still name the account on vaults outside the purged set: one it deleted that the janitor
+        //     already purged, or one it deleted, restored (restore keeps the column) and later handed over. Nothing reads
+        //     the column; it is a raw userId, so it goes like every other one.
+        c.exec("UPDATE vaults SET deletedBy=NULL WHERE deletedBy=?", userId)
 
         // 4. Invites: every row naming the account's address (pending ones it received, and the used one it registered
         //    with — both carry the email in plaintext, spec 02 §5), and the UNUSED ones it minted as an admin. Invites have

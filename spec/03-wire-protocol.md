@@ -979,7 +979,7 @@ Self-service, from inside the app (store policy: Google Play User Data, App Stor
 "no admin lifecycle route" rule; disabling (§7) stays the admin tool. Both routes are authenticated (a §2.6 restricted
 session is refused like every route: enroll, then delete), `enforceVersion`'d, and **refused on the break-glass twin
 origin** (`403 account_delete_public_disabled`): the emergency origin exists to read a vault from somewhere hostile, and
-deletion is the most destructive of the sit-at-home operations §8, §10 and §11 already keep off it. No schema change.
+deletion is the most destructive of the sit-at-home operations §8 and §10–§12 already keep off it. No schema change.
 
 - **`GET /account/delete/preview`** → `{ blockers: [AccountDeleteBlocker], deletedVaults: [vaultId], leftVaults:
   [vaultId], totpRequired }`. A snapshot of what a deletion would do now, so a client can show the blockers and the
@@ -1036,7 +1036,9 @@ deletion is the most destructive of the sit-at-home operations §8, §10 and §1
   - The account's `escrow`, retained `escrow_legacy`, `member_recovery`, `usage_ledger`, `account_state` and
     `personal_wrap` rows are deleted: neither recovery path (spec 04) survives a deletion.
   - Every invite row naming the account's address (pending or used) and every unused invite it minted as an admin
-    (identified through its own `invite_create` rows) is deleted.
+    (identified through its own `invite_create` rows) is deleted, and `vaults.deletedBy` is cleared wherever it still
+    names the account (a vault it deleted that was purged before, or one it deleted, restored and handed over): after the
+    deletion no column of the database holds the account's userId or address.
   - The user row goes last. The address can then register again, through a new invite, as a **new account** — new
     userId, new keys, an empty vault; nothing of the old one is reachable from it. Lookups of the old account answer
     `404 no_such_user`.
