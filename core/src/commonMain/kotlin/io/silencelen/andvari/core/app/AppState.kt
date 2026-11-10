@@ -1,5 +1,7 @@
 package io.silencelen.andvari.core.app
 
+import io.silencelen.andvari.core.client.session.QuickGate
+
 /**
  * Where the app is (design 2026-11-09, "Session layer"). Each screen's data is in [AppState]; a UI renders
  * the screen this names and nothing else.
@@ -82,7 +84,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false),
+            totpRequired = false, accountEmail = null, quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -122,6 +124,10 @@ data class QuickUnlockView(
     val enrolled: Boolean,
     /** Turned on, and the last master-password unlock is recent enough to use it. */
     val fresh: Boolean,
+    /** The first gate that refuses it now; null when it can be used. [QuickGate.NOT_ENROLLED] is the normal "turned off". */
+    val refusal: QuickGate?,
+    /** What to show under the switch while [refusal] stands: null when it is null or [QuickGate.NOT_ENROLLED]. */
+    val reason: String?,
 ) {
     /** Show the Face ID button. */
     val usable: Boolean get() = available && enrolled && fresh

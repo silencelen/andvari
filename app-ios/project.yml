@@ -40,6 +40,8 @@ targets:
       path: Andvari/Andvari.entitlements
       properties:
         com.apple.developer.authentication-services.autofill-credential-provider: true
+        # Shared with both extensions. The app writes only its server origin there (IosStorageConfig.sharedSuite).
+        com.apple.security.application-groups: [group.com.silencelen.andvari]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari
@@ -70,6 +72,11 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.Safari.web-extension
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
+    entitlements:
+      path: AndvariSafari/AndvariSafari.entitlements
+      properties:
+        # The handler reads the app's server origin from here and answers the extension's native message.
+        com.apple.security.application-groups: [group.com.silencelen.andvari]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari.safari
@@ -100,6 +107,7 @@ targets:
       path: AndvariAutoFill/AndvariAutoFill.entitlements
       properties:
         com.apple.developer.authentication-services.autofill-credential-provider: true
+        com.apple.security.application-groups: [group.com.silencelen.andvari]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari.autofill

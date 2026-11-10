@@ -25,6 +25,7 @@ import io.silencelen.andvari.core.client.session.OfflineArtifacts
 import io.silencelen.andvari.core.client.session.PolicyCoordinator
 import io.silencelen.andvari.core.client.session.PolicyProbe
 import io.silencelen.andvari.core.client.session.QuickEnrollResult
+import io.silencelen.andvari.core.client.session.QuickGate
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.RecoveryCapture
 import io.silencelen.andvari.core.client.session.ServerAddress
@@ -80,6 +81,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param uiContext where state is published and actions run.
  * @param biometricHost what the platform's biometric prompt needs, with the reason it shows.
  * @param tickMs the idle check's period while started; 0 runs no ticker (tests drive [tick]).
+ * @param serverShare where the confirmed server is published for the app's own extensions.
  */
 open class SessionController(
     private val store: SessionPersistence,
@@ -91,6 +93,7 @@ open class SessionController(
     private val uiContext: CoroutineContext,
     private val biometricHost: (reason: String?) -> BiometricHost,
     private val tickMs: Long,
+    private val serverShare: ServerShare = ServerShare {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + uiContext)
     private val session = VaultSession(clocks)
@@ -136,6 +139,9 @@ open class SessionController(
 
     /** H08: a lock on leaving the foreground that waited for a running action. */
     private var backgroundLockPending = false
+
+    /** The policy probe a landing started ([refreshPolicyIfStale]), while it runs. */
+    private var policyRefresh: Job? = null
 
     /** Call [listener] with the current state, then with every change, on the UI context, until the subscription is closed. */
     fun observe(listener: (AppState) -> Unit): Subscription {
@@ -184,6 +190,7 @@ open class SessionController(
         backgroundLockPending = false // the person is back: a lock still waiting for an action is void
         checkIdleLock()
         backgroundSync()
+        refreshPolicyIfStale()
     }
 
     /** The app left the foreground: the vault locks (a suspended app cannot run the idle timer). */
@@ -215,6 +222,7 @@ open class SessionController(
             ServerAddress.Invalid -> ServerChoice.Invalid(INVALID_SERVER)
             is ServerAddress.Current -> {
                 serverSwitch.moveTo(a.origin) // a re-spelling of the same server: the session stays
+                publishServer()
                 update { it.copy(server = store.baseUrl, screen = landingScreen(), trustGate = null) }
                 ServerChoice.Applied(a.origin)
             }
@@ -456,7 +464,7 @@ open class SessionController(
             QuickEnrollResult.NoSession -> ActionResult.NotDone(null)
             QuickEnrollResult.MustChangePassword -> ActionResult.Failed(CHANGE_PASSWORD_FIRST)
             QuickEnrollResult.NeedsPasswordUnlock -> ActionResult.Failed(UNLOCK_WITH_PASSWORD_FIRST)
-            is QuickEnrollResult.Unavailable -> ActionResult.Failed(QUICK_UNAVAILABLE)
+            is QuickEnrollResult.Unavailable -> ActionResult.Failed(runCatching { quickReason(r.gate) }.getOrNull() ?: QUICK_UNAVAILABLE)
             is QuickEnrollResult.Failed -> ActionResult.Failed(r.reason ?: QUICK_NOT_ENABLED)
         }
     }
@@ -715,6 +723,7 @@ open class SessionController(
     }
 
     private suspend fun landOnStoredState(probe: Boolean) {
+        publishServer()
         val stored = store.load()
         update { it.copy(server = store.baseUrl, screen = if (session.get() != null) AppScreen.VAULT else landingScreen(), accountEmail = stored?.email) }
         if (session.get() != null) update { it.copy(items = summaries(it.query)) }
@@ -739,10 +748,43 @@ open class SessionController(
         signupMode = effectiveSignupMode(p.signupMode),
     )
 
-    /** Gap 6: the same quick-unlock gates the ladder enforces at unlock. */
+    /** Gap 6: the same quick-unlock gates the ladder enforces at unlock, and why one refuses. */
     private fun refreshQuick() {
         val q = runCatching { ladder.quickStatus(store.load()?.userId ?: session.get()?.account?.userId) }.getOrNull() ?: return
-        update { it.copy(quickUnlock = QuickUnlockView(available = q.eligible, enrolled = q.enrolled, fresh = q.fresh)) }
+        val reason = runCatching { quickReason(q.refusal) }.getOrNull()
+        update { it.copy(quickUnlock = QuickUnlockView(available = q.eligible, enrolled = q.enrolled, fresh = q.fresh, refusal = q.refusal, reason = reason)) }
+    }
+
+    /** The sentence under the quick-unlock switch for [gate]; none while it is merely turned off. */
+    private fun quickReason(gate: QuickGate?): String? = when (gate) {
+        null, QuickGate.NOT_ENROLLED -> null
+        QuickGate.POLICY -> {
+            val originKey = store.baseUrl?.let(OriginCanon::originKey)
+            if (originKey != null && !coordinator.cacheAllowed(originKey)) QUICK_FORBIDDEN else QUICK_POLICY_UNSEEN
+        }
+        QuickGate.NO_BIOMETRIC -> quickKeys.biometricProblem() ?: QUICK_NO_BIOMETRIC
+        QuickGate.EXPIRED -> QUICK_EXPIRED
+    }
+
+    /**
+     * A4: quick unlock needs this origin's policy seen within 7 days, and the start-up probe is the only other read
+     * a locked app makes. A probe that failed at launch, or an app that stayed in memory for days (it locks on every
+     * trip to the background, so its quiet sync rarely runs), left that clock stale. So every landing in the vault and
+     * every return to the foreground probes again once the policy is unknown in this visit or older than an hour.
+     * The probe is the tokenless, fenced one.
+     */
+    private fun refreshPolicyIfStale() {
+        val originKey = store.baseUrl?.let(OriginCanon::originKey) ?: return
+        val fetchedAt = store.origin(originKey).policyFetchedAt
+        val age = clocks.wallMs() - fetchedAt
+        if (coordinator.livePolicy != null && fetchedAt > 0L && age in 0 until POLICY_REFRESH_MS) return
+        if (policyRefresh?.isActive == true) return
+        policyRefresh = scope.launch { probePolicy() }
+    }
+
+    /** Tell the app's extensions which server it uses: the origin it dials, which only the Trust Gate (or a re-spelling) sets. */
+    private fun publishServer() {
+        runCatching { serverShare.publish(store.baseUrl) }
     }
 
     private fun summaries(query: String): List<ItemSummary> {
@@ -790,6 +832,7 @@ open class SessionController(
             )
         }
         refreshQuick()
+        refreshPolicyIfStale()
     }
 
     private fun showFirstSync(first: FirstSync) {
@@ -957,6 +1000,7 @@ open class SessionController(
 
     private companion object {
         const val SYNC_EVERY_MS = 5 * 60 * 1000L
+        const val POLICY_REFRESH_MS = 60 * 60 * 1000L
         const val LOGOUT_MS = 5_000L
 
         // The household's sentences (the Android app's, where it has them).
@@ -984,6 +1028,10 @@ open class SessionController(
         const val ENABLE_PROMPT = "Turn on quick unlock"
         const val CHANGE_PASSWORD_FIRST = "Change your master password first, then you can turn on quick unlock."
         const val UNLOCK_WITH_PASSWORD_FIRST = "Unlock with your master password first, then turn quick unlock on."
+        const val QUICK_FORBIDDEN = "Your server doesn't allow unlocking without your master password."
+        const val QUICK_POLICY_UNSEEN = "andvari needs to reach your server before this can be turned on. Check your connection."
+        const val QUICK_NO_BIOMETRIC = "Set up Face ID or Touch ID on this iPhone first."
+        const val QUICK_EXPIRED = "Unlock with your master password once to use this again."
         const val QUICK_UNAVAILABLE = "This device has no usable Face ID or Touch ID, or your org doesn't allow it."
         const val QUICK_NOT_ENABLED = "Couldn't turn on quick unlock."
         const val NAME_REQUIRED = "Give the login a name."

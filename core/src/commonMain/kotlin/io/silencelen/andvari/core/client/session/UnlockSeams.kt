@@ -42,6 +42,9 @@ interface QuickUnlockKeys {
     /** A strong biometric is enrolled and usable. A device passcode never counts: it is weaker than the master password. */
     fun hasStrongBiometric(): Boolean
 
+    /** Why [hasStrongBiometric] is false, as a sentence the person can act on; null when it is true or the platform cannot say. */
+    fun biometricProblem(): String? = null
+
     /** A well-formed wrapped UVK exists for [userId] at [originKey]. */
     fun isEnrolled(originKey: String, userId: String): Boolean
 

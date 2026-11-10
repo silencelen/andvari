@@ -33,6 +33,10 @@ struct SettingsView: View {
                     if let message {
                         Text(message)
                             .foregroundStyle(Palette.danger)
+                    } else if let reason = quick.reason {
+                        // Why the switch is unavailable (the core's sentence); nothing while it is merely off.
+                        Text(reason)
+                            .foregroundStyle(Palette.inkDim)
                     }
                 }
                 .listRowBackground(Palette.raised)

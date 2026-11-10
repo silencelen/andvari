@@ -34,6 +34,15 @@ object LocalAuthenticationCodes {
         -> BiometricOutcome.INVALIDATED
         else -> BiometricOutcome.DEVICE_ERROR // authenticationFailed, biometryNotAvailable, invalidContext, notInteractive, …
     }
+
+    /** Why `canEvaluatePolicy` refused, from its error [code], for the biometric the device has ([name]: "Face ID", "Touch ID"). */
+    fun unavailable(code: Long?, name: String): String = when (code) {
+        -7L -> "Set up $name in the Settings app first." // biometryNotEnrolled
+        -6L -> "andvari isn't allowed to use $name. Turn it on in Settings › andvari." // biometryNotAvailable: denied, or no hardware
+        -8L -> "$name is locked after too many tries. Lock and unlock your iPhone with its passcode, then try again." // biometryLockout
+        -5L -> "Set a passcode on this iPhone first." // passcodeNotSet
+        else -> "$name isn't available right now."
+    }
 }
 
 /** The sentences a quick-unlock outcome says (Android's, where it has them). */
