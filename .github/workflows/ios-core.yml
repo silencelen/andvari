@@ -4,7 +4,7 @@ name: iOS core
 
 on:
   push:
-    branches: [ios, ios-ui]
+    branches: [ios, ios-ui, ios-swiftui]
     paths:
       - "app-ios/**"
       - "extension/**"
@@ -129,6 +129,12 @@ jobs:
         run: |
           brew install xcodegen
           (cd app-ios && xcodegen generate)
+          set +e
           xcodebuild -project app-ios/Andvari.xcodeproj -scheme Andvari -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build | tail -40
-          exit "${PIPESTATUS[0]}"
+            -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build > xcodebuild.log 2>&1
+          status=$?
+          # The compiler's diagnostics come first: the summary at the end of the log leaves them out.
+          grep -E ': error: ' xcodebuild.log | sort -u | head -100
+          grep -E ': warning: ' xcodebuild.log | grep '/app-ios/' | sort -u | head -100
+          tail -40 xcodebuild.log
+          exit "$status"
