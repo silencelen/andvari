@@ -42,6 +42,31 @@ class PolicyCoordinatorWiringTest {
         assertTrue(end.contains("screen = Screen.Welcome"), "and the session is over, so the sign-in surface")
     }
 
+    /**
+     * The rejection reaches the screen whichever client heard it: the autofill unlock binds sessions the
+     * main screen adopts, and its coordinator has no UI callback. Behaviour: `PolicyCoordinatorTest`.
+     */
+    @Test
+    fun theScreenReportsARejectionWhicheverClientHeardIt() {
+        val idle = span(vm, "fun checkIdleLock()", "fun backgroundSync()")
+        val take = idle.indexOf("if (VaultSession.takeRejected()) {")
+        assertTrue(take > -1, "the tick consumes the process-wide mark")
+        assertTrue(take < idle.indexOf("lock(idleReason)"), "before the idle lock could report the dead session as idle")
+        assertTrue(idle.substring(take, idle.indexOf("return", take)).contains("endRejectedSession()"), "and lands on the sign-in surface")
+        assertTrue(vm.contains("viewModelScope.launch { checkIdleLock() }"), "the screen's own coordinator lands it at once")
+        val signOut = span(vm, "fun signOut(reason: String? = null) {", "private fun endRejectedSession()")
+        assertTrue(signOut.contains("VaultSession.takeRejected()"), "a refusal heard during sign-out is that sign-out, not a second event")
+    }
+
+    /** Finding 5: each client writes tokens only into the session it was built for. Behaviour: `TokenOwnerTest`. */
+    @Test
+    fun tokenWritesAreBoundToTheirSession() {
+        assertTrue(vm.contains("{ store.updateTokensFor(owner, it) }"), "the main app's clients")
+        assertTrue(autofill.contains("{ store.updateTokensFor(owner, it) }"), "the autofill unlock's client")
+        assertFalse(vm.contains("{ store.updateTokens(it) }") || autofill.contains("{ store.updateTokens(it) }"), "an unbound write is the regression")
+        assertTrue(Regex("""owner\.userId = s\.userId""").findAll(vm).count() == 2, "sign-in and enroll name the session they committed")
+    }
+
     /** Gap 3: a forbidding policy seen by the poll, or found at bind, purges the whole namespace. */
     @Test
     fun aForbiddingPolicyIsEnforcedOnThePollAndAtBind() {

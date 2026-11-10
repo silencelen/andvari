@@ -125,13 +125,15 @@ class PolicyCoordinator(
      * reported by [AndvariApi] before it drops the tokens. Only a refusal on the LIVE token-holder
      * ends the session here: a refused refresh on any other client (an unlock still in progress,
      * or a superseded holder) is that client's own business, and the unlock paths handle their
-     * own 401 where their account context is in scope. [onSessionRejected] runs after the purge
-     * so a UI layer can land on its signed-out surface.
+     * own 401 where their account context is in scope. The session records the rejection
+     * ([VaultSession.markRejected]) for whichever UI layer is showing it, and [onSessionRejected]
+     * runs after the purge so this coordinator's own UI layer can look at once.
      */
     fun onRefreshRefused(api: AndvariApi) {
         val live = session.get() ?: return
         if (live.api !== api) return
         purgeRevoked(OriginCanon.originKey(api.baseUrl), live.account.userId)
+        session.markRejected()
         onSessionRejected()
     }
 }

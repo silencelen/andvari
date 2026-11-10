@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalAtomicApi::class)
+
 package io.silencelen.andvari.core.client.session
 
 import io.silencelen.andvari.core.client.Account
@@ -5,6 +7,8 @@ import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.SyncEngine
 import kotlin.concurrent.Volatile
+import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.sync.Mutex
@@ -186,6 +190,7 @@ open class VaultSession(
     ) {
         synchronized(stateLock) {
             touch() // spec 01 §8: the auto-lock timer resets on unlock
+            rejected.store(false) // a new session supersedes any rejection not yet reported
             val prev = state
             state = Unlocked(api, account, engine, provenance)
             prev?.let {
@@ -221,6 +226,19 @@ open class VaultSession(
             takeRunnable().forEach { runCatching { it() } }
         }
     }
+
+    // ---- a definitive rejection, for whichever UI layer is showing the session ----
+    //
+    // The client that hears a refused refresh is whichever one holds the session: on Android that can be
+    // the autofill unlock's, for a session the main screen then adopted. Only the coordinator that heard
+    // it has a callback, so the fact is kept here, process-wide, for the UI layer to find and report once.
+    private val rejected = AtomicBoolean(false)
+
+    /** Record that a definitive rejection ended the live session (set by [PolicyCoordinator]). */
+    fun markRejected() = rejected.store(true)
+
+    /** Whether the last session ended on a definitive rejection, consuming the mark so it is reported once. */
+    fun takeRejected(): Boolean = rejected.exchange(false)
 
     // ---- durable-cache work that has to wait for the engine (spec 02 §8) ----
     //

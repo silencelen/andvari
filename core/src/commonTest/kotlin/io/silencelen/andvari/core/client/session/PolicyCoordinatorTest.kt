@@ -253,6 +253,25 @@ class PolicyCoordinatorTest {
         assertEquals(listOf(account.userId), store.origin(homeKey).clearedAccountKeys)
         assertNull(store.stored)
         assertEquals(1, rejected, "the UI layer hears about it after the purge")
+        assertTrue(session.takeRejected(), "and the session records it for whichever screen shows it")
+    }
+
+    @Test
+    fun aRejectionHeardByAnotherComponentIsStillReportedOnce() {
+        // The autofill unlock's coordinator has no UI callback; the main screen adopted its session.
+        val autofills = PolicyCoordinator(store, artifacts, session, clocks)
+        val live = bindLive()
+        autofills.onRefreshRefused(live)
+        assertNull(session.get())
+        assertTrue(session.takeRejected(), "the screen that adopted the session finds the rejection")
+        assertFalse(session.takeRejected(), "and reports it once")
+    }
+
+    @Test
+    fun aNewSessionSupersedesAnUnreportedRejection() {
+        coordinator.onRefreshRefused(bindLive())
+        bindLive() // signed in again before any screen looked
+        assertFalse(session.takeRejected(), "a stale rejection must not end the new session's screen")
     }
 
     @Test
@@ -262,6 +281,7 @@ class PolicyCoordinatorTest {
         coordinator.onRefreshRefused(orphan)
         assertTrue(artifacts.events.isEmpty())
         assertEquals(0, rejected)
+        assertFalse(session.takeRejected())
 
         // A live session of its own is not ended by a superseded holder's refusal.
         val liveApi = bindLive()
