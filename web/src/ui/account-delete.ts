@@ -318,17 +318,23 @@ export function afterCheck(s: DeleteFlowState, c: DeletionCheck): DeleteFlowStat
  * a retry — cannot be told from a real one, so App signs out saying the account may still exist, and nothing offers to
  * forget it: forgetting wipes the spec 01 §5 self-identity records, which exist precisely to catch an account that changed
  * under this browser (an admin's recovery). Only an end seen during the request itself counts as the deletion's own.
+ * The watch is tied to the account it was armed for, and a new session (`session_start`: an unlock, a sign-in) clears it
+ * unless a request is still in flight — so neither an old unknown outcome nor an old request reaches a later session,
+ * least of all another account's.
  */
 export interface DeletionWatch {
+  /** The account the watch is armed for (its request, its unknown outcome); null when idle. A session end of any OTHER
+   *  account is never held, never worded "can't tell", never routed to Forget. */
+  userId: string | null;
   /** Between `started` (just before the POST) and its settle. */
   inFlight: boolean;
-  /** The first session end that landed while in flight. */
+  /** The first session end of that account that landed while in flight. */
   held: SessionEndKind | null;
   /** The last request's outcome is unknown, and nothing since has settled it. */
   unknown: boolean;
 }
 
-export const IDLE_DELETION_WATCH: DeletionWatch = { inFlight: false, held: null, unknown: false };
+export const IDLE_DELETION_WATCH: DeletionWatch = { userId: null, inFlight: false, held: null, unknown: false };
 
 /** Longer than the request can take — ApiClient.deleteTimeoutMs for the POST, plus a token refresh's own bounds between a
  *  401 and its one re-send — so it fires only when no settle ever arrives. */
@@ -337,19 +343,27 @@ export const DELETION_HOLD_LIMIT_MS = 120_000;
 /** How a request ended, for App: `unsent` — it never reached the server (nothing learned about the account). */
 export type DeletionSettle = "deleted" | "refused" | "unsent" | "unknown" | "session_gone";
 
-export type DeletionWatchEvent =
+/** What the card reports; App adds the account the card is for. */
+export type DeletionCardEvent =
   | { kind: "started" }
   | { kind: "settled"; outcome: DeletionSettle }
-  | { kind: "checked"; result: "still_here" | "session_ended" | "unreachable" }
-  | { kind: "session_end"; end: SessionEndKind }
+  | { kind: "checked"; result: "still_here" | "session_ended" | "unreachable" };
+
+export type DeletionWatchEvent =
+  | (DeletionCardEvent & { userId: string })
+  /** A session ended (the WebSocket `revoked` frame, `expired` at a ticket re-mint) — whose, if this tab knows. */
+  | { kind: "session_end"; end: SessionEndKind; userId: string | null }
+  /** A session began in this tab (an unlock, a sign-in — perhaps of another account). */
+  | { kind: "session_start" }
+  /** App's belt: no settle arrived within DELETION_HOLD_LIMIT_MS of `started`. */
   | { kind: "hold_expired" };
 
 export type DeletionWatchAction =
   | { kind: "none" }
-  /** Sign out (the self-identity records stay); `notice` replaces the session-end kind's own line. */
-  | { kind: "end_session"; end: SessionEndKind; notice?: string }
-  /** Leave the vault for the card that offers to forget the account (DELETION_MOST_LIKELY_DONE). */
-  | { kind: "offer_forget"; end: SessionEndKind };
+  /** Sign out that account's session (the self-identity records stay); `notice` replaces the kind's own line. */
+  | { kind: "end_session"; userId: string | null; end: SessionEndKind; notice?: string }
+  /** Sign that account out onto the card that offers to forget it (DELETION_MOST_LIKELY_DONE). */
+  | { kind: "offer_forget"; userId: string; end: SessionEndKind };
 
 export function settledOutcome(o: DeletionOutcome): DeletionSettle {
   switch (o.kind) {
@@ -373,24 +387,34 @@ export function checkedResult(c: DeletionCheck): "still_here" | "session_ended" 
 export function stepDeletionWatch(w: DeletionWatch, e: DeletionWatchEvent): { watch: DeletionWatch; action: DeletionWatchAction } {
   const none: DeletionWatchAction = { kind: "none" };
   const idle = IDLE_DELETION_WATCH;
-  // After an unknown outcome, an end this browser cannot tie to the deletion: sign out, and say the account may still exist.
-  const ended = (end: SessionEndKind, notice?: string): DeletionWatchAction =>
-    w.unknown ? { kind: "end_session", end, notice: SESSION_ENDED_OUTCOME_UNKNOWN } : { kind: "end_session", end, ...(notice ? { notice } : {}) };
-  if (e.kind === "started") {
-    // A held end is kept, never dropped (there is none in practice: every settle consumes it).
-    return { watch: { ...w, inFlight: true }, action: none };
-  }
-  if (e.kind === "session_end") {
-    if (w.inFlight) return { watch: { ...w, held: w.held ?? e.end }, action: none };
-    return { watch: idle, action: ended(e.end) };
+  if (e.kind === "session_start") {
+    // An outcome nothing settled belonged to the session that ended; a request still in flight keeps its watch — tied to
+    // its account, so the new session's own ends pass it by.
+    return { watch: w.inFlight ? w : idle, action: none };
   }
   if (e.kind === "hold_expired") {
-    return w.inFlight ? stepDeletionWatch(w, { kind: "settled", outcome: "unknown" }) : { watch: w, action: none };
+    return w.inFlight && w.userId !== null ? stepDeletionWatch(w, { kind: "settled", outcome: "unknown", userId: w.userId }) : { watch: w, action: none };
+  }
+  if (e.kind === "session_end") {
+    // Not the account the watch is armed for: an ordinary end — never held, never "can't tell", never Forget.
+    if (e.userId === null || e.userId !== w.userId) return { watch: w, action: { kind: "end_session", userId: e.userId, end: e.end } };
+    if (w.inFlight) return { watch: { ...w, held: w.held ?? e.end }, action: none };
+    // After an unknown outcome, an end this browser cannot tie to the deletion: sign out, saying the account may still exist.
+    return { watch: idle, action: { kind: "end_session", userId: e.userId, end: e.end, ...(w.unknown ? { notice: SESSION_ENDED_OUTCOME_UNKNOWN } : {}) } };
+  }
+  // A card's event: the watch follows the account it is for (a stale watch of another account gives way).
+  const u = e.userId;
+  const s = u === w.userId ? w : { ...idle, userId: u };
+  const ended = (end: SessionEndKind, notice?: string): DeletionWatchAction =>
+    s.unknown ? { kind: "end_session", userId: u, end, notice: SESSION_ENDED_OUTCOME_UNKNOWN } : { kind: "end_session", userId: u, end, ...(notice ? { notice } : {}) };
+  if (e.kind === "started") {
+    // A held end is kept, never dropped (there is none in practice: every settle consumes it).
+    return { watch: { ...s, inFlight: true }, action: none };
   }
   if (e.kind === "checked") {
-    if (e.result === "still_here") return { watch: { ...w, unknown: false }, action: none };
+    if (e.result === "still_here") return { watch: { ...s, unknown: false }, action: none };
     if (e.result === "session_ended") return { watch: idle, action: ended("expired") };
-    return { watch: w, action: none };
+    return { watch: s, action: none };
   }
   switch (e.outcome) {
     case "deleted":
@@ -398,15 +422,15 @@ export function stepDeletionWatch(w: DeletionWatch, e: DeletionWatchEvent): { wa
     case "refused":
       // The server answered a live session, so the account exists: an earlier unknown is settled too, and an end held
       // meanwhile was a real one.
-      return { watch: idle, action: w.held ? { kind: "end_session", end: w.held } : none };
+      return { watch: idle, action: s.held ? { kind: "end_session", userId: u, end: s.held } : none };
     case "unsent":
       // Nothing reached the server, so nothing was learned about the account.
-      return w.held ? { watch: idle, action: ended(w.held) } : { watch: { ...w, inFlight: false }, action: none };
+      return s.held ? { watch: idle, action: ended(s.held) } : { watch: { ...s, inFlight: false }, action: none };
     case "unknown":
-      if (w.held) return { watch: idle, action: { kind: "offer_forget", end: w.held } };
-      return { watch: { ...idle, unknown: true }, action: none };
+      if (s.held) return { watch: idle, action: { kind: "offer_forget", userId: u, end: s.held } };
+      return { watch: { ...idle, userId: u, unknown: true }, action: none };
     case "session_gone":
-      return { watch: idle, action: w.held ? ended(w.held) : ended("expired", SESSION_ENDED) };
+      return { watch: idle, action: s.held ? ended(s.held) : ended("expired", SESSION_ENDED) };
   }
 }
 

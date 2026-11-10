@@ -402,9 +402,12 @@ residual (spec 05 R19).
    cannot be told from an admin's revocation, disable or recovery or a password change elsewhere, so App signs out
    saying the account may still exist, keeps the self-identity records and offers no Forget: forgetting would wipe the
    very records that catch an account that changed under this browser. The hold is bounded twice: the request's
-   deadline, and a 120 s timer in App in case the card never reports a settle. (Independent review, 2026-11-10: the
-   first cut reported a 5xx as "not deleted"; its second cut dropped a held end after an unknown outcome and read any
-   401 on the check as "deleted".)
+   deadline, and a 120 s timer in App in case the card never reports a settle. The watch is tied to the account it was
+   armed for — App passes the account with every event, and acts only on the account whose session the tab holds — and
+   `onUnlocked` clears it unless a request is still in flight, so a later session, the same account's or another's,
+   never inherits an unknown outcome, and another account's session end is never held or routed to Forget.
+   (Independent review, 2026-11-10: the first cut reported a 5xx as "not deleted"; its second cut dropped a held end
+   after an unknown outcome and read any 401 on the check as "deleted"; its third never reset the watch.)
 
 Logic lives in pure, tested modules (`ui/account-delete.ts`, `session.wipeLocalAccountState`,
 `selfidentity.forgetSelfIdentity`, the API client methods); the card body is a pure render of its model, tested with

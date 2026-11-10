@@ -1103,7 +1103,9 @@ table, `retired_ids` (below; spec 02 §5).
   `200`) or to sign in and check. Any OTHER session end after an unknown outcome — a `401` on the check or on a retry, a
   revocation that lands later — MUST NOT be read as the deletion: an admin's revocation, disable or recovery and a
   password change elsewhere end a session too. The client signs out saying the account may still exist and keeps the
-  spec 01 §5 self-identity records, which exist to catch exactly an account that changed under that device.
+  spec 01 §5 self-identity records, which exist to catch exactly an account that changed under that device. All of this
+  is about the account that sent the request: another account's session end is never held or offered as the
+  deletion's, and a new session (an unlock, a sign-in) does not inherit an unknown outcome.
 
 **Errors:** `confirm_email_mismatch`, `totp_code_required`, `bad_totp_code` (400); `reauth_failed`,
 `account_delete_public_disabled`, `totp_enrollment_required` (403); `credential_changed` (401); `account_delete_blocked`

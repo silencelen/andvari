@@ -51,6 +51,7 @@ import {
   DELETION_MOST_LIKELY_DONE,
   type DeletionWatch,
   type DeletionWatchAction,
+  type DeletionWatchEvent,
   IDLE_DELETION_WATCH,
   stepDeletionWatch,
 } from "./account-delete";
@@ -190,6 +191,7 @@ export function App() {
 
   const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) => {
     deletedAccountRef.current = null; // a new session: a deletion this tab ran earlier owns no later landing
+    stepDeletion({ kind: "session_start" }); // ...nor an outcome nothing settled (a request still in flight keeps its watch)
     lockRevokeRef.current = null; // A14 review W1: this tab holds a new pair; an older lock's record is moot
     clearLockRevoke(); // ...and so is the copy of it in the tab's sessionStorage (A14 review 3, W-b)
     setPhase({ kind: "vault", account, store, meta });
@@ -389,20 +391,28 @@ export function App() {
         : void signOut(notice ?? "Your session ended — sign in again.", "expired"), // expiry: surface the lost count
     [signOut],
   );
-  // Account deletion: what stepDeletionWatch decided. Only the vault and unlock phases still hold a session to end (the
-  // tab may have locked while the request was in flight); once the session is gone — the outcome-unknown card, or the
-  // sign-in card after the deletion's own wipe — a late settle must not pull the member off that screen.
+  // The account whose session this tab holds right now — the vault's, or the unlock card's (the tab may have locked while
+  // a deletion request was in flight); null on the sign-in and outcome-unknown cards. Read off the latest render.
+  const liveUserId = (): string | null => {
+    const p = phaseRef.current;
+    return p.kind === "vault" ? p.account.userId : p.kind === "unlock" ? p.session.userId : null;
+  };
+  // Account deletion: what stepDeletionWatch decided — applied only to the account whose session this tab holds now, so a
+  // late settle can neither pull the member off a screen that has no session nor end another account's session.
   const applyDeletionAction = useCallback(
     (a: DeletionWatchAction) => {
-      const phaseKind = phaseRef.current.kind;
-      if (a.kind === "none" || (phaseKind !== "vault" && phaseKind !== "unlock")) return;
-      if (a.kind === "end_session") endSession(a.end, a.notice);
-      else void signOut(undefined, a.end, deletionWhoRef.current ?? undefined); // offer_forget
+      if (a.kind === "none" || a.userId === null || a.userId !== liveUserId()) return;
+      if (a.kind === "end_session") {
+        endSession(a.end, a.notice);
+        return;
+      }
+      const who = deletionWhoRef.current;
+      void signOut(undefined, a.end, { userId: a.userId, email: who?.userId === a.userId ? who.email : (loadSession()?.email ?? "") }); // offer_forget
     },
     [endSession, signOut],
   );
   const stepDeletion = useCallback(
-    (e: DeletionTrack) => {
+    (e: DeletionWatchEvent) => {
       const { watch, action } = stepDeletionWatch(deletionWatchRef.current, e);
       deletionWatchRef.current = watch;
       if (!watch.inFlight) clearDeletionHold();
@@ -412,7 +422,7 @@ export function App() {
   );
   // Every session end goes through the deletion watch: idle, it is the ordinary sign-out; during a deletion request it is
   // held, and acted on when the request settles (never dropped).
-  const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind }), [stepDeletion]);
+  const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind, userId: liveUserId() }), [stepDeletion]);
   const onDeletionTrack = useCallback(
     (event: DeletionTrack, who: { userId: string; email: string }) => {
       if (event.kind === "started") {
@@ -423,7 +433,7 @@ export function App() {
           stepDeletion({ kind: "hold_expired" });
         }, DELETION_HOLD_LIMIT_MS);
       }
-      stepDeletion(event);
+      stepDeletion({ ...event, userId: who.userId });
     },
     [stepDeletion],
   );

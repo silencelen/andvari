@@ -307,6 +307,8 @@ describe("checkDeletion — the preview answers 200 only while the account exist
  * always acted on when it settles — never dropped; only such an end, with the answer lost, offers to forget the account.
  */
 describe("stepDeletionWatch — a held session end is acted on, never dropped; Forget only for the deletion's own", () => {
+  const A = "aaaaaaaa-0000-4000-8000-00000000000a"; // the account deleting itself
+  const B = "bbbbbbbb-0000-4000-8000-00000000000b"; // another account signed in later in the same tab
   const run = (events: DeletionWatchEvent[], from: DeletionWatch = IDLE_DELETION_WATCH) => {
     let w = from;
     const actions = events.map((e) => {
@@ -316,69 +318,99 @@ describe("stepDeletionWatch — a held session end is acted on, never dropped; F
     });
     return { watch: w, actions, last: actions[actions.length - 1]! };
   };
-  const revoked = { kind: "session_end", end: "revoked" } as const;
-  const started = { kind: "started" } as const;
-  const settled = (outcome: "deleted" | "refused" | "unsent" | "unknown" | "session_gone") => ({ kind: "settled", outcome }) as const;
+  const revoked = (userId: string | null = A) => ({ kind: "session_end", end: "revoked", userId }) as const;
+  const started = (userId = A) => ({ kind: "started", userId }) as const;
+  const settled = (outcome: "deleted" | "refused" | "unsent" | "unknown" | "session_gone", userId = A) => ({ kind: "settled", outcome, userId }) as const;
+  const checked = (result: "still_here" | "session_ended" | "unreachable", userId = A) => ({ kind: "checked", result, userId }) as const;
+  const sessionStart = { kind: "session_start" } as const;
 
   it("idle, a session end is the ordinary sign-out", () => {
-    expect(run([revoked]).last).toEqual({ kind: "end_session", end: "revoked" });
+    expect(run([revoked()]).last).toEqual({ kind: "end_session", userId: A, end: "revoked" });
   });
 
   it("in flight it is held; the answer lost → the deletion's own revocation, most likely: offer to forget", () => {
-    const r = run([started, revoked, settled("unknown")]);
+    const r = run([started(), revoked(), settled("unknown")]);
     expect(r.actions[1], "held, not acted on yet").toEqual({ kind: "none" });
-    expect(r.last).toEqual({ kind: "offer_forget", end: "revoked" });
+    expect(r.last).toEqual({ kind: "offer_forget", userId: A, end: "revoked" });
     expect(r.watch).toEqual(IDLE_DELETION_WATCH);
   });
 
   it("a revocation during an unknown outcome still ends the session — whichever comes first", () => {
     // The answer is lost first, then the revocation lands: it cannot be tied to the deletion → sign out, keep the records.
-    const later = run([started, settled("unknown"), revoked]);
-    expect(later.last).toEqual({ kind: "end_session", end: "revoked", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
+    expect(run([started(), settled("unknown"), revoked()]).last).toEqual({ kind: "end_session", userId: A, end: "revoked", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
     // The revocation lands first and the request then times out (unknown): it is acted on, not dropped.
-    expect(run([started, revoked, settled("unknown")]).last.kind).toBe("offer_forget");
+    expect(run([started(), revoked(), settled("unknown")]).last.kind).toBe("offer_forget");
   });
 
   it("the server refused (nothing deleted): a held end was real → the ordinary sign-out; no end → nothing", () => {
-    expect(run([started, revoked, settled("refused")]).last).toEqual({ kind: "end_session", end: "revoked" });
-    expect(run([started, settled("refused")]).last).toEqual({ kind: "none" });
+    expect(run([started(), revoked(), settled("refused")]).last).toEqual({ kind: "end_session", userId: A, end: "revoked" });
+    expect(run([started(), settled("refused")]).last).toEqual({ kind: "none" });
     // …and the refusal proves the account exists, so a later end is ordinary again.
-    expect(run([started, settled("unknown"), started, settled("refused"), revoked]).last).toEqual({ kind: "end_session", end: "revoked" });
+    expect(run([started(), settled("unknown"), started(), settled("refused"), revoked()]).last).toEqual({ kind: "end_session", userId: A, end: "revoked" });
   });
 
   it("a 401 on the request ends the session: 'nothing was deleted', or — after an unknown outcome — 'can't tell'", () => {
-    expect(run([started, settled("session_gone")]).last).toEqual({ kind: "end_session", end: "expired", notice: SESSION_ENDED });
-    expect(run([started, settled("unknown"), started, settled("session_gone")]).last).toEqual({ kind: "end_session", end: "expired", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
-    expect(run([started, revoked, settled("session_gone")]).last).toEqual({ kind: "end_session", end: "revoked" });
+    expect(run([started(), settled("session_gone")]).last).toEqual({ kind: "end_session", userId: A, end: "expired", notice: SESSION_ENDED });
+    expect(run([started(), settled("unknown"), started(), settled("session_gone")]).last).toEqual({ kind: "end_session", userId: A, end: "expired", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
+    expect(run([started(), revoked(), settled("session_gone")]).last).toEqual({ kind: "end_session", userId: A, end: "revoked" });
   });
 
-  it("B: after an unknown outcome, a 401 on the check never offers to forget — the account may still exist", () => {
-    const r = run([started, settled("unknown"), { kind: "checked", result: "session_ended" }]);
-    expect(r.last).toEqual({ kind: "end_session", end: "expired", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
+  it("after an unknown outcome, a 401 on the check never offers to forget — the account may still exist", () => {
+    const r = run([started(), settled("unknown"), checked("session_ended")]);
+    expect(r.last).toEqual({ kind: "end_session", userId: A, end: "expired", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
     expect(r.actions.some((a) => a.kind === "offer_forget")).toBe(false);
-    // A retry whose own window saw no end, then a 401: the same — never Forget.
-    expect(run([started, settled("unknown"), started, settled("session_gone")]).actions.some((a) => a.kind === "offer_forget")).toBe(false);
+    expect(run([started(), settled("unknown"), started(), settled("session_gone")]).actions.some((a) => a.kind === "offer_forget")).toBe(false);
   });
 
   it("the check finding the account still here settles the unknown; an unreachable check changes nothing", () => {
-    expect(run([started, settled("unknown"), { kind: "checked", result: "still_here" }, revoked]).last).toEqual({ kind: "end_session", end: "revoked" });
-    expect(run([started, settled("unknown"), { kind: "checked", result: "unreachable" }]).watch.unknown).toBe(true);
+    expect(run([started(), settled("unknown"), checked("still_here"), revoked()]).last).toEqual({ kind: "end_session", userId: A, end: "revoked" });
+    expect(run([started(), settled("unknown"), checked("unreachable")]).watch.unknown).toBe(true);
   });
 
   it("a request that never reached the server learns nothing: an earlier unknown stands", () => {
-    expect(run([started, settled("unknown"), settled("unsent")]).watch.unknown).toBe(true);
+    expect(run([started(), settled("unknown"), settled("unsent")]).watch.unknown).toBe(true);
   });
 
   it("the hold expires if no settle ever arrives: a held end is then acted on like a lost answer", () => {
-    expect(run([started, revoked, { kind: "hold_expired" }]).last).toEqual({ kind: "offer_forget", end: "revoked" });
-    const none = run([started, { kind: "hold_expired" }]);
+    expect(run([started(), revoked(), { kind: "hold_expired" }]).last).toEqual({ kind: "offer_forget", userId: A, end: "revoked" });
+    const none = run([started(), { kind: "hold_expired" }]);
     expect(none.last).toEqual({ kind: "none" });
-    expect(none.watch).toEqual({ inFlight: false, held: null, unknown: true });
+    expect(none.watch).toEqual({ userId: A, inFlight: false, held: null, unknown: true });
     expect(run([{ kind: "hold_expired" }]).last, "nothing in flight: nothing to expire").toEqual({ kind: "none" });
   });
 
   it("the deletion confirmed: nothing for the watch to do (App's wipe takes over)", () => {
-    expect(run([started, revoked, settled("deleted")])).toMatchObject({ last: { kind: "none" }, watch: IDLE_DELETION_WATCH });
+    expect(run([started(), revoked(), settled("deleted")])).toMatchObject({ last: { kind: "none" }, watch: IDLE_DELETION_WATCH });
+  });
+
+  it("a new session clears an outcome nothing settled — the next session's ordinary end never says 'can't tell'", () => {
+    // Unknown, then the tab locks or signs out, and a session begins again — the same account or another.
+    expect(run([started(), settled("unknown"), sessionStart, revoked(A)]).last).toEqual({ kind: "end_session", userId: A, end: "revoked" });
+    expect(run([started(), settled("unknown"), sessionStart, revoked(B)]).last).toEqual({ kind: "end_session", userId: B, end: "revoked" });
+    expect(run([started(), settled("unknown"), sessionStart]).watch).toEqual(IDLE_DELETION_WATCH);
+    // A request still in flight keeps its watch (its own settle consumes it).
+    expect(run([started(), sessionStart]).watch).toEqual({ userId: A, inFlight: true, held: null, unknown: false });
+  });
+
+  it("an end of another account is never held, never 'can't tell', never routed to the old account's Forget", () => {
+    // A's request is in flight (the tab locked meanwhile, say); B signs in and B's session ends.
+    const r = run([started(A), sessionStart, revoked(B)]);
+    expect(r.last, "B's end is B's ordinary sign-out, at once").toEqual({ kind: "end_session", userId: B, end: "revoked" });
+    expect(r.watch.held, "nothing held for A").toBeNull();
+    // A's request then ends without an answer: nothing of B's is carried into A's Forget.
+    expect(stepDeletionWatch(r.watch, settled("unknown", A)).action).toEqual({ kind: "none" });
+    // After A's unknown outcome, B's end is never worded "can't tell"; nor is an end of a session this tab cannot name.
+    expect(run([started(A), settled("unknown", A), revoked(B)]).last).toEqual({ kind: "end_session", userId: B, end: "revoked" });
+    expect(run([started(A), revoked(null), settled("unknown", A)]).actions).toEqual([
+      { kind: "none" },
+      { kind: "end_session", userId: null, end: "revoked" },
+      { kind: "none" },
+    ]);
+  });
+
+  it("a stale watch of another account gives way to this account's request", () => {
+    const r = run([started(A), settled("unknown", A), started(B), revoked(B), settled("unknown", B)]);
+    expect(r.last, "B's own held end, B's own Forget").toEqual({ kind: "offer_forget", userId: B, end: "revoked" });
   });
 
   it("maps the card's outcomes and checks onto settles", () => {
@@ -537,16 +569,22 @@ describe("wiring", () => {
 
   it("every session end goes through the deletion watch; its actions sign out or offer to forget; the hold is bounded", () => {
     const app = read("./App.tsx");
-    expect(app).toContain('const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind }), [stepDeletion]);');
+    expect(app).toContain('const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind, userId: liveUserId() }), [stepDeletion]);');
     const step = app.slice(app.indexOf("const stepDeletion = useCallback("), app.indexOf("const onRevoked = useCallback("));
     expect(step).toContain("stepDeletionWatch(deletionWatchRef.current, e)");
     expect(step).toContain("if (!watch.inFlight) clearDeletionHold();");
     const act = app.slice(app.indexOf("const applyDeletionAction = useCallback("), app.indexOf("const stepDeletion = useCallback("));
-    expect(act).toContain("if (a.kind === \"end_session\") endSession(a.end, a.notice);");
-    expect(act, "offer_forget: the session is wiped and App lands on the outcome-unknown card").toContain("void signOut(undefined, a.end, deletionWhoRef.current ?? undefined);");
+    expect(act, "an action applies only to the account whose session this tab holds now").toContain('if (a.kind === "none" || a.userId === null || a.userId !== liveUserId()) return;');
+    expect(act).toContain("endSession(a.end, a.notice);");
+    expect(act, "offer_forget: the session is wiped and App lands on the outcome-unknown card").toContain("void signOut(undefined, a.end, { userId: a.userId,");
+    const live = app.slice(app.indexOf("const liveUserId = (): string | null => {"), app.indexOf("const applyDeletionAction = useCallback("));
+    expect(live).toContain('return p.kind === "vault" ? p.account.userId : p.kind === "unlock" ? p.session.userId : null;');
     const track = app.slice(app.indexOf("const onDeletionTrack = useCallback("));
     expect(track).toContain('stepDeletion({ kind: "hold_expired" });');
     expect(track).toContain("}, DELETION_HOLD_LIMIT_MS);");
+    expect(track, "the card's events carry the account they are for").toContain("stepDeletion({ ...event, userId: who.userId });");
+    const unlocked = app.slice(app.indexOf("const onUnlocked = (account: Account"), app.indexOf("setPhase({ kind: \"vault\", account, store, meta });"));
+    expect(unlocked, "a new session clears the watch unless a request is in flight").toContain('stepDeletion({ kind: "session_start" });');
     expect(app).toContain("onDeletionTrack={(event) => onDeletionTrack(event, { userId: deletingUserId, email: vaultEmail })}");
     expect(app).toContain('onForget={() => onAccountDeleted(p.userId, p.email, "forgotten")}');
     const card = read("./DeleteAccount.tsx");
