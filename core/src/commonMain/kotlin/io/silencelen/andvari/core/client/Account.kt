@@ -373,10 +373,26 @@ class Account private constructor(
             uvk.fill(0)
             identityPriv.fill(0)
             signSecret.fill(0)
-            // A sync may be adding a key right now (the engine fills the map). The flag above already stops every
-            // sealing path; a key that lands after this copy is left to the collector, like any dropped session's.
-            runCatching { vaultKeys.values.toList() }.getOrNull()?.forEach { it.fill(0) }
+            // Every writer of the map holds this lock too ([putVaultKey], [dropVaultKey]), so this sees every key, and
+            // none lands after it.
+            for (vk in vaultKeys.values) vk.fill(0)
         }
+    }
+
+    /** Hold [vk] as [vaultId]'s key, under the lock [wipe] takes: after a wipe nothing is held, and [vk] is zeroed. */
+    private fun putVaultKey(vaultId: String, vk: ByteArray) {
+        synchronized(keyLock) {
+            if (wiped) {
+                vk.fill(0)
+                return
+            }
+            vaultKeys[vaultId] = vk
+        }
+    }
+
+    /** Drop [vaultId]'s key, under the lock [wipe] takes. */
+    private fun dropVaultKey(vaultId: String) {
+        synchronized(keyLock) { vaultKeys.remove(vaultId) }
     }
 
     /**
@@ -894,7 +910,14 @@ class Account private constructor(
             }
             // Password path validates the password by the wrappedUvk open above; from here the
             // work is identical to the UVK (quick-unlock) path — one shared tail, no drift.
-            return unlockFromUvk(userId, uvk, keys, crypto, selfIdentityPub)
+            // Review 3: until an account takes the UVK it is this call's, so a failure of the tail (the seed does
+            // not open, an identity mismatch) zeroes it.
+            return try {
+                unlockFromUvk(userId, uvk, keys, crypto, selfIdentityPub)
+            } catch (t: Throwable) {
+                uvk.fill(0)
+                throw t
+            }
         }
 
         /**
@@ -1099,7 +1122,7 @@ class Account private constructor(
         // same broken grant produced two different verdicts depending on which branch minted it.
         if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
         recordHeldKey(grant.vaultId, vk, opened.source)
-        vaultKeys[grant.vaultId] = vk
+        putVaultKey(grant.vaultId, vk)
         keySources[grant.vaultId] = opened.source
         opened.from?.let { signedGrantFrom[grant.vaultId] = it }
         pendingGrants.remove(grant.vaultId)
@@ -1547,7 +1570,7 @@ class Account private constructor(
     private fun holdKeyFromPersonalWrap(vaultId: String, vk: ByteArray) {
         val held = vaultKeys[vaultId]
         if (held != null && !Bytes.ctEquals(held, vk)) vkMismatchVaults.add(vaultId)
-        vaultKeys[vaultId] = vk
+        putVaultKey(vaultId, vk)
         keySources[vaultId] = KeySource.PERSONAL_WRAP
         unreadableKeyVaults.remove(vaultId)
         uvkWrappedVaults.add(vaultId)
@@ -1714,7 +1737,7 @@ class Account private constructor(
 
     /** Drop a vault's key + role (removedGrants purge) so later writes fail fast client-side. */
     fun removeVault(vaultId: String) {
-        vaultKeys.remove(vaultId)
+        dropVaultKey(vaultId)
         vaultRoles.remove(vaultId)
         memberGrantedVaults.remove(vaultId) // provenance dies with the key it describes (H64)
         uvkWrappedVaults.remove(vaultId)

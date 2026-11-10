@@ -9,8 +9,6 @@ import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.io.IOException
 
 /** What one unlock of a stored session came to (spec 01 §8, §8.1). */
@@ -130,8 +128,9 @@ class UnlockLadder(
         if (dialed == null || !sessionBelongsTo(stored.baseUrl, dialed)) return UnlockResult.Elsewhere(stored.baseUrl)
         val originKey = OriginCanon.originKey(dialed) // §4.2: the server this unlock talks to, and the namespace it opens
         return climb(stored, dialed, originKey, VaultSession.UnlockProvenance.PASSWORD, options) { keys ->
-            // The KDF runs off the caller's thread (argon2id at 64 MiB or more: a UI must keep animating).
-            withContext(Dispatchers.Default) { Account.unlock(stored.userId, password, keys, selfIdentityPub = pinFor(originKey, stored)) }
+            // The KDF runs off the caller's thread (argon2id at 64 MiB or more: a UI must keep animating), and an account
+            // the caller no longer waits for is wiped.
+            handOff({ Account.unlock(stored.userId, password, keys, selfIdentityPub = pinFor(originKey, stored)) }, Account::wipe)
         }
     }
 
