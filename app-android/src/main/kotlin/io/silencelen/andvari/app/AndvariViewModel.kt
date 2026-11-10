@@ -1244,7 +1244,7 @@ class AndvariViewModel(
             // try/catch rather than runCatching: a cancelled scope (the activity going away
             // mid-probe) must NOT read as a probe verdict and commit a switch on the way out.
             val failure = try {
-                probe.clientPolicy()
+                boundedPolicy(probe) // H10: busy is held across it; a timeout reads as unreachable
                 null
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
@@ -2109,7 +2109,7 @@ class AndvariViewModel(
                 // owns nothing. Zero the parsed bytes and die: landing would stash a raw secret
                 // + live single-use ticket that no screen consumes and nothing ever zeroes.
                 if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
-                val resp = a.recoverySelfVerify(email.trim(), authKey)
+                val resp = runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfVerify(email.trim(), authKey) } // H10: busy is held across it
                 if (_ui.value.screen !== wizard) { secret.fill(0); return@launch } // cancelled mid-POST: the ticket dies unstashed with this frame
                 zeroPendingRecover() // any earlier attempt's bytes die before the fresh stash
                 pendingRecoverSecret = secret
@@ -2176,7 +2176,7 @@ class AndvariViewModel(
                 // Phase 1 just proved the server reachable: re-probe lazily, exactly when phase 2
                 // needs the params (enrollOp's idiom). clientPolicy() runs the H1 KDF floor fence
                 // (spec 05 T1); a failed probe surfaces through recoverResetError below.
-                val policy = _ui.value.policy ?: a.clientPolicy().let { requireCurrentPolicy(it, applyPolicy(it, policyTag)) } // A12 review LOW-2
+                val policy = _ui.value.policy ?: boundedPolicy(a).let { requireCurrentPolicy(it, applyPolicy(it, policyTag)) } // A12 review LOW-2; H10
                 // §F.7 cancel fence (recoverVerify's twin), re-checked after EVERY await: system
                 // back isn't busy-gated, and once THIS wizard instance is gone the continuation
                 // must zero its alias and die without touching UI state. The pendingRecover*
@@ -2188,7 +2188,7 @@ class AndvariViewModel(
                 // Cancelled during the derivation (cancelRecover may even have zeroed `secret`
                 // mid-read, making `commit` garbage): the reset is abandoned — NEVER post it.
                 if (_ui.value.screen !== wizard) { secret.fill(0); return@launch }
-                a.recoverySelfCommit(commit)
+                runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfCommit(commit) } // H10: busy is held across it
                 // Past the point of no return: the commit LANDED and revoked EVERY session of the
                 // recovered account — even when a cancel won the POST race just now. If that
                 // account is this device's stored session, its persisted tokens/keys/cache are
