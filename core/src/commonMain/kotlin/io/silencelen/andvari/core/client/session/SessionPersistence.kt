@@ -3,6 +3,7 @@ package io.silencelen.andvari.core.client.session
 import io.silencelen.andvari.core.client.SelfIdentityPin
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.model.AccountKeys
+import kotlin.concurrent.Volatile
 import kotlin.math.max
 
 /**
@@ -145,6 +146,29 @@ interface SessionPersistence {
 
     /** The per-origin store for an origin key ([io.silencelen.andvari.core.client.OriginCanon.originKey]). */
     fun origin(key: String): OriginStore
+}
+
+/**
+ * The stored session one client's token callback writes for: its origin and, once known, its user. A
+ * client built from a stored session is that session's from the start; a client that signs in or
+ * enrolls has no session until its caller commits one, and names the user then.
+ */
+class TokenOwner(val origin: String, userId: String? = null) {
+    @Volatile
+    var userId: String? = userId
+}
+
+/**
+ * Persist [t] — a rotation, or the null of a refused refresh or a logout — only while the stored session
+ * is still the one [owner] names. A superseded client's late rotation, or its late null, must not
+ * overwrite or clear a newer session, and a client with no committed session yet writes nothing (its
+ * caller saves the pair it commits). A token callback goes through here, never [SessionPersistence.updateTokens].
+ */
+fun SessionPersistence.updateTokensFor(owner: TokenOwner, t: Tokens?) {
+    val user = owner.userId ?: return
+    val s = load() ?: return
+    if (s.userId != user || !sessionBelongsTo(s.baseUrl, owner.origin)) return
+    updateTokens(t)
 }
 
 /**

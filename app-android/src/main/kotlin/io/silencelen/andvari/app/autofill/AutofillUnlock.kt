@@ -34,8 +34,9 @@ import java.io.IOException
  * exactly one implementation and can't drift between them.
  *
  * Single token-holder invariant (binding blocker): the api is built EXACTLY like
- * AndvariViewModel.newApi — an HttpClient engine AND the SessionStore.updateTokens persistence
- * callback — and bound into [VaultSession] so the main app reuses the SAME token-holder. Building a
+ * AndvariViewModel.newApi — an HttpClient engine AND the SessionStore token persistence callback,
+ * bound to the session it was built for (`updateTokensFor`) — and bound into [VaultSession] so the
+ * main app reuses the SAME token-holder. Building a
  * token-carrying api without the onTokens callback would rotate the refresh token in memory only;
  * the next main-app unlock would reuse the consumed token and revoke the whole device. Under the
  * unlock mutex we reuse any already-fresh session (a race with the main app / a prior fill) instead
@@ -117,7 +118,8 @@ object AutofillUnlock {
         val originKey = OriginNamespace.originKey(baseUrl)
         // The same policy and purge rules as the main app, under its own fence-less policy read below.
         val coordinator = PolicyCoordinator(store, AndroidOfflineArtifacts(appContext.noBackupFilesDir), VaultSession, AndroidClocks)
-        val api = AndvariApi(baseUrl, androidHttpClient(), session.tokens(), { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform "android"
+        val owner = TokenOwner(baseUrl, session.userId) // rotations land only in this session, never a newer one
+        val api = AndvariApi(baseUrl, androidHttpClient(), session.tokens(), { store.updateTokensFor(owner, it) }, onSessionRejected = coordinator::onRefreshRefused) // platform "android"
 
         // A4: the autofill process fetches /client-policy on its ONLINE path (cheap, unauthenticated)
         // so an admin's `offlineCacheAllowed` flip reaches this process too, and persists

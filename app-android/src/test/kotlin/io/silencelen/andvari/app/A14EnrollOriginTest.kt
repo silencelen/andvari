@@ -75,7 +75,9 @@ class A14EnrollOriginTest {
         // login). It now captures the origin with the client, as enrollOp does, and aborts with a revoke if it moved.
         val op = body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "syncNow(engine!!)")
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
-        assertTrue(op.contains("val a = newApi(origin = opOrigin)"))
+        assertTrue(op.contains("val a = newApi(origin = opOrigin, owner = owner)"))
+        val save = "store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"
+        assertTrue(op.contains("$save\n            owner.userId = s.userId"), "the client writes tokens only into the session it committed")
         assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey())))"))
         assertTrue(op.contains("store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"))
         assertFalse(op.contains("store.save(Session(store.baseUrl,"), "never the live origin")
