@@ -635,5 +635,22 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 16) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Account deletion (spec 03 §13, design 2026-11-10): the ids a deleted account leaves behind that must
+                    // never name a NEW account — its userId (re-registering it would revive every lookup of the old one)
+                    // and the pseudonym its retained audit rows carry (an account registered under it would have its own
+                    // security rows erased by the 90-day purge). The CLIENT chooses its userId at register (the AEAD ADs
+                    // bind it), so register checks this table beside `users`. Stored as lowercase-hex SHA-256 of the id,
+                    // never the id: the deletion's promise is that no column names the deleted userId, and a digest of a
+                    // random 122-bit id answers only "was this id retired?" for someone who already holds it. No
+                    // timestamp, deliberately: it would keep the deletion's date beside that digest forever.
+                    // Idempotent: a restore drill that rewinds the marker re-runs this.
+                    st.executeUpdate("CREATE TABLE IF NOT EXISTS retired_ids(idHash TEXT PRIMARY KEY)")
+                    st.executeUpdate("UPDATE meta SET value='16' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

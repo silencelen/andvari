@@ -547,6 +547,39 @@ class AccountDeletionTest : LifecycleTestSupport() {
         assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE userId=?", gone))
     }
 
+    @Test
+    fun theDeletedUserIdAndItsPseudonym_canNeverNameANewAccount() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("admin@x.com", "retired ids admin password")
+        client.register(admin, bootstrapToken)
+        val u = client.enrollSecond(admin, "retired@x.com", "retired ids member password")
+        val gone = u.userId
+        assertEquals(HttpStatusCode.OK, client.deleteAccount(u).status)
+        val pseudonym = client.auditRows(admin, "account_delete").single().userId!!
+
+        // The client chooses its userId at register. Neither id the deletion left behind may name a new account: the old
+        // one would revive lookups of it, and the pseudonym would hand the new account rows the 90-day purge then erases.
+        val token = client.invite(admin, "retired@x.com")
+        val again = VirtualClient("retired@x.com", "a brand new password here")
+        for (id in listOf(gone, pseudonym)) {
+            val r = client.post("/api/v1/auth/register") {
+                contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0")
+                setBody(again.buildRegister(token, recovery.publicKey, fingerprint).copy(userId = id))
+            }
+            assertEquals(HttpStatusCode.BadRequest, r.status, r.bodyAsText())
+            assertEquals("user_id_taken", errorOf(r))
+        }
+        // The refusals consumed nothing: the same invite registers the address under a fresh id.
+        client.register(again, token)
+        assertTrue(again.userId != gone && again.userId != pseudonym)
+        // Kept as digests only: the table answers "retired?" for an id one already holds, and names nobody.
+        assertEquals(2, services.count("SELECT COUNT(*) FROM retired_ids WHERE idHash IN (?,?)", sha256HexUtf8(gone), sha256HexUtf8(pseudonym)))
+        assertEquals(emptyList(), services.cellsContaining(gone))
+        assertEquals(emptyList(), services.cellsContaining(pseudonym).filter { !it.startsWith("audit.") }, "the pseudonym lives only in the audit rows it keys")
+    }
+
     // ---- invites ----
 
     @Test

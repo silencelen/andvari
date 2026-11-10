@@ -39,6 +39,7 @@ from the set of accounts on a server, and admin is an instance-wide role (`users
 | Invites | Every invite row naming the account's address (pending ones it received and the one it registered with — each carries the email in plaintext), and every **unused** invite it minted as an admin. |
 | Audit | Re-keyed to a fresh random pseudonym (security types) or deleted (activity types); the account's id is replaced by the pseudonym in every other row's meta; the janitor deletes the pseudonym's rows 90 days after the deletion (§9). |
 | The user row | Deleted, last. The email can register again — as a brand-new account, through a new invite (registration is invite-only). |
+| The ids it leaves behind | Retired for good: the SHA-256 of the deleted userId and of the audit pseudonym go into `retired_ids` (schema v16), and register refuses both as `user_id_taken` — the client chooses its userId, so without this the old id could be registered again (reviving lookups of it), or the pseudonym (whose rows the 90-day purge would then erase from the new account). |
 
 It is **one database transaction**: either every row above changes or none does (§6). The blob files follow the commit
 (§6.3).
@@ -190,13 +191,15 @@ In `AccountDeletion.deleteRows` (server), inside the caller's `db.tx`, after the
 | `escrow`, `escrow_legacy`, `member_recovery`, `usage_ledger`, `account_state`, `personal_wrap` | the account's row deleted (each a FK child of `users`: a new per-account table not added to the list fails the user delete on its foreign key and rolls everything back — loud, never a silent leftover) |
 | `invites` | rows with the account's email deleted; unused rows it minted deleted (below); when it was the instance's last account, every row (§5) |
 | `audit` | §9 |
+| `retired_ids` (schema v16) | one row each for the SHA-256 of the deleted userId and of the pseudonym (`INSERT OR IGNORE`); register checks it beside `users` |
 | `removal_nonces`, `policies`, `meta` | untouched (vault-keyed random nonces; instance config) |
 
 **Invites the account minted.** Invites have no issuer column. The issuer's `invite_create` row — written in the same
 transaction as the invite, meta = the token-hash prefix — is the record, and it outlives every invite (365-day audit
 retention vs a ≤ 72 h invite), so `DELETE FROM invites WHERE usedAt IS NULL AND substr(tokenHash,1,12) IN (SELECT meta
 FROM audit WHERE type='invite_create' AND userId=?)` is complete. It runs before the audit pass re-keys those rows. No
-schema change (a `createdBy` column would have needed v16, a spec 02 §5 row and its own scrubbing).
+column was added for it (a `createdBy` column would have needed a spec 02 §5 row and its own scrubbing); the one schema
+change of this feature is v16's `retired_ids` table.
 
 ### 6.2 One purge, shared with the janitor
 

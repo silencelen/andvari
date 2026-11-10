@@ -620,8 +620,11 @@ the security record the owner chose to keep.
 self-identity record and refuses a re-registered account at the same address on that origin until the record is removed
 by hand — the backstop cannot tell a new account from a swapped one, so this stays. Co-members keep whatever members list
 their clients hold in memory, and their contact pins of the old identity key, sealed in their own account state where the
-server cannot edit them: inert — the old userId can never be granted again (404), and spec 01 §6's add-member rule refuses
-to add a new account at a pinned address until the owner verifies the person again.
+server cannot edit them: inert — the old userId can never be granted again (404), nor name a new account (its SHA-256 and
+the pseudonym's are kept in `retired_ids`, and register refuses both as `user_id_taken`, so neither a pin of the old id nor
+the 90-day audit purge can ever land on a new account), and spec 01 §6's add-member rule refuses to add a new account at a
+pinned address until the owner verifies the person again. The digests are a residual of their own, accepted: anyone who
+already holds one of those ids (an old backup, a co-member's device) can ask the server whether it was retired.
 (d) **A stolen session** deletes the account only with the master password AND, where enrolled, the current TOTP code. The
 code is checked before the password, so without the factor the route confirms nothing about a guessed password; with TOTP
 off, a session plus the password can delete — as it can already change the password and lock the member out — bounded by
