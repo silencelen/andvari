@@ -322,7 +322,8 @@ residual (spec 05 R19).
    for the others), "This can't be undone", and a "Back up first" link.
 3. **Blockers**, when the preview has any: each on its own line with a link — "Open “Family” settings →" (Sharing, the
    vault's settings, where Transfer and Delete live) or "Open Administration →" for `last_admin` — and the form is not
-   shown. An unknown kind is listed as "Something on the server is blocking the deletion" with no form.
+   shown. An unknown kind is listed as a blocker this version cannot explain ("Reload to update, or ask whoever runs your
+   server"), and a refusal that named nothing still reads as blocked; neither offers the form.
 4. **The form**, when there are none: "Type your email" (must match the session's address, trimmed and case-folded; the
    server re-checks), the master password, the authenticator code when `totpRequired`, and "Delete my account
    permanently", enabled only when all are filled and the email matches.

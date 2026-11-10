@@ -446,6 +446,39 @@ export interface TotpStatus {
   pendingSetup: boolean;
 }
 
+// ---- account deletion (spec 03 §13; design docs/design/2026-11-10-account-deletion.md) ----
+
+/** One reason the server refuses the deletion. `shared_vault`: the account owns `vaultId`, which `others` other accounts
+ *  still use. `last_admin`: the account is the instance's only active admin and `others` other accounts exist. Any other
+ *  kind is a blocker this build cannot explain — shown as such, never proceeded past. */
+export interface AccountDeleteBlocker {
+  kind: string;
+  vaultId?: string | null;
+  others: number;
+}
+
+/** `GET /account/delete/preview` — a snapshot; the deletion re-checks everything in its own transaction. */
+export interface AccountDeletePreview {
+  blockers: AccountDeleteBlocker[];
+  /** Deleted with the account: its personal vault and every vault only it holds. */
+  deletedVaults: string[];
+  /** Other people's vaults whose membership is dropped (what it saved there stays). */
+  leftVaults: string[];
+  /** The account has server TOTP enrolled: the deletion must carry the current code. */
+  totpRequired: boolean;
+}
+
+/** `POST /account/delete`. `confirmEmail` is the address the human typed; the server re-checks it. */
+export interface AccountDeleteRequest {
+  confirmEmail: string;
+  currentAuthKey: string;
+  totp?: string;
+}
+
+export interface AccountDeleteResponse {
+  deletedAt: number;
+}
+
 export interface TotpSetupResponse {
   secretBase32: string;
   otpauthUri: string;

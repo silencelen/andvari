@@ -95,6 +95,29 @@ export function loadSelfIdentityPub(userId: string, email?: string): Uint8Array 
   return b.pub;
 }
 
+function remove(k: string): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/**
+ * Account deletion (spec 03 §13; spec 01 §5 as amended 2026-11-10): the browser that RAN a deletion the server confirmed
+ * forgets its records for that account, so the address can register again here as a new account instead of tripping
+ * the security fault on the first unlock. The userId-keyed pin goes; the email binding goes only when it names THIS
+ * userId — a binding at the same address for another account is not this deletion's to remove. Called only from the
+ * deletion's own success, which the user's typed address and master password produced on this device; every other
+ * device keeps its records (spec 05 R19(c)).
+ */
+export function forgetSelfIdentity(userId: string, email?: string): void {
+  remove(PREFIX + userId);
+  if (!email || !email.trim()) return;
+  const k = BY_EMAIL + normalizeEmail(email);
+  if (decodeBinding(get(k))?.userId === userId) remove(k);
+}
+
 /** Record the pin (and, with `email`, the email binding) once, from an unlock that passed; never overwritten. */
 export function recordSelfIdentityPub(userId: string, account: Account, email?: string): void {
   putOnce(PREFIX + userId, toB64(account.identityPub));

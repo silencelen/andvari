@@ -1,4 +1,4 @@
-import type { AccountKeys, DeletedItem, DeletedVaultSummary, SessionResponse, SyncResponse, UserLookupResponse, VaultMemberSummary } from "./types";
+import type { AccountDeleteBlocker, AccountDeletePreview, AccountKeys, DeletedItem, DeletedVaultSummary, SessionResponse, SyncResponse, UserLookupResponse, VaultMemberSummary } from "./types";
 
 /**
  * The id grammar at the wire boundary (security review 2026-10, plugin scan F1/F2; branch A10).
@@ -90,6 +90,29 @@ export function sanitizeAccountKeys(keys: AccountKeys): Sanitized<AccountKeys> {
   const c = new Collector();
   if (!keys.personalWrap || c.ok("personalWrap.vaultId", keys.personalWrap.vaultId)) return { value: keys, refused: [] };
   return { value: { ...keys, personalWrap: null }, refused: c.refused };
+}
+
+/**
+ * Account deletion (spec 03 §13): the vault ids a deletion preview or refusal names. A deleted/left vault id that fails
+ * the grammar is dropped (it only labels a consequence). A `shared_vault` blocker whose id fails is KEPT, without the id:
+ * it is still a reason the server gives for refusing, and dropping it would let a malformed row turn a refusal into an
+ * empty blocker list that looks like "nothing stands in the way" — the card shows it as a vault it cannot name.
+ */
+export function sanitizeDeleteBlockers(rows: AccountDeleteBlocker[]): Sanitized<AccountDeleteBlocker[]> {
+  const c = new Collector();
+  const value = rows.map((b) => (b.vaultId == null || c.ok("blockers.vaultId", b.vaultId) ? b : { ...b, vaultId: null }));
+  return { value, refused: c.refused };
+}
+
+export function sanitizeDeletePreview(p: AccountDeletePreview): Sanitized<AccountDeletePreview> {
+  const c = new Collector();
+  const blockers = sanitizeDeleteBlockers(p.blockers ?? []);
+  const deletedVaults = (p.deletedVaults ?? []).filter((id) => c.ok("deletedVaults", id));
+  const leftVaults = (p.leftVaults ?? []).filter((id) => c.ok("leftVaults", id));
+  return {
+    value: { blockers: blockers.value, deletedVaults, leftVaults, totpRequired: p.totpRequired === true },
+    refused: [...blockers.refused, ...c.refused],
+  };
 }
 
 /** A served identity row is refused outright (there is no partial row to keep). */

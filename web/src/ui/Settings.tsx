@@ -9,6 +9,7 @@ import type { VaultStore } from "../vault/store";
 import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
+import { DeleteAccountCard } from "./DeleteAccount";
 import { DevicesCard } from "./Devices";
 import { beginTotpEnrolment } from "./totp-enrol";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, UNREACHABLE } from "./errors";
@@ -44,9 +45,17 @@ interface Props {
   // the break-glass export suppression is gone (design 2026-07-15 §5.4.2).
   onBackup?: () => void;
   onCsv?: () => void;
+  /** Account deletion (spec 03 §13): the signed-in address the typed confirmation must match ("" = unknown). */
+  email?: string;
+  /** The server confirmed the account's deletion: App wipes this browser's state for it and lands signed out. */
+  onAccountDeleted?: () => void;
+  /** A deletion blocker's link: the owned vault's settings under Sharing (transfer / delete live there). */
+  onOpenVaultSettings?: (vaultId: string) => void;
+  /** The last-admin blocker's link (admins only). */
+  onOpenAdmin?: () => void;
 }
 
-export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv }: Props) {
+export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv, email, onAccountDeleted, onOpenVaultSettings, onOpenAdmin }: Props) {
   // IA P2: the install hub (a whole feature) was Settings' last card and dominated it — its own
   // sub-page now, reached from a link, symmetric with how the natives reach Autofill status.
   const [sub, setSub] = useState<"main" | "devices">("main");
@@ -72,6 +81,19 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
       <div className="sheet">
         <button type="button" className="link" onClick={() => setSub("devices")}>Get andvari on your other devices →</button>
       </div>
+      {/* Spec 03 §13 (store policy: in-app account deletion). Last on the page, where the irreversible action belongs. */}
+      {onAccountDeleted && (
+        <DeleteAccountCard
+          client={client}
+          account={account}
+          store={store}
+          email={email ?? ""}
+          onDeleted={onAccountDeleted}
+          onOpenVaultSettings={onOpenVaultSettings ?? (() => {})}
+          onOpenAdmin={onOpenAdmin}
+          onBackup={onBackup}
+        />
+      )}
     </div>
   );
 }

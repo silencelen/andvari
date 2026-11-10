@@ -40,9 +40,11 @@ import {
   setOfflineCopyEnabled,
   shouldOfferCacheNudge,
   tokensKeptAcrossLock,
+  wipeLocalAccountState,
   wipeVaultCache,
   type Session,
 } from "./session";
+import { ACCOUNT_DELETED_NOTICE } from "./account-delete";
 import { adoptSharedPair, dropOnSignOutElsewhere, idleTimerUserId, lockTabTokens, revokeForSignOut, storageVerdict } from "./tabsession";
 
 /** `notice` (F26): one-line reason rendered on the auth card — why the user is looking
@@ -174,6 +176,7 @@ export function App() {
   }, []);
 
   const onUnlocked = (account: Account, store: VaultStore, meta: LoginMeta) => {
+    deletedAccountRef.current = null; // a new session: a deletion this tab ran earlier owns no later landing
     lockRevokeRef.current = null; // A14 review W1: this tab holds a new pair; an older lock's record is moot
     clearLockRevoke(); // ...and so is the copy of it in the tab's sessionStorage (A14 review 3, W-b)
     setPhase({ kind: "vault", account, store, meta });
@@ -204,6 +207,9 @@ export function App() {
   // A14 review W1: the revocation the last per-tab lock made of the pair it dropped (lockTabTokens), so a
   // sign-out with no pair left in the client reports THAT, rather than POSTing a logout with no token.
   const lockRevokeRef = useRef<Promise<boolean> | null>(null);
+  // Account deletion (spec 03 §13): the account this tab just deleted, so a sign-out the server's `revoked` frame started
+  // concurrently leaves the landing to onAccountDeleted. Cleared by the next unlock.
+  const deletedAccountRef = useRef<string | null>(null);
 
   const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user") => {
     const uid = loadSession()?.userId ?? null;
@@ -237,7 +243,30 @@ export function App() {
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);
     clearBreachCache(); // CR-08: the in-session HIBP breach map is dropped at the wipe choke point
+    // Account deletion: the server's `revoked` frame to this tab can start this sign-out just before the deletion's own
+    // answer lands; onAccountDeleted then did the wipe and owns the landing (its notice), so don't overwrite it here.
+    if (uid !== null && deletedAccountRef.current === uid) return;
     setPhase({ kind: "welcome", notice: revoked ? lostCount : [lostCount, REVOKE_UNCONFIRMED].filter(Boolean).join(" ") });
+  }, []);
+
+  // Account deletion (spec 03 §13 client duty; design 2026-11-10 §11): the server CONFIRMED it, so this browser forgets
+  // the account — wipeLocalAccountState clears the session and the tab's token slot synchronously first (so dropping the
+  // pair right after writes nothing back), then every userId-scoped key, the spec 01 §5 self-identity records (so the
+  // address can register again here) and the offline copy. Not routed through signOut: there is no session left to
+  // revoke and nothing unsynced worth a confirm, and a sign-out deliberately KEEPS the self-identity records. Other tabs
+  // follow through the session key's `storage` event. A `revoked` frame the server sends this tab's socket at the same
+  // moment may start the ordinary revoked sign-out first: deletedAccountRef tells that sign-out to leave the landing to
+  // this handler, whichever of the two finishes last.
+  const onAccountDeleted = useCallback((userId: string, email: string) => {
+    deletedAccountRef.current = userId;
+    lockRevokeRef.current = null;
+    // Its synchronous half (session, tab token slot, userId-scoped keys, self-identity records) has run by the time the
+    // call returns, so dropping the pair next writes nothing back; the IndexedDB delete then completes on its own (the
+    // live store's handle self-closes on the versionchange — signOut's wipe posture).
+    void wipeLocalAccountState(userId, email);
+    clientRef.current?.setTokens(null);
+    clearBreachCache();
+    setPhase({ kind: "welcome", notice: ACCOUNT_DELETED_NOTICE });
   }, []);
 
   // F26/F27 lock propagation channel: locking KEEPS the persisted session, so the
@@ -497,12 +526,16 @@ export function App() {
   }
 
   if (phase.kind === "vault") {
+    // Read once per render: the deletion hand-off below must still know the address if a racing `revoked` frame has
+    // already cleared the session by the time the deletion's answer arrives.
+    const vaultEmail = loadSession()?.email ?? "";
+    const deletingUserId = phase.account.userId;
     return withUpgradeBar(
       <Vault
         account={phase.account}
         store={phase.store}
         client={clientRef.current!}
-        email={loadSession()?.email ?? ""}
+        email={vaultEmail}
         policy={policy}
         isAdmin={phase.meta.isAdmin}
         mustChangePassword={phase.meta.mustChangePassword}
@@ -515,6 +548,7 @@ export function App() {
         registerUsageFlush={(fn) => {
           usageFlushRef.current = fn;
         }}
+        onAccountDeleted={() => onAccountDeleted(deletingUserId, vaultEmail)}
       />
     );
   }
