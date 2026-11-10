@@ -119,6 +119,12 @@ struct TrustGateSheet: View {
                 .font(.subheadline)
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)
+            if model.gateForInvite {
+                Text(SessionRulesKt.TRUST_GATE_ENROLLMENT_EXTRA)
+                    .font(.subheadline)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let message {
                 InlineMessage(text: message)
             }

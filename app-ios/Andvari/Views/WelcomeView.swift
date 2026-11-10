@@ -427,7 +427,7 @@ struct EnrollFormView: View {
                 draft = EnrollDraft()
             case .otherServer(let origin):
                 // The invite is for another server: switch to it through the Trust Gate, then enroll there.
-                if let invalid = model.chooseServer(origin) as? ServerChoice.Invalid {
+                if let invalid = model.chooseServerForInvite(origin) as? ServerChoice.Invalid {
                     message = invalid.message
                 }
             default:
