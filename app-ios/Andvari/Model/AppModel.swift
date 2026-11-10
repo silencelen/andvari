@@ -74,6 +74,8 @@ enum Outcome: Equatable {
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var state: AppState
+    /// The Trust Gate on screen was raised by an invite for another server, so enrolling there makes a new account.
+    @Published private(set) var gateForInvite = false
 
     private let controller: IosSessionController
     private var endObservation: (() -> Void)?
@@ -85,11 +87,18 @@ final class AppModel: ObservableObject {
         state = controller.state
         let observation = controller.observe { [weak self] next in
             MainActor.assumeIsolated {
-                self?.state = next
+                self?.receive(next)
             }
         }
         endObservation = { observation.close() }
         controller.start()
+    }
+
+    private func receive(_ next: AppState) {
+        if Screen(next.screen) != .trustGate {
+            gateForInvite = false
+        }
+        state = next
     }
 
     var screen: Screen { Screen(state.screen) }
@@ -128,6 +137,13 @@ final class AppModel: ObservableObject {
 
     func chooseServer(_ input: String) -> ServerChoice {
         controller.chooseServer(input: input)
+    }
+
+    /// An invite named another server: the same Trust Gate, which then also says enrolling makes a new account.
+    func chooseServerForInvite(_ origin: String) -> ServerChoice {
+        let choice = controller.chooseServer(input: origin)
+        gateForInvite = choice is ServerChoice.NeedsGate
+        return choice
     }
 
     func confirmTrustGate() async -> Outcome {
