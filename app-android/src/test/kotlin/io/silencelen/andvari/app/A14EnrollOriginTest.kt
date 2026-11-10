@@ -95,6 +95,41 @@ class A14EnrollOriginTest {
         assertTrue(abort.contains("a.logout()") && abort.contains("return@op"), "an unbound commit revokes at the issuer and saves nothing")
     }
 
+    private val sessionStore by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/app/Session.kt").readText() }
+
+    /** F8: the gate above is only as honest as the origin it is handed — the session has to own one. */
+    @Test
+    fun theStoredSessionOwnsItsOrigin() {
+        val load = body(sessionStore, "override fun load(): Session?", "\n    }\n")
+        assertTrue(load.contains("prefs.getString(SESSION_ORIGIN, null) ?: return null"), "a session is only ever handed out with its own origin")
+        assertTrue(load.contains("baseUrl = origin"))
+        assertFalse(load.contains("baseUrl = baseUrl"), "the global key is the origin the app dials, never the session's")
+        val save = body(sessionStore, "override fun save(s: Session)", "\n    }\n")
+        assertTrue(save.contains(".putString(SESSION_ORIGIN, s.baseUrl)"), "saved in one transaction with the tokens it belongs to")
+        for (fn in listOf("override fun clear() {", "override fun clearSessionTokens() {")) {
+            assertTrue(body(sessionStore, fn, "\n    }\n").contains(".remove(SESSION_ORIGIN)"), "$fn drops the origin with the tokens")
+        }
+    }
+
+    /** A session saved before this build gets its origin once, after the default-URL rewrite. */
+    @Test
+    fun legacySessionsAreBackfilledAfterTheDefaultUrlMigration() {
+        val init = body(sessionStore, "migrateDefaultOnce(context.noBackupFilesDir)", "runCatching { bindLegacySelfIdentity() }")
+        assertTrue(init.indexOf("adoptNamespacesOnce(context.noBackupFilesDir)") < init.indexOf("backfillSessionOrigin()"))
+        val backfill = body(sessionStore, "private fun backfillSessionOrigin() {", "\n    }\n")
+        assertTrue(backfill.contains("sessionOriginForBackfill(baseUrl, pendingServer)"), "the pure rule decides")
+        assertTrue(backfill.contains("clearSessionTokens()"), "and an unattributable session is dropped, not guessed")
+    }
+
+    /** §4.1 rule 1, and the crash window F8 named: a dropped session is gone before the origin moves. */
+    @Test
+    fun aRealSwitchDropsTheTokensBeforeTheOriginMoves() {
+        val set = body(vm, "fun setBaseUrl(url: String) {", "_ui.value = _ui.value.copy(")
+        val drop = set.indexOf("store.clearSessionTokens()")
+        val move = set.indexOf("store.baseUrl = newUrl")
+        assertTrue(drop > -1 && move > drop, "tokens first, origin second")
+    }
+
     @Test
     fun storedTokensNeverGoToAnotherOrigin() {
         assertTrue(Regex("""if \(!sessionBelongsTo\(session\.baseUrl, store\.baseUrl\)\)""").findAll(vm).count() >= 2, "password and biometric unlock both check")
