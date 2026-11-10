@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -150,12 +151,17 @@ class SessionEntry(
         val client = clients.forNewSession(opOrigin) // writes no tokens until the session below is committed
         val a = client.api
         var account: Account? = null
+        // Survey gap 5: from the login's answer until the session is saved, a live server session exists that nothing
+        // on this device holds. Every way out in between ends it at the issuer.
+        var issued = false
+        var saved = false
         val c = try {
             val pre = runBounded(BoundedOps.FLAT_MS) { a.prelogin(email) }
             // Argon2id (64 MiB, twice per sign-in) is CPU-bound: never on the caller's thread.
             val authKey = withContext(Dispatchers.Default) { Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams) }
             val s = try {
                 runBounded(BoundedOps.FLAT_MS) { a.login(LoginRequest(email, authKey, Account.deviceInfo(clients.deviceName, clients.wirePlatform), totp = totp)) }
+                    .also { issued = true }
             } catch (e: ApiException) {
                 if (e.code != "totp_required" && e.code != "bad_totp_code") throw e
                 a.close()
@@ -170,13 +176,14 @@ class SessionEntry(
             // not for the origin it now dials. Do not commit: revoke them at the origin that issued them (this
             // client's own), drop them, and say so.
             if (!enrollStillBound(opOrigin, null, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag))) {
-                runCatching { withTimeoutOrNull(REVOKE_MS) { a.logout() } }
+                revoke(a)
                 a.close()
                 acct.wipe()
                 return SignInResult.OriginMoved(opOrigin)
             }
             store.origin(opKey).identityPins().record(s.userId, email, acct)
             store.save(StoredSession(opOrigin, s.userId, email, s.accessToken, s.refreshToken))
+            saved = true
             client.owner.userId = s.userId // this client's later rotations are this session's
             binder.persistAccountKeys(opKey, s.userId, s.accountKeys)
             val unlocked = binder.bind(a, acct, opKey, VaultSession.UnlockProvenance.PASSWORD)
@@ -187,6 +194,9 @@ class SessionEntry(
             binder.stampPasswordUnlock(opKey, s.userId)
             Committed(unlocked, s.accountKeys, s.mustChangePassword, authKey, secret = null, pieceId = null)
         } catch (t: Throwable) {
+            // Gap 5: the login answered but the account did not open (or nothing was saved): end that session where it
+            // was issued, so no live session is left behind. A saved one stays: an unlock can still reach it.
+            if (issued && !saved) revoke(a)
             // F74: no throw path (prelogin, the KDF, login, the unlock, the bind) may leak the transient client.
             // Once bound, the session owns the client and the account.
             if (session.get()?.api !== a) a.close()
@@ -239,6 +249,8 @@ class SessionEntry(
         val a = client.api
         var account: Account? = null
         var secret: ByteArray? = null
+        var issued = false // gap 5, as in sign-in: register answered, nothing saved yet
+        var saved = false
         val c = try {
             // §F.1 posture: `waived` seals NO org escrow (the key is not even fetched); `required` keeps the
             // verified-fingerprint ceremony, and Account.enroll refuses a served key whose fingerprint differs.
@@ -263,18 +275,19 @@ class SessionEntry(
             // register, so a crash between register and the commit below is reconciled at next launch with the
             // address to sign in as. No marker on a same-origin enroll.
             store.pendingServer?.let { store.pendingServer = it.copy(email = r.email) }
-            val s = runBounded(BoundedOps.FLAT_MS) { a.register(enrolled.request) }
+            val s = runBounded(BoundedOps.FLAT_MS) { a.register(enrolled.request) }.also { issued = true }
             // A14 (F8), second layer: if the client was moved anyway, this account is not the one it now points at.
             // Do not commit: revoke the tokens at the origin that issued them (this client's own), drop them, and
             // say so.
             if (!enrollStillBound(opOrigin, opPending, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag))) {
-                runCatching { withTimeoutOrNull(REVOKE_MS) { a.logout() } }
+                revoke(a)
                 a.close()
                 enrolled.recoverySecret.fill(0)
                 enrolled.account.wipe()
                 return EnrollOutcome.OriginMoved(opOrigin)
             }
             store.save(StoredSession(opOrigin, s.userId, r.email, s.accessToken, s.refreshToken))
+            saved = true
             client.owner.userId = s.userId // this client's later rotations are this session's
             binder.persistAccountKeys(opKey, s.userId, s.accountKeys)
             store.origin(opKey).identityPins().record(s.userId, r.email, enrolled.account)
@@ -288,6 +301,7 @@ class SessionEntry(
             binder.stampPasswordUnlock(opKey, s.userId)
             Committed(unlocked, s.accountKeys, s.mustChangePassword, authKey = "", secret = enrolled.recoverySecret, pieceId = s.recoveryPieceId)
         } catch (t: Throwable) {
+            if (issued && !saved) revoke(a) // gap 5
             // F74: same rule as sign-in; and a piece that was never revealed is zeroed.
             if (session.get()?.api !== a) a.close()
             account?.takeIf { session.get()?.account !== it }?.wipe()
@@ -304,6 +318,15 @@ class SessionEntry(
             return EnrollOutcome.EndedBeforeLanding
         }
         return EnrollOutcome.Enrolled(c.unlocked, c.keys, c.mustChangePassword, committedSecret, c.pieceId, first)
+    }
+
+    /**
+     * End the session [a] holds at the origin that issued it: bounded, best effort, and run to the end even when the
+     * caller was cancelled (the revocation is the cleanup). The client's token callback writes nothing: its session was
+     * never committed.
+     */
+    private suspend fun revoke(a: io.silencelen.andvari.core.client.AndvariApi) {
+        runCatching { withContext(NonCancellable) { withTimeoutOrNull(REVOKE_MS) { a.logout() } } }
     }
 
     private companion object {

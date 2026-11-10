@@ -196,6 +196,37 @@ class SessionEntryTest {
         assertNull(session.get())
     }
 
+    // ---- survey gap 5: no issued session is left behind ----
+
+    @Test
+    fun aLoginWhoseAccountDoesNotOpenIsEndedWhereItWasIssued() = runBlocking<Unit> {
+        // The login answered, but the keys it served do not open under this password.
+        val wrongSalt = io.silencelen.andvari.core.crypto.Bytes.toB64(crypto.randomBytes(16))
+        login = { respond(sessionJson(keys.copy(kdfSalt = wrongSalt)), HttpStatusCode.OK, headers) }
+        val r = assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        assertIs<io.silencelen.andvari.core.crypto.CryptoException>(r.cause)
+        val loggedIn = calls.indexOfFirst { it.endsWith("/auth/login") }
+        assertTrue(calls.indexOfFirst { it.endsWith("/auth/logout") } > loggedIn, "the session the login issued is revoked, not orphaned")
+        assertNull(store.stored)
+        assertNull(session.get())
+    }
+
+    @Test
+    fun aSignInThatFailsBeforeAnySessionIsIssuedRevokesNothing() = runBlocking<Unit> {
+        prelogin = refused("not_found", HttpStatusCode.NotFound)
+        assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        assertFalse(calls.any { it.endsWith("/auth/logout") })
+    }
+
+    @Test
+    fun aSavedSessionThatFailedToBindIsKeptForTheNextUnlock() = runBlocking<Unit> {
+        namespaces.failOpen = IllegalStateException("corrupt cache file")
+        assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        assertFalse(calls.any { it.endsWith("/auth/logout") }, "an unlock can still reach a saved session")
+        assertNotNull(store.stored)
+        assertNull(session.get())
+    }
+
     // ---- enroll ----
 
     private fun waived(email: String = "new@example.com", password: String = PASSWORD, policy: ClientPolicy? = ClientPolicy()) =
