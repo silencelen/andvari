@@ -56,7 +56,8 @@ function errText(e: unknown): string {
   if (e instanceof ApiError) {
     switch (e.code) {
       case "admin_only": return "This account is not an administrator.";
-      case "last_admin": return "That's the only active administrator — disabling it would lock everyone out of this console. Make another account an admin first.";
+      // No promote route exists (spec 03 §11): never suggest making an existing account an admin.
+      case "last_admin": return "That's the only active administrator — disabling it would lock everyone out of this console. andvari can't make an existing account an admin: invite a new admin first (Invite a user, with “Admin” ticked).";
       case "no_such_user": return "That account no longer exists — the list has been refreshed.";
     }
     // #23 household voice: the raw server `message` is wire/debug detail — never render it.
