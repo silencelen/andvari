@@ -4,8 +4,10 @@ name: iOS core
 
 on:
   push:
-    branches: [ios]
+    branches: [ios, ios-ui]
     paths:
+      - "app-ios/**"
+      - "extension/**"
       - "core/**"
       - "spec/**"
       - "gradle/**"
@@ -14,6 +16,8 @@ on:
       - ".github/workflows/ios-core.yml"
   pull_request:
     paths:
+      - "app-ios/**"
+      - "extension/**"
       - "core/**"
       - "spec/**"
       - "gradle/**"
@@ -83,3 +87,48 @@ jobs:
           path: core/build/reports/tests
           if-no-files-found: ignore
           retention-days: 7
+
+  app:
+    name: app builds for the iOS simulator
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          xcodebuild -version
+
+      - name: Java
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore libsodium
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/libsodium
+          key: libsodium-ios-${{ hashFiles('scripts/ci/build-libsodium-ios.sh') }}
+
+      - name: Kotlin/Native tools cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      - name: Kotlin framework and Safari files
+        run: app-ios/scripts/prepare.sh iosSimulatorArm64
+
+      - name: Build
+        run: |
+          brew install xcodegen
+          (cd app-ios && xcodegen generate)
+          xcodebuild -project app-ios/Andvari.xcodeproj -scheme Andvari -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build | tail -40
+          exit "${PIPESTATUS[0]}"
