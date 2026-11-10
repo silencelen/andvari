@@ -12,6 +12,7 @@ import io.silencelen.andvari.core.client.session.PendingServer
 import io.silencelen.andvari.core.client.session.QuickUnlockRules
 import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.StoredSession
+import io.silencelen.andvari.core.client.session.sessionBelongsTo
 import io.silencelen.andvari.core.client.session.sessionOriginForBackfill
 import io.silencelen.andvari.core.model.AccountKeys
 import kotlinx.serialization.json.Json
@@ -375,25 +376,29 @@ class SessionStore(context: Context) : SessionPersistence {
     }
 
     override fun save(s: Session) {
-        // A14 review N5: another account saved over this one starts with no app-fill bindings.
-        val prior = prefs.getString("userId", null)
-        if (!prior.isNullOrEmpty() && prior != s.userId) runCatching { AppSignerBindings.clearAll(appContext) }
-        prefs.edit()
-            .putString("baseUrl", s.baseUrl)
-            .putString(SESSION_ORIGIN, s.baseUrl) // F8: in one transaction with the tokens it belongs to
-            .putString("userId", s.userId)
-            .putString("email", s.email)
-            .putString("accessToken", s.accessToken)
-            .putString("refreshToken", s.refreshToken)
-            .apply()
+        synchronized(SESSION_LOCK) {
+            // A14 review N5: another account saved over this one starts with no app-fill bindings.
+            val prior = prefs.getString("userId", null)
+            if (!prior.isNullOrEmpty() && prior != s.userId) runCatching { AppSignerBindings.clearAll(appContext) }
+            prefs.edit()
+                .putString("baseUrl", s.baseUrl)
+                .putString(SESSION_ORIGIN, s.baseUrl) // F8: in one transaction with the tokens it belongs to
+                .putString("userId", s.userId)
+                .putString("email", s.email)
+                .putString("accessToken", s.accessToken)
+                .putString("refreshToken", s.refreshToken)
+                .apply()
+        }
     }
 
     override fun updateTokens(t: Tokens?) {
-        if (t == null) { clear(); return }
-        // commit(), not apply(): the server has already spent the old refresh token, so a process death
-        // that lost this write would replay it at the next refresh and revoke the device. The refresh
-        // stores its pair off the main thread (AndvariApi), so this never blocks the UI.
-        prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).commit()
+        synchronized(SESSION_LOCK) {
+            if (t == null) { clear(); return }
+            // commit(), not apply(): the server has already spent the old refresh token, so a process death
+            // that lost this write would replay it at the next refresh and revoke the device. The refresh
+            // stores its pair off the main thread (AndvariApi), so this never blocks the UI.
+            prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).commit()
+        }
     }
 
     /**
@@ -466,15 +471,17 @@ class SessionStore(context: Context) : SessionPersistence {
      * wave 3's switch flow clears tokens itself before any repoint).
      */
     override fun clear() {
-        // A14 review N5: every path that ends the session lands here (sign-out, a definitive 401, the
-        // revocation purge, a refused refresh) — the apps this member confirmed end with it.
-        runCatching { AppSignerBindings.clearAll(appContext) }
-        val ok = currentOriginKey()
-        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN)
-            .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed"))
-            // A fresh account starts with a full offer budget — it never inherits the previous
-            // account's dismissals or its evidence count.
-            .remove(ns(ok, "quickUnlockPasswordUnlocks")).remove(ns(ok, "quickUnlockReoffers")).apply()
+        synchronized(SESSION_LOCK) {
+            // A14 review N5: every path that ends the session lands here (sign-out, a definitive 401, the
+            // revocation purge, a refused refresh) — the apps this member confirmed end with it.
+            runCatching { AppSignerBindings.clearAll(appContext) }
+            val ok = currentOriginKey()
+            prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN)
+                .remove(ns(ok, "accountKeys")).remove("mustChangePassword").remove(ns(ok, "quickUnlockOfferDismissed"))
+                // A fresh account starts with a full offer budget — it never inherits the previous
+                // account's dismissals or its evidence count.
+                .remove(ns(ok, "quickUnlockPasswordUnlocks")).remove(ns(ok, "quickUnlockReoffers")).apply()
+        }
     }
 
     /**
@@ -485,9 +492,11 @@ class SessionStore(context: Context) : SessionPersistence {
      * for an A→B→A round trip (§4.2/B2-7). Callers change [baseUrl] around this.
      */
     override fun clearSessionTokens() {
-        runCatching { AppSignerBindings.clearAll(appContext) } // A14 review N5: a server switch ends the session too
-        prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN)
-            .remove("mustChangePassword").apply()
+        synchronized(SESSION_LOCK) {
+            runCatching { AppSignerBindings.clearAll(appContext) } // A14 review N5: a server switch ends the session too
+            prefs.edit().remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN)
+                .remove("mustChangePassword").apply()
+        }
     }
 
     /**
@@ -496,10 +505,26 @@ class SessionStore(context: Context) : SessionPersistence {
      * a session with an origin is left alone, and a dropped one has no identity left to backfill.
      */
     private fun backfillSessionOrigin() {
-        if (prefs.getString("userId", null) == null || prefs.contains(SESSION_ORIGIN)) return
-        val origin = sessionOriginForBackfill(baseUrl, pendingServer)
-        if (origin != null) prefs.edit().putString(SESSION_ORIGIN, origin).apply()
-        else clearSessionTokens()
+        synchronized(SESSION_LOCK) {
+            if (prefs.getString("userId", null) == null || prefs.contains(SESSION_ORIGIN)) return
+            val origin = sessionOriginForBackfill(baseUrl, pendingServer)
+            if (origin != null) prefs.edit().putString(SESSION_ORIGIN, origin).apply()
+            else clearSessionTokens()
+        }
+    }
+
+    /**
+     * Review round 2: the compare and the write in one step. Every writer of the stored session holds the
+     * same lock (process-wide: the main app and the autofill entry points each build their own store over
+     * one preferences file), so a concurrent save or clear cannot slip between the check and the write.
+     */
+    override fun replaceTokensIf(origin: String, userId: String, expectedRefreshToken: String, t: Tokens?): Boolean {
+        synchronized(SESSION_LOCK) {
+            val s = load() ?: return false
+            if (s.userId != userId || !sessionBelongsTo(s.baseUrl, origin) || s.refreshToken != expectedRefreshToken) return false
+            updateTokens(t) // null ends the session, as a refused refresh always has
+            return true
+        }
     }
 
     // ---- the per-origin store (ns.<originKey>. prefix) ----
@@ -699,6 +724,9 @@ class SessionStore(context: Context) : SessionPersistence {
         const val DEFAULT_BASE_URL = "https://andvari.monahanhosting.com"
         /** F8: the origin that issued the stored session. Written and removed with the session. */
         private const val SESSION_ORIGIN = "sessionOrigin"
+
+        /** Review round 2: held by every writer of the stored session, across every store in the process. */
+        private val SESSION_LOCK = Any()
         // Historical SHIPPED defaults — kept ONLY as migrateDefaultOnce match-targets (never dialed;
         // §5.5 release-gate carve-out for the tailnet/LAN literals).
         private const val LEGACY_LAN_DEFAULT = "http://192.168.2.122:8080"

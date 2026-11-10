@@ -118,6 +118,14 @@ interface SessionPersistence {
     /** Persist a rotation; null is the refused-refresh path: the stored session is over. */
     fun updateTokens(t: Tokens?)
 
+    /**
+     * Compare-and-write for one client's token callback ([updateTokensFor]): if the stored session is
+     * [userId]'s at [origin] and still holds [expectedRefreshToken], replace its pair with [t], or end
+     * it ([clear]) when [t] is null. Returns whether it wrote. Implementations make the compare and the
+     * write one step against [save], [clear], [clearSessionTokens] and each other.
+     */
+    fun replaceTokensIf(origin: String, userId: String, expectedRefreshToken: String, t: Tokens?): Boolean
+
     /** Kill the stored session and the per-origin state that dies with it. Global + session origin only. */
     fun clear()
 
@@ -149,26 +157,35 @@ interface SessionPersistence {
 }
 
 /**
- * The stored session one client's token callback writes for: its origin and, once known, its user. A
- * client built from a stored session is that session's from the start; a client that signs in or
- * enrolls has no session until its caller commits one, and names the user then.
+ * The stored session one client's token callback writes for: its origin, its user once known, and the
+ * refresh token the client holds now. A client built from a stored session is that session's from the
+ * start; a client that signs in or enrolls has no session until its caller commits one, and names the
+ * user then.
  */
-class TokenOwner(val origin: String, userId: String? = null) {
+class TokenOwner(val origin: String, userId: String? = null, heldRefreshToken: String? = null) {
     @Volatile
     var userId: String? = userId
+
+    /** The refresh token this client holds: the one its next rotation replaces, and the one a drop may clear. */
+    @Volatile
+    var heldRefreshToken: String? = heldRefreshToken
 }
 
 /**
- * Persist [t] — a rotation, or the null of a refused refresh or a logout — only while the stored session
- * is still the one [owner] names. A superseded client's late rotation, or its late null, must not
- * overwrite or clear a newer session, and a client with no committed session yet writes nothing (its
- * caller saves the pair it commits). A token callback goes through here, never [SessionPersistence.updateTokens].
+ * Persist [t] — a rotation, or the null of a refused refresh or a logout — only into the stored session
+ * this client holds: same origin, same user, AND the refresh token this client rotated from (review round
+ * 2). Matching the user alone let a superseded client of the same account — an autofill overlay built
+ * from the session it saw when it opened — overwrite or clear the session another client had rotated
+ * since. A client with no committed session yet writes nothing (its caller saves the pair it commits).
+ * The compare and the write are one atomic step in the store ([SessionPersistence.replaceTokensIf]).
+ * A token callback goes through here, never [SessionPersistence.updateTokens].
  */
 fun SessionPersistence.updateTokensFor(owner: TokenOwner, t: Tokens?) {
+    val held = owner.heldRefreshToken
+    owner.heldRefreshToken = t?.refreshToken // what the client holds now, whether or not it is stored
     val user = owner.userId ?: return
-    val s = load() ?: return
-    if (s.userId != user || !sessionBelongsTo(s.baseUrl, owner.origin)) return
-    updateTokens(t)
+    val from = held ?: return
+    replaceTokensIf(owner.origin, user, from, t)
 }
 
 /**
