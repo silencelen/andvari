@@ -6,7 +6,6 @@ import io.ktor.client.request.get
 import kotlinx.coroutines.runBlocking
 import kotlinx.io.IOException
 import kotlin.test.Test
-import kotlin.test.assertTrue
 import kotlin.test.fail
 
 /**
@@ -15,13 +14,18 @@ import kotlin.test.fail
  */
 class DarwinTransportTest {
     @Test fun aRefusedConnectionIsAnIOException() = runBlocking {
-        HttpClient(Darwin).use { client ->
-            try {
-                client.get("https://127.0.0.1:9/")
-                fail("the request should not have succeeded")
-            } catch (e: Throwable) {
-                assertTrue(e is IOException, "got ${e::class.qualifiedName}: ${e.message}")
-            }
+        val client = HttpClient(Darwin)
+        try {
+            client.get("https://127.0.0.1:9/")
+            fail("the request should not have succeeded")
+        } catch (e: IOException) {
+            // expected
+        } catch (e: AssertionError) {
+            throw e
+        } catch (e: Throwable) {
+            fail("expected an IOException, got ${e::class.qualifiedName}: ${e.message}")
+        } finally {
+            client.close()
         }
     }
 }
