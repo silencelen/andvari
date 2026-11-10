@@ -89,6 +89,20 @@ class AccountDeletionTest : LifecycleTestSupport() {
 
     private fun Services.count(sql: String, vararg args: Any?): Int = repo.db.read { c -> c.queryOne(sql, *args) { it.getInt(1) } ?: 0 }
 
+    /** Every TEXT column of every table holding [needle], as `table.column (rows)` — the "nothing names it any more"
+     *  check, which also covers a column added after this test was written. Ciphertext columns hold base64url: it has no
+     *  `@`, and a random run of it matching a 36-character id exactly is out of reach, so a hit is a real reference. */
+    private fun Services.cellsContaining(needle: String): List<String> = repo.db.read { c ->
+        val tables = c.queryAll("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'") { it.getString(1) }
+        tables.flatMap { t ->
+            val cols = c.queryAll("SELECT name, type FROM pragma_table_info('$t')") { it.getString(1) to it.getString(2) }
+            cols.filter { (_, type) -> type.equals("TEXT", ignoreCase = true) }.mapNotNull { (col, _) ->
+                val n = c.queryOne("SELECT COUNT(*) FROM \"$t\" WHERE instr(\"$col\", ?) > 0", needle) { it.getInt(1) } ?: 0
+                if (n > 0) "$t.$col ($n)" else null
+            }
+        }
+    }
+
     /** Server TOTP straight into the row (the enrolment routes have their own suites): a fresh secret, no step used. */
     private fun enrollTotp(services: Services, vc: VirtualClient): String {
         val secret = Base32.encode(crypto.randomBytes(20))
@@ -194,9 +208,11 @@ class AccountDeletionTest : LifecycleTestSupport() {
         val refresh = client.post("/api/v1/auth/refresh") { contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0"); setBody(RefreshRequest(u.refreshToken)) }
         assertEquals(HttpStatusCode.Unauthorized, refresh.status)
 
-        // No audit row names the account's id or email any more.
+        // No audit row — and no column of any table — names the account's id or email any more.
         assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE userId=? OR instr(COALESCE(meta,''), ?) > 0", gone, gone))
         assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE instr(COALESCE(meta,''), ?) > 0", u.email))
+        assertEquals(emptyList(), services.cellsContaining(gone))
+        assertEquals(emptyList(), services.cellsContaining(u.email))
 
         // The email registers again — as a brand-new account.
         val token = client.invite(admin, "leaver@x.com")
@@ -524,6 +540,44 @@ class AccountDeletionTest : LifecycleTestSupport() {
         assertEquals(0, services.count("SELECT COUNT(*) FROM invites WHERE email IN ('coadmin@x.com','friend@x.com')"), "every invite to the address, used or not, and the unused one it minted")
         assertEquals(1, services.count("SELECT COUNT(*) FROM invites WHERE email='stranger@x.com'"))
         assertEquals(1, client.auditRows(admin, "invite_create").count { it.userId != admin.userId }, "its own invite_create row is kept, under the pseudonym")
+    }
+
+    // ---- no column anywhere names the account afterward ----
+
+    @Test
+    fun noColumnAnywhereNamesTheAccountAfterward_evenOnVaultsItNoLongerOwns() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("admin@x.com", "trace admin password one")
+        client.register(admin, bootstrapToken)
+        val u = client.enrollSecond(admin, "trace@x.com", "trace member password one")
+        val b = client.enrollSecond(admin, "heir@x.com", "trace heir password one")
+
+        // A vault it deleted, restored and then handed over: `deletedBy` survives a restore, so it still names the account.
+        val (sReq, s) = u.buildCreateSharedVault(); client.createVault(u, sReq)
+        client.addMember(u, s, b, "writer")
+        val (deleteId, _) = client.deleteWithProof(u, s)
+        assertEquals(HttpStatusCode.OK, client.vaultRestore(u, s.vaultId, deleteId, u.mintRestoreProof(s.vaultId, s.vk, deleteId)).status)
+        val (offerId, _, offer) = client.offerWithProof(u, s, b, seq = 1)
+        assertEquals(HttpStatusCode.Created, offer.status, offer.bodyAsText())
+        val bVk = client.openMemberVk(b, s.vaultId)
+        val wrapped = b.wrapVkUnderOwnUvk(s.vaultId, bVk)
+        val accept = client.transferAccept(b, s.vaultId, TransferAcceptRequest(offerId, wrapped, b.mintAcceptProof(s.vaultId, bVk, offerId, b.userId, 1, wrapped)))
+        assertEquals(HttpStatusCode.OK, accept.status, accept.bodyAsText())
+        // And one it deleted that the janitor has already purged (outside the set a deletion purges).
+        val (tReq, t) = u.buildCreateSharedVault(); client.createVault(u, tReq)
+        client.addMember(u, t, b, "reader")
+        client.deleteWithProof(u, t)
+        assertTrue(services.janitor.purgeVault(t.vaultId, now() + 8 * Service.DAY_MS))
+        val named = services.repo.db.read { c -> c.queryAll("SELECT vaultId FROM vaults WHERE deletedBy=?", u.userId) { it.getString(1) }.toSet() }
+        assertEquals(setOf(s.vaultId, t.vaultId), named, "fixture: both rows still name the account")
+
+        val gone = u.userId
+        assertEquals(HttpStatusCode.OK, client.deleteAccount(u).status)
+        assertEquals(emptyList(), services.cellsContaining(gone), "no column of any table names the deleted userId")
+        assertEquals(emptyList(), services.cellsContaining(u.email), "…or its address")
+        assertEquals("owner", client.sync(b).grants.single { it.vaultId == s.vaultId }.role, "the handed-over vault lives on")
     }
 
     // ---- the audit-type classification tripwire ----
