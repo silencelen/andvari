@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.MockRequestHandleScope
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.request.HttpRequestData
 import io.ktor.client.request.HttpResponseData
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -25,6 +26,8 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import kotlinx.coroutines.runBlocking
 import kotlinx.io.IOException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -67,12 +70,16 @@ class UnlockLadderTest {
     private var refreshAnswer = refused
     private val calls = mutableListOf<String>()
 
+    /** When set, the whole server: for a test that needs the request itself (its bearer, its body). */
+    private var server: (suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData)? = null
+    private fun HttpRequestData.bodyText(): String = (body as io.ktor.http.content.OutgoingContent.ByteArrayContent).bytes().decodeToString()
+
     private val http = object : HttpClients {
         override fun create() = HttpClient(
             MockEngine { request ->
                 val path = request.url.encodedPath
                 calls += path
-                when {
+                server?.invoke(this, request) ?: when {
                     path.endsWith("/account/keys") -> keysAnswer()
                     path.endsWith("/sync") -> syncAnswer()
                     path.endsWith("/client-policy") -> policyAnswer()
@@ -333,6 +340,57 @@ class UnlockLadderTest {
         assertEquals(UnlockResult.EndedBeforeLanding, ladder.unlockWithQuick(stored, BiometricHost.None))
         assertNull(session.get())
         assertTrue(session.takeRejected(), "the rejection is there for the screen to report")
+    }
+
+    // ---- review 3: the client is built from the session as stored when the mutex is held ----
+
+    @Test
+    fun anUnlockThatWaitedPresentsTheTokensAnUnboundUnlockRotated() = runBlocking<Unit> {
+        readyForQuick()
+        val readByTheApp = assertNotNull(store.load()) // (a1, r1), read before the overlay's unlock ran
+        val presented = mutableListOf<String>()
+        server = { request ->
+            val path = request.url.encodedPath
+            when {
+                path.endsWith("/auth/refresh") -> {
+                    val token = Json.parseToJsonElement(request.bodyText()).jsonObject.getValue("refreshToken").jsonPrimitive.content
+                    presented += token
+                    if (token == "r1" && presented.count { it == "r1" } == 1) {
+                        respond("""{"accessToken":"a2","refreshToken":"r2"}""", HttpStatusCode.OK, headers)
+                    } else {
+                        // A reuse: the server revokes the device.
+                        respond("""{"error":"refresh_reuse","message":"reused"}""", HttpStatusCode.Unauthorized, headers)
+                    }
+                }
+                path.endsWith("/account/keys") ->
+                    if (request.headers[HttpHeaders.Authorization] == "Bearer a2") {
+                        respond(json.encodeToString(AccountKeys.serializer(), served), HttpStatusCode.OK, headers)
+                    } else {
+                        respond("""{"error":"unauthorized","message":"expired"}""", HttpStatusCode.Unauthorized, headers)
+                    }
+                path.endsWith("/sync") -> respond(EMPTY_SYNC, HttpStatusCode.OK, headers)
+                else -> respond("""{"error":"not_found","message":"no"}""", HttpStatusCode.NotFound, headers)
+            }
+        }
+        // The overlay's unlock holds the mutex, rotates r1 to r2 (stored although it then fails), and never binds.
+        assertIs<UnlockResult.Failed>(ladder.unlockWithPassword(stored, "not the password"))
+        assertEquals("r2", store.load()?.refreshToken, "the rotation was stored")
+        // The app's unlock, holding the copy it read before, gets the mutex next.
+        quickKeys.next = { QuickRecover.Ok(releasedUvk()) }
+        val r = assertIs<UnlockResult.Unlocked>(ladder.unlockWithQuick(readByTheApp, BiometricHost.None))
+        assertEquals(listOf("r1"), presented, "r1 was presented once: no reuse, so no revocation")
+        assertSame(r.unlocked, session.get())
+    }
+
+    @Test
+    fun anUnlockWhoseStoredSessionEndedOrChangedHandsWhileItWaitedSendsNothing() = runBlocking<Unit> {
+        val readByTheApp = assertNotNull(store.load())
+        store.clear()
+        assertEquals(UnlockResult.SessionChanged, ladder.unlockWithPassword(readByTheApp, PASSWORD))
+        store.save(StoredSession(home, "00000000-0000-4000-8000-0000000000aa", "x@example.com", "b1", "s1"))
+        assertEquals(UnlockResult.SessionChanged, ladder.unlockWithPassword(readByTheApp, PASSWORD), "another account's session is not this unlock's")
+        assertTrue(calls.isEmpty(), "nothing reached the server")
+        assertNull(session.get())
     }
 
     // ---- the overlay's options ----

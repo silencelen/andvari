@@ -801,6 +801,7 @@ class AndvariViewModel(
             is UnlockResult.Revoked -> { _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED); throw r.cause }
             is UnlockResult.Failed -> throw r.cause
             UnlockResult.EndedBeforeLanding -> sessionEndedBeforeLanding()
+            UnlockResult.SessionChanged -> sessionChangedWhileWaiting()
             is UnlockResult.Unlocked -> {
                 _ui.value = _ui.value.copy(escrowStale = r.keys.escrowStale, escrowFingerprint = r.keys.escrowFingerprint)
                 refreshQuickUnlockState()
@@ -1364,6 +1365,7 @@ class AndvariViewModel(
             is UnlockResult.Revoked -> { _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED); throw climbed.cause }
             is UnlockResult.Failed -> throw climbed.cause
             UnlockResult.EndedBeforeLanding -> { sessionEndedBeforeLanding(); return@op }
+            UnlockResult.SessionChanged -> { sessionChangedWhileWaiting(); return@op }
             is UnlockResult.QuickUnavailable, is UnlockResult.QuickFallback, is UnlockResult.QuickWiped -> error("not a password unlock outcome")
         }
         val keys = r.keys
@@ -3835,6 +3837,21 @@ class AndvariViewModel(
     private fun sessionEndedBeforeLanding() {
         _ui.value = _ui.value.copy(busy = false)
         checkIdleLock()
+    }
+
+    /**
+     * Review 3: the stored session ended, or stopped being this account's, while the unlock waited for another one
+     * (nothing was sent). A rejection that ended it is reported as one; otherwise the screen follows the stored state.
+     */
+    private fun sessionChangedWhileWaiting() {
+        _ui.value = _ui.value.copy(busy = false)
+        if (VaultSession.takeRejected()) {
+            endRejectedSession()
+            return
+        }
+        val now = store.load()
+        _ui.value = _ui.value.copy(screen = if (now != null && now.accessToken.isNotEmpty()) Screen.Unlock(now.email) else Screen.Welcome)
+        refreshQuickUnlockState()
     }
 
     /** What the landing screen also says about its first sync. After the landing, which clears `error`. */

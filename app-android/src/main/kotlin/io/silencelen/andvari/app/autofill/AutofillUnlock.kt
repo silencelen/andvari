@@ -105,6 +105,8 @@ object AutofillUnlock {
         // Review round 2: a definitive rejection during the first sync ended the session (the coordinator
         // purged it). Never hand a dead session to the fill: the overlay says to open andvari.
         UnlockResult.EndedBeforeLanding -> throw ApiException(401, "session_ended", "the session ended during its first sync")
+        // Review 3: the stored session ended or changed hands while this overlay waited: open andvari.
+        UnlockResult.SessionChanged -> throw ApiException(401, "session_ended", "the stored session changed while the unlock waited")
         // A14 (F8): a stored session's tokens go only to its own origin.
         is UnlockResult.Elsewhere -> throw IllegalStateException(sessionElsewhere(r.sessionOrigin))
         is UnlockResult.Revoked -> throw r.cause // A3: the ladder purged this origin's namespace
