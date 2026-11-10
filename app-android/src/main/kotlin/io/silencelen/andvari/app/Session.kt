@@ -582,7 +582,11 @@ class SessionStore(context: Context) : SessionPersistence {
 
         override fun clearPasswordStamp(userId: String) = clearFullPasswordStamp(key, userId)
 
-        override fun identityPins(): SelfIdentityPin.KeyValueStore = selfIdentityStore(key)
+        /** As [selfIdentityPub]: the legacy pin is bound to its email before every use (A11, q08). */
+        override fun identityPins(): SelfIdentityPin.KeyValueStore {
+            bindLegacySelfIdentity()
+            return selfIdentityStore(key)
+        }
     }
 
     /**

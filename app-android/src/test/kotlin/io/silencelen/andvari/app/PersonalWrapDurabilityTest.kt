@@ -53,11 +53,17 @@ class PersonalWrapDurabilityTest {
         val src = File("src/main/kotlin/io/silencelen/andvari/app")
         val vm = File(src, "AndvariViewModel.kt").readText()
         val autofill = File(src, "autofill/AutofillUnlock.kt").readText()
+        // Step 6: both build their engines through core's one bind (SessionBinder), never their own.
+        val binder = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/SessionBinder.kt").readText()
+        val builds = Regex("""SyncEngine\(""").findAll(binder).count()
+        val withState = Regex("""SyncEngine\([^\n]*deviceState = namespaces\.deviceState\(""").findAll(binder).count()
+        assertTrue(builds > 0, "the shared bind builds an engine")
+        assertEquals(builds, withState, "every SyncEngine gets the durable device state")
+        val seams = File(src, "SessionSeams.kt").readText()
+        assertTrue(seams.substringAfter("class AndroidNamespaceStorage").contains("override fun deviceState(originKey: String, userId: String): DeviceState = PersonalDeviceState.open("), "which on Android is this file")
         for ((name, text) in listOf("AndvariViewModel" to vm, "AutofillUnlock" to autofill)) {
-            val builds = Regex("""SyncEngine\(""").findAll(text).count()
-            val withState = Regex("""SyncEngine\([^\n]*deviceState = PersonalDeviceState\.open\(""").findAll(text).count()
-            assertTrue(builds > 0, "$name builds an engine")
-            assertEquals(builds, withState, "$name: every SyncEngine gets the durable device state")
+            assertEquals(0, Regex("""SyncEngine\(""").findAll(text).count(), "$name builds no engine of its own")
+            assertTrue(text.contains("AndroidNamespaceStorage("), "$name binds in the Android namespaces")
         }
         // The purges never reach it.
         val purge = File(src, "QuickUnlock.kt").readText().substringAfter("object OfflineData").substringBefore("object KdfReKey")

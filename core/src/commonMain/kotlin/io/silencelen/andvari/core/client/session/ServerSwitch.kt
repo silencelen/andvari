@@ -134,7 +134,10 @@ class ServerSwitch(
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
-                return PolicyProbe.Failed(t, coordinator.probeIsCurrent(tag))
+                val current = coordinator.probeIsCurrent(tag)
+                // The client no longer knows this origin's policy: what it enforces comes from the persisted mirror.
+                if (current) coordinator.forgetLivePolicy()
+                return PolicyProbe.Failed(t, current)
             }
             if (!coordinator.applyPolicy(p, tag)) return PolicyProbe.Stale
             // Spec 02 §8: a forbidding server purges ITS OWN namespace for the stored session's user.

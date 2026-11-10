@@ -1,6 +1,7 @@
 package io.silencelen.andvari.core.client
 
 import io.silencelen.andvari.core.crypto.Ad
+import kotlin.concurrent.Volatile
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.CryptoProvider
@@ -35,6 +36,8 @@ import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.KeepGeneratedSerializer
@@ -300,6 +303,15 @@ class VaultGrantKeyUnreadableException(val vaultId: String, reason: String, caus
 class VaultKeyNotVerifiedException(val vaultId: String) :
     Exception("the key for vault $vaultId is not verified yet (legacy grant): review the vault before writing to it")
 
+/**
+ * This [Account] was wiped ([Account.wipe]): the session that held it ended and its keys are zeros. Every
+ * method that seals under a key, signs, or hands key material out throws this instead of running, so an
+ * operation still in flight when the session ended can never produce a ciphertext, a wrap or a signature
+ * from a zeroed key. Deliberately NOT a [CryptoException]: the save ladders read that as "wrong master
+ * password", and nothing about the password is wrong.
+ */
+class AccountWipedException : IllegalStateException("the session ended and this account's keys were wiped")
+
 /** §1.6: a v2 grant from a sender this account has not pinned (or whose pin is not current on this device). The
  *  vault is NOT adopted; [fromUserId] is unverified routing data naming whom to verify. */
 data class PendingGrant(val vaultId: String, val fromUserId: String, val grantIdB64: String)
@@ -328,6 +340,45 @@ class Account private constructor(
     private val vaultKeys: MutableMap<String, ByteArray>,
     private val vaultRoles: MutableMap<String, String> = mutableMapOf(),
 ) {
+    // ---- wipe (spec 01 §8: keys live in memory only, and they end with the session) ----
+
+    /** Guards the key fields against [wipe]: whatever seals under them, signs with them or copies them out reads
+     *  them under this lock, so nothing can run on a half-zeroed key. */
+    private val keyLock = SynchronizedObject()
+
+    @Volatile
+    private var wiped = false
+
+    /** Whether [wipe] has run: this account's keys are zeros and it seals nothing more. */
+    val isWiped: Boolean get() = wiped
+
+    /** Runs [block] with the keys held against [wipe], and refuses once they are wiped. Never nested. */
+    private inline fun <T> withKeys(block: () -> T): T = synchronized(keyLock) {
+        if (wiped) throw AccountWipedException()
+        block()
+    }
+
+    /**
+     * Zero every key this account holds: the UVK, the identity and signing secrets and the vault keys. The
+     * session layer calls it when the session that held the account ends, once its transport has closed, and
+     * on an unlock that built an account it never bound. Idempotent; never throws.
+     *
+     * After it, the methods that seal, sign or copy key material out throw [AccountWipedException]; one that was
+     * already running finishes first, on whole keys. Opening still fails closed, as any open under a wrong key does.
+     */
+    fun wipe() {
+        synchronized(keyLock) {
+            if (wiped) return
+            wiped = true
+            uvk.fill(0)
+            identityPriv.fill(0)
+            signSecret.fill(0)
+            // A sync may be adding a key right now (the engine fills the map). The flag above already stops every
+            // sealing path; a key that lands after this copy is left to the collector, like any dropped session's.
+            runCatching { vaultKeys.values.toList() }.getOrNull()?.forEach { it.fill(0) }
+        }
+    }
+
     /**
      * The personal vault (security review 2026-10, root cause A §4): the vault named by
      * `AccountKeys.personalWrap`, which only this user's UVK can mint ([applyPersonalWrap]), or the
@@ -863,7 +914,9 @@ class Account private constructor(
          * pubkey it controls; that hard-fail keeps its distinct identity-mismatch message.
          *
          * The returned [Account] keeps the passed [uvk] reference (see [enroll]/[unlock]: the
-         * private ctor owns it). The caller must hand over a fresh array and not reuse/zero it.
+         * private ctor owns it). The caller must hand over a fresh array and not reuse/zero it; [wipe]
+         * zeroes it with the rest of the account's keys. When this throws, no account took the array:
+         * it is still the caller's, to zero.
          */
         fun unlockWithUvk(
             userId: String,
@@ -971,7 +1024,10 @@ class Account private constructor(
      * it with NO product caller: escrow v2 and signed grants (later branches) seal the frame to the
      * recipient. Internal so only core can sign.
      */
-    internal fun signStatement(statement: Statement): ByteArray =
+    internal fun signStatement(statement: Statement): ByteArray = withKeys { sign(statement) }
+
+    /** [signStatement]'s body, for a caller already inside [withKeys]. */
+    private fun sign(statement: Statement): ByteArray =
         SignedStatement.build(crypto, KeyPairBytes(signPub, signSecret), statement)
 
     /**
@@ -1278,7 +1334,7 @@ class Account private constructor(
      * is the PINNED key and the frame is sealed to it, never to a key fresh from `/users/lookup`. Refuses a key
      * this account itself holds only from an unconfirmed v1 seal (signing it would launder it to the member).
      */
-    fun buildSignedGrant(vaultId: String, pin: Contact): String {
+    fun buildSignedGrant(vaultId: String, pin: Contact): String = withKeys {
         if (isLegacyReadOnly(vaultId) || heldKeyContradictsVouch(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
         if (pin.userId == userId) throw CryptoException("a vault grant cannot be addressed to its sender")
         val pinKey = Bytes.fromB64(pin.identityPub)
@@ -1286,7 +1342,7 @@ class Account private constructor(
             from = userId, to = pin.userId, toKey = pinKey, vaultId = vaultId,
             grantId = crypto.randomBytes(16), issuedAt = nowMs(), vk = vk(vaultId),
         )
-        return Bytes.toB64(SignedGrant.seal(crypto, pinKey, signStatement(st)))
+        Bytes.toB64(SignedGrant.seal(crypto, pinKey, sign(st)))
     }
 
     /**
@@ -1517,20 +1573,20 @@ class Account private constructor(
      * round-trip verified. Refuses a vault whose key did not open from our own UVK wrap, so a key a
      * server-mintable seal delivered can never be laundered into "personal".
      */
-    fun buildPersonalWrap(vaultId: String): PersonalWrap {
+    fun buildPersonalWrap(vaultId: String): PersonalWrap = withKeys {
         if (!keyFromOwnUvkWrap(vaultId)) throw CryptoException("vault $vaultId is not wrapped under this account's key")
         val vk = vk(vaultId)
         val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vkPersonal(vaultId, userId))
         if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vkPersonal(vaultId, userId)).contentEquals(vk)) {
             throw CryptoException("personal wrap failed round-trip verification")
         }
-        return PersonalWrap(vaultId, wrapped)
+        PersonalWrap(vaultId, wrapped)
     }
 
     /** Seal an account-state document (root cause A §4.2) under the UVK, bound to this userId. */
-    fun sealAccountState(doc: AccountStateDoc): String {
+    fun sealAccountState(doc: AccountStateDoc): String = withKeys {
         require(doc.userId == userId) { "account state belongs to another user" }
-        return Envelope.sealB64(crypto, uvk, AccountState.encode(doc).encodeToByteArray(), Ad.accountState(userId))
+        Envelope.sealB64(crypto, uvk, AccountState.encode(doc).encodeToByteArray(), Ad.accountState(userId))
     }
 
     /**
@@ -1676,7 +1732,7 @@ class Account private constructor(
     class NewSharedVault(val request: CreateVaultRequest, val vaultId: String)
 
     /** Create a shared vault locally: fresh VK, meta under VK, owner grant under OUR UVK. */
-    fun buildCreateSharedVault(name: String): NewSharedVault {
+    fun buildCreateSharedVault(name: String): NewSharedVault = withKeys {
         val vaultId = uuid(crypto)
         val svk = crypto.randomBytes(32)
         val metaPlain = buildJsonObject { put("name", name) }.toString()
@@ -1690,12 +1746,12 @@ class Account private constructor(
         vaultRoles[vaultId] = "owner"
         keySources[vaultId] = KeySource.UVK_WRAP
         uvkWrappedVaults.add(vaultId)
-        return NewSharedVault(req, vaultId)
+        NewSharedVault(req, vaultId)
     }
 
     /** Seal a vault's VK to a member's (out-of-band verified!) identity pubkey. */
     fun wrapVkForMember(memberIdentityPub: ByteArray, vaultId: String): String =
-        Bytes.toB64(SharedGrant.seal(crypto, memberIdentityPub, vaultId, vk(vaultId)))
+        withKeys { Bytes.toB64(SharedGrant.seal(crypto, memberIdentityPub, vaultId, vk(vaultId))) }
 
     /** Short identity fingerprint (32 hex / 128 bits, spec 01 §5) over the SEED-DERIVED pubkey —
      *  what a family member reads out when someone shares a vault with them. */
@@ -1721,7 +1777,7 @@ class Account private constructor(
      * nor open).
      */
     fun lifecycleKeyFor(vaultId: String): ByteArray =
-        io.silencelen.andvari.core.crypto.LifecycleProof.lifecycleKey(crypto, vk(vaultId))
+        withKeys { io.silencelen.andvari.core.crypto.LifecycleProof.lifecycleKey(crypto, vk(vaultId)) }
 
     /**
      * Transfer accept (spec 03 §11): the new owner re-wraps the VK it ALREADY holds (via its
@@ -1747,13 +1803,13 @@ class Account private constructor(
         return roundTripWrap(vaultId, "self wrap")
     }
 
-    private fun roundTripWrap(vaultId: String, what: String): String {
+    private fun roundTripWrap(vaultId: String, what: String): String = withKeys {
         val vk = vk(vaultId)
         val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vk(vaultId, userId))
         if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vk(vaultId, userId)).contentEquals(vk)) {
             throw CryptoException("$what failed round-trip verification")
         }
-        return wrapped
+        wrapped
     }
 
     /** The full vault-meta plaintext object (spec 02 §4) — `name`, the monotonic `metaV`
@@ -1776,7 +1832,7 @@ class Account private constructor(
      * monotonic plaintext `metaV` counter (anti-replay). Returns the new metaBlob
      * (base64url). The name stays E2E ciphertext; the server only ever sees an opaque blob.
      */
-    fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String {
+    fun buildRenameMeta(vaultId: String, metaBlob: String, newName: String): String = withKeys {
         // INV-WRITE-KEY "whatever the path" (A9 LOW): a name is sealed under the VK like an item, so a legacy-read-only
         // key or one that contradicts this device's vouch is refused here too, through the same [canSealUnder].
         if (!canSealUnder(vaultId)) throw VaultKeyNotVerifiedException(vaultId)
@@ -1796,7 +1852,7 @@ class Account private constructor(
             put("name", newName)
             put("metaV", metaV + 1)
         }
-        return Envelope.sealB64(crypto, vk(vaultId), next.toString().encodeToByteArray(), Ad.vaultMeta(vaultId))
+        Envelope.sealB64(crypto, vk(vaultId), next.toString().encodeToByteArray(), Ad.vaultMeta(vaultId))
     }
 
     /**
@@ -1827,7 +1883,7 @@ class Account private constructor(
      * Throws when there is no personal vault key — callers treat that exactly like "no ledger".
      */
     fun sealUsage(plaintext: ByteArray): String =
-        Envelope.sealB64(crypto, UsageKey.usageKey(crypto, vk(personalVaultId)), plaintext, Ad.usage(userId))
+        withKeys { Envelope.sealB64(crypto, UsageKey.usageKey(crypto, vk(personalVaultId)), plaintext, Ad.usage(userId)) }
 
     /** Open a ledger sealed by [sealUsage] — on this device or any other client. Throws on a
      *  wrong key or a substituted blob, which callers treat as "no ledger", never an empty one. */
@@ -1864,11 +1920,11 @@ class Account private constructor(
      */
     fun encryptItem(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload = sealItem(SealProvenance.Chosen(vaultId), itemId, doc)
 
-    private fun sealUnder(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload {
+    private fun sealUnder(vaultId: String, itemId: String, doc: ItemDoc): ItemUpload = withKeys {
         val fv = maxOf(docFloor(doc), itemFv[itemId] ?: 1)
         itemFv[itemId] = fv
         val blob = Envelope.sealB64(crypto, vk(vaultId), json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray(), Ad.item(vaultId, itemId, fv))
-        return ItemUpload(formatVersion = fv, attachmentIds = doc.attachments.map { it.id }, blob = blob)
+        ItemUpload(formatVersion = fv, attachmentIds = doc.attachments.map { it.id }, blob = blob)
     }
 
     /** Random per-file key (spec 02 §6) — lives only inside item ciphertext. */
@@ -1889,7 +1945,7 @@ class Account private constructor(
      * platform type into the multiplatform core for zero security delta. Do NOT reach for this
      * for anything other than quick-unlock enrollment.
      */
-    fun uvkCopyForPlatformWrap(): ByteArray = uvk.copyOf()
+    fun uvkCopyForPlatformWrap(): ByteArray = withKeys { uvk.copyOf() }
 
     fun decryptItem(item: WireItem): ItemDoc {
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")
@@ -1932,7 +1988,7 @@ class Account private constructor(
      * so a hostile server cannot redirect the UVK escrow to an attacker-held recovery key. The UVK
      * never leaves the client except sealed to the verified recovery public key (zero-knowledge).
      */
-    fun resealEscrowFor(recoveryPubB64: String, verifiedFingerprint: String): EscrowUpload {
+    fun resealEscrowFor(recoveryPubB64: String, verifiedFingerprint: String): EscrowUpload = withKeys {
         val pub = Bytes.fromB64(recoveryPubB64)
         require(Escrow.fingerprint(crypto, pub) == verifiedFingerprint) {
             "recovery public key does not match the verified fingerprint — refusing to re-seal escrow"
@@ -1943,7 +1999,7 @@ class Account private constructor(
         val sealed = Escrow.sealUvkV2(
             crypto, pub, verifiedFingerprint, userId, identityPub, KeyPairBytes(signPub, signSecret), uvk, nowMs(),
         )
-        return EscrowUpload(Bytes.toB64(sealed), verifiedFingerprint)
+        EscrowUpload(Bytes.toB64(sealed), verifiedFingerprint)
     }
 
     /**
@@ -1955,9 +2011,9 @@ class Account private constructor(
      * The generated recoverySecret is SHOWN ONCE then dropped (returned in [SelfSetupResult]); the UVK
      * is invariant, so a pre-existing org-escrow blob stays valid alongside the new piece.
      */
-    fun setupMemberRecovery(currentAuthKey: String): SelfSetupResult {
+    fun setupMemberRecovery(currentAuthKey: String): SelfSetupResult = withKeys {
         val recovery = MemberRecovery.generate(crypto, userId, uvk)
         val req = RecoverySelfSetupRequest(currentAuthKey, MemberRecoveryBlock(recovery.recoveryWrappedUvk, recovery.recoveryAuthKey))
-        return SelfSetupResult(req, recovery.recoverySecret)
+        SelfSetupResult(req, recovery.recoverySecret)
     }
 }

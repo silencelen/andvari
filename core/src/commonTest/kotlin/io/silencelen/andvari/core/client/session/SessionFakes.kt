@@ -1,7 +1,11 @@
 package io.silencelen.andvari.core.client.session
 
+import io.silencelen.andvari.core.client.DeviceState
+import io.silencelen.andvari.core.client.InMemoryVaultCache
+import io.silencelen.andvari.core.client.MemoryDeviceState
 import io.silencelen.andvari.core.client.SelfIdentityPin
 import io.silencelen.andvari.core.client.Tokens
+import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.model.AccountKeys
 
 /** The platform seams, in memory, so the shared session rules run the same on every target. */
@@ -20,16 +24,26 @@ internal class FakeOriginStore : OriginStore {
     val clearedStamps = mutableListOf<String>()
     private val pinMap = mutableMapOf<String, String>()
 
-    override fun loadAccountKeys(userId: String): AccountKeys? = null
-    override fun saveAccountKeys(userId: String, keys: AccountKeys) {}
+    /** The offline copy of the account keys (one slot, as on Android) and the full-password stamps. */
+    var accountKeys: AccountKeys? = null
+    val stamps = mutableMapOf<String, PasswordStamp>()
+
+    override fun loadAccountKeys(userId: String): AccountKeys? = accountKeys
+    override fun saveAccountKeys(userId: String, keys: AccountKeys) {
+        accountKeys = keys
+    }
     override fun clearAccountKeys(userId: String) {
         clearedAccountKeys += userId
+        accountKeys = null
     }
 
-    override fun passwordStamp(userId: String): PasswordStamp? = null
-    override fun setPasswordStamp(userId: String, stamp: PasswordStamp) {}
+    override fun passwordStamp(userId: String): PasswordStamp? = stamps[userId]
+    override fun setPasswordStamp(userId: String, stamp: PasswordStamp) {
+        stamps[userId] = stamp
+    }
     override fun clearPasswordStamp(userId: String) {
         clearedStamps += userId
+        stamps.remove(userId)
     }
 
     override fun identityPins() = SelfIdentityPin.KeyValueStore({ pinMap[it] }, { k, v -> pinMap[k] = v })
@@ -93,5 +107,42 @@ internal class RecordingArtifacts(private val onDelete: () -> Unit = {}) : Offli
 
     override fun wipeQuickUnlock(originKey: String, userId: String) {
         events += "blob:$originKey/$userId"
+    }
+}
+
+/** The namespace directories, in memory: every cache is in-memory, and each open is recorded. */
+internal class FakeNamespaces : NamespaceStorage {
+    val opened = mutableListOf<String>()
+
+    /** When set, opening a cache throws it (a corrupt cache file). */
+    var failOpen: Throwable? = null
+
+    override fun openVaultCache(originKey: String, userId: String): VaultCache {
+        failOpen?.let { throw it }
+        opened += "$originKey/$userId"
+        return InMemoryVaultCache()
+    }
+
+    override fun deviceState(originKey: String, userId: String): DeviceState = MemoryDeviceState()
+}
+
+/** The quick-unlock key wrapping, in memory: what the next prompt releases is up to the test. */
+internal class FakeQuickKeys : QuickUnlockKeys {
+    var biometric = true
+    val enrolled = mutableSetOf<String>()
+    val wiped = mutableListOf<String>()
+    var prompts = 0
+    var next: () -> QuickRecover = { QuickRecover.Fallback(null) }
+
+    override fun hasStrongBiometric() = biometric
+    override fun isEnrolled(originKey: String, userId: String) = "$originKey/$userId" in enrolled
+    override suspend fun recover(host: BiometricHost, originKey: String, userId: String): QuickRecover {
+        prompts++
+        return next()
+    }
+
+    override fun wipe(originKey: String, userId: String) {
+        wiped += "$originKey/$userId"
+        enrolled -= "$originKey/$userId"
     }
 }

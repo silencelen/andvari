@@ -12,6 +12,17 @@ import kotlin.test.assertTrue
 class BoundedOpWiringTest {
     private val vm = File("src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt").readText()
 
+    /** Step 6: the unlocks climb core's one ladder; their pins moved there with the code. */
+    private val ladder = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/UnlockLadder.kt").readText()
+
+    private fun coreSpan(of: String, from: String, to: String): String {
+        val a = of.indexOf(from)
+        assertTrue(a > -1, "span start missing: $from")
+        val b = of.indexOf(to, a)
+        assertTrue(b > a, "span end missing or out of order: $to")
+        return of.substring(a, b)
+    }
+
     /** The slice of the source from [from] to the next [to], both asserted present. */
     private fun span(from: String, to: String): String {
         val a = vm.indexOf(from)
@@ -31,11 +42,13 @@ class BoundedOpWiringTest {
     /** The biometric prompt waits on a person, so only its server legs are bounded. */
     @Test
     fun theBiometricPromptIsExemptAndTheNetworkLegsAreNot() {
-        val unlock = span("fun unlockWithBiometric(activity: FragmentActivity) = op(", "private suspend fun finishBiometricUnlock")
+        val unlock = span("fun unlockWithBiometric(activity: FragmentActivity) = op(", "\n    }\n")
         assertTrue(unlock.contains("op(timeoutMs = null)"), "the prompt is not bounded by the op")
-        assertTrue(unlock.indexOf("QuickUnlock.recoverUvk") < unlock.indexOf("finishBiometricUnlock(session, originKey, uvk)"), "the server half runs after the prompt")
-        val finish = span("private suspend fun finishBiometricUnlock", "\n    }\n")
-        assertTrue(finish.contains("runBounded(BoundedOps.FLAT_MS) { a.accountKeys() }"), "and its server call is bounded")
+        assertTrue(unlock.contains("ladder.unlockWithQuick(session, ActivityHost(activity)"), "the shared ladder runs the prompt and the server half")
+        val quick = coreSpan(ladder, "suspend fun unlockWithQuick(", "\n    }\n")
+        assertTrue(quick.indexOf("quickKeys.recover(") in 0 until quick.indexOf("return climb("), "the server half runs after the prompt")
+        val held = coreSpan(ladder, "private suspend fun underMutex(", "\n    }\n")
+        assertTrue(held.contains("runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }"), "and its server call is bounded")
     }
 
     /**
@@ -53,11 +66,26 @@ class BoundedOpWiringTest {
 
         val unlock = span("fun unlock(email: String, password: String) = op(", "\n    // internal (A5c)")
         assertTrue(unlock.contains("timeoutMs = null)"))
-        assertTrue(unlock.contains("runBounded(BoundedOps.FLAT_MS) { a.accountKeys() }"), "a stall reads as offline and opens on the cached keys")
-        assertLandsAfterTheFirstSync(unlock, "startRecoveryCapture(authKey)")
+        assertTrue(unlock.contains("ladder.unlockWithPassword(session, password,"), "the shared ladder")
+        val held = coreSpan(ladder, "private suspend fun underMutex(", "\n    }\n")
+        val keys = held.indexOf("runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }")
+        assertTrue(keys > -1, "a stall reads as offline")
+        assertTrue(held.indexOf("} catch (e: IOException) {", keys) > keys && held.contains(".loadAccountKeys(stored.userId)"), "and opens on the cached keys")
+        assertLandsOnTheLaddersVerdict(unlock, "startRecoveryCapture(authKey)")
 
-        val quick = span("private suspend fun finishBiometricUnlock", "\n    }\n")
-        assertLandsAfterTheFirstSync(quick, "toVault()")
+        val quick = span("fun unlockWithBiometric(activity: FragmentActivity) = op(", "\n    }\n")
+        assertLandsOnTheLaddersVerdict(quick, "toVault()\n                showFirstSync")
+
+        // The ladder's own half: the first sync after the bind, outside the mutex, and the session's survival decides.
+        val climb = coreSpan(ladder, "private suspend fun climb(", "\n    }\n")
+        val mutex = climb.indexOf("session.withUnlockMutex { underMutex(")
+        val sync = climb.indexOf("firstSyncAfterBind { options.firstSync(bound.unlocked.engine) }")
+        assertTrue(mutex > -1 && sync > mutex, "the first sync runs after the bind, under its own bound")
+        val live = climb.indexOf("if (!session.isLive(bound.unlocked.api)) return UnlockResult.EndedBeforeLanding", sync)
+        assertTrue(live > sync, "the ladder checks its session survived the sync")
+        assertTrue(climb.indexOf("return UnlockResult.Unlocked(", live) > live, "before it reports a landing")
+        val bound = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/FirstSync.kt").readText()
+        assertTrue(bound.contains("runBounded(BoundedOps.FLAT_MS) { sync() }"), "and that bound is the flat window")
 
         val enroll = span("private fun enrollOp(", "\n    // Shown-once recovery secret")
         assertTrue(enroll.contains("timeoutMs = null)"))
@@ -75,16 +103,33 @@ class BoundedOpWiringTest {
     @Test
     fun theUnlockMutexIsNeverAnUnboundedWait() {
         assertTrue(!vm.contains("unlockMutex.withLock"), "the main app's unlock paths use the bounded wait")
-        assertTrue(Regex("""VaultSession\.withUnlockMutex \{""").findAll(vm).count() == 2, "password and biometric unlock")
+        // Step 6: the main app's password and biometric unlocks and the autofill unlock's two all climb the
+        // one ladder, which takes the mutex once, with the bounded wait.
+        assertTrue(!vm.contains("withUnlockMutex") && vm.contains("ladder.unlockWithPassword(") && vm.contains("ladder.unlockWithQuick("), "password and biometric unlock")
         val autofill = File("src/main/kotlin/io/silencelen/andvari/app/autofill/AutofillUnlock.kt").readText()
-        assertTrue(!autofill.contains("unlockMutex.withLock"))
-        assertTrue(Regex("""VaultSession\.withUnlockMutex \{""").findAll(autofill).count() == 2, "password and quick unlock")
-        val locked = autofill.substringAfter("private suspend fun unlockLocked(").substringBefore("\n}\n")
-        assertTrue(locked.contains("coordinator.boundedPolicy(api)") && locked.contains("runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }"), "its calls under the mutex are bounded")
-        assertTrue(!locked.contains("engine.sync()"), "and its first sync is not under the mutex")
-        assertTrue(autofill.contains("runBounded(BoundedOps.FLAT_MS) { r.unlocked.engine.sync() }"), "it runs after, bounded")
-        val after = autofill.substringAfter("private suspend fun syncOutsideTheMutex(")
-        assertTrue(after.indexOf("if (!VaultSession.isLive(r.unlocked.api)) throw") in 0 until after.indexOf("return r.unlocked"), "and a session that ended in it is never handed to the fill")
+        assertTrue(!autofill.contains("unlockMutex.withLock") && !autofill.contains("withUnlockMutex"))
+        assertTrue(autofill.contains(".unlockWithPassword(session, password, overlay)") && autofill.contains(".unlockWithQuick(session, ActivityHost(activity)"), "password and quick unlock")
+        assertTrue(!ladder.contains("unlockMutex.withLock"))
+        assertTrue(Regex("""session\.withUnlockMutex \{""").findAll(ladder).count() == 1, "one mutex, taken in one place")
+        val held = coreSpan(ladder, "private suspend fun underMutex(", "\n    }\n")
+        assertTrue(held.contains("refreshPolicy(api, originKey, stored.userId)") && held.contains("runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }"), "its calls under the mutex are bounded")
+        assertTrue(coreSpan(ladder, "private suspend fun refreshPolicy(", "\n    }\n").contains("coordinator.boundedPolicy(api)"), "the policy read too")
+        assertTrue(!held.contains(".sync()") && !held.contains("firstSync"), "and its first sync is not under the mutex")
+        val climb = coreSpan(ladder, "private suspend fun climb(", "\n    }\n")
+        assertTrue(climb.indexOf("firstSyncAfterBind {") > climb.indexOf("session.withUnlockMutex {"), "it runs after, bounded")
+        // A session that ended in it is never handed to the fill.
+        val landed = coreSpan(autofill, "private fun landed(r: UnlockResult)", ".also { AutofillHardLock.arm() }")
+        assertTrue(landed.contains("UnlockResult.EndedBeforeLanding -> throw ApiException(401, \"session_ended\""), "and a session that ended in it is never handed to the fill")
+    }
+
+    /** Step 6: an unlock lands where the ladder's verdict says, after the first sync it ran. */
+    private fun assertLandsOnTheLaddersVerdict(body: String, landing: String) {
+        assertTrue(body.contains("UnlockOptions(firstSync = { syncNow(it) })"), "the app's own sync, under the ladder's bound")
+        val ended = body.indexOf("UnlockResult.EndedBeforeLanding -> ")
+        assertTrue(ended > -1 && body.indexOf("sessionEndedBeforeLanding()", ended) > ended, "a session that ended in the first sync lands nowhere")
+        val land = body.indexOf(landing)
+        assertTrue(land > -1, "lands: $landing")
+        assertTrue(body.indexOf("showFirstSync(r.firstSync)", land) > land, "what the sync could not do is said on the landing")
     }
 
     private fun assertLandsAfterTheFirstSync(body: String, landing: String) {
