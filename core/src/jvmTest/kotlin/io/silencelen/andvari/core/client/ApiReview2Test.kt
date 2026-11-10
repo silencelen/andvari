@@ -288,7 +288,8 @@ class ApiReview2Test {
      * Tripwire: product code derives a master-password credential for an upload ONLY through the fence. The raw KDF
      * ([Keys.masterKey]) is called only inside Account (every caller fenced), the backup KDF (its own window, spec 07 §2.3)
      * and the KDF re-key (fenced by [KdfUpgrade.shouldUpgrade]); the pre-session [Account.deriveAuthKey] appears only
-     * at the two sign-in sites, over the prelogin values (fenced at the API boundary, and no session salt exists yet).
+     * at the two sign-in sites (the shared one in core, which Android uses, and the desktop's), over the prelogin values
+     * (fenced at the API boundary, and no session salt exists yet).
      */
     @Test
     fun m1_tripwire_productCodeDerivesPasswordCredentialsOnlyThroughTheFence() {
@@ -312,8 +313,9 @@ class ApiReview2Test {
                 if (Regex("""Account\.deriveAuthKey\(""").containsMatchIn(code)) Triple(f.relativeTo(repo).path, i + 1, code.trim()) else null
             }
         }
+        // Step 7: Android's sign-in is core's shared one now (session/SessionEntry.kt); the pin moved with it.
         val offenders = loginDerivations.filterNot { (path, _, code) ->
-            (path.endsWith("AndvariViewModel.kt") || path.endsWith("DesktopState.kt")) && "pre.kdfSalt" in code && "pre.kdfParams" in code
+            (path.endsWith("core/client/session/SessionEntry.kt") || path.endsWith("DesktopState.kt")) && "pre.kdfSalt" in code && "pre.kdfParams" in code
         }
         assertEquals(emptyList(), offenders.map { "${it.first}:${it.second}: ${it.third}" }, "derive an in-session password proof through Account.reauthAuthKey(password, keys)")
         assertEquals(2, loginDerivations.size, "exactly the two sign-in sites derive the pre-session login authKey")
