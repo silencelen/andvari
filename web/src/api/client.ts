@@ -1,4 +1,8 @@
 import type {
+  AccountDeleteBlocker,
+  AccountDeletePreview,
+  AccountDeleteRequest,
+  AccountDeleteResponse,
   AdminDeviceSummary,
   AdminStatus,
   AdminUserSummary,
@@ -47,7 +51,7 @@ import type {
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
 import { SAFE_ID } from "../vault/itemdoc-shape";
-import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
+import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeleteBlockers, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeDeletePreview, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
 
 export const CLIENT_VERSION = "0.29.1";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
@@ -76,6 +80,29 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/**
+ * Account deletion (spec 03 §13): the `409 account_delete_blocked` refusal, carrying WHAT blocks it — the vaults the
+ * account owns that other accounts still use, or the last-admin role. An ApiError, so a caller that only knows the code
+ * still reads it. `blockers` may be empty when the server sent none it could decode: still a refusal.
+ */
+export class AccountDeleteBlockedError extends ApiError {
+  constructor(public blockers: AccountDeleteBlocker[]) {
+    super(409, "account_delete_blocked", "account deletion is blocked");
+    this.name = "AccountDeleteBlockedError";
+  }
+}
+
+/** A served blocker row in the minimal shape (a kind and a count); anything else becomes a blocker of unknown kind, so a
+ *  malformed row can never shrink a refusal into "nothing stands in the way". */
+function blockerOf(raw: unknown): AccountDeleteBlocker {
+  const r = (raw && typeof raw === "object" ? raw : {}) as { kind?: unknown; vaultId?: unknown; others?: unknown };
+  return {
+    kind: typeof r.kind === "string" ? r.kind : "unknown",
+    vaultId: typeof r.vaultId === "string" ? r.vaultId : null,
+    others: typeof r.others === "number" && Number.isFinite(r.others) ? r.others : 0,
+  };
 }
 
 export interface Tokens {
@@ -738,6 +765,40 @@ export class ApiClient {
 
   changePassword(req: PasswordChangeRequest) {
     return this.text("PUT", "/api/v1/account/password", req);
+  }
+
+  // ---- account deletion (spec 03 §13) — refused on the public break-glass origin ----
+
+  /** What a deletion would do now: its blockers, the vaults deleted with the account and those it leaves, and whether
+   *  the request needs the TOTP code. Served vault ids pass the id grammar (A10) like every other. */
+  async accountDeletePreview(): Promise<AccountDeletePreview> {
+    return this.reported("accountDeletePreview", sanitizeDeletePreview(await this.json<AccountDeletePreview>("GET", "/api/v1/account/delete/preview")));
+  }
+
+  /**
+   * Delete this account. NOT idempotent and never retried here: a transport failure after the server committed leaves the
+   * outcome unknown to this tab (the caller says so). A `409 account_delete_blocked` throws
+   * {@link AccountDeleteBlockedError} with the blockers; every other refusal is the usual ApiError (`reauth_failed`,
+   * `totp_code_required`, `bad_totp_code`, `confirm_email_mismatch`, `credential_changed`, …). A 401 rides raw()'s one
+   * refresh-and-resend: a 401 means the request was not processed, so the resend is a fresh attempt.
+   */
+  async deleteAccount(req: AccountDeleteRequest): Promise<AccountDeleteResponse> {
+    const resp = await this.raw("POST", "/api/v1/account/delete", req);
+    if (resp.status === 409) {
+      let body: { error?: unknown; message?: unknown; blockers?: unknown } | null = null;
+      try {
+        body = JSON.parse(await resp.text());
+      } catch {
+        /* non-JSON 409 */
+      }
+      if (body?.error === "account_delete_blocked") {
+        const rows = Array.isArray(body.blockers) ? body.blockers.map(blockerOf) : [];
+        throw new AccountDeleteBlockedError(this.reported("deleteAccount", sanitizeDeleteBlockers(rows)));
+      }
+      throw new ApiError(409, typeof body?.error === "string" ? body.error : "http_409", typeof body?.message === "string" ? body.message : resp.statusText);
+    }
+    if (!resp.ok) await this.throwApiError(resp);
+    return (await resp.json()) as AccountDeleteResponse;
   }
 
   // ---- admin ----
