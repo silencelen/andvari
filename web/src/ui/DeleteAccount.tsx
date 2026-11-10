@@ -30,8 +30,8 @@ import { Announcer, Msg } from "./Msg";
  * Settings → Delete account (spec 03 §13; design docs/design/2026-11-10-account-deletion.md §11). Closed, the card is one
  * paragraph and a button. Opened, it fetches the preview and says what goes for good and which vaults the member leaves;
  * blockers, when there are any, are listed with a link to where each is resolved and the form is not offered; otherwise
- * the member types their address, the master password and (when enrolled) the code. A confirmed deletion hands off to
- * App, which wipes this browser's state for the account and lands on the sign-in card. An answer
+ * the member types their address, the master password and (when enrolled, or when the server asks) the code. A confirmed
+ * deletion hands off to App, which wipes this browser's state for the account and lands on the sign-in card. An answer
  * that does not say what happened is an UNKNOWN outcome: the card offers a check, and when the account no longer signs in
  * it offers to forget it on this browser (the same wipe), never a "not deleted" it cannot know.
  */
@@ -270,7 +270,7 @@ export function DeleteAccountCard({
     }
   };
 
-  const totpRequired = preview?.totpRequired ?? false;
+  const totpRequired = flow.totpRequired || (preview?.totpRequired ?? false);
 
   const submit = async () => {
     if (!preview) return;

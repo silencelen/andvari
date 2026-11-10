@@ -359,7 +359,10 @@ residual (spec 05 R19).
    server"), and a refusal that named nothing still reads as blocked; neither offers the form.
 4. **The form**, when there are none: "Type your email" (must match the session's address, trimmed and case-folded; the
    server re-checks), the master password, the authenticator code when `totpRequired`, and "Delete my account
-   permanently", enabled only when all are filled and the email matches.
+   permanently", enabled only when all are filled and the email matches. The code field also appears once the server
+   answers `totp_code_required` — TOTP enrolled on another device after the preview loaded — or a check's fresh preview
+   says so, and stays for the rest of the flow. (Independent review, 2026-11-10: the first cut read only the first
+   preview, so such an account had no way to send a code.)
 5. **Submit**: `client.accountKeys()` → `account.reauthAuthKey(password, keys)` (a wrong password is caught LOCALLY and
    never sent) → `POST /account/delete`. Errors map to one sentence each (`ui/account-delete.ts`); a 409 re-renders the
    blockers from the response. A network failure, any 5xx, or a reply that is not the server's JSON (a proxy's error
