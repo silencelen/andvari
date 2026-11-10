@@ -213,6 +213,8 @@ class AccountDeletionTest : LifecycleTestSupport() {
         assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE instr(COALESCE(meta,''), ?) > 0", u.email))
         assertEquals(emptyList(), services.cellsContaining(gone))
         assertEquals(emptyList(), services.cellsContaining(u.email))
+        // Nor the id of the device it used: its kept rows name that device by a fresh id instead.
+        assertEquals(emptyList(), services.cellsContaining(deviceIds.single()))
 
         // The email registers again — as a brand-new account.
         val token = client.invite(admin, "leaver@x.com")
@@ -488,6 +490,8 @@ class AccountDeletionTest : LifecycleTestSupport() {
         val cancel = ws.auditRows(admin, "vault_transfer_cancel").single()
         assertEquals("${v.vaultId}:target_deleted", cancel.meta)
         assertNull(cancel.userId, "a system row of the vault's history, not the deleted account's")
+        assertNotNull(ws.auditRows(admin, "account_delete").single().ip, "the deletion request had an address…")
+        assertNull(cancel.ip, "…which the vault's history, kept past the deleted account's 90 days, does not carry")
     }
 
     // ---- audit: pseudonym, retention, the straggler belt ----
@@ -543,8 +547,81 @@ class AccountDeletionTest : LifecycleTestSupport() {
         services.repo.audit("push_denied", gone, "a-device", "203.0.113.9", "vault:item")
         val row = services.repo.auditQuery(0, "push_denied", null, 10).single()
         assertNull(row.userId)
+        assertNull(row.deviceId, "the account's device id is not written back either")
+        assertNull(row.ip, "nor its address: the row outlives the 90 days the account's own rows keep one")
         assertEquals("deleted_account:vault:item", row.meta)
         assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE userId=?", gone))
+        // A live account's row is written as given.
+        services.repo.audit("push_denied", admin.userId, "a-device", "203.0.113.9", "vault:item")
+        val live = services.repo.auditQuery(0, "push_denied", admin.userId, 10).single()
+        assertEquals("a-device", live.deviceId); assertEquals("203.0.113.9", live.ip); assertEquals("vault:item", live.meta)
+    }
+
+    @Test
+    fun theAccountsDeviceIds_arePseudonymisedInEveryRow_anotherAccountsDeviceIsLeftAlone() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("admin@x.com", "device pseudonym admin password")
+        client.register(admin, bootstrapToken)
+        // U is a second admin (so it may delete itself) with two devices; M is a member whose device U revokes.
+        val u = VirtualClient("second@x.com", "device pseudonym second admin")
+        val uFirst = client.register(u, client.invite(admin, "second@x.com", isAdmin = true)).deviceId
+        val m = client.enrollSecond(admin, "member@x.com", "device pseudonym member password")
+        val mDevice = services.repo.db.read { c -> c.queryOne("SELECT deviceId FROM devices WHERE userId=?", m.userId) { it.getString(1) } }!!
+        val login = client.post("/api/v1/auth/login") {
+            contentType(ContentType.Application.Json); header("X-Andvari-Client", "test/1.0.0")
+            setBody(io.silencelen.andvari.core.model.LoginRequest(u.email, u.authKey, io.silencelen.andvari.core.model.DeviceInfo("test", "second device")))
+        }
+        assertEquals(HttpStatusCode.OK, login.status, login.bodyAsText())
+        val uSecond = json.decodeFromString(io.silencelen.andvari.core.model.SessionResponse.serializer(), login.bodyAsText()).deviceId
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/admin/devices/$mDevice/revoke") { authed(u) }.status) // U's row names M's device
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/admin/devices/$uSecond/revoke") { authed(admin) }.status) // the admin's names U's
+
+        assertEquals(HttpStatusCode.OK, client.deleteAccount(u).status) // from U's first device
+        val pseudonym = client.auditRows(admin, "account_delete").single().userId!!
+        fun rowsOf(userId: String, type: String) = services.repo.auditQuery(0, type, userId, 50)
+
+        // Neither of U's device ids is left anywhere.
+        assertEquals(emptyList(), services.cellsContaining(uFirst))
+        assertEquals(emptyList(), services.cellsContaining(uSecond))
+        // Each is replaced by one fresh id of its own, the same in every row naming it — which device did what still reads.
+        val first = rowsOf(pseudonym, "register").single().deviceId!!
+        assertEquals(first, rowsOf(pseudonym, "account_delete").single().deviceId, "registered and deleted from one device")
+        val second = rowsOf(pseudonym, "login").single().deviceId!!
+        assertEquals(second, rowsOf(admin.userId, "device_revoke").single().deviceId, "the admin's row follows the device it revoked")
+        assertTrue(UUID_RE.matches(first) && UUID_RE.matches(second))
+        assertTrue(setOf(first, second).intersect(setOf(uFirst, uSecond, mDevice)).isEmpty() && first != second)
+        // M's device is not U's to rename: U's kept revocation and M's own rows still name it.
+        assertEquals(mDevice, rowsOf(pseudonym, "device_revoke").single().deviceId)
+        assertEquals(mDevice, rowsOf(m.userId, "register").single().deviceId)
+    }
+
+    @Test
+    fun anAdminActingOnADeletedAccountsIds_recordsTheAttempt_withoutWritingTheIdsBack() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("admin@x.com", "stale screen admin password")
+        client.register(admin, bootstrapToken)
+        val u = client.enrollSecond(admin, "deleted@x.com", "stale screen member password")
+        val gone = u.userId
+        val goneDevice = services.repo.db.read { c -> c.queryOne("SELECT deviceId FROM devices WHERE userId=?", gone) { it.getString(1) } }!!
+        assertEquals(HttpStatusCode.OK, client.deleteAccount(u).status)
+
+        // An admin screen opened before the deletion still holds both ids.
+        assertEquals(HttpStatusCode.NotFound, client.get("/api/v1/admin/users/$gone/escrow") { authed(admin) }.status)
+        val disable = client.post("/api/v1/admin/users/$gone/disable") { authed(admin) }
+        assertEquals("no_such_user", errorOf(disable))
+        val revoke = client.post("/api/v1/admin/devices/$goneDevice/revoke") { authed(admin) }
+        assertEquals("no_such_device", errorOf(revoke))
+
+        assertEquals("no_such_user", client.auditRows(admin, "escrow_admin_read").single().meta)
+        assertEquals("no_such_user", client.auditRows(admin, "user_disable_denied").single().meta)
+        val denied = client.auditRows(admin, "device_revoke_denied").single()
+        assertNull(denied.deviceId); assertEquals("no_such_device", denied.meta)
+        assertEquals(emptyList(), services.cellsContaining(gone))
+        assertEquals(emptyList(), services.cellsContaining(goneDevice))
     }
 
     @Test

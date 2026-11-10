@@ -42,13 +42,14 @@ class AdminEscrowAuditTest : P4TestSupport() {
         assertNull(rows.single().deviceId, "same shape as the other admin rows (user_disable, recovery_apply)")
 
         // Miss: a pull for a member with no blob (or no such member) is still an ATTEMPT — the
-        // interesting event for a hijack review — so it is recorded before the 404.
+        // interesting event for a hijack review — so it is recorded before the 404. An id that names
+        // no account is not written (it may be a deleted account's, spec 03 §13): the row says so.
         val ghost = "00000000-0000-4000-8000-000000000000"
         val miss = client.get("/api/v1/admin/users/$ghost/escrow") { authed(admin) }
         assertEquals(HttpStatusCode.NotFound, miss.status)
         val after = client.auditRows(admin, "escrow_admin_read")
         assertEquals(2, after.size)
-        assertEquals(ghost, after.first().meta, "newest first — the miss carries the id that was asked for")
+        assertEquals("no_such_user", after.first().meta, "newest first — the miss is recorded, without the id")
 
         // A malformed id never reaches the audit (it is refused as a 400 before the route body).
         assertEquals(HttpStatusCode.BadRequest, client.get("/api/v1/admin/users/123/escrow") { authed(admin) }.status)

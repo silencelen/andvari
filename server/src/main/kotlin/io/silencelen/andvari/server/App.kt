@@ -1261,8 +1261,17 @@ fun Application.andvariModule(services: Services) {
             // members' blobs were pulled. Written BEFORE the lookup so a miss (a waived member,
             // an unknown id) is recorded too — the attempt is the interesting event. Meta = the
             // target userId, the same shape user_disable / recovery_apply use; the row's own
-            // userId is the ACTING admin. Own tx (repo.audit): the route holds no tx here.
-            services.repo.audit("escrow_admin_read", p.userId, null, call.clientIp(config), targetId)
+            // userId is the ACTING admin.
+            // Account deletion (spec 03 §13): meta names the target only while that account exists. An id asked for after
+            // its account was deleted (an old admin screen) must not come back into the trail the deletion scrubbed, so a
+            // miss on the account is recorded as `no_such_user`. The check and the write share one tx: a deletion either
+            // committed first (the row says no_such_user) or commits after (its audit pass swaps the id in this row's meta
+            // for the pseudonym, as in every other row).
+            val ip = call.clientIp(config)
+            services.repo.db.tx { c ->
+                val exists = c.queryOne("SELECT 1 FROM users WHERE userId=?", targetId) { 1 } != null
+                services.repo.auditOn(c, "escrow_admin_read", p.userId, null, ip, if (exists) targetId else "no_such_user")
+            }
             // 404, not 400: the id was well-formed, the row simply isn't there — the same stance
             // every other state-of-the-world miss takes (no_such_user, not_a_member). A 400 told
             // the Admin UI "you sent a bad id" for a member who is merely waived (bug-server--9).

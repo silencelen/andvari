@@ -185,12 +185,13 @@ internal object AccountDeletion {
 
         // 3. Transfer offers naming this account on vaults it does not own: cleared as a leaving target's are (spec 03
         //    §11), with the vault rev bumped so every member's stale offer banner clears. Audited as a system action — the
-        //    row is the vault owner's history, not this account's, so it must survive the audit pass below.
+        //    row is the vault owner's history, not this account's, so it must survive the audit pass below — and with no
+        //    address: the request's is the deleted account's, and this row outlives the 90 days its own rows keep one.
         val offers = c.queryAll("SELECT vaultId FROM vaults WHERE pendingOwnerId=?", userId) { it.getString(1) }
         for (vaultId in offers) {
             notify += activeMembers(c, vaultId)
             repo.clearPendingOffer(c, vaultId, bumpVaultRev = true)
-            repo.auditOn(c, "vault_transfer_cancel", null, null, ip, "$vaultId:target_deleted")
+            repo.auditOn(c, "vault_transfer_cancel", null, null, null, "$vaultId:target_deleted")
         }
         // 3b. `deletedBy` can still name the account on vaults outside the purged set: one it deleted that the janitor
         //     already purged, or one it deleted, restored (restore keeps the column) and later handed over. Nothing reads
@@ -209,6 +210,10 @@ internal object AccountDeletion {
 
         // 5. Every session and device (deleting them IS the revocation: authenticate, refresh and the WebSocket re-check
         //    all find nothing), and the idempotency journal of those devices. Sessions first: sessions.deviceId is a FK.
+        //    The device ids are captured first: step 7 pseudonymises them in the audit trail. Only the devices table says
+        //    which devices are the account's — an audit row of the account can name ANOTHER account's device (an admin's
+        //    device_revoke), and that id is not this deletion's to touch.
+        val devices = c.queryAll("SELECT deviceId FROM devices WHERE userId=?", userId) { it.getString(1) }
         c.exec("DELETE FROM mutations WHERE deviceId IN (SELECT deviceId FROM devices WHERE userId=?)", userId)
         c.exec("DELETE FROM sessions WHERE userId=? OR deviceId IN (SELECT deviceId FROM devices WHERE userId=?)", userId, userId)
         c.exec("DELETE FROM devices WHERE userId=?", userId)
@@ -242,6 +247,19 @@ internal object AccountDeletion {
         for (chunk in drop.chunked(ID_CHUNK)) c.exec("DELETE FROM audit WHERE id IN (${chunk.joinToString(",") { "?" }})", *chunk.toTypedArray())
         c.exec("DELETE FROM audit WHERE userId=?", userId) // belt: nothing is left naming it
 
+        // 7b. The account's device ids go the way of its userId: each gets a fresh random id of its own wherever a row
+        //     still names it (its kept rows, and other accounts' — an admin's device_revoke), so a kept record still
+        //     shows which events came from one device without naming a device id the account held — an id its old
+        //     clients, backups and logs share with this trail. Fresh uuid()s, the mapping kept nowhere, like the
+        //     pseudonym; device ids are minted by the server (never chosen by a client), so none of them is retired.
+        val devicePseudonyms = devices.associateWith { uuid() }
+        for (chunk in devices.chunked(ID_CHUNK)) {
+            val rows = c.queryAll("SELECT id, deviceId FROM audit WHERE deviceId IN (${chunk.joinToString(",") { "?" }})", *chunk.toTypedArray()) { rs ->
+                rs.getLong(1) to rs.getString(2)
+            }
+            for ((id, dev) in rows) c.exec("UPDATE audit SET deviceId=? WHERE id=?", devicePseudonyms.getValue(dev), id)
+        }
+
         // 8. The account row, last.
         val removed = c.exec("DELETE FROM users WHERE userId=?", userId)
         check(removed == 1) { "account row vanished mid-deletion" } // rolls the whole tx back
@@ -253,8 +271,8 @@ internal object AccountDeletion {
         val accountsLeft = c.queryOne("SELECT COUNT(*) FROM users") { it.getInt(1) } ?: 0
         if (accountsLeft == 0) c.exec("DELETE FROM invites")
 
-        // 9. The deletion's own row, under the pseudonym, ids-free.
-        repo.auditPseudonymOn(c, "account_delete", pseudonym, deviceId, ip, "vaults=${owned.size},left=${left.size}")
+        // 9. The deletion's own row, under the pseudonym and the deleting device's pseudonym, ids-free.
+        repo.auditPseudonymOn(c, "account_delete", pseudonym, devicePseudonyms[deviceId], ip, "vaults=${owned.size},left=${left.size}")
 
         // 10. Both ids are retired for good: neither the old userId nor the pseudonym may ever name a new account (register
         //     answers `user_id_taken`). Kept as a digest — no column names the deleted userId.

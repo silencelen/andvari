@@ -612,9 +612,11 @@ refused on the break-glass twin origin. Residuals accepted:
 synced; the operator's backups keep every row until they rotate out (T7), and a backup taken before the deletion links the
 pseudonymised rows back to the account by audit id; a hostile server can simply not delete (T1 — it never held more than
 ciphertext and the §5 metadata).
-(b) **Copies outside the database**: every audit line also went to the operator's log pipeline with the raw userId (never
-an email); those copies follow the operator's retention. The retained rows keep each event's IP for the 90 days — part of
-the security record the owner chose to keep.
+(b) **Copies outside the database**: every audit line also went to the operator's log pipeline with the raw userId and
+device id (never an email); those copies follow the operator's retention. The retained rows keep each event's IP for the
+90 days — part of the security record the owner chose to keep; in the database, no row kept past those 90 days records the
+IP of one of the account's requests or names one of its device ids (the deletion replaces each device id with a fresh one,
+and the transfer-cancel row and any row a racing request writes afterwards carry neither).
 (c) **Other devices**: an offline device of the deleted account keeps its offline copy until it next reaches the server
 (T3: the server then answers 401 and the client wipes). Every device other than the deleting one keeps its spec 01 §5
 self-identity record and refuses a re-registered account at the same address on that origin until the record is removed

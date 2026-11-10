@@ -255,7 +255,7 @@ class AdminP4Test : P4TestSupport() {
             "a device that never existed must not appear as a completed revocation",
         )
         val denied = client.auditRows(admin, "device_revoke_denied").single()
-        assertEquals(ghostDevice, denied.deviceId)
+        assertNull(denied.deviceId, "an id that names no device is not written (it may be a deleted account's, spec 03 §13)")
         assertEquals("no_such_device", denied.meta)
 
         // The real device still revokes cleanly (the guard is the only thing that changed).

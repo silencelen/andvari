@@ -122,7 +122,9 @@ class AdminService(private val repo: Repo, private val config: Config) {
                 (rs.getInt("isAdmin") != 0) to rs.getString("status")
             }
             if (target == null) {
-                repo.auditOn(c, "user_disable_denied", byUserId, null, null, "$userId/no_such_user")
+                // No id for a missing target (account deletion, spec 03 §13): it may be a deleted account's, which must not
+                // come back into the trail its deletion scrubbed. The attempt is the event; the id adds nothing.
+                repo.auditOn(c, "user_disable_denied", byUserId, null, null, "no_such_user")
                 return@tx "no_such_user"
             }
             // Lockout guard: refuse to disable the LAST active admin — with no active
@@ -154,9 +156,10 @@ class AdminService(private val repo: Repo, private val config: Config) {
         val owner: String? = repo.db.tx { c ->
             val found = c.queryOne("SELECT userId FROM devices WHERE deviceId=?", deviceId) { it.getString(1) }
             if (found == null) {
-                // meta carries the reason ALONE — unlike user_disable_denied, the audit row has a
-                // deviceId column of its own, so restating the id there would just duplicate it.
-                repo.auditOn(c, "device_revoke_denied", byUserId, deviceId, null, "no_such_device")
+                // The reason alone, and NO device id (account deletion, spec 03 §13): an id that names no device may be
+                // one a deleted account left behind, which must not come back into the trail its deletion scrubbed — the
+                // rule user_disable_denied and escrow_admin_read follow for a missing target.
+                repo.auditOn(c, "device_revoke_denied", byUserId, null, null, "no_such_device")
                 return@tx null
             }
             c.exec("UPDATE devices SET revokedAt=? WHERE deviceId=?", now(), deviceId)
