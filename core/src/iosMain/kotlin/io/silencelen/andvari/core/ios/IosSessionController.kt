@@ -14,6 +14,7 @@ import io.silencelen.andvari.core.client.session.InMemorySecrets
 import io.silencelen.andvari.core.client.session.IosClocks
 import io.silencelen.andvari.core.client.session.NamespaceStorage
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
+import io.silencelen.andvari.core.client.session.QuickEnroll
 import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SessionPersistence
@@ -68,6 +69,7 @@ internal class IosSeams(config: IosStorageConfig) {
     val namespaces: NamespaceStorage = object : NamespaceStorage {
         override fun openVaultCache(originKey: String, userId: String): VaultCache = InMemoryVaultCache()
         override fun deviceState(originKey: String, userId: String): DeviceState = MemoryDeviceState()
+        override fun deleteVaultCache(originKey: String, userId: String) {}
     }
     val http: HttpClients = object : HttpClients {
         override fun create(): HttpClient = HttpClient(Darwin)
@@ -78,6 +80,7 @@ internal class IosSeams(config: IosStorageConfig) {
         override fun hasStrongBiometric(): Boolean = false
         override fun isEnrolled(originKey: String, userId: String): Boolean = false
         override suspend fun recover(host: BiometricHost, originKey: String, userId: String): QuickRecover = QuickRecover.Fallback(null)
+        override suspend fun enroll(host: BiometricHost, originKey: String, userId: String, account: io.silencelen.andvari.core.client.Account): QuickEnroll = QuickEnroll.Failed(null)
         override fun wipe(originKey: String, userId: String) {}
     }
 }

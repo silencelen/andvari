@@ -2,10 +2,12 @@ package io.silencelen.andvari.app
 
 import android.content.Context
 import androidx.fragment.app.FragmentActivity
+import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.NamespaceStorage
+import io.silencelen.andvari.core.client.session.QuickEnroll
 import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.sqliteVaultCache
@@ -32,6 +34,15 @@ class AndroidQuickUnlockKeys(private val context: Context, private val noBackupD
         }
     }
 
+    override suspend fun enroll(host: BiometricHost, originKey: String, userId: String, account: Account): QuickEnroll {
+        val activity = requireNotNull((host as? ActivityHost)?.activity) { "BiometricPrompt needs the activity it shows over" }
+        return when (val r = QuickUnlock.enroll(activity, noBackupDir, originKey, userId, account)) {
+            QuickUnlock.Enroll.Ok -> QuickEnroll.Ok
+            QuickUnlock.Enroll.Cancelled -> QuickEnroll.Cancelled
+            is QuickUnlock.Enroll.Failed -> QuickEnroll.Failed(r.reason)
+        }
+    }
+
     override fun wipe(originKey: String, userId: String) = QuickUnlock.wipe(noBackupDir, originKey, userId)
 }
 
@@ -47,4 +58,6 @@ class AndroidNamespaceStorage(private val noBackupDir: File) : NamespaceStorage 
     }
 
     override fun deviceState(originKey: String, userId: String): DeviceState = PersonalDeviceState.open(noBackupDir, originKey, userId)
+
+    override fun deleteVaultCache(originKey: String, userId: String) = OfflineData.deleteVaultCache(noBackupDir, originKey, userId)
 }
