@@ -1,0 +1,256 @@
+import AndvariCore
+import SwiftUI
+
+/// The screen the controller names. `AppScreen` is a Kotlin enum, exported as a class with one static
+/// member per entry.
+enum Screen: Equatable {
+    case loading
+    case chooseServer
+    case trustGate
+    case welcome
+    case unlock
+    case recoveryReveal
+    case recoveryCapture
+    case vault
+    case upgradeRequired
+
+    init(_ screen: AppScreen) {
+        let screens: [(AppScreen, Screen)] = [
+            (AppScreen.chooseServer, .chooseServer),
+            (AppScreen.trustGate, .trustGate),
+            (AppScreen.welcome, .welcome),
+            (AppScreen.unlock, .unlock),
+            (AppScreen.recoveryReveal, .recoveryReveal),
+            (AppScreen.recoveryCapture, .recoveryCapture),
+            (AppScreen.vault, .vault),
+            (AppScreen.upgradeRequired, .upgradeRequired),
+        ]
+        self = screens.first { $0.0 == screen }?.1 ?? .loading
+    }
+}
+
+/// What an action came to. `ActionResult` is a Kotlin sealed class, so its cases arrive as subclasses.
+enum Outcome: Equatable {
+    case ok
+    case needsCode(wrongCode: Bool)
+    case mismatch
+    case otherServer(origin: String)
+    case notDone(message: String?)
+    case failed(message: String)
+    /// The calling task was cancelled before the action answered.
+    case cancelled
+
+    init(_ result: ActionResult) {
+        switch result {
+        case is ActionResult.Ok:
+            self = .ok
+        case let needsCode as ActionResult.NeedsCode:
+            self = .needsCode(wrongCode: needsCode.wrongCode)
+        case is ActionResult.Mismatch:
+            self = .mismatch
+        case let other as ActionResult.OtherServer:
+            self = .otherServer(origin: other.origin)
+        case let notDone as ActionResult.NotDone:
+            self = .notDone(message: notDone.message)
+        case let failed as ActionResult.Failed:
+            self = .failed(message: failed.message)
+        default:
+            self = .failed(message: Wording.genericFailure)
+        }
+    }
+
+    /// The sentence to show in place, if any. Every message from the core is user-facing copy.
+    var message: String? {
+        switch self {
+        case .notDone(let message): return message
+        case .failed(let message): return message
+        default: return nil
+        }
+    }
+}
+
+/// Owns the session controller and publishes its state to SwiftUI. The controller publishes on the main
+/// thread and runs its actions there, so everything here is main-actor work.
+@MainActor
+final class AppModel: ObservableObject {
+    @Published private(set) var state: AppState
+
+    private let controller: IosSessionController
+    private var endObservation: (() -> Void)?
+    private var wasInBackground = false
+
+    init() {
+        let controller = IosSessionController()
+        self.controller = controller
+        state = controller.state
+        let observation = controller.observe { [weak self] next in
+            MainActor.assumeIsolated {
+                self?.state = next
+            }
+        }
+        endObservation = { observation.close() }
+        controller.start()
+    }
+
+    var screen: Screen { Screen(state.screen) }
+
+    // MARK: - Lifecycle
+
+    /// The vault locks when the app leaves the foreground; the idle check and a quiet sync run on return.
+    func scenePhaseChanged(to phase: ScenePhase) {
+        switch phase {
+        case .background:
+            wasInBackground = true
+            controller.onBackground()
+        case .active:
+            if wasInBackground {
+                wasInBackground = false
+                controller.onForeground()
+            }
+        default:
+            break
+        }
+    }
+
+    /// The person touched or typed: the idle window starts again.
+    func userActivity() {
+        controller.userActivity()
+    }
+
+    /// Stop the controller: its work is cancelled and the vault locks.
+    func close() {
+        endObservation?()
+        endObservation = nil
+        controller.close()
+    }
+
+    // MARK: - Server
+
+    func chooseServer(_ input: String) -> ServerChoice {
+        controller.chooseServer(input: input)
+    }
+
+    func confirmTrustGate() async -> Outcome {
+        await run { try await $0.confirmTrustGate() }
+    }
+
+    func cancelTrustGate() {
+        controller.cancelTrustGate()
+    }
+
+    func changeServer() {
+        controller.changeServer()
+    }
+
+    func retryServer() async -> Outcome {
+        await run { try await $0.retryServer() }
+    }
+
+    // MARK: - Sign-in and enroll
+
+    func signIn(email: String, password: String, totp: String?) async -> Outcome {
+        await run { try await $0.signIn(email: email, password: password, totp: totp) }
+    }
+
+    func enroll(_ form: EnrollForm) async -> Outcome {
+        await run { try await $0.enroll(form: form) }
+    }
+
+    // MARK: - Recovery phrase
+
+    func recoveryPhrase() -> String? {
+        controller.recoveryPhrase()
+    }
+
+    func confirmRecoveryPhrase(_ typedBack: String) async -> Outcome {
+        await run { try await $0.confirmRecoveryPhrase(typedBack: typedBack) }
+    }
+
+    func retryRecoveryCapture() async -> Outcome {
+        await run { try await $0.retryRecoveryCapture() }
+    }
+
+    // MARK: - Unlock
+
+    func unlock(password: String) async -> Outcome {
+        await run { try await $0.unlock(password: password) }
+    }
+
+    /// The prompt's wording is the controller's.
+    func unlockWithBiometrics() async -> Outcome {
+        await run { try await $0.unlockWithBiometrics(reason: nil) }
+    }
+
+    func enableQuickUnlock() async -> Outcome {
+        await run { try await $0.enableQuickUnlock(reason: nil) }
+    }
+
+    func disableQuickUnlock() {
+        controller.disableQuickUnlock()
+    }
+
+    // MARK: - Vault
+
+    func setQuery(_ query: String) {
+        controller.setQuery(query: query)
+    }
+
+    func itemDetail(_ itemId: String) -> ItemDetail? {
+        controller.itemDetail(itemId: itemId)
+    }
+
+    /// One secret, for an explicit reveal or copy. Callers keep it only as long as it is on screen.
+    func revealSecret(_ itemId: String, _ field: SecretField) -> String? {
+        controller.revealSecret(itemId: itemId, field: field)
+    }
+
+    func oneTimeCode(_ itemId: String) -> OneTimeCode? {
+        controller.oneTimeCode(itemId: itemId)
+    }
+
+    func saveLogin(itemId: String?, input: LoginInput) async -> Outcome {
+        await run { try await $0.saveLogin(itemId: itemId, input: input) }
+    }
+
+    func deleteItem(_ itemId: String) async -> Outcome {
+        await run { try await $0.deleteItem(itemId: itemId) }
+    }
+
+    func refresh() async -> Outcome {
+        await run { try await $0.refresh() }
+    }
+
+    func generatePassword(_ settings: GeneratorSettings) -> String {
+        controller.generatePassword(settings: settings)
+    }
+
+    // MARK: - Session
+
+    func lock() {
+        controller.lock()
+    }
+
+    func signOut() async -> Outcome {
+        await run { try await $0.signOut() }
+    }
+
+    func dismissError() {
+        controller.dismissError()
+    }
+
+    func dismissNotice() {
+        controller.dismissNotice()
+    }
+
+    /// Runs one suspend action. The controller throws only a cancellation; every other outcome is a result.
+    private func run(_ action: (IosSessionController) async throws -> ActionResult?) async -> Outcome {
+        do {
+            guard let result = try await action(controller) else {
+                return .failed(message: Wording.genericFailure)
+            }
+            return Outcome(result)
+        } catch {
+            return .cancelled
+        }
+    }
+}
