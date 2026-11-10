@@ -18,12 +18,12 @@ import {
   deletionSummary,
   deletionTrackEvent,
   emailConfirmed,
-  GONE_AFTER_UNKNOWN,
   initialFlow,
   NOT_DELETED_AFTER_CHECK,
   OUTCOME_UNKNOWN,
   runAccountDeletion,
   SESSION_ENDED,
+  SESSION_ENDED_OUTCOME_UNKNOWN,
 } from "./account-delete";
 import { DeleteAccountBody, deleteFormReady, type DeleteAccountView } from "./DeleteAccount";
 import { UNREACHABLE } from "./errors";
@@ -255,22 +255,20 @@ describe("TOTP enrolled after the preview — the server asks for a code the car
   });
 });
 
-describe("the flow after an answer — unknown is never \"not deleted\", and a 401 after it offers to forget", () => {
+describe("the flow after an answer — unknown is never \"not deleted\", and a 401 never says the account is gone", () => {
   const start = initialFlow();
 
-  it("unknown is sticky: a 401 after it means the account is most likely gone (offer to forget)", () => {
+  it("unknown is sticky, and a 401 after it says the account may still exist — nothing is offered to forget", () => {
     const unknown = afterOutcome(start, { kind: "unknown" });
     expect(unknown.unknown).toBe(true);
     expect(unknown.err).toBe("");
-    const gone = afterOutcome(unknown, { kind: "session_gone" });
-    expect(gone.gone).toBe(true);
-    expect(gone.err, "no 'nothing was deleted' after an unknown outcome").toBe("");
+    const ended = afterOutcome(unknown, { kind: "session_gone" });
+    expect(ended.err, "no 'nothing was deleted' after an unknown outcome, and no 'deleted' either").toBe(SESSION_ENDED_OUTCOME_UNKNOWN);
+    expect(SESSION_ENDED_OUTCOME_UNKNOWN).toContain("can't tell whether your account was deleted");
   });
 
   it("a 401 with no unknown before it is the ordinary 'session ended' (refused before anything was deleted)", () => {
-    const s = afterOutcome(start, { kind: "session_gone" });
-    expect(s.gone).toBe(false);
-    expect(s.err).toBe(SESSION_ENDED);
+    expect(afterOutcome(start, { kind: "session_gone" }).err).toBe(SESSION_ENDED);
   });
 
   it("a definitive answer clears unknown: a refusal with blockers, or an error sentence", () => {
@@ -279,11 +277,11 @@ describe("the flow after an answer — unknown is never \"not deleted\", and a 4
     expect(afterOutcome(unknown, { kind: "error", message: "That master password isn't right.", code: "reauth_failed" })).toMatchObject({ unknown: false, err: "That master password isn't right." });
   });
 
-  it("the check settles an unknown outcome either way", () => {
+  it("the check: still here settles it; a 401 says only that the session ended (a revocation's or the deletion's)", () => {
     const unknown = afterOutcome(start, { kind: "unknown" });
     const preview = { blockers: [], deletedVaults: [], leftVaults: [], totpRequired: false };
-    expect(afterCheck(unknown, { kind: "still_here", preview })).toMatchObject({ unknown: false, gone: false, info: NOT_DELETED_AFTER_CHECK });
-    expect(afterCheck(unknown, { kind: "gone" })).toMatchObject({ gone: true });
+    expect(afterCheck(unknown, { kind: "still_here", preview })).toMatchObject({ unknown: false, info: NOT_DELETED_AFTER_CHECK });
+    expect(afterCheck(unknown, { kind: "session_ended" })).toMatchObject({ unknown: true, err: SESSION_ENDED_OUTCOME_UNKNOWN });
     expect(afterCheck(unknown, { kind: "unknown" })).toMatchObject({ unknown: true, err: UNREACHABLE });
   });
 
@@ -297,10 +295,10 @@ describe("the flow after an answer — unknown is never \"not deleted\", and a 4
 });
 
 describe("checkDeletion — the preview answers 200 only while the account exists", () => {
-  it("200 → still here; 401 → gone; anything else → still unknown", async () => {
+  it("200 → still here; 401 → the session ended (NOT 'deleted'); anything else → still unknown", async () => {
     const preview = { blockers: [], deletedVaults: [], leftVaults: [], totpRequired: true };
     expect(await checkDeletion({ accountDeletePreview: async () => preview })).toEqual({ kind: "still_here", preview });
-    expect(await checkDeletion({ accountDeletePreview: async () => { throw new ApiError(401, "invalid_credentials", "m"); } })).toEqual({ kind: "gone" });
+    expect(await checkDeletion({ accountDeletePreview: async () => { throw new ApiError(401, "invalid_credentials", "m"); } })).toEqual({ kind: "session_ended" });
     expect(await checkDeletion({ accountDeletePreview: async () => { throw new TypeError("Failed to fetch"); } })).toEqual({ kind: "unknown" });
     expect(await checkDeletion({ accountDeletePreview: async () => { throw new ApiError(502, "http_502", "m"); } })).toEqual({ kind: "unknown" });
   });
@@ -333,7 +331,6 @@ describe("DeleteAccountBody — static render", () => {
     err: "",
     info: "",
     unknownOutcome: false,
-    gone: false,
     checking: false,
     ...over,
   });
@@ -342,7 +339,7 @@ describe("DeleteAccountBody — static render", () => {
     renderToStaticMarkup(
       createElement(DeleteAccountBody, {
         view: v, onOpen: noop, onCancel: noop, onTypedEmail: noop, onPassword: noop, onTotp: noop, onSubmit: noop, onLink: noop,
-        onCheck: noop, onForget: noop, onBackup: withBackup ? noop : undefined,
+        onCheck: noop, onBackup: withBackup ? noop : undefined,
       }),
     );
 
@@ -397,12 +394,10 @@ describe("DeleteAccountBody — static render", () => {
     expect(OUTCOME_UNKNOWN).toContain("reload andvari and sign in");
   });
 
-  it("once the account no longer signs in after an unknown outcome: the forget offer, and no form", () => {
-    const html = render(view({ unknownOutcome: true, gone: true }));
-    expect(html).toContain(GONE_AFTER_UNKNOWN.replace(/'/g, "&#x27;"));
-    expect(html).toContain("Forget this account on this browser");
-    expect(html).not.toContain('type="password"');
-    expect(html).not.toContain("Delete my account permanently");
+  it("the card itself never offers to forget the account — a 401 after an unknown outcome is not proof it is gone", () => {
+    for (const v of [view({ unknownOutcome: true }), view({ unknownOutcome: true, err: SESSION_ENDED_OUTCOME_UNKNOWN })]) {
+      expect(render(v)).not.toContain("Forget this account");
+    }
   });
 
   it("the check's 'still here' is said as information", () => {
