@@ -13,6 +13,8 @@ import java.io.File
 class AndvariApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Before anything reads the boot identity (VaultSession's clocks have no Context of their own).
+        AndroidClocks.install(this)
         // H09: the lock-on-background overlay exemption needs to see EVERY activity start/stop
         // in the process, so it registers here, before any Activity exists.
         InProcessOverlays.install(this)

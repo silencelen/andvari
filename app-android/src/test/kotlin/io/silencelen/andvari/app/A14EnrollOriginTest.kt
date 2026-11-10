@@ -69,36 +69,92 @@ class A14EnrollOriginTest {
         assertTrue(notice.contains("enabled = !busy"), "the Cancel button is disabled while an op runs")
     }
 
+    /** Step 7: sign-in and enroll are core's ([SessionEntry]); these pins moved there with the code. */
+    private val entry by lazy { sourceFile("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/SessionEntry.kt").readText() }
+
     @Test
     fun theSignInSavesUnderItsOwnOriginOnlyWhileBound() {
         // A14 review N4: the sign-in saved `Session(store.baseUrl, …)` after its awaits (prelogin, two Argon2id passes,
-        // login). It now captures the origin with the client, as enrollOp does, and aborts with a revoke if it moved.
-        val op = body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "syncNow(engine!!)")
+        // login). It now captures the origin with the client, as the enroll does, and aborts with a revoke if it moved.
+        val op = body(entry, "suspend fun signIn(", "firstSyncAfterBind {")
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
-        assertTrue(op.contains("val a = newApi(origin = opOrigin)"))
-        assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey())))"))
-        assertTrue(op.contains("store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"))
-        assertFalse(op.contains("store.save(Session(store.baseUrl,"), "never the live origin")
-        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf("store.save(Session(opOrigin"))
-        assertTrue(abort.contains("a.logout()") && abort.contains("return@op") && abort.contains("signInOriginMoved(opOrigin)"),
+        assertTrue(op.contains("val client = clients.forNewSession(opOrigin)"))
+        val save = "store.save(StoredSession(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"
+        assertTrue(op.contains("$save\n            client.owner.userId = s.userId"), "the client writes tokens only into the session it committed")
+        assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag)))"))
+        assertFalse(op.contains("store.save(StoredSession(store.baseUrl"), "never the live origin")
+        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf(save))
+        assertTrue(abort.contains("a.logout()") && abort.contains("return SignInResult.OriginMoved(opOrigin)"),
             "an unbound commit revokes at the issuer, saves nothing and says so")
+        assertTrue(body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "\n    }\n").contains("is SignInResult.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(outcome.origin)); return@op }"))
         assertTrue(signInOriginMoved("https://a.example").contains("https://a.example"))
     }
 
     @Test
     fun theEnrollSavesUnderItsOwnOriginOnlyWhileBound() {
-        val op = body(vm, "private fun enrollOp(", "syncNow(engine!!)")
+        val op = body(entry, "suspend fun enroll(", "firstSyncAfterBind {")
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
-        assertTrue(op.contains("if (!enrollStillBound(opOrigin, opPending, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey())))"))
-        assertTrue(op.contains("store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"))
-        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf("store.save(Session(opOrigin"))
-        assertTrue(abort.contains("a.logout()") && abort.contains("return@op"), "an unbound commit revokes at the issuer and saves nothing")
+        assertTrue(op.contains("if (!enrollStillBound(opOrigin, opPending, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag)))"))
+        val save = "store.save(StoredSession(opOrigin, s.userId, r.email, s.accessToken, s.refreshToken))"
+        assertTrue(op.contains(save))
+        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf(save))
+        assertTrue(abort.contains("a.logout()") && abort.contains("return EnrollOutcome.OriginMoved(opOrigin)"), "an unbound commit revokes at the issuer and saves nothing")
+        assertTrue(body(vm, "private fun enrollOp(", "\n    }\n").contains("is EnrollOutcome.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(outcome.origin)); return@op }"))
+    }
+
+    private val sessionStore by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/app/Session.kt").readText() }
+
+    /** F8: the gate above is only as honest as the origin it is handed — the session has to own one. */
+    @Test
+    fun theStoredSessionOwnsItsOrigin() {
+        val load = body(sessionStore, "override fun load(): Session?", "\n    }\n")
+        assertTrue(load.contains("prefs.getString(SESSION_ORIGIN, null) ?: return null"), "a session is only ever handed out with its own origin")
+        assertTrue(load.contains("baseUrl = origin"))
+        assertFalse(load.contains("baseUrl = baseUrl"), "the global key is the origin the app dials, never the session's")
+        val save = body(sessionStore, "override fun save(s: Session)", "\n    }\n")
+        assertTrue(save.contains(".putString(SESSION_ORIGIN, s.baseUrl)"), "saved in one transaction with the tokens it belongs to")
+        for (fn in listOf("override fun clear() {", "override fun clearSessionTokens() {")) {
+            assertTrue(body(sessionStore, fn, "\n    }\n").contains(".remove(SESSION_ORIGIN)"), "$fn drops the origin with the tokens")
+        }
+    }
+
+    /** A session saved before this build gets its origin once, after the default-URL rewrite. */
+    @Test
+    fun legacySessionsAreBackfilledAfterTheDefaultUrlMigration() {
+        val init = body(sessionStore, "migrateDefaultOnce(context.noBackupFilesDir)", "runCatching { bindLegacySelfIdentity() }")
+        assertTrue(init.indexOf("adoptNamespacesOnce(context.noBackupFilesDir)") < init.indexOf("backfillSessionOrigin()"))
+        val backfill = body(sessionStore, "private fun backfillSessionOrigin() {", "\n    }\n")
+        assertTrue(backfill.contains("sessionOriginForBackfill(baseUrl, pendingServer)"), "the pure rule decides")
+        assertTrue(backfill.contains("clearSessionTokens()"), "and an unattributable session is dropped, not guessed")
+    }
+
+    /**
+     * §4.1 rule 1, and the crash window F8 named: a dropped session is gone before the origin moves. The
+     * move is core's now (ServerSwitch.moveTo; behaviour pinned by ServerSwitchTest), and every origin
+     * change on this side goes through it.
+     */
+    @Test
+    fun aRealSwitchDropsTheTokensBeforeTheOriginMoves() {
+        val core = sourceFile("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/ServerSwitch.kt").readText()
+        val move = body(core, "fun moveTo(newOrigin: String): Boolean {", "\n    }\n")
+        val drop = move.indexOf("store.clearSessionTokens()")
+        assertTrue(drop > -1 && move.indexOf("store.moveOrigin(newOrigin)") > drop, "tokens first, origin second")
+        assertTrue(body(vm, "fun setBaseUrl(url: String) {", "\n    }\n").contains("serverSwitch.moveTo("), "the app moves its origin only through it")
+        assertTrue(!vm.contains("store.baseUrl = "), "and never writes the origin itself")
     }
 
     @Test
     fun storedTokensNeverGoToAnotherOrigin() {
-        assertTrue(Regex("""if \(!sessionBelongsTo\(session\.baseUrl, store\.baseUrl\)\)""").findAll(vm).count() >= 2, "password and biometric unlock both check")
+        // Step 6: the check lives in core's one ladder, once per rung (password and quick unlock), before anything is sent.
+        val ladder = sourceFile("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/UnlockLadder.kt").readText()
+        val check = "if (dialed == null || !sessionBelongsTo(stored.baseUrl, dialed)) return UnlockResult.Elsewhere(stored.baseUrl)"
+        assertTrue(Regex(Regex.escape(check)).findAll(ladder).count() == 2, "password and biometric unlock both check")
+        val quick = body(ladder, "suspend fun unlockWithQuick(", "\n    }\n")
+        assertTrue(quick.indexOf(check) in 0 until quick.indexOf("quickKeys.recover("), "before the prompt, too")
+        assertTrue(vm.contains("ladder.unlockWithPassword(session, password,") && vm.contains("ladder.unlockWithQuick(session, ActivityHost(activity)"), "the main app's unlocks climb it")
+        assertTrue(vm.contains("is UnlockResult.Elsewhere -> ") && vm.contains("error = sessionElsewhere(climbed.sessionOrigin)"), "and say where the session belongs")
         assertTrue(vm.contains("val a = newApi(session.tokens(), origin = session.baseUrl)"), "locked sign-out revokes at the session's own origin")
-        assertTrue(autofill.contains("if (!sessionBelongsTo(session.baseUrl, baseUrl))"), "the autofill unlock checks too")
+        assertTrue(autofill.contains(".unlockWithPassword(session, password, overlay)") && autofill.contains(".unlockWithQuick(session, ActivityHost(activity)"), "the autofill unlock checks too")
+        assertTrue(autofill.contains("is UnlockResult.Elsewhere -> throw IllegalStateException(sessionElsewhere(r.sessionOrigin))"))
     }
 }

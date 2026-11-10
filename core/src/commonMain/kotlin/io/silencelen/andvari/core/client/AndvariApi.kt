@@ -2,7 +2,9 @@ package io.silencelen.andvari.core.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -74,8 +76,11 @@ import io.silencelen.andvari.core.model.TotpCodeRequest
 import io.silencelen.andvari.core.model.TotpSetupRequest
 import io.silencelen.andvari.core.model.TotpSetupResponse
 import io.silencelen.andvari.core.model.TotpStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import io.silencelen.andvari.core.model.WireIds
 import kotlinx.serialization.json.Json
 
@@ -92,6 +97,9 @@ class UpgradeRequiredException(code: String, message: String) : ApiException(426
 private const val ATTACHMENT_SIZE_MISMATCH = "attachment does not match its declared size"
 
 data class Tokens(val accessToken: String, val refreshToken: String)
+
+/** The whole-call bound on one token refresh: a few hundred bytes of JSON. */
+const val REFRESH_TIMEOUT_MS = 30_000L
 
 /**
  * THE release version — the single Kotlin source of truth. SERVER_VERSION and
@@ -118,6 +126,16 @@ class AndvariApi(
     private var tokens: Tokens? = null,
     private val onTokens: (Tokens?) -> Unit = {},
     platform: String = "android",
+    /**
+     * Called when the refresh endpoint refuses this client's session with a definitive verdict
+     * (a 401), BEFORE the token drop — [onTokens] then erases the stored session, and the purge
+     * (spec 02 §8) needs to know whose session it was. Not called for a 403 (the break-glass
+     * origin refusing refresh by design), a transient refresh failure or an ordinary [logout].
+     * Must not throw; a purge problem cannot be allowed to keep a dead token pair alive.
+     */
+    private val onSessionRejected: (AndvariApi) -> Unit = {},
+    /** The bound on one refresh ([REFRESH_TIMEOUT_MS]); injectable for tests only. */
+    private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
 ) {
     private val clientHeader = "$platform/$ANDVARI_CLIENT_VERSION"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -142,6 +160,7 @@ class AndvariApi(
 
     private val http = engine.config {
         install(ContentNegotiation) { json(this@AndvariApi.json) }
+        install(HttpTimeout) // no default timeouts: only the refresh sets one, per request
     }
 
     fun currentTokens(): Tokens? = tokens
@@ -201,20 +220,35 @@ class AndvariApi(
             // Another coroutine already rotated while we waited on the lock — the caller
             // just retries with the fresh pair; a second POST would double-spend.
             if (current !== observed) return@withLock true
-            val resp = http.post(baseUrl + "/api/v1/auth/refresh") {
-                header("X-Andvari-Client", clientHeader)
-                contentType(ContentType.Application.Json)
-                setBody(RefreshRequest(current.refreshToken))
+            // The server rotates the pair as it answers and treats the old refresh token as spent;
+            // presenting it again revokes the whole device (refresh_reuse). So once this POST is
+            // sent, its answer is stored whatever happens to the caller: a cancelled op (its bound
+            // firing, its screen going away) would otherwise drop the only copy of the new pair and
+            // leave the spent one to be replayed. The request's own timeout bounds the block, and it
+            // runs off the caller's thread because a platform may store the pair synchronously.
+            withContext(NonCancellable + Dispatchers.Default) {
+                val resp = http.post(baseUrl + "/api/v1/auth/refresh") {
+                    header("X-Andvari-Client", clientHeader)
+                    contentType(ContentType.Application.Json)
+                    setBody(RefreshRequest(current.refreshToken))
+                    timeout { requestTimeoutMillis = refreshTimeoutMs }
+                }
+                if (!resp.status.isSuccess()) {
+                    // Only a definitive auth verdict kills the pair; a transient 502/503/429
+                    // from a proxy must not sign the device out — keep the tokens, fail this try.
+                    if (resp.status.value == 401 || resp.status.value == 403) {
+                        // Only a 401 says the session is dead. A 403 is the break-glass origin refusing
+                        // refresh by design (spec 03 §8): this pair is finished here and the user signs
+                        // in again, but nothing about the device was revoked, so its local data stays.
+                        if (resp.status.value == 401) runCatching { onSessionRejected(this@AndvariApi) }
+                        setTokens(null)
+                    }
+                    return@withContext false
+                }
+                val pair = resp.body<TokenPair>()
+                setTokens(Tokens(pair.accessToken, pair.refreshToken))
+                true
             }
-            if (!resp.status.isSuccess()) {
-                // Only a definitive auth verdict kills the pair; a transient 502/503/429
-                // from a proxy must not sign the device out — keep the tokens, fail this try.
-                if (resp.status.value == 401 || resp.status.value == 403) setTokens(null)
-                return@withLock false
-            }
-            val pair = resp.body<TokenPair>()
-            setTokens(Tokens(pair.accessToken, pair.refreshToken))
-            true
         }
     }
 
@@ -383,11 +417,12 @@ class AndvariApi(
     suspend fun login(req: LoginRequest): SessionResponse = session("login", call("POST", "/api/v1/auth/login", req, auth = false))
 
     /** The two fences a served session passes BEFORE it is installed: the KDF floor (H1) and the id grammar (A10). */
-    private fun session(endpoint: String, s: SessionResponse): SessionResponse {
+    private suspend fun session(endpoint: String, s: SessionResponse): SessionResponse {
         KdfUpgrade.requireServerKdfParams(s.accountKeys.kdfParams) // H1: fence BEFORE installing the session
         WireIds.refusedSession(s)?.let { refuseWire(endpoint, it) }
         val keys = WireIds.sanitizeAccountKeys(s.accountKeys).reported(endpoint)
-        setTokens(Tokens(s.accessToken, s.refreshToken))
+        // As in tryRefresh: a platform may store the pair synchronously, so never on the caller's thread.
+        withContext(NonCancellable + Dispatchers.Default) { setTokens(Tokens(s.accessToken, s.refreshToken)) }
         return if (keys === s.accountKeys) s else s.copy(accountKeys = keys)
     }
 

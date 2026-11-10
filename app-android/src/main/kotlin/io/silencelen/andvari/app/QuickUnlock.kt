@@ -9,6 +9,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import io.silencelen.andvari.core.client.Account
+import io.silencelen.andvari.core.client.AccountWipedException
 import io.silencelen.andvari.core.client.session.QuickUnlockRules
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.KdfReKeyCore
@@ -82,7 +83,9 @@ object QuickUnlock {
 
     /** Result of a recover attempt; the caller maps each to the design §5 fallback UX. */
     sealed interface Recover {
-        /** UVK recovered — hand straight to `Account.unlockWithUvk`; the caller zeroes it after. */
+        /** UVK recovered — hand straight to `Account.unlockWithUvk`, which keeps it (its `wipe` zeroes it
+         *  later). On every path where no account took it — another unlock won, the server refused, the key
+         *  did not open the account — the receiver zeroes it (core `UnlockLadder.unlockWithQuick`). */
         class Ok(val uvk: ByteArray) : Recover
         /** User cancelled / pressed "Use master password" / temporary lockout — blob KEPT (A8). */
         data class Fallback(val reason: String?) : Recover
@@ -124,29 +127,8 @@ object QuickUnlock {
     /** True when a well-formed blob of a known version exists for this (origin, user). */
     fun isEnrolled(dir: File, originKey: String, userId: String): Boolean = readBlob(dir, originKey, userId) != null
 
-    /**
-     * A1/A2 freshness: within 30 days of the last REAL full-password unlock, evaluated against a
-     * monotonic high-water clock so a wall-clock rollback cannot re-open the window. Reads (and
-     * advances) the persisted high-water mark as a side effect.
-     */
-    fun isFresh(store: SessionStore, userId: String): Boolean {
-        val now = System.currentTimeMillis()
-        val elapsedNow = android.os.SystemClock.elapsedRealtime()
-        val highWater = store.bumpHighWater(now) // monotonically non-decreasing
-        return QuickUnlockRules.isFreshPure(
-            QuickUnlockRules.FreshnessInputs(
-                nowMs = now,
-                elapsedNowMs = elapsedNow,
-                stampWallMs = store.lastFullPasswordUnlockAt(userId),
-                stampElapsedMs = store.stampElapsedMs(userId),
-                stampBootRefMs = store.stampBootRefMs(userId),
-                highWaterWallMs = highWater,
-                serverFloorMs = store.serverTimeFloorMs,
-                bootIdNow = store.bootCountNow().takeIf { it >= 0 }?.toString(),
-                stampBootId = store.stampBootCount(userId).takeIf { it >= 0 }?.toString(),
-            ),
-        )
-    }
+    // A1/A2 freshness (30 days from the last REAL full-password unlock, against the monotonic high-water
+    // clock) is core's now: `UnlockLadder.quickStatus`, the one view the UI and the unlock share (gap 6).
 
 
     // ---- wipe ----
@@ -206,8 +188,14 @@ object QuickUnlock {
         return when (outcome) {
             is Auth.Ok -> {
                 // A UVK copy egresses core ONLY here (spec 01 §8 enrollment accessor) — sealed
-                // straight into the hardware cipher and zeroed immediately, whatever happens.
-                val uvk = account.uvkCopyForPlatformWrap()
+                // straight into the hardware cipher and zeroed immediately, whatever happens. The vault
+                // may have locked while the prompt was up, and a lock wipes the account's keys: then
+                // there is nothing to wrap, and the orphan key goes.
+                val uvk = try {
+                    account.uvkCopyForPlatformWrap()
+                } catch (e: AccountWipedException) {
+                    wipe(dir, originKey, userId); return Enroll.Failed(null)
+                }
                 try {
                     outcome.cipher.updateAAD(aad(userId))
                     val ct = outcome.cipher.doFinal(uvk)
@@ -433,18 +421,11 @@ object QuickUnlock {
 }
 
 /**
- * A3: durable-offline-data purge, reachable from BOTH the main app and the autofill-only
- * process. Two shapes: a policy-flip purge (the org forbade the durable cache — the session is
- * still valid) and a revocation purge (a definitive 401 — the session is dead). Both destroy the
- * quick-unlock blob (spec 01 §8.1 clearing events), so this is the one place that stays in step
- * with [QuickUnlock.wipe].
- *
- * §4.2 (design 2026-07-15, breaker B2-3 — security-load-bearing): every purge takes an
- * EXPLICIT [originKey] and destroys ONLY that (origin, userId) namespace. Callers pass the key
- * of the origin whose verdict they are enforcing — for a policy probe, the origin that was
- * PROBED (captured beside the probe, before any await). Before this, these purges were
- * origin-blind and global: merely probing a server whose policy said `offlineCacheAllowed=false`
- * destroyed the home server's offline data and account keys.
+ * A3: the vault cache's file-level half, reachable from BOTH the main app and the autofill-only
+ * process. The purges that decide what to delete and when — a policy flip keeps the session, a
+ * definitive 401 ends it, both destroy the quick-unlock blob (spec 01 §8.1) — are core's
+ * [io.silencelen.andvari.core.client.session.PolicyCoordinator], which this app calls through
+ * [AndroidOfflineArtifacts]. Every purge is scoped to one (origin, userId) namespace (§4.2).
  */
 object OfflineData {
     /** Delete the durable vault cache DB (+ its wal/shm) for one (origin, user). */
@@ -453,28 +434,13 @@ object OfflineData {
         val safeUid = OriginNamespace.pathSafe(userId)
         for (suffix in listOf("", "-wal", "-shm")) File(dir, "vault-$safeUid.db$suffix").delete()
     }
+}
 
-    /** `offlineCacheAllowed=false` DECLARED BY [originKey]'s server: drop that namespace's cache
-     *  DB, cached accountKeys and quick-unlock secret — but KEEP the session (tokens still
-     *  valid; this is not a revocation). Other origins' namespaces are untouched (§4.2). */
-    fun purgeCacheForbidden(noBackupDir: File, store: SessionStore, originKey: String, userId: String) {
-        deleteVaultCache(noBackupDir, originKey, userId)
-        store.clearAccountKeys(originKey)
-        QuickUnlock.wipe(noBackupDir, originKey, userId)
-        store.clearFullPasswordStamp(originKey, userId)
-    }
+/** The platform half of core's purges: this namespace's SQLite files and Keystore-wrapped blob. */
+class AndroidOfflineArtifacts(private val noBackupDir: File) : io.silencelen.andvari.core.client.session.OfflineArtifacts {
+    override fun deleteVaultCache(originKey: String, userId: String) = OfflineData.deleteVaultCache(noBackupDir, originKey, userId)
 
-    /** Definitive server rejection (device revoked) FROM [originKey]'s server: everything
-     *  [purgeCacheForbidden] does, plus `store.clear()` — the persisted session/tokens/F58 flag
-     *  are dead. Callers always pass the CURRENT origin's key (the 401 came from the session's
-     *  own server), which is also the namespace `store.clear()` scopes its removals to. */
-    fun purgeRevoked(noBackupDir: File, store: SessionStore, originKey: String, userId: String) {
-        deleteVaultCache(noBackupDir, originKey, userId)
-        QuickUnlock.wipe(noBackupDir, originKey, userId)
-        store.clearFullPasswordStamp(originKey, userId)
-        store.clearAccountKeys(originKey) // store.clear() scopes to the CURRENT origin — be explicit for this one
-        store.clear() // session identity/tokens/F58 (global) + current-origin accountKeys/offer flag
-    }
+    override fun wipeQuickUnlock(originKey: String, userId: String) = QuickUnlock.wipe(noBackupDir, originKey, userId)
 }
 
 /**
