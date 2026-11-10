@@ -15,6 +15,7 @@ import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.crypto.Bytes
 import kotlinx.cinterop.BetaInteropApi
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ObjCObjectVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.convert
@@ -33,12 +34,14 @@ import platform.CoreFoundation.kCFAllocatorDefault
 import platform.CoreFoundation.kCFBooleanTrue
 import platform.Foundation.CFBridgingRelease
 import platform.Foundation.NSData
+import platform.Foundation.NSError
 import platform.Foundation.NSMakeRange
 import platform.Foundation.NSMutableData
 import platform.Foundation.NSNumber
 import platform.Foundation.appendBytes
 import platform.Foundation.numberWithInt
 import platform.Foundation.resetBytesInRange
+import platform.LocalAuthentication.LABiometryTypeTouchID
 import platform.LocalAuthentication.LAContext
 import platform.LocalAuthentication.LAPolicyDeviceOwnerAuthenticationWithBiometrics
 import platform.Security.SecAccessControlCreateWithFlags
@@ -89,8 +92,26 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
 
     private fun reasonOf(host: BiometricHost, fallback: String) = (host as? IosBiometricHost)?.reason?.takeIf { it.isNotBlank() } ?: fallback
 
-    override fun hasStrongBiometric(): Boolean =
-        runCatching { LAContext().canEvaluatePolicy(LAPolicyDeviceOwnerAuthenticationWithBiometrics, error = null) }.getOrDefault(false)
+    override fun hasStrongBiometric(): Boolean = biometricRefusal() == null
+
+    override fun biometricProblem(): String? = biometricRefusal()?.let { (code, name) -> LocalAuthenticationCodes.unavailable(code, name) }
+
+    /**
+     * Null when a fresh context can evaluate the biometric policy; otherwise its error code (null when it gave none) and the
+     * name of the biometric the device has. The code is what tells a person who has not set one up from an app that was
+     * refused it in Settings.
+     */
+    private fun biometricRefusal(): Pair<Long?, String>? = runCatching {
+        memScoped {
+            val context = LAContext()
+            val error = alloc<ObjCObjectVar<NSError?>>()
+            if (context.canEvaluatePolicy(LAPolicyDeviceOwnerAuthenticationWithBiometrics, error.ptr)) {
+                null
+            } else {
+                Pair(error.value?.code, if (context.biometryType == LABiometryTypeTouchID) "Touch ID" else "Face ID")
+            }
+        }
+    }.getOrElse { Pair(null, "Face ID") }
 
     override fun isEnrolled(originKey: String, userId: String): Boolean = blobs.read(blobName(originKey, userId)) != null
 

@@ -2,6 +2,7 @@ package io.silencelen.andvari.core.ios
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.darwin.Darwin
+import io.silencelen.andvari.core.app.ServerShare
 import io.silencelen.andvari.core.app.SessionController
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.HttpClients
@@ -13,6 +14,12 @@ import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.httpsOnly
 import kotlinx.coroutines.Dispatchers
 import platform.UIKit.UIDevice
+
+/** The App Group the app shares with its Safari and AutoFill extensions. */
+const val IOS_APP_GROUP: String = "group.com.silencelen.andvari"
+
+/** The key in the shared suite that holds the app's server origin. SafariWebExtensionHandler.swift reads the same key. */
+const val IOS_APP_SERVER_KEY: String = "appServer"
 
 /**
  * Where the iOS app keeps its state (design 2026-11-09). One object, so the locations can move to an App
@@ -26,9 +33,14 @@ class IosStorageConfig(
     val keychainService: String,
     /** The Keychain access group; null for the app's default group. */
     val keychainAccessGroup: String?,
+    /**
+     * The App Group suite shared with the extensions; null shares nothing. Only the server origin is written there
+     * ([IOS_APP_SERVER_KEY]), for the Safari extension to adopt.
+     */
+    val sharedSuite: String?,
 ) {
-    /** The app's own defaults and Keychain group. */
-    constructor() : this(null, "io.silencelen.andvari", null)
+    /** The app's own defaults and Keychain group, and the server origin shared through [IOS_APP_GROUP]. */
+    constructor() : this(null, "io.silencelen.andvari", null, IOS_APP_GROUP)
 }
 
 /** What the iOS biometric prompt shows: [reason], or the controller's default when null. */
@@ -51,6 +63,7 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     Dispatchers.Main,
     { reason -> IosBiometricHost(reason) },
     1_000L,
+    seams.serverShare,
 ) {
     constructor(config: IosStorageConfig) : this(IosSeams(config))
 
@@ -67,6 +80,18 @@ internal class IosSeams(config: IosStorageConfig) {
     val namespaces: NamespaceStorage = IosNamespaceStorage()
     val http: HttpClients = IosHttpClients
     val quickKeys: QuickUnlockKeys = IosQuickUnlockKeys(KeychainSecrets("${config.keychainService}.quickunlock", config.keychainAccessGroup), config.keychainAccessGroup)
+    val serverShare: ServerShare = config.sharedSuite?.let(::AppGroupServerShare) ?: ServerShare {}
+}
+
+/**
+ * The app's server origin in the App Group [suite], where the Safari extension's native handler reads it. The origin
+ * is the Trust-Gate-confirmed one the app dials; null removes it, and the extension then asks the person to choose a
+ * server in the app.
+ */
+internal class AppGroupServerShare(suite: String) : ServerShare {
+    private val prefs = UserDefaultsPrefs(suite)
+
+    override fun publish(origin: String?) = prefs.putString(IOS_APP_SERVER_KEY, origin)
 }
 
 /** The Darwin engine, https only (loopback excepted), tagged "ios" for the server's version pins (spec 03 §1). */

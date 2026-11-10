@@ -22,7 +22,9 @@ import io.silencelen.andvari.core.client.session.FakeNamespaces
 import io.silencelen.andvari.core.client.session.FakeQuickKeys
 import io.silencelen.andvari.core.client.session.FakeSessionPersistence
 import io.silencelen.andvari.core.client.session.HttpClients
+import io.silencelen.andvari.core.client.session.QuickGate
 import io.silencelen.andvari.core.client.session.QuickRecover
+import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.StoredSession
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
@@ -33,6 +35,7 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.WireItem
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -52,8 +55,9 @@ import kotlin.test.assertTrue
  * The controller a native UI drives, against in-memory seams and a mock server, on one thread (the test's own
  * event loop stands in for the main thread). It composes flows that have their own tests; these pin what the
  * controller itself decides: the screen, the rules Android's view model follows, and that nothing throws.
+ * The iOS tests run it again over the persistence the app uses ([newStore]).
  */
-class SessionControllerTest {
+open class SessionControllerTest {
     private companion object {
         val crypto = createCryptoProvider()
         const val PASSWORD = "correct horse battery staple 42!"
@@ -91,16 +95,20 @@ class SessionControllerTest {
     }
 
     private val homeKey = OriginCanon.originKey(HOME)
+
+    /** The persistence under test, pointed at [origin]. */
+    protected open fun newStore(origin: String?): SessionPersistence = FakeSessionPersistence(origin)
     private val headers = headersOf(HttpHeaders.ContentType, "application/json")
 
     /** Everything one test drives, built on the test's event loop. */
     private inner class Rig(ui: CoroutineContext, origin: String?) {
         val clocks = FakeClocks(wall = 100 * DAY, mono = 5 * DAY, boot = "7")
-        val store = FakeSessionPersistence(origin)
+        val store = newStore(origin)
         val namespaces = FakeNamespaces()
         val quickKeys = FakeQuickKeys()
         val calls = mutableListOf<String>()
         val seen = mutableListOf<AppState>()
+        val shared = mutableListOf<String?>()
 
         /** Route answers by path suffix; a test swaps them. The account keys are offline by default (cached keys open). */
         val routes = mutableMapOf<String, suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData>(
@@ -125,7 +133,12 @@ class SessionControllerTest {
             override val deviceName = "test device"
         }
 
-        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0)
+        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0) { shared += it }
+
+        /** Let the work a landing started on the UI loop finish, until [done]. */
+        suspend fun settle(done: () -> Boolean) = withTimeout(10_000) {
+            while (!done()) delay(5)
+        }
 
         init {
             controller.observe { seen += it }
@@ -164,6 +177,20 @@ class SessionControllerTest {
         assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
         assertTrue(calls.isEmpty(), "no default server, no probe")
         assertEquals(AppScreen.LOADING, seen.first().screen, "the subscriber saw the first state at once")
+    }
+
+    @Test
+    fun theConfirmedServerIsSharedWithTheExtensions() = test(origin = null) {
+        controller.startAndLand()
+        assertEquals(listOf<String?>(null), shared, "no server yet: the extensions are told there is none")
+        controller.chooseServer("https://home.example")
+        controller.cancelTrustGate()
+        assertEquals(listOf<String?>(null), shared, "a server only typed is never shared")
+        controller.chooseServer("https://home.example")
+        assertEquals(ActionResult.Ok, controller.confirmTrustGate())
+        assertEquals(HOME, shared.last())
+        controller.chooseServer("https://HOME.example/")
+        assertEquals(HOME, shared.last(), "a re-spelling shares the same origin")
     }
 
     @Test
@@ -268,6 +295,38 @@ class SessionControllerTest {
         assertEquals(AppScreen.WELCOME, controller.state.screen)
         assertEquals("Your session ended — sign in again.", controller.state.lockReason)
         assertNull(store.load(), "the session is gone")
+    }
+
+    @Test
+    fun aSignedInSessionHasAFreshPolicyAfterAMissedLaunchProbe() = policyIsFreshOnceInTheVault()
+
+    /**
+     * A4: the launch probe failed, so the origin's policy was never seen and quick unlock cannot be turned on (and says
+     * why). Landing in the vault probes again, and the switch becomes available.
+     */
+    protected fun policyIsFreshOnceInTheVault() = test {
+        seedSession()
+        routes["/client-policy"] = { throw IOException("unreachable") }
+        controller.startAndLand()
+        assertEquals(0L, store.origin(homeKey).policyFetchedAt)
+        assertFalse(controller.state.quickUnlock.available)
+        assertEquals(QuickGate.POLICY, controller.state.quickUnlock.refusal)
+        assertNotNull(controller.state.quickUnlock.reason)
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy()), HttpStatusCode.OK, headers) }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.quickUnlock.available }
+        assertEquals(clocks.wall, store.origin(homeKey).policyFetchedAt)
+        assertEquals(QuickGate.NOT_ENROLLED, controller.state.quickUnlock.refusal)
+        assertNull(controller.state.quickUnlock.reason, "turned off is not a problem to explain")
+    }
+
+    @Test
+    fun aDeviceWithNoBiometricSaysSo() = test {
+        quickKeys.biometric = false
+        unlocked()
+        assertFalse(controller.state.quickUnlock.available)
+        assertEquals(QuickGate.NO_BIOMETRIC, controller.state.quickUnlock.refusal)
+        assertEquals("Set up Face ID or Touch ID on this iPhone first.", controller.state.quickUnlock.reason)
     }
 
     @Test

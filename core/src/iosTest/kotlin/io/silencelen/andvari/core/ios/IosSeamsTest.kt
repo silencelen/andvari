@@ -46,6 +46,22 @@ class IosSeamsTest {
     }
 
     @Test
+    fun theServerOriginIsSharedThroughTheAppGroupSuiteOnly() {
+        assertEquals(IOS_APP_GROUP, IosStorageConfig().sharedSuite, "the app shares through its App Group by default")
+        val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        try {
+            val seams = IosSeams(IosStorageConfig(null, "io.silencelen.andvari.test", null, suite))
+            seams.serverShare.publish("https://home.example")
+            // What SafariWebExtensionHandler reads: the same suite and key, through a fresh instance.
+            assertEquals("https://home.example", NSUserDefaults(suiteName = suite).stringForKey(IOS_APP_SERVER_KEY))
+            seams.serverShare.publish(null)
+            assertNull(NSUserDefaults(suiteName = suite).stringForKey(IOS_APP_SERVER_KEY), "no server: the extension is told there is none")
+        } finally {
+            NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+        }
+    }
+
+    @Test
     fun aNamespaceHoldsItsCacheAndDeviceStateAndTheCacheCanGo() {
         val root = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
         try {
