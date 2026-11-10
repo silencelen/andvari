@@ -4,8 +4,9 @@ import io.silencelen.andvari.core.client.session.*
 import android.content.Context
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.silencelen.andvari.app.AndroidClocks
+import io.silencelen.andvari.app.AndroidOfflineArtifacts
 import io.silencelen.andvari.app.KdfReKey
-import io.silencelen.andvari.app.OfflineData
 import io.silencelen.andvari.app.OriginNamespace
 import io.silencelen.andvari.app.PersonalDeviceState
 import io.silencelen.andvari.app.Session
@@ -115,7 +116,9 @@ object AutofillUnlock {
         // A14 (F8): a stored session's tokens go only to its own origin.
         if (!sessionBelongsTo(session.baseUrl, baseUrl)) throw IllegalStateException(sessionElsewhere(session.baseUrl))
         val originKey = OriginNamespace.originKey(baseUrl)
-        val api = AndvariApi(baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }) // platform "android"
+        // The same policy and purge rules as the main app, under its own fence-less policy read below.
+        val coordinator = PolicyCoordinator(store, AndroidOfflineArtifacts(appContext.noBackupFilesDir), VaultSession, AndroidClocks)
+        val api = AndvariApi(baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform "android"
 
         // A4: the autofill process fetches /client-policy on its ONLINE path (cheap, unauthenticated)
         // so an admin's `offlineCacheAllowed` flip reaches this process too, and persists
@@ -124,16 +127,11 @@ object AutofillUnlock {
         var policy: ClientPolicy? = null
         runCatching { api.clientPolicy() }.onSuccess { p ->
             policy = p
-            store.setCacheAllowed(originKey, p.offlineCacheAllowed)
-            val autoLock = clampAutoLockSeconds(p.autoLockSeconds) // §2.3: a server can't disable/stretch the lock
-            store.setAutoLockSeconds(originKey, autoLock)
-            store.setPolicyFetchedAt(originKey, System.currentTimeMillis())
-            store.bumpServerTimeFloor(originKey, p.serverTime) // A2 (review [2]): trusted duration anchor, per-origin
-            VaultSession.setAutoLockSeconds(autoLock)
+            coordinator.recordPolicy(originKey, p) // the clamped window and the per-origin mirrors
             // Policy forbids durable at-rest key material → drop THIS origin's cache + cached
             // keys + quick-unlock blob (spec 01 §8.1 / A4 / §4.2). Session stays valid; other
             // origins' namespaces are untouched.
-            if (!p.offlineCacheAllowed) OfflineData.purgeCacheForbidden(appContext.noBackupFilesDir, store, originKey, session.userId)
+            if (!p.offlineCacheAllowed) coordinator.purgeForbidden(originKey, session.userId)
         }
 
         var online = false
@@ -147,7 +145,7 @@ object AutofillUnlock {
             // purge the session + THIS origin's namespace (cache + keys + quick-unlock blob +
             // store.clear()) so a stolen, overlay-only device can no longer open the cached
             // vault. Then rethrow.
-            if (e.status == 401) OfflineData.purgeRevoked(appContext.noBackupFilesDir, store, originKey, session.userId)
+            if (e.status == 401) coordinator.purgeRevoked(originKey, session.userId)
             api.close(); throw e
         } catch (e: IOException) {
             // Offline: fall back to the cached accountKeys (spec 02 §8).
@@ -171,8 +169,9 @@ object AutofillUnlock {
                 val nsDir = OriginNamespace.dir(appContext.noBackupFilesDir, originKey, acct.userId).apply { mkdirs() }
                 sqliteVaultCache(File(nsDir, "vault-${OriginNamespace.pathSafe(acct.userId)}.db").absolutePath, acct.userId)
             } else {
-                // Policy forbids the durable cache: delete any existing file (spec 02 §8) — scoped.
-                OfflineData.deleteVaultCache(appContext.noBackupFilesDir, originKey, acct.userId)
+                // Policy forbids the durable cache: delete any existing file and the rest of this
+                // namespace's durable material (spec 02 §8 / spec 01 §8.1) — scoped.
+                coordinator.purgeForbidden(originKey, acct.userId)
                 InMemoryVaultCache()
             }
             // A5b (M-1): the same durable personal-wrap memory as the main app (outside the cache).

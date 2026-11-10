@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.InMemoryVaultCache
+import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultCache
@@ -197,6 +198,57 @@ class VaultSessionTest {
         val s = VaultSession(FakeClocks(), hook)
         s.lock()
         assertEquals(listOf("clear"), hook.events)
+    }
+
+    private val originKey = OriginCanon.originKey("http://fake")
+
+    @Test
+    fun workForTheHeldNamespaceWaitsForTheEngineToClose() {
+        val s = VaultSession(FakeClocks())
+        val (engine, cache) = engine()
+        s.bind(api(), account, engine)
+        assertTrue(s.holds(originKey, account.userId))
+        var ran = 0
+        s.runWhenEngineCloses(originKey, account.userId) {
+            assertTrue(cache.closed, "the DB is only ever deleted after its engine released it")
+            ran++
+        }
+        assertEquals(0, ran, "held open by the live engine")
+        s.lock()
+        assertEquals(1, ran, "runs on the close, whichever path ended the session")
+        assertFalse(s.holds(originKey, account.userId))
+        s.lock()
+        assertEquals(1, ran, "exactly once")
+    }
+
+    @Test
+    fun workForAnotherNamespaceRunsImmediately() {
+        val s = VaultSession(FakeClocks())
+        s.bind(api(), account, engine().first)
+        var ran = 0
+        s.runWhenEngineCloses(OriginCanon.originKey("https://elsewhere.example"), account.userId) { ran++ }
+        assertEquals(1, ran)
+        s.runWhenEngineCloses(originKey, "another-user") { ran++ }
+        assertEquals(2, ran, "and for another account at this origin")
+        val locked = VaultSession(FakeClocks())
+        locked.runWhenEngineCloses(originKey, account.userId) { ran++ }
+        assertEquals(3, ran, "and when nothing is bound")
+    }
+
+    @Test
+    fun workQueuedForAnEngineDoesNotSurviveItsReplacement() {
+        val s = VaultSession(FakeClocks())
+        val holder = api()
+        val (first, _) = engine()
+        val (second, secondCache) = engine()
+        s.bind(holder, account, first)
+        var ran = 0
+        s.runWhenEngineCloses(originKey, account.userId) { ran++ }
+        s.bind(holder, account, second)
+        assertEquals(0, ran, "the new engine may have opened the same file under the current policy")
+        s.lock()
+        assertEquals(0, ran)
+        assertTrue(secondCache.closed)
     }
 
     @Test

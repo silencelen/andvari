@@ -685,10 +685,11 @@ class AndvariViewModel(
      * §4.2 (design 2026-07-15, B2-3): [originKey] is the namespace of the origin whose POLICY
      * VERDICT is being enforced — captured by the caller beside its probe, BEFORE any await, so
      * a verdict landing after a racing setBaseUrl still purges the origin it came from and a
-     * probe of server B can never touch server A's namespace.
+     * probe of server B can never touch server A's namespace. The rules are core's
+     * [PolicyCoordinator.purgeForbidden]; with a live engine the cache file goes when it closes.
      */
     private fun purgeOfflineData(originKey: String, userId: String) {
-        OfflineData.purgeCacheForbidden(cacheDir, store, originKey, userId)
+        coordinator.purgeForbidden(originKey, userId)
     }
 
     /**
@@ -830,7 +831,7 @@ class AndvariViewModel(
                 a.close()
                 // F26: a definitive rejection is a session-end — explain it on the Unlock
                 // surface (B6: a dead token is a plain 401 here; there is no revoked variant).
-                if (e.status == 401) { OfflineData.purgeRevoked(cacheDir, store, originKey, userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
+                if (e.status == 401) { coordinator.purgeRevoked(originKey, userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
                 throw e
             } catch (t: Throwable) { a.close(); throw t }
             val acct = try {
@@ -859,16 +860,6 @@ class AndvariViewModel(
         toVault()
     }
 
-    /**
-     * Record a freshly-fetched policy everywhere it's enforced: UI state, the persisted
-     * offline fallbacks, and the process-wide auto-lock gate (shared with autofill).
-     *
-     * [originKey] is REQUIRED (§4.2): the persisted mirrors are per-origin, and every caller
-     * captures the key of the origin it PROBED beside the probe itself (before any await) — a
-     * probe result landing after a racing setBaseUrl still files under the origin it came from,
-     * never under whatever happens to be current. The timer window is CLAMPED (§2.3/B1-1)
-     * before it is persisted or armed — a hostile server cannot disable or stretch auto-lock.
-     */
     // Security review 2026-10 (A12, row 80 — the desktop shape exists here too): every policy reply
     // must belong to the origin the app dials NOW and to the visit it was started in. A late reply
     // from an abandoned origin used to land in the single in-memory policy and the process-wide
@@ -877,25 +868,20 @@ class AndvariViewModel(
     private val probeFence = OriginProbeFence()
     private var probeJob: Job? = null
 
+    /** The shared policy and purge rules (see [PolicyCoordinator]). Holds [probeFence] itself so its
+     *  checks and the ones this class makes for sign-in and enroll are one fence. */
+    private val coordinator = PolicyCoordinator(store, AndroidOfflineArtifacts(cacheDir), VaultSession, AndroidClocks, probeFence, ::endRejectedSession)
+
     /** A12 (row 80): one policy fetch under a whole-call bound (a timeout reads as unreachable). */
-    private suspend fun boundedPolicy(probe: AndvariApi): ClientPolicy =
-        withTimeoutOrNull(POLICY_PROBE_TIMEOUT_MS) { probe.clientPolicy() }
-            ?: throw java.io.InterruptedIOException("policy probe timed out")
+    private suspend fun boundedPolicy(probe: AndvariApi): ClientPolicy = coordinator.boundedPolicy(probe)
 
     /** A12 (row 80): the probe tagged at launch is still the current origin's current visit. */
-    private fun probeIsCurrent(tag: OriginProbeFence.Tag): Boolean = probeFence.isCurrent(tag, store.currentOriginKey())
+    private fun probeIsCurrent(tag: OriginProbeFence.Tag): Boolean = coordinator.probeIsCurrent(tag)
 
-    /** Returns false (and writes NOTHING) when [tag] is stale — A12 (row 80). */
+    /** Mirrors the policy (see [PolicyCoordinator.applyPolicy]) and into UI state; false, with NOTHING written, when [tag] is stale — A12 (row 80). */
     private fun applyPolicy(p: ClientPolicy, tag: OriginProbeFence.Tag): Boolean {
-        if (!probeIsCurrent(tag)) return false
-        val originKey = tag.originKey
+        if (!coordinator.applyPolicy(p, tag)) return false
         _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
-        store.setCacheAllowed(originKey, p.offlineCacheAllowed)
-        val autoLock = clampAutoLockSeconds(p.autoLockSeconds) // B1-1: [floor, AUTO_LOCK_MAX_SECONDS]
-        store.setAutoLockSeconds(originKey, autoLock)
-        store.setPolicyFetchedAt(originKey, System.currentTimeMillis()) // A4: quick-unlock eligibility freshness
-        store.bumpServerTimeFloor(originKey, p.serverTime) // A2 (review [2]): the one clock the holder cannot set — per-origin
-        VaultSession.setAutoLockSeconds(autoLock)
         return true
     }
 
@@ -1010,7 +996,7 @@ class AndvariViewModel(
     private fun needsUpdate(): Int = engine?.needsUpdateCount() ?: 0
 
     private fun newApi(tokens: Tokens? = null, origin: String = store.baseUrl): AndvariApi =
-        AndvariApi(origin, HttpClient(OkHttp), tokens, { store.updateTokens(it) }) // platform defaults to "android"
+        AndvariApi(origin, HttpClient(OkHttp), tokens, { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform defaults to "android"
 
     fun start() {
         viewModelScope.launch {
@@ -1042,11 +1028,11 @@ class AndvariViewModel(
                     .onSuccess { p ->
                         // UI state + persisted fallbacks + auto-lock gate — only if still current.
                         if (!applyPolicy(p, tag)) return@onSuccess
-                        // Policy may forbid the durable cache; honor it the moment we learn it,
-                        // deleting any existing file (spec 02 §8) — but only when no live engine holds
-                        // it (when bound, a later lock/rebind enforces the purge safely). Scoped to
-                        // the probed origin's namespace ONLY (§4.2).
-                        if (!p.offlineCacheAllowed && session != null && !bound) purgeOfflineData(originKey, session.userId)
+                        // Policy may forbid the durable cache; honor it the moment we learn it (spec
+                        // 02 §8), the live-engine case included: the coordinator wipes the key
+                        // material now and deletes the file when the engine closes. Scoped to the
+                        // probed origin's namespace ONLY (§4.2).
+                        if (!p.offlineCacheAllowed && session != null) purgeOfflineData(originKey, session.userId)
                     }
                     // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
                     // honestly (the policy itself stays last-known for the offline gates).
@@ -1511,10 +1497,10 @@ class AndvariViewModel(
                 a.close()
                 // Definitive rejection: this device's session is dead (e.g. the web password
                 // change revoked every other session, spec 03 §3) — wipe it, including the
-                // persisted F58 flag (store.clear()); mirror the clear into UI state, and say
-                // WHY on the Unlock/sign-in surface (F26 session-end reason). §4.2: the 401
-                // came from THIS origin — only its namespace is purged.
-                if (e.status == 401) { purgeOfflineData(originKey, session.userId); store.clear(); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
+                // persisted F58 flag; mirror the clear into UI state, and say WHY on the
+                // Unlock/sign-in surface (F26 session-end reason). §4.2: the 401 came from THIS
+                // origin — only its namespace is purged.
+                if (e.status == 401) { coordinator.purgeRevoked(originKey, session.userId); _ui.value = _ui.value.copy(mustChangePassword = false, lockReason = REASON_SESSION_ENDED) }
                 throw e
             } catch (t: Throwable) {
                 a.close(); throw t // F74: a generic throw must never leak the transient client
@@ -2170,7 +2156,7 @@ class AndvariViewModel(
                     // §4.2: the commit ran against the origin captured at entry (newApi() dialed
                     // it), and the stored session it just revoked belongs there — purge that
                     // namespace only.
-                    OfflineData.purgeRevoked(cacheDir, store, originKey, session.userId)
+                    coordinator.purgeRevoked(originKey, session.userId)
                 }
                 if (cancelled) return@launch // …but the wizard is gone: no screen/notice to paint
                 val next = store.load()?.takeIf { it.accessToken.isNotEmpty() }?.let { Screen.Unlock(it.email) } ?: Screen.Welcome
@@ -2638,7 +2624,11 @@ class AndvariViewModel(
             // N2 §3/B4: deliberately NO onFailure — the poll must never flip policyFetchFailed
             // (that flag belongs to the enroll-feeding fetches; the last-known policy stays
             // live here for the offline gates). Success still clears it via applyPolicy.
-            runCatching { current.api.clientPolicy() }.onSuccess { applyPolicy(it, tag) }
+            runCatching { current.api.clientPolicy() }.onSuccess { p ->
+                // Spec 02 §8 / spec 01 §8.1: a forbidding policy is enforced on every successful fetch,
+                // this poll included. The session keeps running, on a cache whose file goes at its close.
+                if (applyPolicy(p, tag) && !p.offlineCacheAllowed) purgeOfflineData(originKey, current.account.userId)
+            }
             try {
                 syncNow(current.engine)
                 if (VaultSession.get() !== current) { // locked/rebound mid-sync — publish nothing stale
@@ -3514,6 +3504,31 @@ class AndvariViewModel(
         }
     }
 
+    /**
+     * A definitive in-session rejection (spec 01 §8.1, spec 02 §8): the server refused this session's
+     * refresh. [PolicyCoordinator.onRefreshRefused] has already locked it and purged its data; this
+     * is the UI half. The in-flight secrets die as on a sign-out, and the user lands on the sign-in
+     * surface with the F26 session-end reason, so a dead session never strands them on the vault.
+     */
+    private fun endRejectedSession() {
+        viewModelScope.launch {
+            pendingBackupRequest = null
+            zeroPendingRecovery()
+            zeroPendingRecover()
+            pendingCaptureAuthKey = null
+            closeEditor()
+            importDismiss()
+            moveGestures.clear()
+            movePickerMode = null
+            movePickerItemId = null
+            _ui.value = _ui.value.sessionCleared(REASON_SESSION_ENDED).copy(
+                screen = Screen.Welcome, busy = false,
+                quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
+                mustChangePassword = false, // the purge dropped the persisted F58 flag with the session
+            )
+        }
+    }
+
     // ---- settings / server TOTP ----
 
     fun openSettings() {
@@ -4077,7 +4092,8 @@ class AndvariViewModel(
         val cache = if (allowed) {
             sqliteVaultCache(cacheFile(originKey, acct.userId).apply { parentFile?.mkdirs() }.absolutePath, acct.userId)
         } else {
-            deleteCache(originKey, acct.userId); InMemoryVaultCache()
+            // Spec 02 §8 / spec 01 §8.1: this also takes the quick-unlock secret, not only the file.
+            purgeOfflineData(originKey, acct.userId); InMemoryVaultCache()
         }
         // A5b (M-1): the personal wrap this device authenticated lives OUTSIDE the cache (which may be in memory,
         // or purged), so a withheld wrap stays an anomaly across restarts.
