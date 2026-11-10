@@ -30,7 +30,10 @@ class VaultSessionTest {
         override fun bootId() = boot
     }
 
-    private class TrackingCache(private val inner: InMemoryVaultCache = InMemoryVaultCache()) : VaultCache by inner {
+    private class TrackingCache(
+        private val inner: InMemoryVaultCache = InMemoryVaultCache(),
+        override val durable: Boolean = false,
+    ) : VaultCache by inner {
         var closed = false
             private set
 
@@ -203,9 +206,9 @@ class VaultSessionTest {
     private val originKey = OriginCanon.originKey("http://fake")
 
     @Test
-    fun workForTheHeldNamespaceWaitsForTheEngineToClose() {
+    fun workForAHeldFileWaitsForTheEngineToClose() {
         val s = VaultSession(FakeClocks())
-        val (engine, cache) = engine()
+        val (engine, cache) = engine(TrackingCache(durable = true))
         s.bind(api(), account, engine)
         assertTrue(s.holds(originKey, account.userId))
         var ran = 0
@@ -222,9 +225,18 @@ class VaultSessionTest {
     }
 
     @Test
+    fun anInMemoryEngineHoldsNoFileBack() {
+        val s = VaultSession(FakeClocks())
+        s.bind(api(), account, engine().first) // in-memory cache: the namespace is live, its file is not open
+        var ran = 0
+        s.runWhenEngineCloses(originKey, account.userId) { ran++ }
+        assertEquals(1, ran)
+    }
+
+    @Test
     fun workForAnotherNamespaceRunsImmediately() {
         val s = VaultSession(FakeClocks())
-        s.bind(api(), account, engine().first)
+        s.bind(api(), account, engine(TrackingCache(durable = true)).first)
         var ran = 0
         s.runWhenEngineCloses(OriginCanon.originKey("https://elsewhere.example"), account.userId) { ran++ }
         assertEquals(1, ran)
@@ -236,18 +248,53 @@ class VaultSessionTest {
     }
 
     @Test
-    fun workQueuedForAnEngineDoesNotSurviveItsReplacement() {
+    fun aRepeatedRequestReplacesTheQueuedOne() {
+        val s = VaultSession(FakeClocks())
+        s.bind(api(), account, engine(TrackingCache(durable = true)).first)
+        val runs = mutableListOf<String>()
+        repeat(3) { i -> s.runWhenEngineCloses(originKey, account.userId) { runs += "poll $i" } }
+        s.lock()
+        assertEquals(listOf("poll 2"), runs, "one entry per namespace, however many polls repeated the verdict")
+    }
+
+    @Test
+    fun aReplacementThatDoesNotHoldTheFileRunsTheQueuedWork() {
         val s = VaultSession(FakeClocks())
         val holder = api()
-        val (first, _) = engine()
-        val (second, secondCache) = engine()
+        val (first, firstCache) = engine(TrackingCache(durable = true))
         s.bind(holder, account, first)
         var ran = 0
+        s.runWhenEngineCloses(originKey, account.userId) {
+            assertTrue(firstCache.closed, "the replaced engine released the file first")
+            ran++
+        }
+        s.bind(holder, account, engine().first) // in memory: nothing holds the file any more
+        assertEquals(1, ran, "a rebind must not drop the deletion")
+    }
+
+    @Test
+    fun aReplacementForAnotherNamespaceRunsTheQueuedWork() {
+        val s = VaultSession(FakeClocks())
+        s.bind(api(), account, engine(TrackingCache(durable = true)).first)
+        var ran = 0
         s.runWhenEngineCloses(originKey, account.userId) { ran++ }
+        val elsewhere = AndvariApi("https://elsewhere.example", HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) }), Tokens("a", "r"))
+        s.bind(elsewhere, account, SyncEngine(elsewhere, account, TrackingCache(durable = true)))
+        assertEquals(1, ran)
+    }
+
+    @Test
+    fun aReplacementHoldingTheSameFileKeepsTheWorkWaiting() {
+        val s = VaultSession(FakeClocks())
+        val holder = api()
+        s.bind(holder, account, engine(TrackingCache(durable = true)).first)
+        var ran = 0
+        s.runWhenEngineCloses(originKey, account.userId) { ran++ }
+        val (second, secondCache) = engine(TrackingCache(durable = true))
         s.bind(holder, account, second)
-        assertEquals(0, ran, "the new engine may have opened the same file under the current policy")
+        assertEquals(0, ran, "the new engine has the same file open")
         s.lock()
-        assertEquals(0, ran)
+        assertEquals(1, ran)
         assertTrue(secondCache.closed)
     }
 

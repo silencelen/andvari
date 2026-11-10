@@ -189,14 +189,12 @@ open class VaultSession(
             val prev = state
             state = Unlocked(api, account, engine, provenance)
             prev?.let {
-                if (it.engine !== engine) {
-                    runCatching { it.engine.close() }
-                    // Queued work belonged to the engine being replaced; the new engine has already
-                    // opened (or refused) the cache file under the current policy.
-                    afterEngineClose.clear()
-                }
+                if (it.engine !== engine) runCatching { it.engine.close() }
                 if (it.api !== api) runCatching { it.api.close() } // never close a reused token-holder
             }
+            // The replaced engine has released its file: whatever waited on it runs now, unless the
+            // new engine holds that same file open, in which case it waits on the new one instead.
+            takeRunnable().forEach { runCatching { it() } }
         }
     }
 
@@ -220,9 +218,7 @@ open class VaultSession(
             prev?.let {
                 runCatching { it.engine.close() }
             }
-            val waiting = afterEngineClose.toList()
-            afterEngineClose.clear()
-            waiting.forEach { runCatching { it() } }
+            takeRunnable().forEach { runCatching { it() } }
         }
     }
 
@@ -231,8 +227,26 @@ open class VaultSession(
     // Everything else a forbidding policy destroys can go immediately; the cache database cannot,
     // because the live engine holds it open and closing a database out from under a running
     // operation is the outcome the deferral above exists to prevent. So the deletion is queued
-    // and runs right after the engine closes, whichever path ends the session.
-    private val afterEngineClose = mutableListOf<() -> Unit>() // guarded by stateLock
+    // and runs right after the engine closes, whichever path ends the session. One entry per
+    // namespace: each poll that repeats the verdict replaces the entry rather than adding one.
+    private val afterEngineClose = LinkedHashMap<String, () -> Unit>() // namespace -> work; guarded by stateLock
+
+    private fun namespace(originKey: String, userId: String) = "$originKey/$userId"
+
+    /** The namespace whose cache file the live engine holds open, or null. Under [stateLock]. */
+    private fun heldFile(): String? {
+        val live = state ?: return null
+        if (!live.engine.holdsDurableCache) return null
+        return namespace(OriginCanon.originKey(live.api.baseUrl), live.account.userId)
+    }
+
+    /** Removes and returns the queued work no live engine is holding back. Under [stateLock]. */
+    private fun takeRunnable(): List<() -> Unit> {
+        val held = heldFile()
+        val ready = afterEngineClose.filterKeys { it != held }
+        ready.keys.forEach { afterEngineClose.remove(it) }
+        return ready.values.toList()
+    }
 
     /** Whether a live session is using this (origin, user)'s namespace. */
     fun holds(originKey: String, userId: String): Boolean {
@@ -241,14 +255,16 @@ open class VaultSession(
     }
 
     /**
-     * Run [action] after the engine of a live session using this (origin, user)'s namespace has
-     * closed, or now when no live session is using it. Queued work does not survive a [bind] that
-     * replaces the engine: the new engine has already applied the current policy to the file.
+     * Run [action] once no engine holds this (origin, user)'s cache file open: now if none does (no
+     * live session there, or one running on an in-memory cache), otherwise as soon as that engine
+     * closes or is replaced by one that does not hold the file. A later call for the same namespace
+     * replaces the queued action, so [action] should decide from state it reads when it runs.
      */
     fun runWhenEngineCloses(originKey: String, userId: String, action: () -> Unit) {
         val queued = synchronized(stateLock) {
-            val holding = holds(originKey, userId)
-            if (holding) afterEngineClose.add(action)
+            val key = namespace(originKey, userId)
+            val holding = heldFile() == key
+            if (holding) afterEngineClose[key] = action
             holding
         }
         if (!queued) action()

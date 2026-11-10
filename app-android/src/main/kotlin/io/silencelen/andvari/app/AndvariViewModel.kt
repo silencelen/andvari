@@ -4090,8 +4090,7 @@ class AndvariViewModel(
         val cache = if (allowed) {
             sqliteVaultCache(cacheFile(originKey, acct.userId).apply { parentFile?.mkdirs() }.absolutePath, acct.userId)
         } else {
-            // Spec 02 §8 / spec 01 §8.1: this also takes the quick-unlock secret, not only the file.
-            purgeOfflineData(originKey, acct.userId); InMemoryVaultCache()
+            InMemoryVaultCache() // the namespace's durable material goes after the bind, below
         }
         // A5b (M-1): the personal wrap this device authenticated lives OUTSIDE the cache (which may be in memory,
         // or purged), so a withheld wrap stays an anomaly across restarts.
@@ -4101,6 +4100,9 @@ class AndvariViewModel(
         newEngine.onPersonalWrapStored = { w -> store.loadAccountKeys()?.let { persistAccountKeys(it.copy(personalWrap = w)) } }
         // VaultSession closes any previously-bound engine/api (defensive: never two conns).
         VaultSession.bind(a, acct, newEngine, provenance)
+        // Spec 02 §8 / spec 01 §8.1: a forbidding verdict takes the quick-unlock secret, not only the
+        // file. After the bind, so an engine this one replaced has already released the file.
+        if (!allowed) purgeOfflineData(originKey, acct.userId)
         // §7.1: the ONE place a full-password unlock completes with a session bound, so the
         // evidence count cannot double-fire for a single unlock. QUICK unlocks are excluded by
         // provenance — they are the outcome the offer exists to produce, not a cost to record.

@@ -1541,6 +1541,10 @@ class SyncEngine(
     /** Close the underlying cache (must precede deleting its DB file — Windows file locks). */
     fun close() = cache.close()
 
+    /** Whether this engine's cache is a durable file it holds open ([VaultCache.durable]). An
+     *  in-memory engine holds no file, so a deletion never has to wait for it. */
+    val holdsDurableCache: Boolean get() = cache.durable
+
     private suspend fun pull() {
         // §8.2 (A6 re-review LOW-D): evidence is what THIS cache held before the upgrade. Every pull (sync, an
         // import, a write's reconcile) marks the freeze as done FIRST, so if no hydrate looked at the cache, nothing
