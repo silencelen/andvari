@@ -290,15 +290,45 @@ class AccountDeletionTest : LifecycleTestSupport() {
     }
 
     @Test
-    fun theOnlyAccount_mayDeleteItself_leavingAnEmptyInstance() = testApplication {
-        val services = buildServices(config(), Notifier())
+    fun theOnlyAccount_mayDeleteItself_andTheNextStartReBootstraps() = testApplication {
+        val cfg = config()
+        val services = buildServices(cfg, Notifier())
         application { andvariModule(services) }
         val client = jsonClient(this)
         val admin = VirtualClient("alone@x.com", "the only account password")
         client.register(admin, bootstrapToken)
+        client.invite(admin, "never-came@x.com") // an unused invite of the household that is about to end
         assertEquals(emptyList(), client.deletePreview(admin).blockers, "no other account would be stranded")
         assertEquals(HttpStatusCode.OK, client.deleteAccount(admin).status)
         assertEquals(0, services.count("SELECT COUNT(*) FROM users"))
+        assertEquals(0, services.count("SELECT COUNT(*) FROM invites"), "the last account takes every invite with it, the used bootstrap row included")
+
+        // The next start: a fresh bootstrap invite, redeemable with the operator's token.
+        val restarted = buildServices(config(dbPath = cfg.dbPath), Notifier())
+        assertEquals(1, restarted.count("SELECT COUNT(*) FROM invites WHERE email='*' AND usedAt IS NULL AND expiresAt>?", now()))
+        val next = VirtualClient("next@x.com", "the next first admin password")
+        assertTrue(restarted.service.register(next.buildRegister(bootstrapToken, recovery.publicKey, fingerprint), "127.0.0.1").isAdmin)
+    }
+
+    @Test
+    fun aDatabaseEmptiedWithInvitesLeftOver_stillReBootstrapsAtTheNextStart() {
+        // What an instance emptied by an older build looks like: no account, the used `*` row it registered through, and
+        // an invite its admin minted that nobody redeemed. The used row once counted as "an invite exists" and blocked the
+        // re-mint, silently, until the janitor pruned it ~33 days later.
+        val cfg = config()
+        val first = buildServices(cfg, Notifier())
+        first.repo.db.tx { c ->
+            c.exec("UPDATE invites SET usedAt=? WHERE email=?", now(), BOOTSTRAP_ANY_EMAIL)
+            c.exec(
+                "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,0,?,?)",
+                ServerCrypto.hashToken("an invite the gone admin minted"), "left@x.com", now(), now() + 3_600_000,
+            )
+        }
+        val restarted = buildServices(config(dbPath = cfg.dbPath), Notifier())
+        val live = restarted.repo.db.read { c -> c.queryAll("SELECT email FROM invites WHERE usedAt IS NULL") { it.getString(1) } }
+        assertEquals(listOf(BOOTSTRAP_ANY_EMAIL), live, "only a fresh bootstrap invite survives a start with no account")
+        assertEquals(1, restarted.count("SELECT COUNT(*) FROM invites"))
+        assertTrue(restarted.service.register(VirtualClient("first@x.com", "first admin again password").buildRegister(bootstrapToken, recovery.publicKey, fingerprint), "127.0.0.1").isAdmin)
     }
 
     // ---- the gate ----

@@ -348,28 +348,39 @@ internal fun purgeRetiredEscrowLegacy(repo: Repo, config: Config) {
     if (purged) repo.db.checkpointTruncate()
 }
 
-private fun seedBootstrap(repo: Repo, config: Config) {
+internal fun seedBootstrap(repo: Repo, config: Config) {
     val userCount = repo.db.read { it.queryOne("SELECT COUNT(*) FROM users") { rs -> rs.getInt(1) } ?: 0 }
     if (userCount > 0) return
+    // With ZERO accounts, no invite row has any business left: an expired one is debris (#22: it
+    // used to count as "existing" and block the re-mint until the janitor's 30-day prune, bricking
+    // a first-run admin whose 72 h fuse lapsed); a USED one was redeemed by an account that has
+    // since deleted itself (account deletion, spec 03 §13 — a used `*` row blocked the re-mint the
+    // same way, with no log line, for ~33 days); and a live one is authority left over from a
+    // household that no longer exists. Only the operator's bootstrap token may enrol the next first
+    // admin, so every row goes BEFORE minting, in the minting tx — which also frees the tokenHash PK
+    // for the same token. A live bootstrap invite from an earlier start is simply minted again (same
+    // token, a fresh 72 h). Account deletion clears the table itself when it removes the last
+    // account; this is the belt for a database emptied any other way (or by an older build).
     val token = config.bootstrapToken?.takeIf { it.length >= INVITE_TOKEN_MIN_CHARS }
+    val tokenHash = token?.let { ServerCrypto.hashToken(it) }
+    val stale = repo.db.tx { c ->
+        // Said in the log only for rows other than this token's own unredeemed invite, which an unenrolled instance
+        // re-mints at every start and is not news.
+        val n = c.queryOne("SELECT COUNT(*) FROM invites WHERE NOT (tokenHash IS ? AND usedAt IS NULL)", tokenHash) { it.getInt(1) } ?: 0
+        c.exec("DELETE FROM invites")
+        if (tokenHash != null) {
+            c.exec(
+                "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,1,?,?)",
+                tokenHash, BOOTSTRAP_ANY_EMAIL, now(), now() + 72L * 3600 * 1000,
+            )
+        }
+        n
+    }
+    if (stale > 0) System.err.println("[andvari] no accounts: cleared $stale invite row(s) an earlier household left (used, expired, or minted by an account that no longer exists)")
     if (token == null) {
         val why = if (config.bootstrapToken.isNullOrBlank()) "is unset or blank" else "is shorter than $INVITE_TOKEN_MIN_CHARS characters"
         System.err.println("[andvari] WARNING: no users yet and ANDVARI_BOOTSTRAP_TOKEN $why — no admin invite minted; set a random token (deploy/bringup.sh mints one) to enroll the first admin")
         return
-    }
-    // #22 self-heal: with ZERO users no invite was ever redeemed (redeem creates the user in the
-    // same tx), so an EXPIRED leftover row here is pure debris — yet it used to count as "existing"
-    // and block re-minting until the janitor's 30-day prune, bricking a first-run admin whose 72 h
-    // fuse lapsed before enrollment. Clear it (which also frees the tokenHash PK for the same
-    // ANDVARI_BOOTSTRAP_TOKEN), then only a LIVE invite blocks the re-mint.
-    repo.db.tx { c -> c.exec("DELETE FROM invites WHERE usedAt IS NULL AND expiresAt < ?", now()) }
-    val existing = repo.db.read { it.queryOne("SELECT COUNT(*) FROM invites") { rs -> rs.getInt(1) } ?: 0 }
-    if (existing > 0) return
-    repo.db.tx { c ->
-        c.exec(
-            "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,1,?,?)",
-            ServerCrypto.hashToken(token), BOOTSTRAP_ANY_EMAIL, now(), now() + 72L * 3600 * 1000,
-        )
     }
     System.err.println("[andvari] bootstrap admin invite created (redeem with ANDVARI_BOOTSTRAP_TOKEN and any email)")
 }

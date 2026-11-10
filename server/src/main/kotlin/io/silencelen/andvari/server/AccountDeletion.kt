@@ -214,6 +214,13 @@ internal object AccountDeletion {
         val removed = c.exec("DELETE FROM users WHERE userId=?", userId)
         check(removed == 1) { "account row vanished mid-deletion" } // rolls the whole tx back
 
+        // 8b. The instance's LAST account (the only one may delete itself, §5 of the design): every remaining invite goes
+        //     with it — the used `*` bootstrap row it registered through included. A household with no accounts left keeps
+        //     no enrolment authority, and seedBootstrap mints a fresh bootstrap invite at the next start (it also clears the
+        //     table itself when it finds no account, for a database emptied any other way).
+        val accountsLeft = c.queryOne("SELECT COUNT(*) FROM users") { it.getInt(1) } ?: 0
+        if (accountsLeft == 0) c.exec("DELETE FROM invites")
+
         // 9. The deletion's own row, under the pseudonym, ids-free.
         repo.auditPseudonymOn(c, "account_delete", pseudonym, deviceId, ip, "vaults=${owned.size},left=${left.size}")
 
