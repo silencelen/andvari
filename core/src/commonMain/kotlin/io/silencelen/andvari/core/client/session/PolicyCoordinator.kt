@@ -117,7 +117,7 @@ class PolicyCoordinator(
     }
 
     /**
-     * A refresh the server refused with a definitive verdict (401/403 from the refresh endpoint),
+     * A refresh the server refused with a definitive verdict (a 401 from the refresh endpoint),
      * reported by [AndvariApi] before it drops the tokens. Only a refusal on the LIVE token-holder
      * ends the session here: a refused refresh on any other client (an unlock still in progress,
      * or a superseded holder) is that client's own business, and the unlock paths handle their

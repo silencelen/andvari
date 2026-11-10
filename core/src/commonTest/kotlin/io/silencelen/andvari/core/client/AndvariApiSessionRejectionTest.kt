@@ -36,14 +36,22 @@ class AndvariApiSessionRejectionTest {
 
     @Test
     fun aDefinitiveRefusalSignalsBeforeTheTokensDrop() = runBlocking<Unit> {
-        for (status in listOf(HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden)) {
-            val events = mutableListOf<String>()
-            val api = client(status, events)
-            assertFailsWith<ApiException> { api.sync(0) }
-            assertEquals(listOf("rejected", "tokens-null"), events, "$status: the purge needs the session's identity before the tokens are erased")
-            assertNull(api.currentTokens())
-            api.close()
-        }
+        val events = mutableListOf<String>()
+        val api = client(HttpStatusCode.Unauthorized, events)
+        assertFailsWith<ApiException> { api.sync(0) }
+        assertEquals(listOf("rejected", "tokens-null"), events, "the purge needs the session's identity before the tokens are erased")
+        assertNull(api.currentTokens())
+        api.close()
+    }
+
+    @Test
+    fun theBreakGlassRefusalEndsThePairButIsNotARevocation() = runBlocking<Unit> {
+        val events = mutableListOf<String>()
+        val api = client(HttpStatusCode.Forbidden, events)
+        assertFailsWith<ApiException> { api.sync(0) }
+        assertEquals(listOf("tokens-null"), events, "403 public_refresh_disabled must not purge the device's offline data (spec 03 §8)")
+        assertNull(api.currentTokens())
+        api.close()
     }
 
     @Test
