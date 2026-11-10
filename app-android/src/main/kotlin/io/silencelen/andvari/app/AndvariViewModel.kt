@@ -800,7 +800,7 @@ class AndvariViewModel(
      * never a full-password unlock, A1/§7). identityPub verification still runs inside
      * `Account.unlockWithUvk` — a mismatch hard-fails; a stale/foreign UVK wipes the blob (§5).
      */
-    fun unlockWithBiometric(activity: FragmentActivity) = op {
+    fun unlockWithBiometric(activity: FragmentActivity) = op(timeoutMs = null) { // H10: bounded below, past the prompt, which waits on a person
         val session = store.load() ?: throw IllegalStateException("no session")
         if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) { // A14 (F8)
             _ui.value = _ui.value.copy(busy = false, error = sessionElsewhere(session.baseUrl))
@@ -813,8 +813,14 @@ class AndvariViewModel(
             is QuickUnlock.Recover.Fallback -> { _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
             is QuickUnlock.Recover.Wiped -> { refreshQuickUnlockState(); _ui.value = _ui.value.copy(busy = false, quickUnlockMessage = r.reason); return@op }
         }
+        runBounded(BoundedOps.AUTH_OP_MS) { finishBiometricUnlock(session, originKey, uvk) }
+    }
+
+    /** The network half of [unlockWithBiometric]: the legs that wait on the server, bounded together (audit H10). */
+    private suspend fun finishBiometricUnlock(session: Session, originKey: String, uvk: ByteArray) {
+        val userId = session.userId
         VaultSession.unlockMutex.withLock {
-            VaultSession.get()?.let { toVault(); return@op } // adopt a winner instead of a 2nd holder
+            VaultSession.get()?.let { toVault(); return } // adopt a winner instead of a 2nd holder
             val a = newApi(session.tokens())
             val keys = try {
                 a.accountKeys().also { persistAccountKeys(it) }
@@ -845,7 +851,7 @@ class AndvariViewModel(
                 throw t
             }
         }
-        runCatching { syncNow(engine!!) }.onFailure {
+        runCatching { runBounded(BoundedOps.FLAT_MS) { syncNow(engine!!) } }.onFailure { // H10: a stalled server reads as offline
             if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
             else throw it
         }
@@ -1382,7 +1388,7 @@ class AndvariViewModel(
 
     fun closeTrash() { _ui.value = _ui.value.copy(screen = Screen.Vault, deletedItems = null) }
 
-    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }) {
+    fun signIn(email: String, password: String, totp: String? = null) = op(mapError = { HouseholdCopy.forSignInError(it, totpTried = totp != null) }, timeoutMs = BoundedOps.AUTH_OP_MS) {
         // §4.3 B2-6 (sink guard — the authoritative backstop for the pending-state sign-in lockout):
         // an uncommitted pendingServer marker means store.baseUrl is OPTIMISTICALLY pointed at an
         // unverified invite origin (enroll-success is what clears the marker). Deriving a master-password
@@ -1471,7 +1477,7 @@ class AndvariViewModel(
         }
     }
 
-    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError) {
+    fun unlock(email: String, password: String) = op(mapError = HouseholdCopy::forUnlockError, timeoutMs = BoundedOps.AUTH_OP_MS) {
         val session = store.load() ?: throw IllegalStateException("no session")
         // A14 (F8): a stored session's tokens go only to its own origin — refuse, never "repair".
         if (!sessionBelongsTo(session.baseUrl, store.baseUrl)) {
@@ -1540,8 +1546,9 @@ class AndvariViewModel(
                 throw t
             }
         }
-        // Tolerate an offline sync — hydrate() already populated the cached vault.
-        runCatching { syncNow(engine!!) }.onFailure {
+        // Tolerate an offline sync — hydrate() already populated the cached vault. H10: a stalled
+        // server is bounded and reads as offline too, so the vault still opens on its cached data.
+        runCatching { runBounded(BoundedOps.FLAT_MS) { syncNow(engine!!) } }.onFailure {
             if (it is IOException) _ui.value = _ui.value.copy(notice = "Offline — showing cached data")
             else throw it
         }
@@ -1615,7 +1622,7 @@ class AndvariViewModel(
         inPersonEntry: String = "",
         inPersonAffirmed: Boolean = false,
         inviteProvenance: InviteProvenance = InviteProvenance.Typed,
-    ) = op(mapError = HouseholdCopy::forEnrollError) {
+    ) = op(mapError = HouseholdCopy::forEnrollError, timeoutMs = BoundedOps.AUTH_OP_MS) {
         // F74: the old fallback built a client, closed it UNUSED, then leaked the second one
         // it actually called (`newApi().also { it.close() }.let { newApi().clientPolicy() }`).
         // One probe, closed in finally (AndvariApi has close() but isn't Closeable — no .use).
@@ -1882,7 +1889,8 @@ class AndvariViewModel(
                 val setup = acct.setupMemberRecovery(authKey)
                 var committed = false
                 val resp = try {
-                    a.recoverySelfSetup(setup.request).also { committed = true }
+                    // H10: bounded per call — busy is held across this PUT, and busy defers the idle lock.
+                    runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfSetup(setup.request) }.also { committed = true }
                 } finally {
                     // §F.7 discipline: a failed commit must not leave the raw secret alive.
                     if (!committed) setup.recoverySecret.fill(0)
@@ -1953,7 +1961,7 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true)
         viewModelScope.launch {
             val outcome = try {
-                a.recoverySelfConfirm(pieceId)
+                runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfConfirm(pieceId) } // H10: busy is held across this call
                 ConfirmOutcome.Confirmed
             } catch (e: ApiException) {
                 if (e.status == 409 && e.code == "recovery_piece_stale") ConfirmOutcome.Stale else ConfirmOutcome.Failed
@@ -2228,7 +2236,7 @@ class AndvariViewModel(
      */
     private fun boundVault(itemId: String): String? = _ui.value.items.firstOrNull { it.itemId == itemId }?.vaultId
 
-    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError) {
+    fun saveItem(itemId: String?, doc: ItemDoc, uploads: List<PendingUpload> = emptyList(), vaultId: String? = null, onSaved: () -> Unit = {}) = op(mapError = HouseholdCopy::forSaveError, timeoutMs = BoundedOps.attachmentMs(uploads.sumOf { it.data.size.toLong() })) { // H10: scaled to the bytes
         // F18 + INV-EDIT (root cause A §5.1, A1b): for a NEW item [vaultId] is the vault picker's
         // choice (null = personal). For an EXISTING item it is REQUIRED and must be the vault the
         // editor was bound to when it opened ([editorVaultId], or the planned item's vault for the
@@ -2427,8 +2435,16 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, error = null, copiedNote = null, copyProgress = 0 to 0, copyVaultId = vaultId, copyOpVaultId = vaultId)
         viewModelScope.launch {
             try {
-                val copied = e.copyAllToPersonal(vaultId) { done, total ->
-                    _ui.value = _ui.value.copy(copyProgress = done to total)
+                // Audit H10: the rescue copy re-uploads every attachment of every item in the vault
+                // under busy + the copy gate (both defer the idle lock). Scaled over the bytes plus
+                // one flat window per item, capped; a timeout surfaces as the canon's unreachable
+                // copy, and the memoized gestures make a re-run converge rather than duplicate.
+                val bytes = e.items().filter { it.vaultId == vaultId }.sumOf { i -> i.doc.attachments.sumOf { it.size } }
+                val count = e.items().count { it.vaultId == vaultId }
+                val copied = runBounded(BoundedOps.rescueCopyMs(bytes, count)) {
+                    e.copyAllToPersonal(vaultId) { done, total ->
+                        _ui.value = _ui.value.copy(copyProgress = done to total)
+                    }
                 }
                 // A4: copyVaultId stays — the surviving note is named through it.
                 _ui.value = _ui.value.copy(
@@ -2516,7 +2532,12 @@ class AndvariViewModel(
                 val memo = moveGestures[gKey]
                 val g = if (memo != null && memo.sourceRev == current.rev) memo
                         else e.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[gKey] = it }
-                e.runGesture(g, { done, total -> _ui.value = _ui.value.copy(moveProgress = done to total) })
+                // Audit H10: the gesture re-uploads the item's attachments under busy; scaled to their
+                // bytes. A timeout lands in the transient branch below: the memoized gesture
+                // survives, so Retry replays the same ids instead of duplicating.
+                runBounded(BoundedOps.attachmentMs(current.doc.attachments.sumOf { it.size })) {
+                    e.runGesture(g, { done, total -> _ui.value = _ui.value.copy(moveProgress = done to total) })
+                }
                 moveGestures.remove(gKey)
                 val target = e.vaultInfos().find { it.vaultId == targetVaultId }?.name ?: "the other vault"
                 // Completion is VM state (#7): close the picker + notice, whatever
@@ -2770,7 +2791,11 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(importBusy = true, importError = null, importRetryable = true, importProgress = 0 to plan.items.size)
         viewModelScope.launch {
             try {
-                engine!!.importAll(plan.items, onProgress = { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }, vaultId = dest)
+                // Audit H10: bounded per pushed batch, so importBusy (which defers the idle lock) has an
+                // end. A timeout is an IOException → the retryable branch: the same plan replays idempotently.
+                runBounded(BoundedOps.importMs(plan.items.size)) {
+                    engine!!.importAll(plan.items, onProgress = { done, total -> _ui.value = _ui.value.copy(importProgress = done to total) }, vaultId = dest)
+                }
                 // The destination can be deleted INTO GRACE mid-import: denials park (F21) and
                 // importAll returns normally — success copy telling the user to delete the CSV
                 // would then be a lie. A held/gone destination is not a success.
@@ -2988,7 +3013,7 @@ class AndvariViewModel(
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val plain = engine!!.downloadAttachment(ref)
+                    val plain = runBounded(BoundedOps.attachmentMs(ref.size)) { engine!!.downloadAttachment(ref) } // H10
                     try { write(plain) } finally { plain.fill(0) }
                 }
                 _ui.value = _ui.value.copy(busy = false, notice = "Saved ${ref.name}")
@@ -3011,7 +3036,8 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, error = null, notice = null)
         viewModelScope.launch {
             val offline = try {
-                syncNow(e); false
+                // H10: bounded — this sync runs under busy; a stall reads as offline (IOException, below).
+                runBounded(BoundedOps.FLAT_MS) { syncNow(e) }; false
             } catch (t: IOException) {
                 true // offline is fine — export the cached snapshot, visibly dated
             } catch (t: Throwable) {
@@ -3162,7 +3188,8 @@ class AndvariViewModel(
         for (p in plan.included) {
             var bytes: ByteArray? = null
             for (attempt in 0 until 2) {
-                bytes = runCatching { current.engine.downloadAttachment(p.ref) }.getOrNull()
+                // H10: under busy, so bounded per attachment; a timeout falls into the skip-by-name path below.
+                bytes = runCatching { runBounded(BoundedOps.attachmentMs(p.ref.size)) { current.engine.downloadAttachment(p.ref) } }.getOrNull()
                 if (bytes != null) break
             }
             if (bytes == null) fetchFailed.add(p.ref.name) else fetched.add(p to bytes)
@@ -3252,7 +3279,7 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, error = null, notice = null)
         viewModelScope.launch {
             val offline = try {
-                syncNow(e); false
+                runBounded(BoundedOps.FLAT_MS) { syncNow(e) }; false // H10, as backupBegin
             } catch (t: IOException) {
                 true
             } catch (t: Throwable) {
@@ -4028,7 +4055,7 @@ class AndvariViewModel(
         _ui.value = _ui.value.copy(busy = true, totpMessage = null)
         viewModelScope.launch {
             try {
-                block()
+                runBounded(BoundedOps.FLAT_MS) { block() } // H10
             } catch (t: Throwable) {
                 // #23: the shared canon covers bad_totp_code (its authenticator-hint wording
                 // deliberately unifies android's old shorter variant) and never leaks raw text.
@@ -4100,12 +4127,23 @@ class AndvariViewModel(
 
     /** [mapError] is the #23 context seam: sign-in/unlock/save/sync ops pass their
      *  [HouseholdCopy] mapper so a failure reads right for ITS surface; everything else
-     *  takes the general [HouseholdCopy.forError]. */
-    private fun op(mapError: (Throwable) -> String = HouseholdCopy::forError, block: suspend () -> Unit) {
+     *  takes the general [HouseholdCopy.forError].
+     *
+     *  Audit H10 (the desktop fix): every op runs under a whole-call bound, because [UiState.busy]
+     *  defers the idle lock and a server that accepts the connection and then never answers must
+     *  not hold the vault unlocked past the policy window. A timeout surfaces as an IOException,
+     *  so the callers' "can't reach the server" mappings apply. [timeoutMs] defaults to
+     *  [BoundedOps.FLAT_MS]; byte-carrying legs scale it, and a null is reserved for an op that
+     *  waits on a person (the biometric prompt) and bounds its own server legs instead. */
+    private fun op(
+        mapError: (Throwable) -> String = HouseholdCopy::forError,
+        timeoutMs: Long? = BoundedOps.FLAT_MS,
+        block: suspend () -> Unit,
+    ) {
         _ui.value = _ui.value.copy(busy = true, error = null)
         viewModelScope.launch {
             try {
-                block()
+                if (timeoutMs != null) runBounded(timeoutMs) { block() } else block()
             } catch (e: UpgradeRequiredException) {
                 // A8: a 426 is not a per-action error — this build is too old for the server's
                 // minVersion pin. Raise the blocking upgrade screen (A9), not a dismissable toast.
