@@ -221,6 +221,10 @@ open class VaultSession(
     /** Immutable snapshot of the current unlocked session, or null when locked. */
     fun get(): Unlocked? = state
 
+    /** Whether the session [api] holds is still the live one: false once it was locked, ended by a
+     *  rejection, or replaced. An op that bound a session asks this before landing on it. */
+    fun isLive(api: AndvariApi): Boolean = state?.api === api
+
     /** Lock: close the engine (releasing its cache DB handle) then the api, and clear. */
     fun lock() {
         synchronized(stateLock) {

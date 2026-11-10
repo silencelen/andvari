@@ -83,12 +83,18 @@ class BoundedOpWiringTest {
         assertTrue(locked.contains("coordinator.boundedPolicy(api)") && locked.contains("runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }"), "its calls under the mutex are bounded")
         assertTrue(!locked.contains("engine.sync()"), "and its first sync is not under the mutex")
         assertTrue(autofill.contains("runBounded(BoundedOps.FLAT_MS) { r.unlocked.engine.sync() }"), "it runs after, bounded")
+        val after = autofill.substringAfter("private suspend fun syncOutsideTheMutex(")
+        assertTrue(after.indexOf("if (!VaultSession.isLive(r.unlocked.api)) throw") in 0 until after.indexOf("return r.unlocked"), "and a session that ended in it is never handed to the fill")
     }
 
     private fun assertLandsAfterTheFirstSync(body: String, landing: String) {
         val sync = body.indexOf("firstSyncAfterBind { syncNow(engine!!) }")
         assertTrue(sync > -1, "the first sync after bind() runs under its own bound")
-        assertTrue(body.indexOf(landing, sync) > sync, "and the landing follows it whatever it did: $landing")
+        // Review round 2: a rejection during that sync ends the session; the op must not land on it.
+        val live = body.indexOf("isLive", sync)
+        assertTrue(live > sync, "the op checks its session survived the sync")
+        assertTrue(body.indexOf("sessionEndedBeforeLanding()", sync) in sync until body.indexOf(landing, sync), "before it lands")
+        assertTrue(body.indexOf(landing, sync) > live, "and the landing follows it whatever it did: $landing")
         assertTrue(body.indexOf("showFirstSync(first)", sync) > sync, "what the sync could not do is said on the landing")
     }
 

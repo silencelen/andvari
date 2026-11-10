@@ -260,6 +260,15 @@ class PolicyCoordinatorTest {
     }
 
     @Test
+    fun aRejectionDuringTheFirstSyncLeavesNothingToLandOn() {
+        // An unlock on cached keys binds, then its first sync hears the device was revoked since.
+        val mine = bindLive()
+        coordinator.onRefreshRefused(mine)
+        assertFalse(session.isLive(mine), "the op that bound it must not land on the vault, gate or reveal")
+        assertTrue(session.takeRejected(), "the screen lands on sign-in instead")
+    }
+
+    @Test
     fun aRejectionHeardByAnotherComponentIsStillReportedOnce() {
         // The autofill unlock's coordinator has no UI callback; the main screen adopted its session.
         val autofills = PolicyCoordinator(store, artifacts, session, clocks)
