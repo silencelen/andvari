@@ -49,6 +49,13 @@ internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPe
         if (t == null) clear() else stored = stored?.copy(accessToken = t.accessToken, refreshToken = t.refreshToken)
     }
 
+    override fun replaceTokensIf(origin: String, userId: String, expectedRefreshToken: String, t: Tokens?): Boolean {
+        val s = stored ?: return false
+        if (s.userId != userId || !sessionBelongsTo(s.baseUrl, origin) || s.refreshToken != expectedRefreshToken) return false
+        updateTokens(t)
+        return true
+    }
+
     override fun clear() {
         clearCalls++
         stored = null

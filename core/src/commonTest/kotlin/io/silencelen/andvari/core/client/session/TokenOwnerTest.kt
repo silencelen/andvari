@@ -11,10 +11,12 @@ import io.silencelen.andvari.core.client.Tokens
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
-/** A client's token callback writes only into the stored session it was built for. */
+/** A client's token callback writes only into the stored session it holds: same origin, user and refresh token. */
 class TokenOwnerTest {
     private val home = "https://home.example"
     private val store = FakeSessionPersistence(home)
@@ -23,39 +25,61 @@ class TokenOwnerTest {
         StoredSession(origin, user, "u@example.com", access, refresh).also { store.save(it) }
 
     @Test
-    fun theOwningClientsRotationIsStored() {
+    fun theHoldingClientsRotationsAreStoredInTurn() {
         stored("u1")
-        store.updateTokensFor(TokenOwner(home, "u1"), Tokens("a2", "r2"))
+        val owner = TokenOwner(home, "u1", heldRefreshToken = "r1")
+        store.updateTokensFor(owner, Tokens("a2", "r2"))
+        assertEquals(Tokens("a2", "r2"), store.load()?.tokens())
+        store.updateTokensFor(owner, Tokens("a3", "r3"))
+        assertEquals(Tokens("a3", "r3"), store.load()?.tokens(), "each rotation starts from the one before")
+    }
+
+    @Test
+    fun aSupersededClientOfTheSameUserCannotOverwriteTheNewerPair() {
+        // The autofill overlay read the session at r1; the main app rotated it to r2 since.
+        stored("u1", access = "a2", refresh = "r2")
+        val overlay = TokenOwner(home, "u1", heldRefreshToken = "r1")
+        store.updateTokensFor(overlay, Tokens("a9", "r9"))
         assertEquals(Tokens("a2", "r2"), store.load()?.tokens())
     }
 
     @Test
-    fun aSupersededClientsLateRotationCannotOverwriteANewerSession() {
-        val superseded = TokenOwner(home, "u1")
-        stored("u2", access = "b1", refresh = "s1") // another account signed in since
-        store.updateTokensFor(superseded, Tokens("a9", "r9"))
-        assertEquals(Tokens("b1", "s1"), store.load()?.tokens())
-    }
-
-    @Test
-    fun aSupersededClientsLateDropCannotClearANewerSession() {
-        stored("u2")
-        store.updateTokensFor(TokenOwner(home, "u1"), null)
+    fun aSupersededClientOfTheSameUserCannotClearTheNewerSession() {
+        stored("u1", access = "a2", refresh = "r2")
+        val overlay = TokenOwner(home, "u1", heldRefreshToken = "r1")
+        store.updateTokensFor(overlay, null) // its refresh was refused, or it logged out
         assertNotNull(store.load())
         assertEquals(0, store.clearCalls)
     }
 
     @Test
+    fun aClientThatLostTheRaceTracksItsOwnPairAndStillCannotClear() {
+        stored("u1", access = "a2", refresh = "r2")
+        val overlay = TokenOwner(home, "u1", heldRefreshToken = "r1")
+        store.updateTokensFor(overlay, Tokens("a9", "r9")) // not stored: the session moved on
+        assertEquals("r9", overlay.heldRefreshToken, "it holds what the server gave it")
+        store.updateTokensFor(overlay, null)
+        assertNotNull(store.load(), "its later drop is about its own pair, not the stored one")
+    }
+
+    @Test
+    fun aSupersededClientOfAnotherUserWritesNothing() {
+        stored("u2", access = "b1", refresh = "s1") // another account signed in since
+        store.updateTokensFor(TokenOwner(home, "u1", heldRefreshToken = "s1"), Tokens("a9", "r9"))
+        assertEquals(Tokens("b1", "s1"), store.load()?.tokens(), "the user still has to match, whatever the token")
+    }
+
+    @Test
     fun aClientOfAnotherOriginWritesNothing() {
         stored("u1")
-        store.updateTokensFor(TokenOwner("https://other.example", "u1"), Tokens("a9", "r9"))
+        store.updateTokensFor(TokenOwner("https://other.example", "u1", heldRefreshToken = "r1"), Tokens("a9", "r9"))
         assertEquals(Tokens("a1", "r1"), store.load()?.tokens())
     }
 
     @Test
-    fun theOwnersDropEndsItsOwnSession() {
+    fun theHoldersDropEndsItsOwnSession() {
         stored("u1")
-        store.updateTokensFor(TokenOwner("https://HOME.example:443/", "u1"), null) // the canonical compare decides
+        store.updateTokensFor(TokenOwner("https://HOME.example:443/", "u1", heldRefreshToken = "r1"), null) // the canonical compare decides
         assertNull(store.load())
     }
 
@@ -65,10 +89,20 @@ class TokenOwnerTest {
         stored("previous")
         store.updateTokensFor(owner, Tokens("login-a", "login-r"))
         assertEquals(Tokens("a1", "r1"), store.load()?.tokens(), "the login's own pair is saved by its caller, with the session")
+        assertEquals("login-r", owner.heldRefreshToken)
         store.save(StoredSession(home, "u1", "u@example.com", "login-a", "login-r"))
         owner.userId = "u1"
         store.updateTokensFor(owner, Tokens("a2", "r2"))
         assertEquals(Tokens("a2", "r2"), store.load()?.tokens(), "from the commit on, its rotations are the session's")
+    }
+
+    @Test
+    fun theStoreComparesAndWritesInOneStep() {
+        stored("u1")
+        assertFalse(store.replaceTokensIf(home, "u1", "r0", Tokens("x", "y")), "a stale expectation writes nothing")
+        assertEquals(Tokens("a1", "r1"), store.load()?.tokens())
+        assertTrue(store.replaceTokensIf(home, "u1", "r1", Tokens("a2", "r2")))
+        assertEquals(Tokens("a2", "r2"), store.load()?.tokens())
     }
 
     @Test
@@ -87,11 +121,11 @@ class TokenOwnerTest {
             }
         }
         stored("u1")
-        val owner = TokenOwner(home, "u1")
+        val owner = TokenOwner(home, "u1", heldRefreshToken = "r1")
         val superseded = AndvariApi(home, HttpClient(engine), Tokens("a1", "r1"), onTokens = { store.updateTokensFor(owner, it) })
-        stored("u2", access = "b1", refresh = "s1") // a newer sign-in replaced the stored session
+        stored("u1", access = "b1", refresh = "s1") // the same account, rotated by another client since
         superseded.sync(0) // rotates late
-        assertEquals(Tokens("b1", "s1"), store.load()?.tokens(), "the newer session keeps its own pair")
+        assertEquals(Tokens("b1", "s1"), store.load()?.tokens(), "the newer pair stays")
         superseded.close()
     }
 }

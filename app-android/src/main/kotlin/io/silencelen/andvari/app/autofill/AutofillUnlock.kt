@@ -134,7 +134,9 @@ object AutofillUnlock {
         val originKey = OriginNamespace.originKey(baseUrl)
         // The same policy and purge rules as the main app, under its own fence-less policy read below.
         val coordinator = PolicyCoordinator(store, AndroidOfflineArtifacts(appContext.noBackupFilesDir), VaultSession, AndroidClocks)
-        val owner = TokenOwner(baseUrl, session.userId) // rotations land only in this session, never a newer one
+        // Rotations land only in this session, and only while it still holds the token this overlay started
+        // from: the main app may have rotated it since the overlay read the session.
+        val owner = TokenOwner(baseUrl, session.userId, heldRefreshToken = session.refreshToken)
         val api = AndvariApi(baseUrl, androidHttpClient(), session.tokens(), { store.updateTokensFor(owner, it) }, onSessionRejected = coordinator::onRefreshRefused) // platform "android"
 
         // A4: the autofill process fetches /client-policy on its ONLINE path (cheap, unauthenticated)

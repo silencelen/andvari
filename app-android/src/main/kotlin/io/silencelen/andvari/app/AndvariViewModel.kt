@@ -1031,7 +1031,7 @@ class AndvariViewModel(
     /** The stored session a client built from [tokens] writes its rotations into: the one holding those
      *  tokens. A tokenless client (a probe, or a sign-in before its commit) writes into none. */
     private fun tokenOwnerFor(tokens: Tokens?, origin: String): TokenOwner =
-        TokenOwner(origin, tokens?.let { t -> store.load()?.takeIf { it.tokens() == t }?.userId })
+        TokenOwner(origin, tokens?.let { t -> store.load()?.takeIf { it.tokens() == t }?.userId }, heldRefreshToken = tokens?.refreshToken)
 
     fun start() {
         viewModelScope.launch {

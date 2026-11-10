@@ -65,6 +65,16 @@ class PolicyCoordinatorWiringTest {
         assertTrue(autofill.contains("{ store.updateTokensFor(owner, it) }"), "the autofill unlock's client")
         assertFalse(vm.contains("{ store.updateTokens(it) }") || autofill.contains("{ store.updateTokens(it) }"), "an unbound write is the regression")
         assertTrue(Regex("""owner\.userId = s\.userId""").findAll(vm).count() == 2, "sign-in and enroll name the session they committed")
+        // Review round 2: the client's own refresh token is part of the match (TokenOwnerTest), and the
+        // compare and the write are one step: every writer of the stored session holds the same lock.
+        assertTrue(vm.contains("heldRefreshToken = tokens?.refreshToken"))
+        assertTrue(autofill.contains("heldRefreshToken = session.refreshToken"))
+        val store = File(src, "Session.kt").readText()
+        for (fn in listOf("override fun save(s: Session) {", "override fun updateTokens(t: Tokens?) {", "override fun clear() {", "override fun clearSessionTokens() {", "private fun backfillSessionOrigin() {", "override fun replaceTokensIf(")) {
+            val body = span(store, fn, "\n    }\n")
+            assertTrue(body.contains("synchronized(SESSION_LOCK)"), "$fn holds the session lock")
+        }
+        assertTrue(store.contains("private val SESSION_LOCK = Any()"), "one lock for every store in the process")
     }
 
     /** Gap 3: a forbidding policy seen by the poll, or found at bind, purges the whole namespace. */
