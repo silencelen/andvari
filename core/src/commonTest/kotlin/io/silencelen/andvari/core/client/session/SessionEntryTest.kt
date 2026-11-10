@@ -93,6 +93,9 @@ class SessionEntryTest {
     private val binder = SessionBinder(store, session, coordinator, namespaces, clocks)
     private val entry = SessionEntry(store, session, coordinator, clients, binder)
 
+    /** The first sync after the bind: the engine's own. */
+    private val engineSync: suspend (io.silencelen.andvari.core.client.SyncEngine) -> Unit = { it.sync() }
+
     private companion object {
         val crypto = createCryptoProvider()
         const val PASSWORD = "correct horse battery staple 42!"
@@ -126,16 +129,16 @@ class SessionEntryTest {
     fun aPendingInviteSwitchRefusesTheSignInBeforeAnythingIsDerived() = runBlocking<Unit> {
         val pending = PendingServer(origin = home, previousOrigin = other, ts = 1L)
         store.pendingServer = pending
-        assertEquals(SignInResult.PendingSwitch(pending), entry.signIn(EMAIL, PASSWORD))
+        assertEquals(SignInResult.PendingSwitch(pending), entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertTrue(calls.isEmpty(), "B2-6: no authKey reaches an unverified origin")
     }
 
     @Test
     fun aSecondFactorIsAskedForAndAWrongCodeSaysSo() = runBlocking<Unit> {
         login = refused("totp_required", HttpStatusCode.Forbidden)
-        assertEquals(SignInResult.TotpRequired(codeWasWrong = false), entry.signIn(EMAIL, PASSWORD))
+        assertEquals(SignInResult.TotpRequired(codeWasWrong = false), entry.signIn(EMAIL, PASSWORD, null, engineSync))
         login = refused("bad_totp_code", HttpStatusCode.Forbidden)
-        assertEquals(SignInResult.TotpRequired(codeWasWrong = true), entry.signIn(EMAIL, PASSWORD, totp = "000000"))
+        assertEquals(SignInResult.TotpRequired(codeWasWrong = true), entry.signIn(EMAIL, PASSWORD, "000000", engineSync))
         assertNull(store.stored)
         assertNull(session.get())
     }
@@ -148,7 +151,7 @@ class SessionEntryTest {
             assertEquals("test device", sent.device.name)
             respond(sessionJson(keys, mustChange = true), HttpStatusCode.OK, headers)
         }
-        val r = assertIs<SignInResult.SignedIn>(entry.signIn(EMAIL, PASSWORD))
+        val r = assertIs<SignInResult.SignedIn>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertNull(r.captureProof, "a confirmed piece needs no capture")
         assertTrue(r.mustChangePassword)
         assertTrue(store.mustChangePassword, "F58: persisted, since only a login response carries it")
@@ -163,7 +166,7 @@ class SessionEntryTest {
     @Test
     fun anUnconfirmedRecoveryPieceHandsTheCaptureItsProof() = runBlocking<Unit> {
         login = { respond(sessionJson(keysOf(reg, confirmed = false)), HttpStatusCode.OK, headers) }
-        val r = assertIs<SignInResult.SignedIn>(entry.signIn(EMAIL, PASSWORD))
+        val r = assertIs<SignInResult.SignedIn>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertEquals(Account.deriveAuthKey(PASSWORD, reg.kdfSalt, reg.kdfParams), r.captureProof, "§F.9: the login authKey is the fresh reauth")
     }
 
@@ -174,7 +177,7 @@ class SessionEntryTest {
             coordinator.originChanged()
             respond(sessionJson(keys), HttpStatusCode.OK, headers)
         }
-        assertEquals(SignInResult.OriginMoved(home), entry.signIn(EMAIL, PASSWORD))
+        assertEquals(SignInResult.OriginMoved(home), entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertTrue(calls.last().endsWith("/auth/logout"), "revoked at the issuer")
         assertNull(store.stored)
         assertNull(session.get())
@@ -183,7 +186,7 @@ class SessionEntryTest {
     @Test
     fun aRefusedSignInKeepsNothing() = runBlocking<Unit> {
         login = refused("invalid_credentials")
-        val r = assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        val r = assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertEquals(401, (r.cause as io.silencelen.andvari.core.client.ApiException).status)
         assertNull(store.stored)
         assertNull(session.get())
@@ -192,7 +195,7 @@ class SessionEntryTest {
     @Test
     fun aSessionRejectedDuringItsFirstSyncLandsNowhere() = runBlocking<Unit> {
         sync = refused("unauthorized")
-        assertEquals(SignInResult.EndedBeforeLanding, entry.signIn(EMAIL, PASSWORD))
+        assertEquals(SignInResult.EndedBeforeLanding, entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertNull(session.get())
     }
 
@@ -203,7 +206,7 @@ class SessionEntryTest {
         // The login answered, but the keys it served do not open under this password.
         val wrongSalt = io.silencelen.andvari.core.crypto.Bytes.toB64(crypto.randomBytes(16))
         login = { respond(sessionJson(keys.copy(kdfSalt = wrongSalt)), HttpStatusCode.OK, headers) }
-        val r = assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        val r = assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertIs<io.silencelen.andvari.core.crypto.CryptoException>(r.cause)
         val loggedIn = calls.indexOfFirst { it.endsWith("/auth/login") }
         assertTrue(calls.indexOfFirst { it.endsWith("/auth/logout") } > loggedIn, "the session the login issued is revoked, not orphaned")
@@ -214,14 +217,14 @@ class SessionEntryTest {
     @Test
     fun aSignInThatFailsBeforeAnySessionIsIssuedRevokesNothing() = runBlocking<Unit> {
         prelogin = refused("not_found", HttpStatusCode.NotFound)
-        assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertFalse(calls.any { it.endsWith("/auth/logout") })
     }
 
     @Test
     fun aSavedSessionThatFailedToBindIsKeptForTheNextUnlock() = runBlocking<Unit> {
         namespaces.failOpen = IllegalStateException("corrupt cache file")
-        assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD))
+        assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
         assertFalse(calls.any { it.endsWith("/auth/logout") }, "an unlock can still reach a saved session")
         assertNotNull(store.stored)
         assertNull(session.get())
@@ -234,7 +237,7 @@ class SessionEntryTest {
 
     @Test
     fun aWeakMasterPasswordSendsNothing() = runBlocking<Unit> {
-        assertEquals(EnrollOutcome.WeakPassword, entry.enroll(waived(password = "password")))
+        assertEquals(EnrollOutcome.WeakPassword, entry.enroll(waived(password = "password"), engineSync))
         assertTrue(calls.isEmpty())
     }
 
@@ -242,13 +245,13 @@ class SessionEntryTest {
     fun aSheetThatNoLongerMatchesThePolicySendsNothing() = runBlocking<Unit> {
         val policy = ClientPolicy(recoveryFingerprint = "ab".repeat(32))
         val request = EnrollRequest("invite", "new@example.com", "", PASSWORD, waived = false, typedShortFp = "cd".repeat(16), gatePolicy = policy)
-        assertEquals(EnrollOutcome.AnchorMismatch, entry.enroll(request))
+        assertEquals(EnrollOutcome.AnchorMismatch, entry.enroll(request, engineSync))
         assertTrue(calls.isEmpty(), "CR-06: no escrow is sealed to a fingerprint the person did not check")
     }
 
     @Test
     fun aWaivedEnrollCommitsItsPieceAndHandsItOverOnce() = runBlocking<Unit> {
-        val r = assertIs<EnrollOutcome.Enrolled>(entry.enroll(waived()))
+        val r = assertIs<EnrollOutcome.Enrolled>(entry.enroll(waived(), engineSync))
         val sent = assertNotNull(registered)
         assertNull(sent.escrow, "a waived invite seals no org escrow")
         assertFalse(calls.any { it.endsWith("/recovery-pubkey") }, "and fetches no org key")
@@ -266,7 +269,7 @@ class SessionEntryTest {
         val inner = register
         var markerAtRegister: PendingServer? = null
         register = { request -> markerAtRegister = store.pendingServer; inner(request) }
-        assertIs<EnrollOutcome.Enrolled>(entry.enroll(waived()))
+        assertIs<EnrollOutcome.Enrolled>(entry.enroll(waived(), engineSync))
         assertEquals("new@example.com", markerAtRegister?.email, "B2-9: the crash marker names the address before register")
         assertNull(store.pendingServer, "B2-6: success commits the switch")
     }
@@ -279,7 +282,7 @@ class SessionEntryTest {
             coordinator.originChanged()
             inner(request)
         }
-        assertEquals(EnrollOutcome.OriginMoved(home), entry.enroll(waived()))
+        assertEquals(EnrollOutcome.OriginMoved(home), entry.enroll(waived(), engineSync))
         assertTrue(calls.last().endsWith("/auth/logout"))
         assertNull(store.stored)
         assertNull(session.get())
@@ -288,7 +291,7 @@ class SessionEntryTest {
     @Test
     fun anEnrollWhoseSessionEndsInItsFirstSyncShowsNoPhrase() = runBlocking<Unit> {
         sync = refused("unauthorized")
-        assertEquals(EnrollOutcome.EndedBeforeLanding, entry.enroll(waived()))
+        assertEquals(EnrollOutcome.EndedBeforeLanding, entry.enroll(waived(), engineSync))
         assertNull(session.get())
     }
 }

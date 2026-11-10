@@ -61,6 +61,29 @@ sealed interface UnlockResult {
     data class Failed(val cause: Throwable) : UnlockResult
 }
 
+/** What turning quick unlock on came to (spec 01 §8.1). */
+sealed interface QuickEnrollResult {
+    data object Enabled : QuickEnrollResult
+
+    /** The prompt was cancelled: nothing was wrapped. */
+    data object Cancelled : QuickEnrollResult
+
+    /** No unlocked session: the key to wrap is not in memory. */
+    data object NoSession : QuickEnrollResult
+
+    /** A5: a recovery temporary password is the live credential; it must be changed first. */
+    data object MustChangePassword : QuickEnrollResult
+
+    /** A1: a quick-unlocked session with no surviving full-password stamp: unlock with the password first. */
+    data object NeedsPasswordUnlock : QuickEnrollResult
+
+    /** The policy, its age or the device's biometrics rule it out. */
+    data class Unavailable(val gate: QuickGate) : QuickEnrollResult
+
+    /** The platform wrapped nothing; [reason] says why, when it can. */
+    data class Failed(val reason: String?) : QuickEnrollResult
+}
+
 /** How one entry point climbs the ladder. The defaults are the main app's. */
 class UnlockOptions(
     /**
@@ -119,6 +142,29 @@ class UnlockLadder(
             else -> null
         }
         return QuickStatus(eligible, enrolled, fresh, refusal)
+    }
+
+    /**
+     * Turn quick unlock on for the live session's account: the platform's prompt consents and the UVK is wrapped under
+     * its hardware key. Refused under a recovery temporary password (A5), where [quickStatus] says the policy or the
+     * device rule it out, and from a quick-unlocked session with no surviving full-password stamp (A1: enrolling would
+     * restart the 30-day window with no password typed).
+     */
+    suspend fun enableQuick(host: BiometricHost): QuickEnrollResult {
+        val live = session.get() ?: return QuickEnrollResult.NoSession
+        val originKey = store.baseUrl?.let(OriginCanon::originKey) ?: return QuickEnrollResult.NoSession
+        val userId = live.account.userId
+        if (store.mustChangePassword) return QuickEnrollResult.MustChangePassword
+        val status = quickStatus(userId)
+        if (!status.eligible) return QuickEnrollResult.Unavailable(status.refusal ?: QuickGate.NO_BIOMETRIC)
+        if (live.provenance != VaultSession.UnlockProvenance.PASSWORD && store.origin(originKey).passwordStamp(userId) == null) {
+            return QuickEnrollResult.NeedsPasswordUnlock
+        }
+        return when (val r = quickKeys.enroll(host, originKey, userId, live.account)) {
+            QuickEnroll.Ok -> QuickEnrollResult.Enabled
+            QuickEnroll.Cancelled -> QuickEnrollResult.Cancelled
+            is QuickEnroll.Failed -> QuickEnrollResult.Failed(r.reason)
+        }
     }
 
     /** Unlock [stored] with the master password. Stamps the full-password window (A1). */
