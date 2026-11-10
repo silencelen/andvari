@@ -3,22 +3,16 @@ package io.silencelen.andvari.core.ios
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.darwin.Darwin
 import io.silencelen.andvari.core.app.SessionController
-import io.silencelen.andvari.core.client.DeviceState
-import io.silencelen.andvari.core.client.InMemoryVaultCache
-import io.silencelen.andvari.core.client.MemoryDeviceState
-import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.HttpClients
-import io.silencelen.andvari.core.client.session.InMemoryPrefs
-import io.silencelen.andvari.core.client.session.InMemorySecrets
 import io.silencelen.andvari.core.client.session.IosClocks
 import io.silencelen.andvari.core.client.session.NamespaceStorage
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
-import io.silencelen.andvari.core.client.session.QuickEnroll
-import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SessionPersistence
+import io.silencelen.andvari.core.client.session.httpsOnly
 import kotlinx.coroutines.Dispatchers
+import platform.UIKit.UIDevice
 
 /**
  * Where the iOS app keeps its state (design 2026-11-09). One object, so the locations can move to an App
@@ -63,24 +57,24 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     constructor() : this(IosStorageConfig())
 }
 
-/** The platform seams one controller uses. The API surface lands first; the storage seams follow it. */
+/** The platform seams one controller uses. */
 internal class IosSeams(config: IosStorageConfig) {
-    val store: SessionPersistence = PrefsSessionPersistence(InMemoryPrefs(), InMemorySecrets())
-    val namespaces: NamespaceStorage = object : NamespaceStorage {
-        override fun openVaultCache(originKey: String, userId: String): VaultCache = InMemoryVaultCache()
-        override fun deviceState(originKey: String, userId: String): DeviceState = MemoryDeviceState()
-        override fun deleteVaultCache(originKey: String, userId: String) {}
-    }
-    val http: HttpClients = object : HttpClients {
-        override fun create(): HttpClient = HttpClient(Darwin)
-        override val wirePlatform: String = "ios"
-        override val deviceName: String = "iPhone"
-    }
-    val quickKeys: QuickUnlockKeys = object : QuickUnlockKeys {
-        override fun hasStrongBiometric(): Boolean = false
-        override fun isEnrolled(originKey: String, userId: String): Boolean = false
-        override suspend fun recover(host: BiometricHost, originKey: String, userId: String): QuickRecover = QuickRecover.Fallback(null)
-        override suspend fun enroll(host: BiometricHost, originKey: String, userId: String, account: io.silencelen.andvari.core.client.Account): QuickEnroll = QuickEnroll.Failed(null)
-        override fun wipe(originKey: String, userId: String) {}
-    }
+    /** Non-secret state in NSUserDefaults; only the session's tokens in the Keychain. */
+    val store: SessionPersistence = PrefsSessionPersistence(
+        UserDefaultsPrefs(config.defaultsSuite),
+        KeychainSecrets(config.keychainService, config.keychainAccessGroup),
+    )
+    val namespaces: NamespaceStorage = IosNamespaceStorage()
+    val http: HttpClients = IosHttpClients
+    val quickKeys: QuickUnlockKeys = IosQuickUnlockKeys(KeychainSecrets("${config.keychainService}.quickunlock", config.keychainAccessGroup), config.keychainAccessGroup)
+}
+
+/** The Darwin engine, https only (loopback excepted), tagged "ios" for the server's version pins (spec 03 §1). */
+internal object IosHttpClients : HttpClients {
+    override fun create(): HttpClient = HttpClient(Darwin).httpsOnly(IOS_CLEARTEXT_EXEMPT_HOSTS)
+
+    override val wirePlatform: String = "ios"
+
+    /** The model ("iPhone", "iPad"): the device's own name needs an entitlement since iOS 16. */
+    override val deviceName: String get() = UIDevice.currentDevice.model
 }
