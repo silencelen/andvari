@@ -10,6 +10,8 @@ settings:
     CODE_SIGN_STYLE: Manual
     SWIFT_VERSION: "5.0"
     # The shared Kotlin core, built by Gradle before Xcode runs (see README.md).
+    # The Kotlin core is built for arm64 only, on device and simulator.
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
     KOTLIN_TARGET[sdk=iphoneos*]: iosArm64
     KOTLIN_TARGET[sdk=iphonesimulator*]: iosSimulatorArm64
     FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../core/build/bin/$(KOTLIN_TARGET)/releaseFramework
