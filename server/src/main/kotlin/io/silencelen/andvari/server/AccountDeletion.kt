@@ -76,6 +76,14 @@ internal object AccountDeletion {
         "recovery_self_confirm", "recovery_self_confirm_unbound", "recovery_self_confirm_stale",
     )
 
+    /**
+     * Audit types whose deviceId is NOT the writer's own device but the target of its action — an admin revoking someone's
+     * device. Every other audit row's deviceId is its writer's session device or null (AccountDeletionTest reads the
+     * server sources to keep it so), so the account's own rows of every other type name only its own devices: the
+     * deletion gathers device ids from them (step 5), and must not from these, or it would rename another account's device.
+     */
+    val FOREIGN_DEVICE_AUDIT_TYPES: Set<String> = setOf("device_revoke", "device_revoke_denied")
+
     /** The vault a [VAULT_SCOPED_AUDIT_TYPES] row names: its meta's leading id, or — for `attachment_upload`, whose meta is
      *  `<attachmentId>:<bytes>` — the vault of that attachment's row (gone with a purged vault, so such a row is dropped).
      *  Null when the meta names none. */
@@ -209,12 +217,24 @@ internal object AccountDeletion {
         c.exec("DELETE FROM invites WHERE email=?", user.email)
 
         // 5. Every session and device (deleting them IS the revocation: authenticate, refresh and the WebSocket re-check
-        //    all find nothing), and the idempotency journal of those devices. Sessions first: sessions.deviceId is a FK.
-        //    The device ids are captured first: step 7 pseudonymises them in the audit trail. Only the devices table says
-        //    which devices are the account's — an audit row of the account can name ANOTHER account's device (an admin's
-        //    device_revoke), and that id is not this deletion's to touch.
-        val devices = c.queryAll("SELECT deviceId FROM devices WHERE userId=?", userId) { it.getString(1) }
-        c.exec("DELETE FROM mutations WHERE deviceId IN (SELECT deviceId FROM devices WHERE userId=?)", userId)
+        //    all find nothing), and the idempotency journal of every device the account ever had. Sessions first:
+        //    sessions.deviceId is a FK. The device ids are gathered first, from everywhere that still ties one to the
+        //    account — its `devices` rows, the deviceId on its own audit rows, its journal rows (schema v17) — because the
+        //    janitor prunes a session-less device row after 90 days while its audit rows live 365 and its journal rows 180:
+        //    the devices table alone misses every pruned device. Step 7b pseudonymises the whole set. The audit rows of
+        //    [FOREIGN_DEVICE_AUDIT_TYPES] are left out: their deviceId is the TARGET of an admin action, another account's.
+        val devices = LinkedHashSet<String>().apply {
+            addAll(c.queryAll("SELECT deviceId FROM devices WHERE userId=?", userId) { it.getString(1) })
+            addAll(
+                c.queryAll(
+                    "SELECT DISTINCT deviceId FROM audit WHERE userId=? AND deviceId IS NOT NULL AND type NOT IN (${FOREIGN_DEVICE_AUDIT_TYPES.joinToString(",") { "?" }})",
+                    userId, *FOREIGN_DEVICE_AUDIT_TYPES.toTypedArray(),
+                ) { it.getString(1) },
+            )
+            addAll(c.queryAll("SELECT DISTINCT deviceId FROM mutations WHERE userId=?", userId) { it.getString(1) })
+        }.toList()
+        c.exec("DELETE FROM mutations WHERE userId=?", userId)
+        for (chunk in devices.chunked(ID_CHUNK)) c.exec("DELETE FROM mutations WHERE deviceId IN (${chunk.joinToString(",") { "?" }})", *chunk.toTypedArray())
         c.exec("DELETE FROM sessions WHERE userId=? OR deviceId IN (SELECT deviceId FROM devices WHERE userId=?)", userId, userId)
         c.exec("DELETE FROM devices WHERE userId=?", userId)
 
@@ -247,11 +267,12 @@ internal object AccountDeletion {
         for (chunk in drop.chunked(ID_CHUNK)) c.exec("DELETE FROM audit WHERE id IN (${chunk.joinToString(",") { "?" }})", *chunk.toTypedArray())
         c.exec("DELETE FROM audit WHERE userId=?", userId) // belt: nothing is left naming it
 
-        // 7b. The account's device ids go the way of its userId: each gets a fresh random id of its own wherever a row
-        //     still names it (its kept rows, and other accounts' — an admin's device_revoke), so a kept record still
-        //     shows which events came from one device without naming a device id the account held — an id its old
-        //     clients, backups and logs share with this trail. Fresh uuid()s, the mapping kept nowhere, like the
-        //     pseudonym; device ids are minted by the server (never chosen by a client), so none of them is retired.
+        // 7b. The account's device ids (step 5's set, pruned devices included) go the way of its userId: each gets a fresh
+        //     random id of its own wherever a row still names it (its kept rows, and other accounts' — an admin's
+        //     device_revoke), so a kept record still shows which events came from one device without naming a device id
+        //     the account held — an id its old clients, backups and logs share with this trail. Fresh uuid()s, the mapping
+        //     kept nowhere, like the pseudonym; device ids are minted by the server (never chosen by a client), so none of
+        //     them is retired.
         val devicePseudonyms = devices.associateWith { uuid() }
         for (chunk in devices.chunked(ID_CHUNK)) {
             val rows = c.queryAll("SELECT id, deviceId FROM audit WHERE deviceId IN (${chunk.joinToString(",") { "?" }})", *chunk.toTypedArray()) { rs ->

@@ -652,5 +652,28 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 17) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Account deletion (spec 03 §13): the idempotency journal named only a deviceId, and the janitor prunes a
+                    // session-less device row after 90 days while the journal keeps its rows 180 — so a deletion that found
+                    // the account's journal through `devices` missed every pruned device's rows (and their device ids). The
+                    // pushing account now rides on each new row. Existing rows take it from their device row where that still
+                    // exists; a row whose device is already pruned stays NULL, and the deletion still finds it through the
+                    // device ids on the account's own audit rows, or it ages out within the 180 days. Idempotent: a restore
+                    // drill that rewinds the marker re-runs this.
+                    val cols = st.executeQuery("PRAGMA table_info(mutations)").use { rs ->
+                        val names = HashSet<String>()
+                        while (rs.next()) names.add(rs.getString("name"))
+                        names
+                    }
+                    if ("userId" !in cols) st.executeUpdate("ALTER TABLE mutations ADD COLUMN userId TEXT")
+                    st.executeUpdate(
+                        "UPDATE mutations SET userId=(SELECT d.userId FROM devices d WHERE d.deviceId=mutations.deviceId) WHERE userId IS NULL",
+                    )
+                    st.executeUpdate("UPDATE meta SET value='17' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }

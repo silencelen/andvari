@@ -1026,7 +1026,8 @@ table, `retired_ids` (below; spec 02 §5).
 
   **Effect.**
   - Every session and device of the account is deleted (which revokes them: refresh, the bearer and the §6 socket
-    re-check all find nothing), with the idempotency journal of those devices; every open socket of the account gets
+    re-check all find nothing), with the idempotency journal of every device it had — a device row the janitor already
+    pruned included (journal rows carry the pushing account since schema v17); every open socket of the account gets
     `{"type":"revoked"}` and is closed (§6 — no new frame).
   - **Every vault the account alone holds is purged now**, with the janitor's statements and no grace: its personal
     vault, every vault it owns that no other account holds an active grant to, and a vault it soft-deleted that is still
@@ -1068,18 +1069,19 @@ table, `retired_ids` (below; spec 02 §5).
   vault's trash, a file it uploaded there, the history of a vault it handed over: the data is still there, and so is the
   record of who touched it — and deleted when the vault is one this deletion purges (`VAULT_SCOPED_AUDIT_TYPES`). Its
   lookups and recovery-capture confirmations are deleted. The userId is replaced by the pseudonym in every other
-  account's row that names it in meta, and those rows keep the ordinary retention. Each of the account's device ids
-  (its rows in `devices`) is replaced, in every row naming it — its own and other accounts', such as an admin's
-  `device_revoke` —, by a fresh random id of its own, the same in each row, so a kept record still shows which events
-  came from one device; a device id in the account's rows that names ANOTHER account's device (a revocation it made as
-  an admin) is left alone. The deletion's own row is `account_delete` (userId = the pseudonym, deviceId = the deleting
-  device's new id, meta `vaults=N,left=M`). The janitor deletes every row under a pseudonym **90 days after that
-  account's deletion** (the `account_delete` row is the clock); the ordinary rule deletes audit rows 365 days after they
-  were written. A row a racing request writes after the deletion naming the gone userId is stored without anything that
-  names the account (userId, deviceId and ip null, meta prefixed `deleted_account`), and an admin route given an id that
-  names no account or device records the attempt without the id (`escrow_admin_read`, `user_disable_denied`,
-  `device_revoke_denied`), so a screen opened before the deletion does not write a deleted id back. No audit row
-  carries an email (spec 02 §5).
+  account's row that names it in meta, and those rows keep the ordinary retention. Each of the account's device ids —
+  its `devices` rows, the deviceId on its own audit rows and on its journal rows, so a device row the janitor pruned
+  (90 days without a session) still counts — is replaced, in every row naming it — its own and other accounts', such as
+  an admin's `device_revoke` —, by a fresh random id of its own, the same in each row, so a kept record still shows
+  which events came from one device; the deviceId of the account's `device_revoke`/`device_revoke_denied` rows is the
+  TARGET of an admin action, another account's device, and is left alone. The deletion's own row is `account_delete`
+  (userId = the pseudonym, deviceId = the deleting device's new id, meta `vaults=N,left=M`). The janitor deletes every
+  row under a pseudonym **90 days after that account's deletion** (the `account_delete` row is the clock); the ordinary
+  rule deletes audit rows 365 days after they were written. A row a racing request writes after the deletion naming the
+  gone userId is stored without anything that names the account (userId, deviceId and ip null, meta prefixed
+  `deleted_account`), and an admin route given an id that names no account or device records the attempt without the
+  id (`escrow_admin_read`, `user_disable_denied`, `device_revoke_denied`), so a screen opened before the deletion does
+  not write a deleted id back. No audit row carries an email (spec 02 §5).
 
   **Rate limit:** `account_delete:{userId}`, 5 per hour (each attempt is a memory-hard verify, and each reauth route is
   another password guess for a session holder); a request carrying a code also draws on `totp_verify:{userId}` (§2).
