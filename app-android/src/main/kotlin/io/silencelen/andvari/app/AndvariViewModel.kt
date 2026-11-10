@@ -1075,8 +1075,9 @@ class AndvariViewModel(
         // A no-op canonical re-entry keeps the session. Old-origin NAMESPACED material (cached keys,
         // vault cache, quick-unlock) is PRESERVED (§4.2/B2-7 — a switch is not a wipe); only the
         // single global session slot is cleared, via [SessionStore.clearSessionTokens].
+        // F8 (design §4.1 rule 1): the tokens drop BEFORE the origin moves, so a crash between the two
+        // leaves the old origin with no tokens, never a stored session paired with the new origin.
         val drop = switchDropsSession(store.baseUrl, newUrl)
-        store.baseUrl = newUrl
         if (drop) {
             VaultSession.lock() // close the old origin's api/engine before any request goes to the new one
             store.clearSessionTokens()
@@ -1084,6 +1085,7 @@ class AndvariViewModel(
             // into the new one (mirrors lock()/signOut()'s zeroize discipline).
             zeroPendingRecovery(); zeroPendingRecover(); pendingCaptureAuthKey = null
         }
+        store.baseUrl = newUrl
         // §3/B4(4) (review MED, desktop-twin parity): a deliberate URL change nulls the OLD
         // server's policy and clears the flag AT CHANGE TIME, so Welcome renders the neutral
         // "Checking the server…" state during the probe — never the old server's ceremony
