@@ -52,6 +52,46 @@ class BoundedOpTest {
     private fun assertFalse(condition: Boolean) = assertTrue(!condition)
 
     @Test
+    fun aLibraryRethrowingOurTimeoutAsItsOwnCancellationStillReadsAsATimeout() = runBlocking<Unit> {
+        // What Ktor does when the bound cancels a call: a fresh CancellationException, not the timeout's.
+        assertFailsWith<IOException> {
+            runBounded(30L) {
+                try {
+                    delay(60_000L)
+                } catch (e: CancellationException) {
+                    throw CancellationException("Timed out waiting for 30 ms")
+                }
+                1
+            }
+        }
+    }
+
+    @Test
+    fun anOuterBoundFiringInsideAnInnerOneIsATimeoutAtTheOuterOne() = runBlocking<Unit> {
+        var innerSaw: Throwable? = null
+        assertFailsWith<IOException> {
+            runBounded(50L) {
+                try {
+                    runBounded(10_000L) { delay(60_000L); 1 }
+                } catch (t: Throwable) {
+                    innerSaw = t
+                    throw t
+                }
+            }
+        }
+        assertTrue(innerSaw is CancellationException, "the inner bound did not fire; it was cancelled: $innerSaw")
+        assertFalse(innerSaw is IOException)
+    }
+
+    @Test
+    fun anInnerTimeoutIsAnIOExceptionTheOuterCodeCanHandle() = runBlocking<Unit> {
+        val handled = runBounded(10_000L) {
+            runCatching { runBounded(20L) { delay(60_000L); 1 } }.exceptionOrNull() ?: IllegalStateException("no timeout")
+        }
+        assertTrue(handled is IOException, "the outer op carries on with an offline verdict: $handled")
+    }
+
+    @Test
     fun theByteCarryingBoundIsScaledAndCapped() {
         assertEquals(BoundedOps.FLAT_MS, BoundedOps.attachmentMs(0L), "no bytes: the flat window")
         assertEquals(BoundedOps.FLAT_MS, BoundedOps.attachmentMs(-5L), "nonsense sizes cannot shrink the window")

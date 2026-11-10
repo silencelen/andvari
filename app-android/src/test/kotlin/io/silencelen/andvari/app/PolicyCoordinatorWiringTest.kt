@@ -47,11 +47,15 @@ class PolicyCoordinatorWiringTest {
     fun aForbiddingPolicyIsEnforcedOnThePollAndAtBind() {
         val poll = span(vm, "runCatching { current.api.clientPolicy() }", "syncNow(current.engine)")
         assertTrue(poll.contains("if (applyPolicy(p, tag) && !p.offlineCacheAllowed) purgeOfflineData(originKey, current.account.userId)"), "only a reply that passed the fence may purge")
-        val bind = span(vm, "private fun bind(a: AndvariApi", "newEngine.onPersonalWrapStored")
-        assertTrue(bind.contains("purgeOfflineData(originKey, acct.userId); InMemoryVaultCache()"), "bind drops the blob too, not just the file")
+        val bind = span(vm, "private fun bind(a: AndvariApi", "notePasswordUnlockForQuickUnlockOffer()\n    }")
+        val purge = bind.indexOf("if (!allowed) purgeOfflineData(originKey, acct.userId)")
+        assertTrue(purge > -1, "bind drops the blob too, not just the file")
+        assertTrue(bind.indexOf("VaultSession.bind(a, acct, newEngine, provenance)") in 0 until purge, "after the bind, so a replaced engine has released the file")
         assertFalse(bind.contains("deleteCache("), "the file-only delete is the regression")
-        val af = span(autofill, "private suspend fun unlockLocked(", "VaultSession.bind(api, acct, engine, provenance)")
-        assertTrue(af.contains("coordinator.purgeForbidden(originKey, acct.userId)"), "the autofill unlock's cache path too")
+        val af = span(autofill, "private suspend fun unlockLocked(", "runCatching { engine.sync() }")
+        val afPurge = af.indexOf("if (!cacheAllowed) coordinator.purgeForbidden(originKey, acct.userId)")
+        assertTrue(afPurge > -1, "the autofill unlock's cache path too")
+        assertTrue(af.indexOf("VaultSession.bind(api, acct, engine, provenance)") in 0 until afPurge, "and after its bind")
         assertFalse(vm.contains("session != null && !bound) purgeOfflineData"), "start() no longer skips a bound session")
     }
 

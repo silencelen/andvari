@@ -1,6 +1,9 @@
 package io.silencelen.andvari.core.client.session
 
 import io.silencelen.andvari.core.client.SyncEngine
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.IOException
 
@@ -15,13 +18,28 @@ import kotlinx.io.IOException
  *
  * A timeout surfaces as an [IOException], so every existing "can't reach the server" mapping and
  * every offline branch applies unchanged. Cancellation of the enclosing coroutine is not a
- * timeout and propagates as itself.
+ * timeout and propagates as itself. Bounds nest: an inner bound's timeout is an IOException its
+ * caller can handle, and an outer bound firing inside an inner one passes through the inner one
+ * as a cancellation and surfaces as an IOException at the outer one.
  *
  * The bound takes effect at suspension points: blocking work inside [block] (a KDF on a worker)
  * finishes first and the timeout lands when it returns.
  */
-suspend fun <T : Any> runBounded(timeoutMs: Long, block: suspend () -> T): T =
-    withTimeoutOrNull(timeoutMs) { block() } ?: throw IOException("operation timed out")
+suspend fun <T : Any> runBounded(timeoutMs: Long, block: suspend () -> T): T {
+    val caller = currentCoroutineContext()[Job]
+    val result = try {
+        withTimeoutOrNull(timeoutMs) { block() }
+    } catch (e: CancellationException) {
+        // Our own timeout can come back as a cancellation withTimeoutOrNull does not recognise: a
+        // library that cancels its work on our behalf may rethrow a fresh CancellationException
+        // (Ktor does, carrying the timeout's message). While the caller is still active, nothing but
+        // this bound cancelled the block, so it is the timeout, and it must read as one rather than
+        // escape as a cancellation that skips every IOException branch.
+        if (caller?.isActive != false) throw IOException("operation timed out", e)
+        throw e
+    }
+    return result ?: throw IOException("operation timed out")
+}
 
 /** The whole-call budgets for the ops [runBounded] guards. */
 object BoundedOps {

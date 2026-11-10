@@ -45,7 +45,10 @@ class PolicyCoordinatorTest {
     private var rejected = 0
     private val coordinator = PolicyCoordinator(store, artifacts, session, clocks, fence, onSessionRejected = { rejected++ })
 
-    private class TrackingCache(private val inner: InMemoryVaultCache = InMemoryVaultCache()) : VaultCache by inner {
+    private class TrackingCache(
+        private val inner: InMemoryVaultCache = InMemoryVaultCache(),
+        override val durable: Boolean = true,
+    ) : VaultCache by inner {
         var closed = false
             private set
 
@@ -66,14 +69,17 @@ class PolicyCoordinatorTest {
 
     private fun api(origin: String) = AndvariApi(origin, HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) }), Tokens("a", "r"))
 
-    /** Binds a live session at [origin] and hands back its api. */
-    private fun bindLive(origin: String = home): AndvariApi {
+    /** Binds a live session at [origin], on a durable cache unless [durable] is false, and hands back its api. */
+    private fun bindLive(origin: String = home, durable: Boolean = true): AndvariApi {
         val api = api(origin)
-        val cache = TrackingCache().also { liveCache = it }
+        val cache = TrackingCache(durable = durable).also { liveCache = it }
         session.bind(api, account, SyncEngine(api, account, cache))
         store.save(StoredSession(origin, account.userId, "u@example.com", "a", "r"))
         return api
     }
+
+    /** What every caller does before purging: the forbidding verdict is in the origin's mirror. */
+    private fun forbid(originKey: String = homeKey) = coordinator.recordPolicy(originKey, ClientPolicy(offlineCacheAllowed = false))
 
     private fun storedHomeSession() = store.save(StoredSession(home, "u1", "u@example.com", "a", "r"))
 
@@ -133,6 +139,7 @@ class PolicyCoordinatorTest {
     @Test
     fun aForbiddingVerdictWithNoLiveEngineClearsEverythingButTheSession() {
         storedHomeSession()
+        forbid()
         coordinator.purgeForbidden(homeKey, "u1")
         assertEquals(listOf("blob:$homeKey/u1", "cache:$homeKey/u1"), artifacts.events)
         assertEquals(listOf("u1"), store.origin(homeKey).clearedAccountKeys)
@@ -146,6 +153,7 @@ class PolicyCoordinatorTest {
     fun aForbiddingPollWithALiveEngineWipesSecretsNowAndTheFileAtClose() {
         val live = bindLive()
         val before = assertNotNull(session.get())
+        forbid()
         coordinator.purgeForbidden(homeKey, account.userId)
         assertEquals(listOf("blob:$homeKey/${account.userId}"), artifacts.events, "the blob goes now; the DB is held open by the engine")
         assertEquals(listOf(account.userId), store.origin(homeKey).clearedStamps)
@@ -161,9 +169,66 @@ class PolicyCoordinatorTest {
     @Test
     fun aForbiddingVerdictForAnotherOriginIsNotDeferredByThisOnesEngine() {
         bindLive(home)
+        forbid(otherKey)
         coordinator.purgeForbidden(otherKey, "stranger")
         assertTrue("cache:$otherKey/stranger" in artifacts.events, "no live engine holds that namespace")
         assertNotNull(session.get(), "and the live session here is untouched")
+    }
+
+    @Test
+    fun aLaterAllowingVerdictKeepsTheFile() {
+        bindLive()
+        forbid()
+        coordinator.purgeForbidden(homeKey, account.userId)
+        coordinator.recordPolicy(homeKey, ClientPolicy(offlineCacheAllowed = true)) // the admin changed their mind
+        session.lock()
+        assertTrue(artifacts.events.none { it.startsWith("cache:") }, "the deletion reads the verdict when it runs: ${artifacts.events}")
+    }
+
+    @Test
+    fun repeatedForbiddingPollsDeleteTheFileOnce() {
+        bindLive()
+        repeat(3) {
+            forbid()
+            coordinator.purgeForbidden(homeKey, account.userId)
+        }
+        session.lock()
+        assertEquals(1, artifacts.events.count { it.startsWith("cache:") })
+    }
+
+    @Test
+    fun aRebindUnderAForbiddingVerdictStillDeletesTheFile() {
+        // The view model's bind: the verdict was queued against the old engine, and the new one runs in
+        // memory. The replaced engine releases the file and the queued deletion runs, rather than vanishing.
+        bindLive()
+        forbid()
+        coordinator.purgeForbidden(homeKey, account.userId)
+        val oldCache = liveCache
+        val api = api(home)
+        session.bind(api, account, SyncEngine(api, account, TrackingCache(durable = false)))
+        assertEquals(true, oldCache?.closed)
+        assertTrue("cache:$homeKey/${account.userId}" in artifacts.events)
+    }
+
+    @Test
+    fun theBindTimePurgeRunsAtOnceForAnInMemoryEngine() {
+        // Purging AFTER the bind (as the view model and the autofill unlock now do) must not wait on an
+        // engine that holds no file.
+        forbid()
+        bindLive(durable = false)
+        coordinator.purgeForbidden(homeKey, account.userId)
+        assertTrue("cache:$homeKey/${account.userId}" in artifacts.events)
+    }
+
+    @Test
+    fun aRebindOntoTheSameFileKeepsTheDeletionWaiting() {
+        bindLive()
+        forbid()
+        coordinator.purgeForbidden(homeKey, account.userId)
+        bindLive() // another durable engine on the same file
+        assertTrue(artifacts.events.none { it.startsWith("cache:") })
+        session.lock()
+        assertEquals(1, artifacts.events.count { it.startsWith("cache:") })
     }
 
     // ---- purgeRevoked and the in-session rejection: spec 02 §8, spec 01 §8.1 ----

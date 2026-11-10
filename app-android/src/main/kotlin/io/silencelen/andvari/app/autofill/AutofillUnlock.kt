@@ -162,16 +162,14 @@ object AutofillUnlock {
         // vault-<userId>.db throws HERE, after the token-holder exists. Close the cache (its
         // sqlite handle) and, unless VaultSession already adopted the api, the api too.
         var cache: VaultCache? = null
+        val cacheAllowed = store.cacheAllowed(originKey)
         val engine = try {
-            cache = if (store.cacheAllowed(originKey)) {
+            cache = if (cacheAllowed) {
                 // §4.2 layout: <noBackup>/ns/<originKey>/<userId>/vault-<userId>.db
                 val nsDir = OriginNamespace.dir(appContext.noBackupFilesDir, originKey, acct.userId).apply { mkdirs() }
                 sqliteVaultCache(File(nsDir, "vault-${OriginNamespace.pathSafe(acct.userId)}.db").absolutePath, acct.userId)
             } else {
-                // Policy forbids the durable cache: delete any existing file and the rest of this
-                // namespace's durable material (spec 02 §8 / spec 01 §8.1) — scoped.
-                coordinator.purgeForbidden(originKey, acct.userId)
-                InMemoryVaultCache()
+                InMemoryVaultCache() // policy forbids the durable cache; its material goes after the bind
             }
             // A5b (M-1): the same durable personal-wrap memory as the main app (outside the cache).
             SyncEngine(api, acct, cache, deviceState = PersonalDeviceState.open(appContext.noBackupFilesDir, originKey, acct.userId)).also { it.hydrate() }
@@ -181,6 +179,9 @@ object AutofillUnlock {
             throw t
         }
         VaultSession.bind(api, acct, engine, provenance) // now THE token-holder; the main app reuses it
+        // Policy forbids the durable cache: delete any existing file and the rest of this namespace's
+        // durable material (spec 02 §8 / spec 01 §8.1) — scoped, and after the bind, as in the main app.
+        if (!cacheAllowed) coordinator.purgeForbidden(originKey, acct.userId)
         runCatching { engine.sync() } // best-effort; hydrate already gave cached items
         val unlocked = VaultSession.get() ?: VaultSession.Unlocked(api, acct, engine, provenance)
         return Locked(unlocked, keys, policy, online)

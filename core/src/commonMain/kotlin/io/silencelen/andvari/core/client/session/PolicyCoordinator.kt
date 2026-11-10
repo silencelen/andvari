@@ -89,14 +89,18 @@ class PolicyCoordinator(
      * The verdict is re-evaluated on every successful policy fetch, including the poll of a
      * session that is already unlocked. A live engine has the cache open, so the file goes as
      * soon as that engine closes ([VaultSession.runWhenEngineCloses]) rather than under it; the
-     * key material goes now. A bind that finds the verdict in the mirror purges the same way.
+     * key material goes now. The file's deletion reads the origin's mirror again when it runs, so
+     * a later fetch that allows the cache wins over this verdict. A bind that finds the verdict in
+     * the mirror purges the same way, after the bind.
      */
     fun purgeForbidden(originKey: String, userId: String) {
         val origin = store.origin(originKey)
         origin.clearAccountKeys(userId)
         artifacts.wipeQuickUnlock(originKey, userId)
         origin.clearPasswordStamp(userId)
-        session.runWhenEngineCloses(originKey, userId) { artifacts.deleteVaultCache(originKey, userId) }
+        session.runWhenEngineCloses(originKey, userId) {
+            if (!store.origin(originKey).cacheAllowed) artifacts.deleteVaultCache(originKey, userId)
+        }
     }
 
     /**
