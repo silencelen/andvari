@@ -2,6 +2,7 @@ package io.silencelen.andvari.core.client.session
 
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.SyncEngine
 import kotlin.concurrent.Volatile
 import kotlinx.atomicfu.locks.SynchronizedObject
@@ -188,7 +189,12 @@ open class VaultSession(
             val prev = state
             state = Unlocked(api, account, engine, provenance)
             prev?.let {
-                if (it.engine !== engine) runCatching { it.engine.close() }
+                if (it.engine !== engine) {
+                    runCatching { it.engine.close() }
+                    // Queued work belonged to the engine being replaced; the new engine has already
+                    // opened (or refused) the cache file under the current policy.
+                    afterEngineClose.clear()
+                }
                 if (it.api !== api) runCatching { it.api.close() } // never close a reused token-holder
             }
         }
@@ -214,6 +220,37 @@ open class VaultSession(
             prev?.let {
                 runCatching { it.engine.close() }
             }
+            val waiting = afterEngineClose.toList()
+            afterEngineClose.clear()
+            waiting.forEach { runCatching { it() } }
         }
+    }
+
+    // ---- durable-cache work that has to wait for the engine (spec 02 §8) ----
+    //
+    // Everything else a forbidding policy destroys can go immediately; the cache database cannot,
+    // because the live engine holds it open and closing a database out from under a running
+    // operation is the outcome the deferral above exists to prevent. So the deletion is queued
+    // and runs right after the engine closes, whichever path ends the session.
+    private val afterEngineClose = mutableListOf<() -> Unit>() // guarded by stateLock
+
+    /** Whether a live session is using this (origin, user)'s namespace. */
+    fun holds(originKey: String, userId: String): Boolean {
+        val live = state ?: return false
+        return live.account.userId == userId && OriginCanon.originKey(live.api.baseUrl) == originKey
+    }
+
+    /**
+     * Run [action] after the engine of a live session using this (origin, user)'s namespace has
+     * closed, or now when no live session is using it. Queued work does not survive a [bind] that
+     * replaces the engine: the new engine has already applied the current policy to the file.
+     */
+    fun runWhenEngineCloses(originKey: String, userId: String, action: () -> Unit) {
+        val queued = synchronized(stateLock) {
+            val holding = holds(originKey, userId)
+            if (holding) afterEngineClose.add(action)
+            holding
+        }
+        if (!queued) action()
     }
 }

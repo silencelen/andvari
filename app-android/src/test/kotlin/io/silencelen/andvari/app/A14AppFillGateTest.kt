@@ -156,7 +156,7 @@ class A14AppFillGateTest {
         val signOut = vm.substring(vm.indexOf("fun signOut(reason: String? = null) {"), vm.indexOf("pendingBackupRequest = null", vm.indexOf("fun signOut(reason: String? = null) {")))
         assertTrue(signOut.contains("AppSignerBindings.clearAll(appContext)"), "sign-out forgets which apps this member confirmed")
         // A14 review N5: a session also ends without signOut - a definitive 401 on unlock (store.clear()), a revocation
-        // purge (OfflineData.purgeRevoked -> store.clear()), a refused refresh (updateTokens(null) -> clear()), a server
+        // purge (PolicyCoordinator.purgeRevoked -> store.clear()), a refused refresh (updateTokens(null) -> clear()), a server
         // switch (clearSessionTokens) - and another account saved over this one. Every one of them goes through the store.
         val store = src("Session.kt")
         for (fn in listOf("fun clear() {", "fun clearSessionTokens() {", "fun save(s: Session) {")) {

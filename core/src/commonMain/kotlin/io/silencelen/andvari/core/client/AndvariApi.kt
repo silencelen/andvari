@@ -118,6 +118,14 @@ class AndvariApi(
     private var tokens: Tokens? = null,
     private val onTokens: (Tokens?) -> Unit = {},
     platform: String = "android",
+    /**
+     * Called when the refresh endpoint refuses this client's session with a definitive verdict
+     * (401/403), BEFORE the token drop — [onTokens] then erases the stored session, and the purge
+     * (spec 02 §8) needs to know whose session it was. Not called for a transient refresh failure
+     * or an ordinary [logout]. Must not throw; a purge problem cannot be allowed to keep a dead
+     * token pair alive.
+     */
+    private val onSessionRejected: (AndvariApi) -> Unit = {},
 ) {
     private val clientHeader = "$platform/$ANDVARI_CLIENT_VERSION"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -209,7 +217,10 @@ class AndvariApi(
             if (!resp.status.isSuccess()) {
                 // Only a definitive auth verdict kills the pair; a transient 502/503/429
                 // from a proxy must not sign the device out — keep the tokens, fail this try.
-                if (resp.status.value == 401 || resp.status.value == 403) setTokens(null)
+                if (resp.status.value == 401 || resp.status.value == 403) {
+                    runCatching { onSessionRejected(this@AndvariApi) }
+                    setTokens(null)
+                }
                 return@withLock false
             }
             val pair = resp.body<TokenPair>()

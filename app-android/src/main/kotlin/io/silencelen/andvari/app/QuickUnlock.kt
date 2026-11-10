@@ -433,18 +433,11 @@ object QuickUnlock {
 }
 
 /**
- * A3: durable-offline-data purge, reachable from BOTH the main app and the autofill-only
- * process. Two shapes: a policy-flip purge (the org forbade the durable cache — the session is
- * still valid) and a revocation purge (a definitive 401 — the session is dead). Both destroy the
- * quick-unlock blob (spec 01 §8.1 clearing events), so this is the one place that stays in step
- * with [QuickUnlock.wipe].
- *
- * §4.2 (design 2026-07-15, breaker B2-3 — security-load-bearing): every purge takes an
- * EXPLICIT [originKey] and destroys ONLY that (origin, userId) namespace. Callers pass the key
- * of the origin whose verdict they are enforcing — for a policy probe, the origin that was
- * PROBED (captured beside the probe, before any await). Before this, these purges were
- * origin-blind and global: merely probing a server whose policy said `offlineCacheAllowed=false`
- * destroyed the home server's offline data and account keys.
+ * A3: the vault cache's file-level half, reachable from BOTH the main app and the autofill-only
+ * process. The purges that decide what to delete and when — a policy flip keeps the session, a
+ * definitive 401 ends it, both destroy the quick-unlock blob (spec 01 §8.1) — are core's
+ * [io.silencelen.andvari.core.client.session.PolicyCoordinator], which this app calls through
+ * [AndroidOfflineArtifacts]. Every purge is scoped to one (origin, userId) namespace (§4.2).
  */
 object OfflineData {
     /** Delete the durable vault cache DB (+ its wal/shm) for one (origin, user). */
@@ -453,28 +446,13 @@ object OfflineData {
         val safeUid = OriginNamespace.pathSafe(userId)
         for (suffix in listOf("", "-wal", "-shm")) File(dir, "vault-$safeUid.db$suffix").delete()
     }
+}
 
-    /** `offlineCacheAllowed=false` DECLARED BY [originKey]'s server: drop that namespace's cache
-     *  DB, cached accountKeys and quick-unlock secret — but KEEP the session (tokens still
-     *  valid; this is not a revocation). Other origins' namespaces are untouched (§4.2). */
-    fun purgeCacheForbidden(noBackupDir: File, store: SessionStore, originKey: String, userId: String) {
-        deleteVaultCache(noBackupDir, originKey, userId)
-        store.clearAccountKeys(originKey)
-        QuickUnlock.wipe(noBackupDir, originKey, userId)
-        store.clearFullPasswordStamp(originKey, userId)
-    }
+/** The platform half of core's purges: this namespace's SQLite files and Keystore-wrapped blob. */
+class AndroidOfflineArtifacts(private val noBackupDir: File) : io.silencelen.andvari.core.client.session.OfflineArtifacts {
+    override fun deleteVaultCache(originKey: String, userId: String) = OfflineData.deleteVaultCache(noBackupDir, originKey, userId)
 
-    /** Definitive server rejection (device revoked) FROM [originKey]'s server: everything
-     *  [purgeCacheForbidden] does, plus `store.clear()` — the persisted session/tokens/F58 flag
-     *  are dead. Callers always pass the CURRENT origin's key (the 401 came from the session's
-     *  own server), which is also the namespace `store.clear()` scopes its removals to. */
-    fun purgeRevoked(noBackupDir: File, store: SessionStore, originKey: String, userId: String) {
-        deleteVaultCache(noBackupDir, originKey, userId)
-        QuickUnlock.wipe(noBackupDir, originKey, userId)
-        store.clearFullPasswordStamp(originKey, userId)
-        store.clearAccountKeys(originKey) // store.clear() scopes to the CURRENT origin — be explicit for this one
-        store.clear() // session identity/tokens/F58 (global) + current-origin accountKeys/offer flag
-    }
+    override fun wipeQuickUnlock(originKey: String, userId: String) = QuickUnlock.wipe(noBackupDir, originKey, userId)
 }
 
 /**

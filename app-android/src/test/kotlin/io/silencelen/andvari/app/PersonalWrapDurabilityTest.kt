@@ -62,5 +62,9 @@ class PersonalWrapDurabilityTest {
         // The purges never reach it.
         val purge = File(src, "QuickUnlock.kt").readText().substringAfter("object OfflineData").substringBefore("object KdfReKey")
         assertTrue(!purge.contains("PersonalDeviceState") && !purge.contains(io.silencelen.andvari.core.client.FileDeviceState.FILE_NAME))
+        // The purge RULES moved to core with the coordinator; the pin moved with them.
+        val coordinator = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/PolicyCoordinator.kt").readText()
+        assertTrue(coordinator.contains("fun purgeForbidden(") && coordinator.contains("fun purgeRevoked("), "the purges live here")
+        assertTrue(!coordinator.contains("DeviceState") && !coordinator.contains(io.silencelen.andvari.core.client.FileDeviceState.FILE_NAME))
     }
 }

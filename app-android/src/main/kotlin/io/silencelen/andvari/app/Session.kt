@@ -37,7 +37,7 @@ typealias Session = StoredSession
  *    re-open another origin's expired cross-boot window.
  *
  * The implicit `var` accessors read/write the CURRENT origin's namespace; the explicit
- * `(originKey, …)` variants exist for the purge paths ([OfflineData]) and for policy-probe
+ * `(originKey, …)` variants exist for the purge paths (core `PolicyCoordinator`) and for policy-probe
  * callbacks that captured their origin BEFORE an await (a probe of server B landing after the
  * user re-pointed at C must still write/purge under B — never under whatever is current).
  */
@@ -266,7 +266,7 @@ class SessionStore(context: Context) : SessionPersistence {
     /** Drop a user's full-password stamp in the CURRENT origin's namespace (sign-out / revocation). */
     fun clearFullPasswordStamp(userId: String) = clearFullPasswordStamp(currentOriginKey(), userId)
 
-    /** Explicit-origin form — the purge paths ([OfflineData]) scope by the key they were given. */
+    /** Explicit-origin form — the purge paths (core `PolicyCoordinator`) scope by the key they were given. */
     fun clearFullPasswordStamp(originKey: String, userId: String) {
         prefs.edit()
             .remove(ns(originKey, "qu_stampWall_$userId"))
