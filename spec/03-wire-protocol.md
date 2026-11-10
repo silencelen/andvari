@@ -650,14 +650,16 @@ strips them degrades every client to the poll path (correct, just slower).
   900 s applies uniformly, reset on success; a wrong password, a missing/wrong/replayed TOTP
   code and the break-glass origin's `public_login_requires_totp` refusal all count as a
   failure (§2 — the last since server scan 2026-10-26 F7). `/client-policy` carries a per-IP bucket
-  (~60/min, §1.1). Per-account keys also exist on vault-create, user-lookup and the
-  §11 lifecycle buckets (`vault_destructive`/`vault_recovery`). On the **opt-in
+  (~60/min, §1.1). Per-account keys also exist on vault-create, user-lookup, the
+  §11 lifecycle buckets (`vault_destructive`/`vault_recovery`) and account deletion
+  (`account_delete`, 5/h, §13). On the **opt-in
   break-glass twin origin** (the request `Host` header — minus any `:port` and trailing
   FQDN root dot — equal, case-insensitively, to the configured `ANDVARI_PUBLIC_HOSTNAME`;
   **exact equality only, no forwarded-header condition**, and unset ⇒ never public) TOTP
   is required and register/refresh are hard-disabled (`403 register_public_disabled` /
   `public_refresh_disabled` — no policy flag enables them; break-glass sessions re-login
-  with TOTP instead of refreshing). The `/recovery/self/*` routes (§12) keep their unconditional **per-IP
+  with TOTP instead of refreshing), and account deletion and its preview are refused there
+  (`403 account_delete_public_disabled`, §13). The `/recovery/self/*` routes (§12) keep their unconditional **per-IP
   5/min fixed window and NOTHING else — deliberately NO per-account/email-keyed
   backoff** (§F.8: a per-account counter on the last-resort recovery path *is* a targeted
   lockout of the victim; the recovery secret is 256-bit CSPRNG, so per-IP alone already
@@ -890,7 +892,8 @@ gains a `deleted:` meta prefix for tombstoned vaults (excludes routine lifecycle
 from intrusion review). **Janitor** (daily 04:30 + delayed on-boot; log-only dry-run its
 first armed week): purge vaults past grace (spec 02 §7) and expire transfer offers past
 `expiresAt`; a Grafana/Loki alert fires on any vault with `purgeAt < now-2d AND purgedAt IS
-NULL`. **Admin succession: no admin lifecycle route exists BY DESIGN** (a server route that
+NULL`. Account deletion (§13) is the one other purge path: it purges the vaults a deleted
+account alone held at once, with the same statements, and clears a transfer offer naming it. **Admin succession: no admin lifecycle route exists BY DESIGN** (a server route that
 reassigns owner rows *is* the F16 forgery class) — a lost/disabled owner is recovered via
 spec 04 §4 escrow recovery, then signs in and transfers or deletes the vault as its owner.
 
@@ -968,3 +971,101 @@ foreign-device piece); an invalid/consumed ticket and all verify failures are th
 `recovery_self_confirm`, `recovery_self_confirm_unbound`, `recovery_self_confirm_stale`.
 New stored surface: table `member_recovery` (+ v8 `pieceId`, `setupDeviceId`) + columns
 `invites.escrowPolicy`, `users.recoveryConfirmed` (ZK contract: spec 02 §5).
+
+## 13. Account deletion
+
+Self-service, from inside the app (store policy: Google Play User Data, App Store 5.1.1(v)); design
+`docs/design/2026-11-10-account-deletion.md`. There is **no admin route that deletes another account** — the §11
+"no admin lifecycle route" rule; disabling (§7) stays the admin tool. Both routes are authenticated (a §2.6 restricted
+session is refused like every route: enroll, then delete), `enforceVersion`'d, and **refused on the break-glass twin
+origin** (`403 account_delete_public_disabled`): the emergency origin exists to read a vault from somewhere hostile, and
+deletion is the most destructive of the sit-at-home operations §8, §10 and §11 already keep off it. No schema change.
+
+- **`GET /account/delete/preview`** → `{ blockers: [AccountDeleteBlocker], deletedVaults: [vaultId], leftVaults:
+  [vaultId], totpRequired }`. A snapshot of what a deletion would do now, so a client can show the blockers and the
+  consequences before it asks for the master password: `deletedVaults` (sorted) are deleted with the account,
+  `leftVaults` (sorted) are memberships it drops, `totpRequired` means the deletion must carry the current code. The
+  deletion re-checks everything inside its own transaction. No rate bucket (a read, like the members GET).
+- **`POST /account/delete { confirmEmail, currentAuthKey, totp? }`** → `200 { deletedAt }`. The gate runs outside the
+  writer lock, in this order, the first failure deciding:
+  1. `confirmEmail` — the address the human typed — must equal the account's, trimmed and lowercased:
+     `400 confirm_email_mismatch`. The typed confirmation therefore binds every client.
+  2. An account with server TOTP enrolled must send the current `totp`: missing → `400 totp_code_required`; wrong or an
+     already-used step → `400 bad_totp_code`, audited `totp_verify_fail` (meta `account_delete`). These are the
+     authenticated rotation gate's codes (§2), not login's 401s. The code is checked **before** the password, so a
+     session holder without the factor never reaches the password verify and the route is no password oracle (spec 05
+     T11, F7). The step is verified here and **consumed inside the transaction**: a wrong password burns no step, and two
+     requests with one code cannot both pass.
+  3. `currentAuthKey` is verified against the login verifier exactly as `PUT /account/password` verifies it (§3) — the
+     fresh master-password proof. A miss is `403 reauth_failed`, audited `account_delete_reauth_fail` — a 403, never a
+     401, which would send a client into a token refresh.
+
+  Then **one transaction**: the verified credential must still be the account's and the calling session still live —
+  else `401 credential_changed` (a password change, a recovery or a revocation committed in between; audited
+  `account_delete_reauth_fail`, meta `credential_changed`) —, the TOTP step is consumed, the refusal rules below are
+  evaluated, and only then is anything deleted. Either every change below commits or none does.
+
+  **Refusal rules** (owner decisions) → `409 account_delete_blocked`: the §8 error fields plus `blockers`, each
+  `{ kind, vaultId?, others }`, in a stable order; audited `account_delete_denied` (meta: the kinds) in the transaction,
+  which commits — with the consumed TOTP step — before the refusal is returned.
+  - `shared_vault` (one per vault; `vaultId`, `others`) — the account holds an **active owner grant** to `vaultId` and
+    `others ≥ 1` other accounts hold active grants to it. The member deletes the vault or transfers it (§11), then
+    retries; a vault in its grace window no longer blocks (it is purged with the account, below).
+  - `last_admin` (`others`) — the account is an active admin, **no other account is an active admin**, and `others ≥ 1`
+    other accounts exist, whatever their status (a disabled account comes back only through an admin's recovery
+    upload). The instance's only account may delete itself; the instance is then empty, and its operator re-bootstraps
+    it. andvari makes admins only at invite time, so this is resolved by inviting a new admin account (or recovering a
+    disabled admin).
+  A client MUST show a `kind` it does not know as a blocker it cannot explain, and MUST NOT offer to proceed past it.
+
+  **Effect.**
+  - Every session and device of the account is deleted (which revokes them: refresh, the bearer and the §6 socket
+    re-check all find nothing), with the idempotency journal of those devices; every open socket of the account gets
+    `{"type":"revoked"}` and is closed (§6 — no new frame).
+  - **Every vault the account alone holds is purged now**, with the janitor's statements and no grace: its personal
+    vault, every vault it owns that no other account holds an active grant to, and a vault it soft-deleted that is still
+    in grace (only the deleting owner could restore it). Item rows become ciphertext-free tombstones (no rev bump; they
+    age out through spec 02 §7's 30-day rule), archived versions and attachment rows are deleted and the blob files
+    unlinked after the commit (a crash in between leaves rowless files the orphan sweep removes), every grant's key
+    material on the vault is blanked, and the vault row stays as a purged tombstone (`metaBlob` blanked, `deletedBy`
+    cleared) — a `vaultId` is still never recycled.
+  - **Memberships elsewhere are dropped as a leave would**: the account's grant rows go (spec 02 §7's grant-retention
+    rule excepts a deleted account's own rows, which reference the deleted user row); the items it wrote there stay. A
+    transfer offer naming the account is cleared, with a vault rev bump (audited `vault_transfer_cancel`, userId null,
+    meta `<vaultId>:target_deleted`). Co-members get a `rev` bell.
+  - The account's `escrow`, retained `escrow_legacy`, `member_recovery`, `usage_ledger`, `account_state` and
+    `personal_wrap` rows are deleted: neither recovery path (spec 04) survives a deletion.
+  - Every invite row naming the account's address (pending or used) and every unused invite it minted as an admin
+    (identified through its own `invite_create` rows) is deleted.
+  - The user row goes last. The address can then register again, through a new invite, as a **new account** — new
+    userId, new keys, an empty vault; nothing of the old one is reachable from it. Lookups of the old account answer
+    `404 no_such_user`.
+  - Key material and ciphertext were destroyed in place, so the WAL is checkpointed and truncated after the commit (the
+    spec 04 §3 rule for every key-destruction path).
+
+  **Audit (owner decision: security events kept 90 days with the email removed).** At deletion the server mints a
+  fresh random UUIDv4 **pseudonym** — not derived from the userId or the email, and stored nowhere as a mapping, so
+  nothing on the server reverses it; shaped like a userId so every client's id grammar (spec 05 R18) renders it. The
+  account's own rows of the retained security types (sign-in, session, credential, second-factor, recovery, denied-write,
+  admin-action and deletion types; the list is `AccountDeletion.RETAINED_AUDIT_TYPES`) are re-keyed to the pseudonym; its
+  other rows (vault, item, sharing activity, lookups) are deleted; the userId is replaced by the pseudonym in every other
+  account's row that names it in meta, and those rows keep the ordinary retention. The deletion's own row is
+  `account_delete` (userId = the pseudonym, meta `vaults=N,left=M`). The janitor deletes every row under a pseudonym
+  **90 days after that account's deletion** (the `account_delete` row is the clock); the ordinary rule deletes audit rows
+  365 days after they were written. A row a racing request writes after the deletion naming the gone userId is stored
+  without it (userId null, meta prefixed `deleted_account`). No audit row carries an email (spec 02 §5).
+
+  **Rate limit:** `account_delete:{userId}`, 5 per hour (each attempt is a memory-hard verify, and each reauth route is
+  another password guess for a session holder); a request carrying a code also draws on `totp_verify:{userId}` (§2).
+
+  **Client duties.** Before the request: show what is deleted and left (the preview), any blockers with a way to resolve
+  them, and require the typed address, the master password (derived through the client's fenced reauth, so a wrong one
+  is caught locally) and the code when `totpRequired`. On `200`: wipe this device's state for the account — session and
+  tokens, the offline cache, every device-local record keyed by the userId — **including the spec 01 §5 self-identity
+  records** (the userId-keyed pin, and the email binding when it names that userId), then land signed out. A transport
+  failure leaves the outcome unknown and MUST NOT be reported as either success or failure.
+
+**Errors:** `confirm_email_mismatch`, `totp_code_required`, `bad_totp_code` (400); `reauth_failed`,
+`account_delete_public_disabled`, `totp_enrollment_required` (403); `credential_changed` (401); `account_delete_blocked`
+(409, with `blockers`); `rate_limited` (429); `upgrade_required` (426). **Audit types:** `account_delete`,
+`account_delete_denied`, `account_delete_reauth_fail`.

@@ -360,7 +360,9 @@ member identityPub) is set; the other is empty (a post-transfer owner grant MAY 
 `member_remove`); vault RESTORE resurrects only `vault_delete` revocations made at the
 matching `deletedAt`. Vault rows also carry lifecycle state:
 `deletedAt/purgeAt/purgedAt/deletedBy/deleteId/deleteProof/restoreProof` (soft-delete +
-grace + purge — vault rows are NEVER hard-deleted; `vaultId` is never recycled, normative)
+grace + purge — vault rows are NEVER hard-deleted; `vaultId` is never recycled, normative; an
+account deletion, spec 03 §13, purges the vaults the account alone held without a grace, and
+their rows stay too)
 and `transferSeq/pendingOwnerId/pendingOfferId/pendingOfferProof/pendingOfferExpiresAt/
 pendingOfferSetAt/lastTransferOfferId/lastTransferAcceptProof`. Roles are
 **server-enforced only** (crypto cannot stop a reader who has VK from encrypting; the
@@ -443,8 +445,8 @@ spec violation.
 
 | Surface | Fields |
 |---|---|
-| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), isAdmin, status, mustChangePassword, **recoveryConfirmed** (boolean flag, plaintext metadata — the durable, cross-device capture-confirmation signal, design §F.9; not a secret; 0 until the user confirms saving their recovery phrase), **escrowPolicy** ('required'\|'waived'\|NULL pre-v8 — the member's enforced recovery posture, persisted from the invite at register; plaintext metadata for admin reconciliation, design §F.4), createdAt, server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2) |
-| invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt, **escrowPolicy** ('required'\|'waived' — the admin's per-invite recovery posture, plaintext metadata; read server-side at register, design §F.4) |
+| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), isAdmin, status, mustChangePassword, **recoveryConfirmed** (boolean flag, plaintext metadata — the durable, cross-device capture-confirmation signal, design §F.9; not a secret; 0 until the user confirms saving their recovery phrase), **escrowPolicy** ('required'\|'waived'\|NULL pre-v8 — the member's enforced recovery posture, persisted from the invite at register; plaintext metadata for admin reconciliation, design §F.4), createdAt, server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2). An account deletion (spec 03 §13) deletes the row, after every row that references it |
+| invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt, **escrowPolicy** ('required'\|'waived' — the admin's per-invite recovery posture, plaintext metadata; read server-side at register, design §F.4). An account deletion deletes every row naming the account's address, used or not, and the unused rows it minted |
 | devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
 | sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
 | vaults | vaultId, type, rev, createdAt (names/icons are ciphertext); **lifecycle** — deletedAt/purgeAt/purgedAt/deletedBy/deleteId, transferSeq, pendingOwnerId/pendingOfferId/pendingOfferExpiresAt/pendingOfferSetAt/lastTransferOfferId (ids + epoch times), and opaque VK-derived MACs deleteProof/restoreProof/pendingOfferProof/lastTransferAcceptProof (PRF outputs — reveal nothing about VK) |
@@ -458,7 +460,7 @@ spec violation.
 | escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
 | usage_ledger | userId, **sealedUsage** (the per-user "last used" map sealed under the VK(personal)-derived usageKey (§2/§8.2) — ciphertext, opaque; AD `andvari/v1\|usage\|{userId}`, §2), updatedAt — the staleness-ranking input (§8.2). ONE aggregate blob by design, never per-item rows: the server sees THAT a user's ledger changed and its size, never WHICH login |
 | member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), **pieceId** (opaque random id of the current piece — rotation/confirm binding, spec 03 §12; not a secret), **setupDeviceId** (which device committed it — legacy-confirm scoping), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
-| audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content) |
+| audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content). After an account deletion (spec 03 §13) the account's retained security rows carry a random **pseudonym** in place of its userId (a UUIDv4 naming no user, not derived from the userId or email, its mapping stored nowhere; purged 90 days after the deletion), its other rows are gone, other rows' meta names the pseudonym, and a row written later for the gone userId carries no userId (meta prefixed `deleted_account`) |
 | policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
 | meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
 
@@ -520,7 +522,14 @@ GC below; the edit-over-tombstone fence is grant-gated and never reads them post
 (`wrappedVk=''` — the `NOT NULL` sentinel — and `sealedVk=NULL`, active and
 previously-revoked alike). Vault tombstone rows and all grant rows are retained
 indefinitely and `vaultId` is never recycled — that pair is what keeps a push against the
-purged vault itself denied forever. Skeletal item rows are **not** retained indefinitely:
+purged vault itself denied forever. **One exception (account deletion, spec 03 §13, design
+2026-11-10):** a deleted account's OWN grant rows go with its user row, which they
+reference. The property holds without them: a push needs an authenticated session of an
+existing account, the deleted account has none, and every other account's rows on the vault
+are retained. Account deletion is also the **second purge path**: the vaults the deleted
+account alone held (its personal vault, solely held shared vaults, and one it soft-deleted
+that is still in grace) are purged at once, with the same statements and no grace — nobody is
+left who could restore them. Skeletal item rows are **not** retained indefinitely:
 by the time one ages out, every cursor is vault-absent by one of two legs — (1) a cursor
 predating the DELETE has sat behind the `oldestRetainedRev` fence for at least the full
 grace window (410 → full resync → vault absent); (2) a cursor minted DURING the grace
