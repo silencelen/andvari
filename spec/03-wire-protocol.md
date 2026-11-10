@@ -1089,7 +1089,14 @@ table, `retired_ids` (below; spec 02 §5).
   is caught locally) and the code when `totpRequired`. On `200`: wipe this device's state for the account — session and
   tokens, the offline cache, every device-local record keyed by the userId — **including the spec 01 §5 self-identity
   records** (the userId-keyed pin, and the email binding when it names that userId), then land signed out. A transport
-  failure leaves the outcome unknown and MUST NOT be reported as either success or failure.
+  failure, any `5xx`, or a reply that is not the server's JSON (a proxy's error page; a `200` without `deletedAt`) leaves
+  the outcome unknown — the transaction may have committed — and MUST NOT be reported as either success or failure; the
+  client offers to check (the preview answers `200` while the account exists and `401` once it is gone). A `401` after an
+  unknown outcome means the session no longer works, so the deletion most likely went through: the client offers to
+  forget the account on that device — the same wipe as after a `200` — and MUST NOT say nothing was deleted. A session
+  end that arrives while the request is in flight (the `revoked` frame the deletion itself sends, a refused refresh) is
+  held until the request settles, so it cannot land the client signed out before it knows the outcome; it runs if the
+  server refused.
 
 **Errors:** `confirm_email_mismatch`, `totp_code_required`, `bad_totp_code` (400); `reauth_failed`,
 `account_delete_public_disabled`, `totp_enrollment_required` (403); `credential_changed` (401); `account_delete_blocked`

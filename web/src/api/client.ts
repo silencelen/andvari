@@ -94,6 +94,19 @@ export class AccountDeleteBlockedError extends ApiError {
   }
 }
 
+/**
+ * Account deletion (spec 03 §13): a reply to `POST /account/delete` that says nothing reliable about whether the server
+ * committed — any 5xx (a proxy's 502/504/524, or the server failing AFTER its commit) and any reply that is not the
+ * server's JSON. The outcome is UNKNOWN: never reported as a failure ("not deleted" would be a guess, and a wrong one
+ * sends the member back into a retry against an account that is gone), never as a success.
+ */
+export class AccountDeleteUnknownError extends Error {
+  constructor(public status: number) {
+    super(`the deletion's outcome is unknown (HTTP ${status})`);
+    this.name = "AccountDeleteUnknownError";
+  }
+}
+
 /** A served blocker row in the minimal shape (a kind and a count); anything else becomes a blocker of unknown kind, so a
  *  malformed row can never shrink a refusal into "nothing stands in the way". */
 function blockerOf(raw: unknown): AccountDeleteBlocker {
@@ -776,29 +789,42 @@ export class ApiClient {
   }
 
   /**
-   * Delete this account. NOT idempotent and never retried here: a transport failure after the server committed leaves the
-   * outcome unknown to this tab (the caller says so). A `409 account_delete_blocked` throws
-   * {@link AccountDeleteBlockedError} with the blockers; every other refusal is the usual ApiError (`reauth_failed`,
-   * `totp_code_required`, `bad_totp_code`, `confirm_email_mismatch`, `credential_changed`, …). A 401 rides raw()'s one
+   * Delete this account. NOT idempotent and never retried here. What the reply proves decides how it surfaces:
+   *  - the server's JSON `200 {deletedAt}` — deleted;
+   *  - its JSON `409 account_delete_blocked` — {@link AccountDeleteBlockedError} with the blockers;
+   *  - its JSON 4xx refusal — the usual ApiError (`reauth_failed`, `totp_code_required`, `bad_totp_code`,
+   *    `confirm_email_mismatch`, `credential_changed`, `invalid_credentials`, …): refused before its transaction wrote
+   *    anything;
+   *  - any 5xx, and any reply that is not the server's JSON (a proxy's error page, a truncated body, a refusal without
+   *    the server's `error` code) —
+   *    {@link AccountDeleteUnknownError}: the server may have committed (spec 03 §13: unknown, never "not deleted").
+   * A transport failure rejects with the fetch's TypeError, which the caller also treats as unknown. A 401 rides raw()'s one
    * refresh-and-resend: a 401 means the request was not processed, so the resend is a fresh attempt.
    */
   async deleteAccount(req: AccountDeleteRequest): Promise<AccountDeleteResponse> {
     const resp = await this.raw("POST", "/api/v1/account/delete", req);
-    if (resp.status === 409) {
-      let body: { error?: unknown; message?: unknown; blockers?: unknown } | null = null;
-      try {
-        body = JSON.parse(await resp.text());
-      } catch {
-        /* non-JSON 409 */
-      }
-      if (body?.error === "account_delete_blocked") {
-        const rows = Array.isArray(body.blockers) ? body.blockers.map(blockerOf) : [];
-        throw new AccountDeleteBlockedError(this.reported("deleteAccount", sanitizeDeleteBlockers(rows)));
-      }
-      throw new ApiError(409, typeof body?.error === "string" ? body.error : "http_409", typeof body?.message === "string" ? body.message : resp.statusText);
+    if (resp.status >= 500) throw new AccountDeleteUnknownError(resp.status);
+    type Reply = { error?: unknown; message?: unknown; blockers?: unknown; deletedAt?: unknown };
+    let body: Reply | null = null;
+    try {
+      const parsed: unknown = JSON.parse(await resp.text());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Reply;
+    } catch {
+      /* not JSON — handled below */
     }
-    if (!resp.ok) await this.throwApiError(resp);
-    return (await resp.json()) as AccountDeleteResponse;
+    if (body === null) throw new AccountDeleteUnknownError(resp.status);
+    if (resp.ok) {
+      if (typeof body.deletedAt === "number") return { deletedAt: body.deletedAt };
+      throw new AccountDeleteUnknownError(resp.status); // a 2xx that is not the server's answer proves nothing
+    }
+    // The server's refusals always carry their code (§8); a JSON reply without one is some other hop's.
+    if (typeof body.error !== "string") throw new AccountDeleteUnknownError(resp.status);
+    if (resp.status === 409 && body.error === "account_delete_blocked") {
+      const rows = Array.isArray(body.blockers) ? body.blockers.map(blockerOf) : [];
+      throw new AccountDeleteBlockedError(this.reported("deleteAccount", sanitizeDeleteBlockers(rows)));
+    }
+    if (body.error === "upgrade_required") this.onUpgradeRequired?.();
+    throw new ApiError(resp.status, body.error, typeof body.message === "string" ? body.message : resp.statusText);
   }
 
   // ---- admin ----

@@ -362,12 +362,22 @@ residual (spec 05 R19).
    permanently", enabled only when all are filled and the email matches.
 5. **Submit**: `client.accountKeys()` → `account.reauthAuthKey(password, keys)` (a wrong password is caught LOCALLY and
    never sent) → `POST /account/delete`. Errors map to one sentence each (`ui/account-delete.ts`); a 409 re-renders the
-   blockers from the response; a network failure says the outcome is unknown.
+   blockers from the response. A network failure, any 5xx, or a reply that is not the server's JSON (a proxy's error
+   page, a 200 without `deletedAt`) is an **unknown** outcome — the server may have committed — and is never reported as
+   "not deleted": the card says so, keeps the form for a retry, and offers "Check whether it went through" (the preview
+   answers 200 only while the account exists). A 401 after an unknown outcome — on the retry, or on the check — means the
+   account no longer signs in: the card offers "Forget this account on this browser", the same wipe as step 6 with a
+   notice that says the deletion most likely went through. A 401 with no unknown outcome before it is the ordinary
+   "session ended — nothing was deleted". App holds a session end (the WebSocket `revoked` frame the deletion itself
+   sends, a refused refresh at the socket's ticket mint) while the request is in flight, so the card, not a sign-out,
+   reports the outcome; the held end runs if the server refused. (Independent review, 2026-11-10: the first cut
+   reported a 5xx as "not deleted".)
 6. **Success**: `App.onAccountDeleted` wipes this browser's state for the account — the session and the tab's token
    slot, the offline copy (IndexedDB), every `andvari.*` key scoped to the userId (client state, the cache opt-in, the
    auto-lock and last-export stamps), the in-session breach cache, and the self-identity records (§10) — and lands on the
-   sign-in card with "Your andvari account was deleted…". Other tabs follow through the session key's `storage` event.
-   Device-wide preferences (theme, install id, server address, the device's cache opt-out) are not account data and stay.
+   sign-in card with "Your andvari account was deleted…" (after a forget, step 5: "This browser forgot the account…").
+   Other tabs follow through the session key's `storage` event. Device-wide preferences (theme, install id, server
+   address, the device's cache opt-out) are not account data and stay.
 
 Logic lives in pure, tested modules (`ui/account-delete.ts`, `session.wipeLocalAccountState`,
 `selfidentity.forgetSelfIdentity`, the API client methods); the card body is a pure render of its model, tested with
@@ -398,5 +408,6 @@ co-member's bell; the offer clear; the pseudonymised trail and its 90-day purge;
 account's device left alone); the straggler belt; an admin screen's stale ids not written back; invites; the
 audit-type classification tripwire; and the races — a share, a push + upload and a password change landing between the
 gate and the transaction, plus pushes, pulls and a second deletion racing for real. Web (vitest): the client methods and
-their wire shapes, the blocked-response parsing, the flow logic and error sentences, the card's static render, the local
-wipe and the self-identity forget.
+their wire shapes, the blocked-response parsing, a 5xx or non-JSON reply read as unknown, the flow logic (an unknown
+outcome, the check, the forget offer after a 401) and error sentences, App's in-flight hold, the card's static render,
+the local wipe and the self-identity forget.

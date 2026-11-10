@@ -9,7 +9,7 @@ import type { VaultStore } from "../vault/store";
 import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
-import { DeleteAccountCard } from "./DeleteAccount";
+import { DeleteAccountCard, type DeletionEnd, type DeletionTrack } from "./DeleteAccount";
 import { DevicesCard } from "./Devices";
 import { beginTotpEnrolment } from "./totp-enrol";
 import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, UNREACHABLE } from "./errors";
@@ -47,15 +47,18 @@ interface Props {
   onCsv?: () => void;
   /** Account deletion (spec 03 §13): the signed-in address the typed confirmation must match ("" = unknown). */
   email?: string;
-  /** The server confirmed the account's deletion: App wipes this browser's state for it and lands signed out. */
-  onAccountDeleted?: () => void;
+  /** This browser should forget the account — the server confirmed its deletion, or the member chose to after an unknown
+   *  outcome left the account unable to sign in: App wipes this browser's state for it and lands signed out. */
+  onAccountDeleted?: (end: DeletionEnd) => void;
+  /** The deletion request's lifecycle, so App holds back a session end that lands while it is in flight. */
+  onDeletionTrack?: (event: DeletionTrack) => void;
   /** A deletion blocker's link: the owned vault's settings under Sharing (transfer / delete live there). */
   onOpenVaultSettings?: (vaultId: string) => void;
   /** The last-admin blocker's link (admins only). */
   onOpenAdmin?: () => void;
 }
 
-export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv, email, onAccountDeleted, onOpenVaultSettings, onOpenAdmin }: Props) {
+export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv, email, onAccountDeleted, onDeletionTrack, onOpenVaultSettings, onOpenAdmin }: Props) {
   // IA P2: the install hub (a whole feature) was Settings' last card and dominated it — its own
   // sub-page now, reached from a link, symmetric with how the natives reach Autofill status.
   const [sub, setSub] = useState<"main" | "devices">("main");
@@ -89,6 +92,7 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
           store={store}
           email={email ?? ""}
           onDeleted={onAccountDeleted}
+          onTrack={onDeletionTrack}
           onOpenVaultSettings={onOpenVaultSettings ?? (() => {})}
           onOpenAdmin={onOpenAdmin}
           onBackup={onBackup}

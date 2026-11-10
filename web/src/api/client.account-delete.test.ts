@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AccountDeleteBlockedError, ApiError, ApiClient } from "./client";
+import { AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, ApiClient } from "./client";
 
 /**
  * Account deletion on the wire (spec 03 §13): `GET /account/delete/preview` with its served ids held to the grammar (A10),
- * and `POST /account/delete` — the exact body, the 409 refusal surfaced WITH its blockers, every other refusal as the usual
- * ApiError, and a transport failure left to the caller (the outcome of a non-idempotent request is unknown).
+ * and `POST /account/delete` — the exact body, the 409 refusal surfaced WITH its blockers, every other refusal of the
+ * server's as the usual ApiError, and the replies that prove nothing — a transport failure (left to the caller), any 5xx,
+ * anything that is not the server's JSON — as an unknown outcome (the request is not idempotent and may have committed).
  */
 
 const V1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -107,5 +108,23 @@ describe("ApiClient.deleteAccount", () => {
   it("a transport failure propagates untouched — the caller reports the outcome as unknown", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
     await expect(client().deleteAccount({ confirmEmail: "me@x.com", currentAuthKey: "KEY" })).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("any 5xx is an UNKNOWN outcome — a proxy's page or the server's own JSON alike (it may have failed after its commit)", async () => {
+    for (const [status, body] of [[502, "<html>Bad gateway</html>"], [504, ""], [524, "A timeout occurred"], [500, { error: "internal", message: "internal error" }]] as const) {
+      stub(resp(status, body));
+      const e = await client().deleteAccount({ confirmEmail: "me@x.com", currentAuthKey: "KEY" }).catch((x: unknown) => x);
+      expect(e, `HTTP ${status}`).toBeInstanceOf(AccountDeleteUnknownError);
+      expect(e).not.toBeInstanceOf(ApiError);
+      expect((e as AccountDeleteUnknownError).status).toBe(status);
+    }
+  });
+
+  it("a reply that is not the server's JSON is UNKNOWN, whatever its status", async () => {
+    for (const [status, body] of [[200, "<html>ok</html>"], [200, { something: "else" }], [403, "<html>blocked by a firewall</html>"], [403, { message: "Forbidden" }], [409, "conflict"], [400, [1, 2]]] as const) {
+      stub(resp(status, body));
+      const e = await client().deleteAccount({ confirmEmail: "me@x.com", currentAuthKey: "KEY" }).catch((x: unknown) => x);
+      expect(e, `HTTP ${status} ${JSON.stringify(body)}`).toBeInstanceOf(AccountDeleteUnknownError);
+    }
   });
 });
