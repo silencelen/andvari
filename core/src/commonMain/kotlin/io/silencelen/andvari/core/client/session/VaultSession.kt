@@ -102,11 +102,35 @@ open class VaultSession(
      * timed-out wait is an IOException ([runBounded]) and never leaves the mutex held.
      */
     suspend inline fun <T> withUnlockMutex(timeoutMs: Long = BoundedOps.FLAT_MS, block: () -> T): T {
-        runBounded(timeoutMs) { unlockMutex.lock() }
+        acquireUnlockMutex(timeoutMs)
         try {
             return block()
         } finally {
             unlockMutex.unlock()
+        }
+    }
+
+    /**
+     * Take [unlockMutex], waiting at most [timeoutMs]. Review 3: the bound's timeout, or the caller's
+     * cancellation, can land after `lock()` acquired the mutex and before the bounded block returned (a
+     * timeout then discards the block's result). A mutex acquired there was never released, and every later
+     * unlock timed out until the process died. So the acquisition is recorded inside the bounded block, right
+     * after `lock()`, and any failure after it releases the mutex before it propagates.
+     *
+     * [afterLock] runs inside the bound once the mutex is held; it is a test seam for exactly that window.
+     */
+    @PublishedApi
+    internal suspend fun acquireUnlockMutex(timeoutMs: Long, afterLock: suspend () -> Unit = {}) {
+        var acquired = false
+        try {
+            runBounded(timeoutMs) {
+                unlockMutex.lock()
+                acquired = true
+                afterLock()
+            }
+        } catch (t: Throwable) {
+            if (acquired) unlockMutex.unlock()
+            throw t
         }
     }
 
