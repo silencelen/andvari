@@ -17,8 +17,11 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.ktor.http.HttpHeaders
+import io.ktor.http.headersOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -272,6 +275,57 @@ class PolicyCoordinatorTest {
         coordinator.onRefreshRefused(bindLive())
         bindLive() // signed in again before any screen looked
         assertFalse(session.takeRejected(), "a stale rejection must not end the new session's screen")
+    }
+
+    /** Every request is refused: the access token is dead, and so is the refresh token. */
+    private fun refusedEverywhere(): AndvariApi {
+        val headers = headersOf(HttpHeaders.ContentType, "application/json")
+        val engine = MockEngine { respond("""{"error":"session_revoked","message":"revoked"}""", HttpStatusCode.Unauthorized, headers) }
+        return AndvariApi(home, HttpClient(engine), Tokens("a", "r"), onTokens = { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused)
+    }
+
+    private fun bindLiveOn(api: AndvariApi) {
+        val cache = TrackingCache().also { liveCache = it }
+        session.bind(api, account, SyncEngine(api, account, cache))
+        store.save(StoredSession(home, account.userId, "u@example.com", "a", "r"))
+    }
+
+    @Test
+    fun theRefreshItselfEndsTheLiveSessionWithoutDeadlock() = runBlocking<Unit> {
+        // The real path: AndvariApi.tryRefresh, holding its refresh mutex, reports the 401 to the
+        // coordinator, which locks the session (closing this very client) and purges before the pair drops.
+        val api = refusedEverywhere()
+        bindLiveOn(api)
+        withTimeout(10_000L) { runCatching { api.sync(0) } }
+        assertNull(session.get(), "the session is over")
+        assertNull(api.currentTokens())
+        assertEquals(listOf("cache:$homeKey/${account.userId}", "blob:$homeKey/${account.userId}"), artifacts.events)
+        assertEquals(true, cacheClosedAtDelete)
+        assertNull(store.stored)
+        assertEquals(1, rejected)
+        assertTrue(session.takeRejected())
+    }
+
+    @Test
+    fun aSignOutWhoseLogoutHearsTheRejectionStaysASignOut() = runBlocking<Unit> {
+        // Android's sign-out calls logout() on the live client first. With a dead access token and a refused
+        // refresh, the coordinator ends and purges the session from inside that logout; the sign-out's own
+        // steps then run against a session that is already gone, and must still finish cleanly.
+        val api = refusedEverywhere()
+        bindLiveOn(api)
+        withTimeout(10_000L) { runCatching { api.logout() } }
+        assertEquals(1, rejected, "the refused refresh inside the logout fired the hook once")
+        // AndvariViewModel.signOut's steps, in its order.
+        session.lock()
+        artifacts.deleteVaultCache(homeKey, account.userId)
+        artifacts.wipeQuickUnlock(homeKey, account.userId)
+        store.origin(homeKey).clearPasswordStamp(account.userId)
+        store.clear()
+        session.takeRejected() // sign-out consumes the mark: the user is on Welcome by their own choice
+        assertNull(session.get())
+        assertNull(store.stored)
+        assertNull(api.currentTokens())
+        assertFalse(session.takeRejected(), "nothing is left for a later tick to report as a session end")
     }
 
     @Test
