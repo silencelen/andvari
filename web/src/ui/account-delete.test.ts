@@ -203,6 +203,46 @@ describe("runAccountDeletion — the submit", () => {
     await runAccountDeletion(wrong.client, wrong.account, { email: "me@x.com", password: "no", totp: "", totpRequired: false }, () => sent.push("sent"));
     expect(sent).toEqual(["keys,reauth"]);
   });
+
+  it("a server refusal carries its code, so the card can tell 'a code is needed' from any other refusal", async () => {
+    const f = fakes({ del: async () => { throw new ApiError(400, "totp_code_required", "a code is required"); } });
+    expect(await runAccountDeletion(f.client, f.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false }))
+      .toEqual({ kind: "error", message: "Enter the code from your authenticator app.", code: "totp_code_required" });
+  });
+});
+
+describe("TOTP enrolled after the preview — the server asks for a code the card did not know about", () => {
+  const start = initialFlow();
+  const needCode = { kind: "error", message: "Enter the code from your authenticator app.", code: "totp_code_required" } as const;
+
+  it("totp_code_required turns the code field on, with the sentence that asks for it", () => {
+    expect(start.totpRequired).toBe(false);
+    const s = afterOutcome(start, needCode);
+    expect(s.totpRequired).toBe(true);
+    expect(s.err).toBe("Enter the code from your authenticator app.");
+  });
+
+  it("no other refusal does, and once on it stays on (a wrong code next must not hide the field)", () => {
+    for (const code of ["reauth_failed", "bad_totp_code", "confirm_email_mismatch", "rate_limited"]) {
+      expect(afterOutcome(start, { kind: "error", message: "x", code }).totpRequired, code).toBe(false);
+    }
+    expect(afterOutcome(start, { kind: "error", message: "x" }).totpRequired).toBe(false);
+    const on = afterOutcome(start, needCode);
+    expect(afterOutcome(on, { kind: "error", message: "That code is wrong", code: "bad_totp_code" }).totpRequired).toBe(true);
+    expect(afterOutcome(on, { kind: "unknown" }).totpRequired).toBe(true);
+  });
+
+  it("a check's fresh preview turns it on too", () => {
+    const preview = { blockers: [], deletedVaults: [], leftVaults: [], totpRequired: true };
+    expect(afterCheck(afterOutcome(start, { kind: "unknown" }), { kind: "still_here", preview }).totpRequired).toBe(true);
+  });
+
+  it("the card asks for the code when either the preview or the flow says so, and sends it on submit", () => {
+    const card = readFileSync(fileURLToPath(new URL("./DeleteAccount.tsx", import.meta.url)), "utf8");
+    expect(card).toContain("const totpRequired = flow.totpRequired || (preview?.totpRequired ?? false);");
+    expect(card).toContain("runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired },");
+    expect(card).toContain("deleteFormReady({ typedEmail, accountEmail: email, password, totp, totpRequired })");
+  });
 });
 
 describe("the flow after an answer — unknown is never \"not deleted\", and a 401 after it offers to forget", () => {
@@ -226,7 +266,7 @@ describe("the flow after an answer — unknown is never \"not deleted\", and a 4
   it("a definitive answer clears unknown: a refusal with blockers, or an error sentence", () => {
     const unknown = afterOutcome(start, { kind: "unknown" });
     expect(afterOutcome(unknown, { kind: "blocked", blockers: [{ kind: "last_admin", vaultId: null, others: 1 }] })).toMatchObject({ unknown: false, refused: [{ kind: "last_admin", vaultId: null, others: 1 }] });
-    expect(afterOutcome(unknown, { kind: "error", message: "That master password isn't right." })).toMatchObject({ unknown: false, err: "That master password isn't right." });
+    expect(afterOutcome(unknown, { kind: "error", message: "That master password isn't right.", code: "reauth_failed" })).toMatchObject({ unknown: false, err: "That master password isn't right." });
   });
 
   it("the check settles an unknown outcome either way", () => {

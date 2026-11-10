@@ -1086,9 +1086,11 @@ table, `retired_ids` (below; spec 02 §5).
 
   **Client duties.** Before the request: show what is deleted and left (the preview), any blockers with a way to resolve
   them, and require the typed address, the master password (derived through the client's fenced reauth, so a wrong one
-  is caught locally) and the code when `totpRequired`. On `200`: wipe this device's state for the account — session and
-  tokens, the offline cache, every device-local record keyed by the userId — **including the spec 01 §5 self-identity
-  records** (the userId-keyed pin, and the email binding when it names that userId), then land signed out. A transport
+  is caught locally) and the code when `totpRequired` — or once the server answers `totp_code_required` (TOTP enrolled
+  after the preview was fetched): the client then asks for the code rather than leaving no way to send one. On `200`:
+  wipe this device's state for the account — session and tokens, the offline cache, every device-local record keyed by
+  the userId — **including the spec 01 §5 self-identity records** (the userId-keyed pin, and the email binding when it
+  names that userId), then land signed out. A transport
   failure, any `5xx`, or a reply that is not the server's JSON (a proxy's error page; a `200` without `deletedAt`) leaves
   the outcome unknown — the transaction may have committed — and MUST NOT be reported as either success or failure; the
   client offers to check (the preview answers `200` while the account exists and `401` once it is gone). A `401` after an

@@ -185,7 +185,7 @@ export const SESSION_ENDED = "Your session ended — nothing was deleted. Sign i
 export type DeletionOutcome =
   | { kind: "deleted"; deletedAt: number }
   | { kind: "blocked"; blockers: AccountDeleteBlocker[] }
-  | { kind: "error"; message: string }
+  | { kind: "error"; message: string; code?: string }
   | { kind: "unknown" }
   /** The server answered 401: this session no longer works (the account may be gone). */
   | { kind: "session_gone" };
@@ -208,7 +208,7 @@ export async function runAccountDeletion(
     currentAuthKey = await account.reauthAuthKey(input.password, await client.accountKeys());
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
-    return { kind: "error", message: deleteErrorText(e) };
+    return { kind: "error", message: deleteErrorText(e), ...(e instanceof ApiError ? { code: e.code } : {}) };
   }
   const totp = input.totpRequired ? totpDigits(input.totp) : "";
   onSend?.();
@@ -219,7 +219,7 @@ export async function runAccountDeletion(
     if (e instanceof AccountDeleteBlockedError) return { kind: "blocked", blockers: e.blockers };
     if (e instanceof AccountDeleteUnknownError || e instanceof TypeError) return { kind: "unknown" };
     if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
-    return { kind: "error", message: deleteErrorText(e) };
+    return { kind: "error", message: deleteErrorText(e), ...(e instanceof ApiError ? { code: e.code } : {}) };
   }
 }
 
@@ -238,18 +238,20 @@ export async function checkDeletion(client: Pick<ApiClient, "accountDeletePrevie
 /**
  * The card's flow state, as a pure function of what happened (account-delete.test.ts pins it). `unknown` is sticky until a
  * check or a later answer settles it; a 401 AFTER an unknown outcome means the account is most likely gone, and the card
- * then offers to forget it on this browser (`gone`) instead of claiming nothing was deleted.
+ * then offers to forget it on this browser (`gone`) instead of claiming nothing was deleted. `totpRequired` turns on when
+ * the server asks for a code the preview did not know about (TOTP enrolled on another device mid-flow).
  */
 export interface DeleteFlowState {
   unknown: boolean;
   gone: boolean;
+  totpRequired: boolean;
   err: string;
   info: string;
   /** A refusal of the request itself (the preview's blockers are older). */
   refused: AccountDeleteBlocker[] | null;
 }
 
-export const initialFlow = (): DeleteFlowState => ({ unknown: false, gone: false, err: "", info: "", refused: null });
+export const initialFlow = (): DeleteFlowState => ({ unknown: false, gone: false, totpRequired: false, err: "", info: "", refused: null });
 
 export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlowState {
   const base = { ...s, err: "", info: "" };
@@ -263,14 +265,19 @@ export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlow
     case "session_gone":
       return s.unknown ? { ...base, gone: true } : { ...base, err: SESSION_ENDED };
     case "error":
-      return { ...base, unknown: false, err: o.message };
+      return {
+        ...base,
+        unknown: false,
+        err: o.message,
+        totpRequired: s.totpRequired || o.code === "totp_code_required",
+      };
   }
 }
 
 export function afterCheck(s: DeleteFlowState, c: DeletionCheck): DeleteFlowState {
   switch (c.kind) {
     case "still_here":
-      return { ...s, unknown: false, gone: false, err: "", info: NOT_DELETED_AFTER_CHECK };
+      return { ...s, unknown: false, gone: false, err: "", info: NOT_DELETED_AFTER_CHECK, totpRequired: s.totpRequired || c.preview.totpRequired };
     case "gone":
       return { ...s, gone: true, err: "", info: "" };
     case "unknown":
