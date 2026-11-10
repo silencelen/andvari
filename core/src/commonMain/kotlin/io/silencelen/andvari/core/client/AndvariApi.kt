@@ -218,7 +218,10 @@ class AndvariApi(
                 // Only a definitive auth verdict kills the pair; a transient 502/503/429
                 // from a proxy must not sign the device out — keep the tokens, fail this try.
                 if (resp.status.value == 401 || resp.status.value == 403) {
-                    runCatching { onSessionRejected(this@AndvariApi) }
+                    // Only a 401 says the session is dead. A 403 is the break-glass origin refusing
+                    // refresh by design (spec 03 §8): this pair is finished here and the user signs
+                    // in again, but nothing about the device was revoked, so its local data stays.
+                    if (resp.status.value == 401) runCatching { onSessionRejected(this@AndvariApi) }
                     setTokens(null)
                 }
                 return@withLock false
