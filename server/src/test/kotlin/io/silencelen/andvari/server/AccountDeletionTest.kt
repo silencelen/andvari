@@ -657,8 +657,71 @@ class AccountDeletionTest : LifecycleTestSupport() {
             call.findAll(text).map { it.groupValues[1] } + computed.findAll(text).map { it.groupValues[1] }
         }.toSet()
         assertTrue(types.size >= 50, "the scan found only ${types.size} audit types — did the call shape change?")
-        val unclassified = types - AccountDeletion.RETAINED_AUDIT_TYPES - AccountDeletion.DROPPED_AUDIT_TYPES
-        assertEquals(emptySet(), unclassified, "classify each new audit type in AccountDeletion (kept 90 days under the pseudonym, or deleted with the account)")
-        assertEquals(emptySet(), AccountDeletion.RETAINED_AUDIT_TYPES intersect AccountDeletion.DROPPED_AUDIT_TYPES)
+        val sets = listOf(AccountDeletion.RETAINED_AUDIT_TYPES, AccountDeletion.VAULT_SCOPED_AUDIT_TYPES, AccountDeletion.DROPPED_AUDIT_TYPES)
+        val unclassified = types - sets.flatten().toSet()
+        assertEquals(
+            emptySet(), unclassified,
+            "classify each new audit type in AccountDeletion: retained (kept 90 days under the pseudonym), vault-scoped (kept while its vault outlives the deletion), or dropped",
+        )
+        for (i in sets.indices) for (j in sets.indices) if (i < j) assertEquals(emptySet(), sets[i] intersect sets[j], "the sets are disjoint")
+        // The owner's list: revocations are security events, whatever vault they name.
+        assertTrue(AccountDeletion.RETAINED_AUDIT_TYPES.containsAll(setOf("vault_member_remove", "vault_member_leave", "vault_delete")))
+    }
+
+    @Test
+    fun auditRowsAboutDataThatOutlivesTheDeletion_stayUnderThePseudonym_onlyThoseAboutPurgedVaultsGo() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val admin = VirtualClient("admin@x.com", "audit integrity admin password")
+        client.register(admin, bootstrapToken)
+        val u = client.enrollSecond(admin, "writer@x.com", "audit integrity writer password")
+        val b = client.enrollSecond(admin, "heir@x.com", "audit integrity heir password")
+
+        // In the admin's vault V the account is a writer: it trashes an item and purges it for good, and leaves a file there.
+        val (vReq, v) = admin.buildCreateSharedVault(); client.createVault(admin, vReq)
+        client.addMember(admin, v, u, "writer")
+        val vk = client.openMemberVk(u, v.vaultId)
+        val trashed = uuid()
+        val rev = client.push(u, Mutation(uuid(), "put", trashed, v.vaultId, 0, u.encItemIn(v.vaultId, vk, trashed, "short-lived"))).results.single().newItemRev!!
+        client.push(u, Mutation(uuid(), "delete", trashed, v.vaultId, rev))
+        assertEquals(HttpStatusCode.OK, client.post("/api/v1/items/$trashed/purge") { authed(u) }.status)
+        val att = uuid(); val attItem = uuid()
+        assertEquals(HttpStatusCode.OK, client.uploadAttachment(u, att, attItem, ByteArray(Attachments.HEADER_BYTES + 64) { 9 }, vaultId = v.vaultId).status)
+        client.push(u, Mutation(uuid(), "put", attItem, v.vaultId, 0, u.encItemIn(v.vaultId, vk, attItem, "with a file").copy(attachmentIds = listOf(att))))
+        // T: it creates a vault, shares it and hands it over — T outlives the deletion with its new owner.
+        val (tReq, t) = u.buildCreateSharedVault(); client.createVault(u, tReq)
+        client.addMember(u, t, b, "writer")
+        val (offerId, _, offer) = client.offerWithProof(u, t, b, seq = 1)
+        assertEquals(HttpStatusCode.Created, offer.status)
+        val bVk = client.openMemberVk(b, t.vaultId)
+        val wrapped = b.wrapVkUnderOwnUvk(t.vaultId, bVk)
+        assertEquals(HttpStatusCode.OK, client.transferAccept(b, t.vaultId, TransferAcceptRequest(offerId, wrapped, b.mintAcceptProof(t.vaultId, bVk, offerId, b.userId, 1, wrapped))).status)
+        // W: it shares a vault and removes the member again — a revocation; W itself is purged with the account.
+        val (wReq, w) = u.buildCreateSharedVault(); client.createVault(u, wReq)
+        client.addMember(u, w, b, "reader")
+        assertEquals(HttpStatusCode.OK, client.removeMember(u, w.vaultId, b.userId).status)
+        // S: a vault only it ever held; and a lookup.
+        val (sReq, s) = u.buildCreateSharedVault(); client.createVault(u, sReq)
+        client.post("/api/v1/users/lookup") { authed(u); contentType(ContentType.Application.Json); setBody(io.silencelen.andvari.core.model.UserLookupRequest(b.email)) }
+
+        assertEquals(HttpStatusCode.OK, client.deleteAccount(u).status)
+        val pseudonym = client.auditRows(admin, "account_delete").single().userId!!
+        val rows = services.repo.db.read { c -> c.queryAll("SELECT type, meta FROM audit WHERE userId=?", pseudonym) { it.getString(1) to it.getString(2) } }
+
+        // Kept: whatever touched data that is still there, and every revocation.
+        assertTrue(("item_purge" to "${v.vaultId}:$trashed") in rows, "who purged a shared vault's item: $rows")
+        assertTrue(rows.any { it.first == "attachment_upload" && it.second.startsWith("$att:") }, "who uploaded the file still in V")
+        assertTrue(("vault_create" to t.vaultId) in rows && ("vault_transfer_offer" to "${t.vaultId}:${b.userId}") in rows, "the history of a vault someone else now owns")
+        assertTrue(("vault_member_remove" to "${w.vaultId}:${b.userId}") in rows, "a revocation, though W itself was purged")
+        // Gone: activity about vaults this deletion purged, and the lookup.
+        assertTrue(rows.none { it.first == "vault_create" && (it.second == s.vaultId || it.second == w.vaultId) }, "$rows")
+        assertTrue(rows.none { it.first == "vault_member_add" && it.second.startsWith(w.vaultId) })
+        assertTrue(rows.none { it.first == "personal_wrap_set" || it.first == "user_lookup" })
+        assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE userId=?", u.userId))
+
+        // …and the kept rows go with the rest, 90 days after the deletion.
+        services.janitor.sweep(now() + 91 * Service.DAY_MS)
+        assertEquals(0, services.count("SELECT COUNT(*) FROM audit WHERE userId=?", pseudonym))
     }
 }
