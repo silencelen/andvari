@@ -1095,12 +1095,13 @@ table, `retired_ids` (below; spec 02 §5).
   names that userId), then land signed out. A transport
   failure, any `5xx`, or a reply that is not the server's JSON (a proxy's error page; a `200` without `deletedAt`) leaves
   the outcome unknown — the transaction may have committed — and MUST NOT be reported as either success or failure; the
-  client offers to check (the preview answers `200` while the account exists and `401` once it is gone). A `401` after an
-  unknown outcome means the session no longer works, so the deletion most likely went through: the client offers to
-  forget the account on that device — the same wipe as after a `200` — and MUST NOT say nothing was deleted. A session
-  end that arrives while the request is in flight (the `revoked` frame the deletion itself sends, a refused refresh) is
-  held until the request settles, so it cannot land the client signed out before it knows the outcome; it runs if the
-  server refused.
+  client offers to check (the preview answers `200` while the account exists). A `401` after an unknown outcome — on the
+  check or on a retry — MUST NOT be read as the deletion either: an admin's revocation, disable or recovery and a
+  password change elsewhere end a session too. The client says the session ended and the account may still exist, and
+  keeps the spec 01 §5 self-identity records, which exist to catch exactly an account that changed under that device.
+  A session end that arrives while the request is in flight (the `revoked` frame the deletion itself sends, a refused
+  refresh) is held until the request settles, so it cannot land the client signed out before it knows the outcome; it
+  runs if the server refused.
 
 **Errors:** `confirm_email_mismatch`, `totp_code_required`, `bad_totp_code` (400); `reauth_failed`,
 `account_delete_public_disabled`, `totp_enrollment_required` (403); `credential_changed` (401); `account_delete_blocked`

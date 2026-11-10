@@ -15,7 +15,6 @@ import {
   deletionSummary,
   deletionTrackEvent,
   emailConfirmed,
-  GONE_AFTER_UNKNOWN,
   initialFlow,
   OUTCOME_UNKNOWN,
   previewErrorText,
@@ -32,12 +31,12 @@ import { Announcer, Msg } from "./Msg";
  * blockers, when there are any, are listed with a link to where each is resolved and the form is not offered; otherwise
  * the member types their address, the master password and (when enrolled, or when the server asks) the code. A confirmed
  * deletion hands off to App, which wipes this browser's state for the account and lands on the sign-in card. An answer
- * that does not say what happened is an UNKNOWN outcome: the card offers a check, and when the account no longer signs in
- * it offers to forget it on this browser (the same wipe), never a "not deleted" it cannot know.
+ * that does not say what happened is an UNKNOWN outcome: the card says so and offers a check, never a "not deleted" it
+ * cannot know — and a 401 after it never a "deleted" either (a revocation ends a session too).
  */
 
 /** How a deletion left this browser: `confirmed` by the server's own answer, or `forgotten` by the member after an
- *  unknown outcome when the account no longer signed in. App wipes the same state either way; the notice differs. */
+ *  unknown outcome. App wipes the same state either way; the notice differs. */
 export type DeletionEnd = "confirmed" | "forgotten";
 
 /** The request's lifecycle, for App: `started` just before the POST; then `refused` or `settled` (account-delete.ts). */
@@ -59,8 +58,6 @@ export interface DeleteAccountView {
   err: string;
   info: string;
   unknownOutcome: boolean;
-  /** After an unknown outcome the account stopped signing in: offer to forget it here, no form. */
-  gone: boolean;
   checking: boolean;
 }
 
@@ -75,7 +72,6 @@ export function DeleteAccountBody({
   onSubmit,
   onLink,
   onCheck,
-  onForget,
   onBackup,
 }: {
   view: DeleteAccountView;
@@ -87,7 +83,6 @@ export function DeleteAccountBody({
   onSubmit: () => void;
   onLink: (link: BlockerLink) => void;
   onCheck: () => void;
-  onForget: () => void;
   onBackup?: () => void;
 }) {
   const v = view;
@@ -99,20 +94,13 @@ export function DeleteAccountBody({
         Permanently delete your andvari account and everything only you hold on this server. Vaults you share with other
         people stay with them.
       </p>
-      <Announcer text={v.err || v.info || (v.gone ? GONE_AFTER_UNKNOWN : v.unknownOutcome ? OUTCOME_UNKNOWN : "")} />
+      <Announcer text={v.err || v.info || (v.unknownOutcome ? OUTCOME_UNKNOWN : "")} />
       {!v.open ? (
         <div className="actions">
           <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={onOpen}>Delete my account…</button>
         </div>
       ) : v.loading ? (
         <p className="muted"><Busy>Checking what would be deleted…</Busy></p>
-      ) : v.gone ? (
-        <>
-          <Msg kind="info">{GONE_AFTER_UNKNOWN}</Msg>
-          <div className="actions">
-            <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={onForget}>Forget this account on this browser</button>
-          </div>
-        </>
       ) : v.previewError ? (
         <>
           <Msg kind="err">{v.previewError}</Msg>
@@ -318,7 +306,6 @@ export function DeleteAccountCard({
     err: flow.err,
     info: flow.info,
     unknownOutcome: flow.unknown,
-    gone: flow.gone,
     checking,
   };
 
@@ -333,7 +320,6 @@ export function DeleteAccountCard({
       onSubmit={() => void submit()}
       onLink={(link) => (link.kind === "vault" ? onOpenVaultSettings(link.vaultId) : onOpenAdmin?.())}
       onCheck={() => void check()}
-      onForget={() => onDeleted("forgotten")}
       onBackup={onBackup}
     />
   );

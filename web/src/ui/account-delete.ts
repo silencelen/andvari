@@ -174,15 +174,18 @@ export function deleteErrorText(e: unknown): string {
 export const OUTCOME_UNKNOWN =
   "The server didn't answer in a way that says whether your account was deleted — it may have been. Check below, or reload andvari and sign in: if your account is gone, the deletion went through.";
 
-/** After an unknown outcome, the session no longer works (a 401): the deletion almost certainly went through. */
-export const GONE_AFTER_UNKNOWN =
-  "This account no longer signs in, so the deletion most likely went through. You can make this browser forget it — its sign-in, its offline copy and everything else it kept for the account.";
-
 /** After an unknown outcome, the check found the account still here. */
 export const NOT_DELETED_AFTER_CHECK = "Your account is still here — it was not deleted. You can try again.";
 
 /** A 401 with no unknown outcome before it: the request was refused before anything was deleted. */
 export const SESSION_ENDED = "Your session ended — nothing was deleted. Sign in again and retry.";
+
+/** The session ended after an unknown outcome, by something this browser cannot tie to the deletion — a 401 on the check
+ *  or on a retry, a revocation that arrived afterwards. An admin's revocation, disable or recovery and a password change
+ *  elsewhere end a session too, so the account may still exist: this is said instead, the spec 01 §5 self-identity
+ *  records stay, and nothing offers to forget the account. */
+export const SESSION_ENDED_OUTCOME_UNKNOWN =
+  "Your session ended, so andvari can't tell whether your account was deleted. Sign in to find out: if your account still exists, you can.";
 
 export type DeletionOutcome =
   | { kind: "deleted"; deletedAt: number }
@@ -225,27 +228,28 @@ export async function runAccountDeletion(
   }
 }
 
-/** What the "check whether it went through" probe found: the preview answers 200 while the account exists. */
-export type DeletionCheck = { kind: "still_here"; preview: AccountDeletePreview } | { kind: "gone" } | { kind: "unknown" };
+/** What the "check whether it went through" probe found: the preview answers 200 while the account exists. A 401 means only
+ *  that this session no longer works — the deletion's doing, or a revocation's: it does NOT say the account is gone. */
+export type DeletionCheck = { kind: "still_here"; preview: AccountDeletePreview } | { kind: "session_ended" } | { kind: "unknown" };
 
 export async function checkDeletion(client: Pick<ApiClient, "accountDeletePreview">): Promise<DeletionCheck> {
   try {
     return { kind: "still_here", preview: await client.accountDeletePreview() };
   } catch (e) {
-    if (e instanceof ApiError && e.status === 401) return { kind: "gone" };
+    if (e instanceof ApiError && e.status === 401) return { kind: "session_ended" };
     return { kind: "unknown" };
   }
 }
 
 /**
  * The card's flow state, as a pure function of what happened (account-delete.test.ts pins it). `unknown` is sticky until a
- * check or a later answer settles it; a 401 AFTER an unknown outcome means the account is most likely gone, and the card
- * then offers to forget it on this browser (`gone`) instead of claiming nothing was deleted. `totpRequired` turns on when
- * the server asks for a code the preview did not know about (TOTP enrolled on another device mid-flow).
+ * check or a later answer settles it. A 401 after an unknown outcome is NOT read as the deletion: it says only that this
+ * session ended, which a revocation does too, so the card says the account may still exist and offers nothing to forget.
+ * `totpRequired` turns on when the server asks for a code the preview did not know about (TOTP enrolled on another device
+ * mid-flow).
  */
 export interface DeleteFlowState {
   unknown: boolean;
-  gone: boolean;
   totpRequired: boolean;
   err: string;
   info: string;
@@ -253,7 +257,7 @@ export interface DeleteFlowState {
   refused: AccountDeleteBlocker[] | null;
 }
 
-export const initialFlow = (): DeleteFlowState => ({ unknown: false, gone: false, totpRequired: false, err: "", info: "", refused: null });
+export const initialFlow = (): DeleteFlowState => ({ unknown: false, totpRequired: false, err: "", info: "", refused: null });
 
 export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlowState {
   const base = { ...s, err: "", info: "" };
@@ -265,7 +269,7 @@ export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlow
     case "unknown":
       return { ...base, unknown: true };
     case "session_gone":
-      return s.unknown ? { ...base, gone: true } : { ...base, err: SESSION_ENDED };
+      return { ...base, err: s.unknown ? SESSION_ENDED_OUTCOME_UNKNOWN : SESSION_ENDED };
     case "error":
       return {
         ...base,
@@ -279,9 +283,9 @@ export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlow
 export function afterCheck(s: DeleteFlowState, c: DeletionCheck): DeleteFlowState {
   switch (c.kind) {
     case "still_here":
-      return { ...s, unknown: false, gone: false, err: "", info: NOT_DELETED_AFTER_CHECK, totpRequired: s.totpRequired || c.preview.totpRequired };
-    case "gone":
-      return { ...s, gone: true, err: "", info: "" };
+      return { ...s, unknown: false, err: "", info: NOT_DELETED_AFTER_CHECK, totpRequired: s.totpRequired || c.preview.totpRequired };
+    case "session_ended":
+      return { ...s, err: SESSION_ENDED_OUTCOME_UNKNOWN, info: "" };
     case "unknown":
       return { ...s, err: UNREACHABLE };
   }
