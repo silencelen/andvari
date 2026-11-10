@@ -85,7 +85,7 @@ per account), and the admin download joins `escrow_legacy` on the current finger
 build left behind, or a database restored across a rotation, is never served even before that purge.
 The purge (and every other path that destroys or replaces key material: the `PUT /escrow/self`
 re-seal, a password change, a self or admin recovery, a member-recovery piece rotation (§6), a vault
-purge) runs on a connection with
+purge, an account deletion) runs on a connection with
 `PRAGMA secure_delete=ON` and is followed by `PRAGMA wal_checkpoint(TRUNCATE)` (server scan
 2026-10-26 F5): a plain `DELETE`/`UPDATE` only returns the old cells to free space with their
 bytes intact, so the retired-key blobs stayed carvable out of the live file, its WAL and every
@@ -112,6 +112,13 @@ re-secure the account (the recovery temp password already forces a change at the
 owner's next sign-in — see "Account recovery" step 4 below, so no extra step is needed).
 A vault deleted during a lockout reconciles
 on the recovered account's next sync like any offline device.
+
+**Account deletion ends both recovery paths (spec 03 §13, 2026-11-10).** Deleting an account deletes its `escrow` row,
+any retained `escrow_legacy` row and its `member_recovery` row in the same transaction as the account: neither the admin
+ceremony nor the self-service reset can bring it back, and it can no longer be recovered to act as a vault's successor.
+That is the intent of a deletion, and the client says so before the member confirms. Succession is not lost by it: the
+deletion is refused while the account owns a vault other accounts still use, so such a vault is transferred or deleted
+by its living owner first. The org recovery key itself is untouched — it is the household's, not the member's.
 
 **Genesis ceremony (before ANY real account):**
 1. Offline machine → `recovery-cli keygen` → sheet ×2 + USB; verify both printouts

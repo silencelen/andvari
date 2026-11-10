@@ -207,7 +207,13 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   upgrade gets its email binding trust-on-first-use from the next passing unlock (migration residual,
   spec 05 R14(g)). Consequence: an account deleted and re-registered under the same
   email on the same origin is refused on a device that unlocked the old one, until that device's
-  record is removed by hand.
+  record is removed by hand. **Amended for account deletion (spec 03 §13, 2026-11-10):** the device
+  that RAN the deletion removes its own records when the server confirms it — the userId-keyed pin,
+  and the email binding only where it names the deleted userId — so the address can register again
+  there; every OTHER device that unlocked the old account keeps refusing an account re-registered
+  under that email until its record is removed by hand. That refusal is the backstop working: no
+  device can tell a new account at the same address from a server that swapped the account, so the
+  residual is accepted (spec 05 R19(c)), never relaxed.
 - **Out-of-band verification (sharing, P5):** before an owner seals a shared VK to a
   member, the member reads their short fingerprint from their own client and the owner
   confirms it over an out-of-band channel (in person / phone). This closes the

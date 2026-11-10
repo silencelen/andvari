@@ -599,6 +599,40 @@ same row raises the notice again on each pull (it is never silent). (e) a captur
 an item's home was recorded on this device (an upgrade mid-session) binds to the vault the item showed then,
 which is the item's recorded home from that point on.
 
+**R19 (account deletion — spec 03 §13, design 2026-11-10-account-deletion).** What a deletion guarantees: ONE
+transaction removes the account, every session and device, every vault only it held (ciphertext, history, attachments
+and — after the commit — their blob files, every key wrap on them), its memberships elsewhere (as a leave), its escrow,
+retained escrow and recovery piece, its usage ledger, account state and personal wrap, and the invites that name its
+address or that it minted unused; its audit trail is cut down to its security events under a fresh random pseudonym that
+nothing on the server maps back, and those go 90 days after the deletion; the address can then register again only as a
+NEW account. It is refused while the account owns a vault other accounts still use or is the last admin with other
+accounts on the instance, so no member is left with an ownerless vault and no instance with stranded accounts. It is
+refused on the break-glass twin origin. Residuals accepted:
+(a) **Not cryptographic erasure** (R7, extended to accounts): anyone who held a vault key while granted keeps what they
+synced; the operator's backups keep every row until they rotate out (T7), and a backup taken before the deletion links the
+pseudonymised rows back to the account by audit id; a hostile server can simply not delete (T1 — it never held more than
+ciphertext and the §5 metadata).
+(b) **Copies outside the database**: every audit line also went to the operator's log pipeline with the raw userId (never
+an email); those copies follow the operator's retention. The retained rows keep each event's IP for the 90 days — part of
+the security record the owner chose to keep.
+(c) **Other devices**: an offline device of the deleted account keeps its offline copy until it next reaches the server
+(T3: the server then answers 401 and the client wipes). Every device other than the deleting one keeps its spec 01 §5
+self-identity record and refuses a re-registered account at the same address on that origin until the record is removed
+by hand — the backstop cannot tell a new account from a swapped one, so this stays. Co-members keep whatever members list
+their clients hold in memory, and their contact pins of the old identity key, sealed in their own account state where the
+server cannot edit them: inert — the old userId can never be granted again (404), and spec 01 §6's add-member rule refuses
+to add a new account at a pinned address until the owner verifies the person again.
+(d) **A stolen session** deletes the account only with the master password AND, where enrolled, the current TOTP code. The
+code is checked before the password, so without the factor the route confirms nothing about a guessed password; with TOTP
+off, a session plus the password can delete — as it can already change the password and lock the member out — bounded by
+the hourly `account_delete` bucket (every reauth route a session holder can reach is more guesses per window, which is why
+this one is per hour, not per minute).
+(e) **Irreversible, no grace window**: a grace period would have to keep the credentials and both recovery paths alive,
+the opposite of the deletion. The client requires the typed address, the password and the code, and offers a backup first.
+(f) **The last-admin rule is resolved only by a new admin account** (admin is set at invite time; there is no promote
+route, and a member's address cannot be invited again): an availability cost for a departing last admin, accepted until a
+promote route is designed.
+
 **A14 (security review 2026-10, whole-repository scan of 0.28.1).** (a) **The escrow ceremony keeps the seed out of
 docker's logs** (F1): `bringup.sh` and every documented `docker run … recovery-cli` pass `--log-driver none` before the
 image, because docker copies an attached container's stdout to its log driver (json-file on disk, which `--rm` only
