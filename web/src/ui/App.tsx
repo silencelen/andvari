@@ -44,7 +44,8 @@ import {
   wipeVaultCache,
   type Session,
 } from "./session";
-import { ACCOUNT_DELETED_NOTICE } from "./account-delete";
+import { ACCOUNT_DELETED_NOTICE, ACCOUNT_FORGOTTEN_NOTICE } from "./account-delete";
+import type { DeletionEnd, DeletionTrack } from "./DeleteAccount";
 import { adoptSharedPair, dropOnSignOutElsewhere, idleTimerUserId, lockTabTokens, revokeForSignOut, storageVerdict } from "./tabsession";
 
 /** `notice` (F26): one-line reason rendered on the auth card — why the user is looking
@@ -256,9 +257,13 @@ export function App() {
   // revoke and nothing unsynced worth a confirm, and a sign-out deliberately KEEPS the self-identity records. Other tabs
   // follow through the session key's `storage` event. A `revoked` frame the server sends this tab's socket at the same
   // moment may start the ordinary revoked sign-out first: deletedAccountRef tells that sign-out to leave the landing to
-  // this handler, whichever of the two finishes last.
-  const onAccountDeleted = useCallback((userId: string, email: string) => {
+  // this handler, whichever of the two finishes last. `end` is how the account went: `confirmed` by the server's answer,
+  // or `forgotten` — the member's choice after an unknown outcome, once the account no longer signed in. The wipe is the
+  // same; only the notice differs (a forgotten account may, rarely, still exist).
+  const onAccountDeleted = useCallback((userId: string, email: string, end: DeletionEnd) => {
     deletedAccountRef.current = userId;
+    deletionInFlightRef.current = false;
+    deferredEndRef.current = null;
     lockRevokeRef.current = null;
     // Its synchronous half (session, tab token slot, userId-scoped keys, self-identity records) has run by the time the
     // call returns, so dropping the pair next writes nothing back; the IndexedDB delete then completes on its own (the
@@ -266,8 +271,17 @@ export function App() {
     void wipeLocalAccountState(userId, email);
     clientRef.current?.setTokens(null);
     clearBreachCache();
-    setPhase({ kind: "welcome", notice: ACCOUNT_DELETED_NOTICE });
+    setPhase({ kind: "welcome", notice: end === "confirmed" ? ACCOUNT_DELETED_NOTICE : ACCOUNT_FORGOTTEN_NOTICE });
   }, []);
+
+  // Account deletion, defect class "the answer was lost": the server revokes every socket of the account the moment its
+  // deletion commits, so when the HTTP answer itself is lost (a proxy's 502 after the commit) this tab's socket would sign
+  // it out as "revoked" and unmount the card before it could say the outcome is unknown and offer to forget the account —
+  // leaving this browser's self-identity records behind. While the request is in flight, a session end is therefore HELD;
+  // when it settles: a definitive refusal (nothing was deleted) means the end was real, and it runs now; any other ending
+  // leaves the card in charge (it checks, and offers to forget the account once it no longer signs in).
+  const deletionInFlightRef = useRef(false);
+  const deferredEndRef = useRef<SessionEndKind | null>(null);
 
   // F26/F27 lock propagation channel: locking KEEPS the persisted session, so the
   // `storage` event can no longer signal it — locks are announced explicitly.
@@ -348,12 +362,36 @@ export function App() {
   // explicit WS `revoked` frame is a revocation; a dead session at ticket mint is
   // ordinary expiry (laptop asleep past the refresh lifetime) and saying "revoked"
   // there would be a false alarm.
-  const onRevoked = useCallback(
+  const endSession = useCallback(
     (kind: SessionEndKind) =>
       kind === "revoked"
         ? void signOut("This device's access was revoked.", "revoked") // server-initiated: silent-drop
         : void signOut("Your session ended — sign in again.", "expired"), // expiry: surface the lost count
     [signOut],
+  );
+  const onRevoked = useCallback(
+    (kind: SessionEndKind) => {
+      if (deletionInFlightRef.current) {
+        deferredEndRef.current ??= kind; // held until the deletion request settles (see deletionInFlightRef)
+        return;
+      }
+      endSession(kind);
+    },
+    [endSession],
+  );
+  const onDeletionTrack = useCallback(
+    (event: DeletionTrack) => {
+      if (event === "started") {
+        deletionInFlightRef.current = true;
+        deferredEndRef.current = null;
+        return;
+      }
+      deletionInFlightRef.current = false;
+      const held = deferredEndRef.current;
+      deferredEndRef.current = null;
+      if (event === "refused" && held !== null) endSession(held); // nothing was deleted: the end was real
+    },
+    [endSession],
   );
 
   // Which account is live in THIS tab (vault/unlock phases) — read by the storage
@@ -548,7 +586,8 @@ export function App() {
         registerUsageFlush={(fn) => {
           usageFlushRef.current = fn;
         }}
-        onAccountDeleted={() => onAccountDeleted(deletingUserId, vaultEmail)}
+        onAccountDeleted={(end) => onAccountDeleted(deletingUserId, vaultEmail, end)}
+        onDeletionTrack={onDeletionTrack}
       />
     );
   }

@@ -1,4 +1,4 @@
-import { AccountDeleteBlockedError, ApiError, type ApiClient } from "../api/client";
+import { AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, type ApiClient } from "../api/client";
 import type { AccountDeleteBlocker, AccountDeletePreview } from "../api/types";
 import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { ReauthFailedError, ReauthStaleSessionError, type Account } from "../vault/account";
@@ -167,44 +167,130 @@ export function deleteErrorText(e: unknown): string {
   return "Something went wrong and your account was not deleted — try again.";
 }
 
-/** Shown when the deletion request itself never got an answer: the server may or may not have committed it. */
+/** Shown when the deletion request got no answer that says what happened — none at all, a 5xx, or a reply that is not
+ *  the server's — so the server may or may not have committed it (spec 03 §13: never reported as either). */
 export const OUTCOME_UNKNOWN =
-  "The server couldn't be reached while deleting, so this tab doesn't know whether your account was deleted. Reload andvari and sign in: if your account is gone, the deletion went through.";
+  "The server didn't answer in a way that says whether your account was deleted — it may have been. Check below, or reload andvari and sign in: if your account is gone, the deletion went through.";
+
+/** After an unknown outcome, the session no longer works (a 401): the deletion almost certainly went through. */
+export const GONE_AFTER_UNKNOWN =
+  "This account no longer signs in, so the deletion most likely went through. You can make this browser forget it — its sign-in, its offline copy and everything else it kept for the account.";
+
+/** After an unknown outcome, the check found the account still here. */
+export const NOT_DELETED_AFTER_CHECK = "Your account is still here — it was not deleted. You can try again.";
+
+/** A 401 with no unknown outcome before it: the request was refused before anything was deleted. */
+export const SESSION_ENDED = "Your session ended — nothing was deleted. Sign in again and retry.";
 
 export type DeletionOutcome =
   | { kind: "deleted"; deletedAt: number }
   | { kind: "blocked"; blockers: AccountDeleteBlocker[] }
   | { kind: "error"; message: string }
-  | { kind: "unknown" };
+  | { kind: "unknown" }
+  /** The server answered 401: this session no longer works (the account may be gone). */
+  | { kind: "session_gone" };
 
 /**
  * The submit. The master-password proof is derived through the account's fenced reauth (`Account.reauthAuthKey`: the KDF
  * floor, only this session's salt, and the derivation proved by opening this session's UVK), so a wrong password is caught
- * HERE and never sent. Then the one request. A transport failure on that request is the ambiguous case — it may have
- * committed — and is reported as such, never as a failure; any earlier failure means nothing was sent.
+ * HERE and never sent. Then the one request; `onSend` fires just before it (App defers a session end that lands while it
+ * is in flight). A transport failure, a 5xx or a reply that is not the server's JSON is the ambiguous case — it may have
+ * committed — and is reported as `unknown`, never as a failure; a 401, before or on the request, is `session_gone`.
  */
 export async function runAccountDeletion(
   client: Pick<ApiClient, "accountKeys" | "deleteAccount">,
   account: Pick<Account, "reauthAuthKey">,
   input: { email: string; password: string; totp: string; totpRequired: boolean },
+  onSend?: () => void,
 ): Promise<DeletionOutcome> {
   let currentAuthKey: string;
   try {
     currentAuthKey = await account.reauthAuthKey(input.password, await client.accountKeys());
   } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
     return { kind: "error", message: deleteErrorText(e) };
   }
   const totp = input.totpRequired ? totpDigits(input.totp) : "";
+  onSend?.();
   try {
     const r = await client.deleteAccount({ confirmEmail: input.email.trim(), currentAuthKey, ...(totp ? { totp } : {}) });
     return { kind: "deleted", deletedAt: r.deletedAt };
   } catch (e) {
     if (e instanceof AccountDeleteBlockedError) return { kind: "blocked", blockers: e.blockers };
-    if (e instanceof TypeError) return { kind: "unknown" };
+    if (e instanceof AccountDeleteUnknownError || e instanceof TypeError) return { kind: "unknown" };
+    if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
     return { kind: "error", message: deleteErrorText(e) };
   }
+}
+
+/** What the "check whether it went through" probe found: the preview answers 200 while the account exists. */
+export type DeletionCheck = { kind: "still_here"; preview: AccountDeletePreview } | { kind: "gone" } | { kind: "unknown" };
+
+export async function checkDeletion(client: Pick<ApiClient, "accountDeletePreview">): Promise<DeletionCheck> {
+  try {
+    return { kind: "still_here", preview: await client.accountDeletePreview() };
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return { kind: "gone" };
+    return { kind: "unknown" };
+  }
+}
+
+/**
+ * The card's flow state, as a pure function of what happened (account-delete.test.ts pins it). `unknown` is sticky until a
+ * check or a later answer settles it; a 401 AFTER an unknown outcome means the account is most likely gone, and the card
+ * then offers to forget it on this browser (`gone`) instead of claiming nothing was deleted.
+ */
+export interface DeleteFlowState {
+  unknown: boolean;
+  gone: boolean;
+  err: string;
+  info: string;
+  /** A refusal of the request itself (the preview's blockers are older). */
+  refused: AccountDeleteBlocker[] | null;
+}
+
+export const initialFlow = (): DeleteFlowState => ({ unknown: false, gone: false, err: "", info: "", refused: null });
+
+export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlowState {
+  const base = { ...s, err: "", info: "" };
+  switch (o.kind) {
+    case "deleted":
+      return base;
+    case "blocked":
+      return { ...base, unknown: false, refused: o.blockers };
+    case "unknown":
+      return { ...base, unknown: true };
+    case "session_gone":
+      return s.unknown ? { ...base, gone: true } : { ...base, err: SESSION_ENDED };
+    case "error":
+      return { ...base, unknown: false, err: o.message };
+  }
+}
+
+export function afterCheck(s: DeleteFlowState, c: DeletionCheck): DeleteFlowState {
+  switch (c.kind) {
+    case "still_here":
+      return { ...s, unknown: false, gone: false, err: "", info: NOT_DELETED_AFTER_CHECK };
+    case "gone":
+      return { ...s, gone: true, err: "", info: "" };
+    case "unknown":
+      return { ...s, err: UNREACHABLE };
+  }
+}
+
+/** Which way a deletion request ended, for App's deferral of a session end that landed while it was in flight:
+ *  `refused` — the server answered and nothing was deleted, so a session end that arrived meanwhile was real and runs now;
+ *  `settled` — anything else (an unknown outcome, a 401 after one): the card takes it from there. */
+export function deletionTrackEvent(state: DeleteFlowState, o: DeletionOutcome): "refused" | "settled" {
+  if (o.kind === "blocked" || o.kind === "error") return "refused";
+  if (o.kind === "session_gone" && !state.unknown) return "refused";
+  return "settled";
 }
 
 /** The notice on the sign-in card after a deletion this browser ran. */
 export const ACCOUNT_DELETED_NOTICE =
   "Your andvari account was deleted. Everything only it held is gone from the server, and this browser kept nothing of it.";
+
+/** The notice after the member chose to forget an account whose deletion's answer was lost (it no longer signs in). */
+export const ACCOUNT_FORGOTTEN_NOTICE =
+  "This browser forgot the account. It no longer signed in, so its deletion most likely went through; if it still exists after all, sign in again.";

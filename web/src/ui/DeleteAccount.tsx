@@ -4,12 +4,19 @@ import type { AccountDeletePreview } from "../api/types";
 import type { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
 import {
+  afterCheck,
+  afterOutcome,
   BLOCKED_UNEXPLAINED,
   blockerLines,
   type BlockerLine,
   type BlockerLink,
+  checkDeletion,
+  type DeleteFlowState,
   deletionSummary,
+  deletionTrackEvent,
   emailConfirmed,
+  GONE_AFTER_UNKNOWN,
+  initialFlow,
   OUTCOME_UNKNOWN,
   previewErrorText,
   runAccountDeletion,
@@ -24,8 +31,17 @@ import { Announcer, Msg } from "./Msg";
  * paragraph and a button. Opened, it fetches the preview and says what goes for good and which vaults the member leaves;
  * blockers, when there are any, are listed with a link to where each is resolved and the form is not offered; otherwise
  * the member types their address, the master password and (when enrolled) the code. A confirmed deletion hands off to
- * App, which wipes this browser's state for the account and lands on the sign-in card.
+ * App, which wipes this browser's state for the account and lands on the sign-in card. An answer
+ * that does not say what happened is an UNKNOWN outcome: the card offers a check, and when the account no longer signs in
+ * it offers to forget it on this browser (the same wipe), never a "not deleted" it cannot know.
  */
+
+/** How a deletion left this browser: `confirmed` by the server's own answer, or `forgotten` by the member after an
+ *  unknown outcome when the account no longer signed in. App wipes the same state either way; the notice differs. */
+export type DeletionEnd = "confirmed" | "forgotten";
+
+/** The request's lifecycle, for App: `started` just before the POST; then `refused` or `settled` (account-delete.ts). */
+export type DeletionTrack = "started" | "refused" | "settled";
 
 export interface DeleteAccountView {
   open: boolean;
@@ -41,7 +57,11 @@ export interface DeleteAccountView {
   canSubmit: boolean;
   busy: boolean;
   err: string;
+  info: string;
   unknownOutcome: boolean;
+  /** After an unknown outcome the account stopped signing in: offer to forget it here, no form. */
+  gone: boolean;
+  checking: boolean;
 }
 
 /** The card body — a pure function of the view (the node-env static-render posture; see account-delete.test.ts). */
@@ -54,6 +74,8 @@ export function DeleteAccountBody({
   onTotp,
   onSubmit,
   onLink,
+  onCheck,
+  onForget,
   onBackup,
 }: {
   view: DeleteAccountView;
@@ -64,6 +86,8 @@ export function DeleteAccountBody({
   onTotp: (v: string) => void;
   onSubmit: () => void;
   onLink: (link: BlockerLink) => void;
+  onCheck: () => void;
+  onForget: () => void;
   onBackup?: () => void;
 }) {
   const v = view;
@@ -75,13 +99,20 @@ export function DeleteAccountBody({
         Permanently delete your andvari account and everything only you hold on this server. Vaults you share with other
         people stay with them.
       </p>
-      <Announcer text={v.err || (v.unknownOutcome ? OUTCOME_UNKNOWN : "")} />
+      <Announcer text={v.err || v.info || (v.gone ? GONE_AFTER_UNKNOWN : v.unknownOutcome ? OUTCOME_UNKNOWN : "")} />
       {!v.open ? (
         <div className="actions">
           <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={onOpen}>Delete my account…</button>
         </div>
       ) : v.loading ? (
         <p className="muted"><Busy>Checking what would be deleted…</Busy></p>
+      ) : v.gone ? (
+        <>
+          <Msg kind="info">{GONE_AFTER_UNKNOWN}</Msg>
+          <div className="actions">
+            <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={onForget}>Forget this account on this browser</button>
+          </div>
+        </>
       ) : v.previewError ? (
         <>
           <Msg kind="err">{v.previewError}</Msg>
@@ -134,6 +165,17 @@ export function DeleteAccountBody({
                 if (v.canSubmit && !v.busy) onSubmit();
               }}
             >
+              {v.unknownOutcome && (
+                <>
+                  <Msg kind="err">{OUTCOME_UNKNOWN}</Msg>
+                  <div className="actions">
+                    <button type="button" className="ghost" disabled={v.checking || v.busy} onClick={onCheck}>
+                      {v.checking ? <Busy>Checking…</Busy> : "Check whether it went through"}
+                    </button>
+                  </div>
+                </>
+              )}
+              {v.info && <Msg kind="info">{v.info}</Msg>}
               <Field label="Type your email address to confirm" prompt>
                 <input type="email" autoComplete="off" spellCheck={false} value={v.typedEmail} disabled={v.busy} onChange={(e) => onTypedEmail(e.target.value)} />
               </Field>
@@ -146,7 +188,6 @@ export function DeleteAccountBody({
                 </Field>
               )}
               {v.err && <Msg kind="err">{v.err}</Msg>}
-              {v.unknownOutcome && <Msg kind="err">{OUTCOME_UNKNOWN}</Msg>}
               <div className="actions">
                 <button type="submit" className="ghost" style={{ color: "var(--danger)" }} disabled={!v.canSubmit || v.busy}>
                   {v.busy ? <Busy>Deleting…</Busy> : "Delete my account permanently"}
@@ -172,6 +213,7 @@ export function DeleteAccountCard({
   store,
   email,
   onDeleted,
+  onTrack,
   onOpenVaultSettings,
   onOpenAdmin,
   onBackup,
@@ -181,8 +223,10 @@ export function DeleteAccountCard({
   store: Pick<VaultStore, "vaults">;
   /** The signed-in address the typed confirmation must match ("" when the session predates it: the server decides). */
   email: string;
-  /** The server confirmed the deletion: App wipes this browser's state for the account and lands signed out. */
-  onDeleted: () => void;
+  /** This browser should forget the account (App wipes its state and lands signed out). */
+  onDeleted: (end: DeletionEnd) => void;
+  /** The deletion request's lifecycle, so App can hold back a session end that lands while it is in flight. */
+  onTrack?: (event: DeletionTrack) => void;
   onOpenVaultSettings: (vaultId: string) => void;
   onOpenAdmin?: () => void;
   onBackup?: () => void;
@@ -191,14 +235,12 @@ export function DeleteAccountCard({
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<AccountDeletePreview | null>(null);
   const [previewError, setPreviewError] = useState("");
-  // A refusal of the request itself overrides the preview's (the state moved between the two).
-  const [refused, setRefused] = useState<AccountDeletePreview["blockers"] | null>(null);
+  const [flow, setFlow] = useState<DeleteFlowState>(initialFlow());
   const [typedEmail, setTypedEmail] = useState("");
   const [password, setPassword] = useState("");
   const [totp, setTotp] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [unknownOutcome, setUnknownOutcome] = useState(false);
+  const [checking, setChecking] = useState(false);
 
   // Names decrypt locally (the server knows vaults only as ids); once per preview, not per keystroke.
   const names = useMemo(() => new Map(store.vaults().map((v) => [v.vaultId, v.name] as const)), [store, preview]);
@@ -208,19 +250,17 @@ export function DeleteAccountCard({
     setOpen(false);
     setPreview(null);
     setPreviewError("");
-    setRefused(null);
+    setFlow(initialFlow());
     setTypedEmail("");
     setPassword("");
     setTotp("");
-    setErr("");
-    setUnknownOutcome(false);
   };
 
   const openCard = async () => {
     setOpen(true);
     setLoading(true);
     setPreviewError("");
-    setRefused(null);
+    setFlow(initialFlow());
     try {
       setPreview(await client.accountDeletePreview());
     } catch (e) {
@@ -230,27 +270,20 @@ export function DeleteAccountCard({
     }
   };
 
+  const totpRequired = preview?.totpRequired ?? false;
+
   const submit = async () => {
     if (!preview) return;
+    const before = flow;
     setBusy(true);
-    setErr("");
-    setUnknownOutcome(false);
     try {
-      const outcome = await runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired: preview.totpRequired });
-      switch (outcome.kind) {
-        case "deleted":
-          onDeleted();
-          return;
-        case "blocked":
-          setRefused(outcome.blockers);
-          break;
-        case "error":
-          setErr(outcome.message);
-          break;
-        case "unknown":
-          setUnknownOutcome(true);
-          break;
+      const outcome = await runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired }, () => onTrack?.("started"));
+      if (outcome.kind === "deleted") {
+        onDeleted("confirmed");
+        return;
       }
+      onTrack?.(deletionTrackEvent(before, outcome));
+      setFlow(afterOutcome(before, outcome));
     } finally {
       setPassword("");
       setTotp("");
@@ -258,21 +291,35 @@ export function DeleteAccountCard({
     }
   };
 
-  const blockers = refused ?? (preview && preview.blockers.length > 0 ? preview.blockers : null);
+  const check = async () => {
+    setChecking(true);
+    try {
+      const c = await checkDeletion(client);
+      if (c.kind === "still_here") setPreview(c.preview);
+      setFlow((f) => afterCheck(f, c));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const blockers = flow.refused ?? (preview && preview.blockers.length > 0 ? preview.blockers : null);
   const view: DeleteAccountView = {
     open,
     loading,
     previewError,
     summary: preview ? deletionSummary(preview, vaultName, account.personalVaultId || null) : null, // "" = no personal vault
     blockers: blockers === null ? null : blockerLines(blockers, vaultName),
-    totpRequired: preview?.totpRequired ?? false,
+    totpRequired,
     typedEmail,
     password,
     totp,
-    canSubmit: preview !== null && deleteFormReady({ typedEmail, accountEmail: email, password, totp, totpRequired: preview.totpRequired }),
+    canSubmit: preview !== null && deleteFormReady({ typedEmail, accountEmail: email, password, totp, totpRequired }),
     busy,
-    err,
-    unknownOutcome,
+    err: flow.err,
+    info: flow.info,
+    unknownOutcome: flow.unknown,
+    gone: flow.gone,
+    checking,
   };
 
   return (
@@ -285,6 +332,8 @@ export function DeleteAccountCard({
       onTotp={setTotp}
       onSubmit={() => void submit()}
       onLink={(link) => (link.kind === "vault" ? onOpenVaultSettings(link.vaultId) : onOpenAdmin?.())}
+      onCheck={() => void check()}
+      onForget={() => onDeleted("forgotten")}
       onBackup={onBackup}
     />
   );

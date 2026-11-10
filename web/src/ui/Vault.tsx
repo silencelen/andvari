@@ -43,6 +43,7 @@ import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { Settings } from "./Settings";
+import type { DeletionEnd, DeletionTrack } from "./DeleteAccount";
 import { BrandSigil } from "./Sigil";
 import { Sharing } from "./Sharing";
 import { Empty } from "./Empty";
@@ -168,12 +169,14 @@ interface Props {
   /** A14 (F5): hand App this session's usage-ledger flush, so a lock that revokes the tab's tokens
    *  (no offline copy on this browser) lets the last uses land first (the H33 order). */
   registerUsageFlush?: (flush: (() => Promise<void>) | null) => void;
-  /** Account deletion (spec 03 §13): the server confirmed it — App wipes this browser's state for the
-   *  account and lands signed out. Absent ⇒ Settings offers no deletion. */
-  onAccountDeleted?: () => void;
+  /** Account deletion (spec 03 §13): this browser should forget the account (confirmed by the server, or chosen
+   *  by the member after an unknown outcome) — App wipes its state and lands signed out. Absent ⇒ no deletion. */
+  onAccountDeleted?: (end: DeletionEnd) => void;
+  /** The deletion request's lifecycle (App holds back a session end that lands while it is in flight). */
+  onDeletionTrack?: (event: DeletionTrack) => void;
 }
 
-export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowNeedsV2 = false, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked, registerUsageFlush, onAccountDeleted }: Props) {
+export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowNeedsV2 = false, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked, registerUsageFlush, onAccountDeleted, onDeletionTrack }: Props) {
   // Usage ledger (spec 02 §8.2) — one per unlocked session. Recording is in-memory and the flush
   // is debounced, because spec 03 §3 forbids a PUT per fill: that would turn the blob's own
   // updatedAt into a keystroke-grade activity trace, which is the leak the single-blob design
@@ -718,6 +721,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                owned vault's settings under Sharing (Transfer / Delete), or Administration (invite an admin). */
             email={email}
             onAccountDeleted={onAccountDeleted}
+            onDeletionTrack={onDeletionTrack}
             onOpenVaultSettings={(vaultId) => { setView("sharing"); closeLayers(); setSharingSettingsVaultId(vaultId); }}
             onOpenAdmin={isAdmin ? () => { setView("admin"); closeLayers(); } : undefined}
           />
