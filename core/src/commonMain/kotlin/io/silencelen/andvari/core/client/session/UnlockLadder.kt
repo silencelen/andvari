@@ -37,6 +37,12 @@ sealed interface UnlockResult {
     /** Bound, but the session ended during its first sync (a definitive rejection, most likely). There is nothing to land on. */
     data object EndedBeforeLanding : UnlockResult
 
+    /**
+     * The stored session ended, or became another account's or another origin's, while this unlock waited for the
+     * mutex. Nothing was sent; land where the stored state says now (an unlock of it, or the sign-in surface).
+     */
+    data object SessionChanged : UnlockResult
+
     /** The server refused the stored session (a 401 that survived the refresh): this origin's namespace was purged and the session is gone. */
     data class Revoked(val cause: ApiException) : UnlockResult
 
@@ -205,7 +211,15 @@ class UnlockLadder(
         // Another unlock bound a session while this one waited: adopt it, never mint a second token-holder that
         // reuses the now-consumed refresh token.
         (if (options.adoptOnlyFresh) session.getIfFresh() else session.get())?.let { return Held.Done(UnlockResult.Adopted(it)) }
-        val api = clients.forSession(stored, dialed)
+        // Review 3: the caller read [stored] before the mutex, and an unlock that held it meanwhile may have rotated the
+        // refresh token without binding (a wrong password, an overlay the user left): the rotation is stored either way.
+        // Presenting the token from before it would be a reuse, which revokes the device. So the client is built from
+        // the session as stored now, and only while it is still the caller's: the same account at the same origin.
+        val current = store.load()
+        if (current == null || current.userId != stored.userId || !sessionBelongsTo(current.baseUrl, stored.baseUrl)) {
+            return Held.Done(UnlockResult.SessionChanged)
+        }
+        val api = clients.forSession(current, dialed)
         var online = false
         var policy: ClientPolicy? = null
         val keys = try {
