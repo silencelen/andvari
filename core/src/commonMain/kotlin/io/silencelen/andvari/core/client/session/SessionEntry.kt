@@ -168,9 +168,9 @@ class SessionEntry(
                 return SignInResult.TotpRequired(codeWasWrong = totp != null)
             }
             // A11 (q08): the §2.4 pin is found by the email the person TYPED, not only by the server's userId.
-            val acct = withContext(Dispatchers.Default) {
+            val acct = handOff({
                 Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.origin(opKey).identityPins().pinFor(email, s.userId))
-            }
+            }, Account::wipe) // review 3: an account the caller no longer waits for is wiped
             account = acct
             // A14 review N4, second layer: if the client was moved while login and the KDF ran, these tokens are
             // not for the origin it now dials. Do not commit: revoke them at the origin that issued them (this
@@ -257,7 +257,7 @@ class SessionEntry(
             val recoveryPub = if (r.waived) null else Bytes.fromB64(runBounded(BoundedOps.FLAT_MS) { a.recoveryPubkey() })
             // Key generation and the KDF are CPU-bound (argon2id): off the caller's thread. The third part is the
             // SHOWN-ONCE recovery piece (§F.4).
-            val enrolled = withContext(Dispatchers.Default) {
+            val enrolled = handOff({
                 Account.enroll(
                     inviteToken = r.invite, email = r.email, displayName = r.name.ifBlank { r.email.substringBefore('@') },
                     password = r.password, params = policy.kdfParams,
@@ -268,7 +268,7 @@ class SessionEntry(
                     deviceName = clients.deviceName,
                     platform = clients.wirePlatform,
                 )
-            }
+            }, { e -> e.account.wipe(); e.recoverySecret.fill(0) }) // review 3: nor its piece and keys, when nobody waits
             account = enrolled.account
             secret = enrolled.recoverySecret
             // §4.3 B2-9 crash marker: on a PENDING invite switch, record the enrolling email in the marker BEFORE

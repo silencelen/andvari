@@ -74,6 +74,22 @@ class AccountWipeTest {
     }
 
     @Test
+    fun aPasswordUnlockWhoseAccountDoesNotOpenZeroesWhatItOpened() {
+        // Review 3: the opened UVK is the call's until an account takes it; here none does (an identity mismatch).
+        val e = enroll()
+        val opened = mutableListOf<ByteArray>()
+        val spy = object : io.silencelen.andvari.core.crypto.CryptoProvider by crypto {
+            override fun aeadDecrypt(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray, ad: ByteArray): ByteArray =
+                crypto.aeadDecrypt(key, nonce, ciphertext, ad).also { opened += it }
+        }
+        val stranger = crypto.boxKeypairFromSeed(crypto.randomBytes(32)).publicKey
+        val keys = keysOf(e).copy(identityPub = Bytes.toB64(stranger))
+        assertFailsWith<io.silencelen.andvari.core.crypto.CryptoException> { Account.unlock(e.request.userId, "pw", keys, spy) }
+        assertTrue(opened.size >= 2, "the UVK and the identity seed were opened")
+        assertTrue(opened.all { it.isZero() }, "and both are zeroed")
+    }
+
+    @Test
     fun theRefusalIsNotReadAsAWrongPassword() {
         // The save ladders read a CryptoException as "wrong master password"; a session that ended is not that.
         val e: Throwable = AccountWipedException()

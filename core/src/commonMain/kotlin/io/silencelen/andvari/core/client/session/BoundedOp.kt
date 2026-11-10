@@ -2,8 +2,10 @@ package io.silencelen.andvari.core.client.session
 
 import io.silencelen.andvari.core.client.SyncEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.io.IOException
 
@@ -39,6 +41,22 @@ suspend fun <T : Any> runBounded(timeoutMs: Long, block: suspend () -> T): T {
         throw e
     }
     return result ?: throw IOException("operation timed out")
+}
+
+/**
+ * Review 3: build something that holds key material ([make], CPU-bound: a KDF) off the caller's thread, and hand
+ * it back; or [discard] it when the caller was cancelled while it was being built. `withContext` drops a result
+ * that completes after its caller's cancellation, and a dropped account would keep its keys until the collector
+ * came by.
+ */
+suspend fun <T : Any> handOff(make: () -> T, discard: (T) -> Unit): T {
+    var made: T? = null
+    try {
+        return withContext(Dispatchers.Default) { make().also { made = it } }
+    } catch (c: CancellationException) {
+        made?.let(discard)
+        throw c
+    }
 }
 
 /** The whole-call budgets for the ops [runBounded] guards. */
