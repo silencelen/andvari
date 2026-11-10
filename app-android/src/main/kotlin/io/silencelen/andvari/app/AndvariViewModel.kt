@@ -902,6 +902,10 @@ class AndvariViewModel(
         viewModelScope.launch { checkIdleLock() } // the rejection is recorded on VaultSession; land it now rather than at the next tick
     }
 
+    /** The shared session clients and the manual server switch with its policy probe (core). */
+    private val clients = SessionClients(AndroidHttpClients, store, coordinator)
+    private val serverSwitch = ServerSwitch(store, VaultSession, coordinator, clients, CLEARTEXT_EXEMPT_HOSTS)
+
     /** A12 (row 80): one policy fetch under a whole-call bound (a timeout reads as unreachable). */
     private suspend fun boundedPolicy(probe: AndvariApi): ClientPolicy = coordinator.boundedPolicy(probe)
 
@@ -1052,28 +1056,15 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(screen = Screen.Vault, items = engine?.items() ?: emptyList(), needsUpdateCount = needsUpdate(), baseUrl = store.baseUrl)
             }
             val session = store.load()
-            // §4.2: capture the PROBED origin's key beside the probe (newApi() reads the same
-            // baseUrl) — the async verdict below purges/persists under THIS key, so a racing
-            // setBaseUrl can never redirect it onto another origin's namespace.
-            val originKey = store.currentOriginKey()
-            val tag = probeFence.tag(originKey) // A12 (row 80): this visit's probe, tagged before the await
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { boundedPolicy(probe) }
-                    .onSuccess { p ->
-                        // UI state + persisted fallbacks + auto-lock gate — only if still current.
-                        if (!applyPolicy(p, tag)) return@onSuccess
-                        // Policy may forbid the durable cache; honor it the moment we learn it (spec
-                        // 02 §8), the live-engine case included: the coordinator wipes the key
-                        // material now and deletes the file when the engine closes. Scoped to the
-                        // probed origin's namespace ONLY (§4.2).
-                        if (!p.offlineCacheAllowed && session != null) purgeOfflineData(originKey, session.userId)
-                    }
-                    // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
-                    // honestly (the policy itself stays last-known for the offline gates).
-                    .onFailure { if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policyFetchFailed = true) }
-            } finally {
-                probe.close()
+            // The shared probe (core ServerSwitch.probePolicy): tagged before the await, applied only if
+            // still current (A12 row 80), and a forbidding answer purges the probed origin's namespace,
+            // the live-engine case included (the file goes when the engine closes; spec 02 §8, §4.2).
+            when (val probed = serverSwitch.probePolicy()) {
+                is PolicyProbe.Applied -> showPolicy(probed.policy)
+                // N2 §3: this probe feeds the Welcome/Enroll gate — record the failure
+                // honestly (the policy itself stays last-known for the offline gates).
+                is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policyFetchFailed = true)
+                PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
             }
             if (!bound) {
                 _ui.value = _ui.value.copy(
@@ -1088,25 +1079,20 @@ class AndvariViewModel(
     }
 
     fun setBaseUrl(url: String) {
-        val newUrl = url.trim().removeSuffix("/")
-        // §4.1 rule 1 (B1-5 — HARD MUST): a REAL origin change drops the old origin's access+refresh
-        // tokens and in-memory unlock state BEFORE the probe below fires, so the client rebuilt for
-        // the new origin (newApi() reads the just-changed baseUrl) can never replay the old bearer
-        // token — no `Authorization` header crosses a baseUrl change ([inheritedTokensAcrossSwitch]).
-        // A no-op canonical re-entry keeps the session. Old-origin NAMESPACED material (cached keys,
-        // vault cache, quick-unlock) is PRESERVED (§4.2/B2-7 — a switch is not a wipe); only the
-        // single global session slot is cleared, via [SessionStore.clearSessionTokens].
-        // F8 (design §4.1 rule 1): the tokens drop BEFORE the origin moves, so a crash between the two
-        // leaves the old origin with no tokens, never a stored session paired with the new origin.
-        val drop = switchDropsSession(store.baseUrl, newUrl)
+        afterOriginMove(serverSwitch.moveTo(url.trim().removeSuffix("/")))
+    }
+
+    /**
+     * The UI half of an origin move (core [ServerSwitch.moveTo] did the rest: §4.1 rule 1's session drop,
+     * tokens before origin, and the stale fence). A dropped session's in-flight secrets die with it; then
+     * the new origin's policy is probed so the recovery fingerprint and the pins update at once.
+     */
+    private fun afterOriginMove(drop: Boolean) {
         if (drop) {
-            VaultSession.lock() // close the old origin's api/engine before any request goes to the new one
-            store.clearSessionTokens()
             // In-flight secret material belongs to the old origin's session — it must not survive
             // into the new one (mirrors lock()/signOut()'s zeroize discipline).
             zeroPendingRecovery(); zeroPendingRecover(); pendingCaptureAuthKey = null
         }
-        store.baseUrl = newUrl
         // §3/B4(4) (review MED, desktop-twin parity): a deliberate URL change nulls the OLD
         // server's policy and clears the flag AT CHANGE TIME, so Welcome renders the neutral
         // "Checking the server…" state during the probe — never the old server's ceremony
@@ -1120,39 +1106,27 @@ class AndvariViewModel(
             mustChangePassword = if (drop) false else _ui.value.mustChangePassword,
         )
         // Re-fetch policy against the new server so the recovery fingerprint / pins update
-        // immediately (no app restart needed).
-        // §4.2 — THE call site the namespacing exists for: this probes the JUST-SET origin, so
-        // a forbidding answer purges the NEW origin's (empty) namespace and can no longer
-        // destroy the previous server's offline data + account keys. The key is captured here,
-        // synchronously with the baseUrl write, so a second setBaseUrl racing this in-flight
-        // probe still lands the verdict on the origin that produced it.
-        val originKey = store.currentOriginKey()
-        // A12 (row 80): every earlier probe — above all one still in flight against the origin
-        // just left — is stale from here on, and the in-flight one is cancelled.
-        probeFence.advance()
+        // immediately (no app restart needed). §4.2 — THE call site the namespacing exists for: this
+        // probes the JUST-SET origin, so a forbidding answer purges the NEW origin's (empty) namespace
+        // and can no longer destroy the previous server's offline data + account keys. A12 (row 80):
+        // the move made every earlier probe stale; the one still in flight against the origin just
+        // left is cancelled too.
         probeJob?.cancel()
-        val tag = probeFence.tag(originKey)
         probeJob = viewModelScope.launch {
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { boundedPolicy(probe) }
-                    .onSuccess { p ->
-                        if (!applyPolicy(p, tag)) return@onSuccess
-                        // Same policy enforcement as start(): a forbidding server purges ITS OWN
-                        // namespace for the stored session's user — never another origin's.
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
-                    }
-                    // A deliberate URL change invalidates the old server's policy (null stays
-                    // right) — and the probe against the NEW one failed, so say so (N2 §3);
-                    // Welcome must never claim the new server has no recovery key.
-                    .onFailure {
-                        if (it is kotlinx.coroutines.CancellationException) throw it
-                        if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
-                    }
-            } finally {
-                probe.close()
+            when (val probed = serverSwitch.probePolicy()) {
+                is PolicyProbe.Applied -> showPolicy(probed.policy)
+                // A deliberate URL change invalidates the old server's policy (null stays right) — and
+                // the probe against the NEW one failed, so say so (N2 §3); Welcome must never claim the
+                // new server has no recovery key.
+                is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
+                PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
             }
         }
+    }
+
+    /** A probe's policy, into UI state (core already applied it where it is enforced). */
+    private fun showPolicy(p: ClientPolicy) {
+        _ui.value = _ui.value.copy(policy = p, policyFetchFailed = false) // N2 §3: any fetch success clears the failure flag
     }
 
     // ---- Wave-3 endpoint switch + anti-phishing trust gate (design 2026-07-15 §4) ----
@@ -1165,15 +1139,14 @@ class AndvariViewModel(
         // (`https://real.host@evil.example` shows a reassuring host while the HTTP stack dials evil.example
         // → authKey phishing on the next sign-in). canonicalServerOrigin returns the bare canonical origin
         // the gate shows AND dials, or null to refuse.
-        val target = OriginNamespace.canonicalServerOrigin(url)
-        if (target == null) {
-            _ui.value = _ui.value.copy(error = "Enter a server address like https://example.org — no username, path, or query.")
-            return
+        when (val address = serverSwitch.prepare(url)) {
+            ServerAddress.Invalid ->
+                _ui.value = _ui.value.copy(error = "Enter a server address like https://example.org — no username, path, or query.")
+            is ServerAddress.Current -> setBaseUrl(address.origin)
+            is ServerAddress.NeedsGate -> _ui.value = _ui.value.copy(
+                trustGate = TrustGatePrompt(address.render, enrollment = false, action = TrustGateAction.ManualSwitch(address.origin)),
+            )
         }
-        if (!switchDropsSession(store.baseUrl, target)) { setBaseUrl(target); return }
-        _ui.value = _ui.value.copy(
-            trustGate = TrustGatePrompt(trustGateRender(target), enrollment = false, action = TrustGateAction.ManualSwitch(target)),
-        )
     }
 
     /** A foreign-origin enroll link was entered (design §4.4): show the Trust Gate (ENROLLMENT
@@ -1242,24 +1215,14 @@ class AndvariViewModel(
     private fun commitManualSwitch(target: String) {
         _ui.value = _ui.value.copy(trustGate = null, busy = true, error = null)
         viewModelScope.launch {
-            val probe = AndvariApi(target, androidHttpClient())
-            // try/catch rather than runCatching: a cancelled scope (the activity going away
-            // mid-probe) must NOT read as a probe verdict and commit a switch on the way out.
-            val failure = try {
-                boundedPolicy(probe) // H10: busy is held across it; a timeout reads as unreachable
-                null
-            } catch (c: kotlinx.coroutines.CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                t
-            } finally {
-                probe.close()
-            }
-            if (switchProbeReachable(failure)) {
-                _ui.value = _ui.value.copy(busy = false)
-                setBaseUrl(target) // unchanged from here: drop tokens, re-probe, land on Welcome
-            } else {
-                fail(failure!!) // session, unlock state and old origin all intact
+            // Core ServerSwitch.connect: a tokenless, bounded probe (H10: busy is held across it), and
+            // only a target that answered becomes the origin.
+            when (val r = serverSwitch.connect(target)) {
+                is SwitchResult.Switched -> {
+                    _ui.value = _ui.value.copy(busy = false)
+                    afterOriginMove(r.droppedSession) // drop tokens, re-probe, land on Welcome
+                }
+                is SwitchResult.Unreachable -> fail(r.cause) // session, unlock state and old origin all intact
             }
         }
     }
@@ -1315,19 +1278,14 @@ class AndvariViewModel(
     fun retryPolicy() {
         if (_ui.value.busy) return
         _ui.value = _ui.value.copy(busy = true)
-        val originKey = store.currentOriginKey() // §4.2: captured beside the probe it scopes
-        val tag = probeFence.tag(originKey) // A12 (row 80)
         viewModelScope.launch {
-            val probe = newApi()
-            try { // F74: close() in finally — no throw path may leak the transient probe
-                runCatching { boundedPolicy(probe) }
-                    .onSuccess { p ->
-                        if (!applyPolicy(p, tag)) return@onSuccess
-                        if (!p.offlineCacheAllowed) store.load()?.let { purgeOfflineData(originKey, it.userId) }
-                    }
-                    .onFailure { if (probeIsCurrent(tag)) _ui.value = _ui.value.copy(policyFetchFailed = true) }
+            try {
+                when (val probed = serverSwitch.probePolicy()) { // core: tagged, fenced, purges a forbidding origin
+                    is PolicyProbe.Applied -> showPolicy(probed.policy)
+                    is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policyFetchFailed = true)
+                    PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
+                }
             } finally {
-                probe.close()
                 _ui.value = _ui.value.copy(busy = false)
             }
         }

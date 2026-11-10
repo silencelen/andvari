@@ -112,14 +112,17 @@ class BoundedOpWiringTest {
             "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfSetup(setup.request) }",
             "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfConfirm(pieceId) }",
             "runBounded(BoundedOps.FLAT_MS) { block() }",
-            // The pre-session legs that hold busy too: the manual switch probe and both recovery steps.
-            "boundedPolicy(probe) // H10",
+            // The pre-session legs that hold busy too: the manual switch probe (below) and both recovery steps.
             "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfVerify(email.trim(), authKey) }",
             "boundedPolicy(a).let { requireCurrentPolicy(it, applyPolicy(it, policyTag)) }",
             "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfCommit(commit) }",
         )) {
             assertTrue(vm.contains(pin), "must stay bounded: $pin")
         }
+        // The manual switch's probe holds busy too; it moved to core with the switch (step 5).
+        assertTrue(vm.contains("when (val r = serverSwitch.connect(target))"), "the app's Connect is core's")
+        val switch = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/ServerSwitch.kt").readText()
+        assertTrue(switch.substringAfter("suspend fun connect(").substringBefore("fun moveTo(").contains("coordinator.boundedPolicy(probe)"), "and its probe is bounded")
         // A stalled pre-export sync reads as offline, on both paths.
         assertTrue(Regex("""runBounded\(BoundedOps\.FLAT_MS\) \{ syncNow\(e\) \}""").findAll(vm).count() >= 2, "backupBegin and csvBegin")
     }

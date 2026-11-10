@@ -3,7 +3,15 @@ package io.silencelen.andvari.app
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.core.client.session.BoundedOps
+import io.silencelen.andvari.core.client.session.HttpClients
 import java.util.concurrent.TimeUnit
+
+/** Android's [HttpClients]: OkHttp, the "android" wire tag, and the device model as its name. */
+object AndroidHttpClients : HttpClients {
+    override fun create(): HttpClient = androidHttpClient()
+    override val wirePlatform: String = "android"
+    override val deviceName: String get() = android.os.Build.MODEL ?: "android"
+}
 
 /**
  * The HTTP client behind every Android [io.silencelen.andvari.core.client.AndvariApi].

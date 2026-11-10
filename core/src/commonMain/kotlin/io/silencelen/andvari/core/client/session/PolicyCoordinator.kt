@@ -41,6 +41,29 @@ class PolicyCoordinator(
     private val fence: OriginProbeFence = OriginProbeFence(),
     private val onSessionRejected: () -> Unit = {},
 ) {
+    /** The policy this client last applied ([applyPolicy]) and the origin it belongs to; null after a move. */
+    @kotlin.concurrent.Volatile
+    private var live: Pair<String, ClientPolicy>? = null
+
+    /** The current origin's live policy, if one was fetched since the client last moved. */
+    val livePolicy: ClientPolicy? get() = live?.second
+
+    /**
+     * Whether [originKey]'s namespace may hold a durable cache now: the live policy when it is that
+     * origin's, else the persisted mirror (spec 02 §8: a forbidding policy is honoured offline too).
+     */
+    fun cacheAllowed(originKey: String): Boolean =
+        live?.takeIf { it.first == originKey }?.second?.offlineCacheAllowed ?: store.origin(originKey).cacheAllowed
+
+    /** A12 (row 80): tag a probe of [originKey] at the current visit. Call BEFORE any await. */
+    fun tag(originKey: String): OriginProbeFence.Tag = fence.tag(originKey)
+
+    /** The client moved its origin: every outstanding probe is stale, and the live policy was the old origin's. */
+    fun originChanged() {
+        fence.advance()
+        live = null
+    }
+
     /** A12 (row 80): one policy fetch under a whole-call bound (a timeout reads as unreachable). */
     suspend fun boundedPolicy(probe: AndvariApi, timeoutMs: Long = POLICY_PROBE_TIMEOUT_MS): ClientPolicy =
         runBounded(timeoutMs) { probe.clientPolicy() }
@@ -60,6 +83,7 @@ class PolicyCoordinator(
     fun applyPolicy(p: ClientPolicy, tag: OriginProbeFence.Tag): Boolean {
         if (!probeIsCurrent(tag)) return false
         recordPolicy(tag.originKey, p)
+        live = tag.originKey to p
         return true
     }
 

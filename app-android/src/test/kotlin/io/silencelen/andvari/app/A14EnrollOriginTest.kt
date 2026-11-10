@@ -123,13 +123,19 @@ class A14EnrollOriginTest {
         assertTrue(backfill.contains("clearSessionTokens()"), "and an unattributable session is dropped, not guessed")
     }
 
-    /** §4.1 rule 1, and the crash window F8 named: a dropped session is gone before the origin moves. */
+    /**
+     * §4.1 rule 1, and the crash window F8 named: a dropped session is gone before the origin moves. The
+     * move is core's now (ServerSwitch.moveTo; behaviour pinned by ServerSwitchTest), and every origin
+     * change on this side goes through it.
+     */
     @Test
     fun aRealSwitchDropsTheTokensBeforeTheOriginMoves() {
-        val set = body(vm, "fun setBaseUrl(url: String) {", "_ui.value = _ui.value.copy(")
-        val drop = set.indexOf("store.clearSessionTokens()")
-        val move = set.indexOf("store.baseUrl = newUrl")
-        assertTrue(drop > -1 && move > drop, "tokens first, origin second")
+        val core = sourceFile("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/ServerSwitch.kt").readText()
+        val move = body(core, "fun moveTo(newOrigin: String): Boolean {", "\n    }\n")
+        val drop = move.indexOf("store.clearSessionTokens()")
+        assertTrue(drop > -1 && move.indexOf("store.moveOrigin(newOrigin)") > drop, "tokens first, origin second")
+        assertTrue(body(vm, "fun setBaseUrl(url: String) {", "\n    }\n").contains("serverSwitch.moveTo("), "the app moves its origin only through it")
+        assertTrue(!vm.contains("store.baseUrl = "), "and never writes the origin itself")
     }
 
     @Test
