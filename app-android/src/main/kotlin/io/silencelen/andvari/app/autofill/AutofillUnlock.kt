@@ -2,8 +2,6 @@ package io.silencelen.andvari.app.autofill
 
 import io.silencelen.andvari.core.client.session.*
 import android.content.Context
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.app.AndroidClocks
 import io.silencelen.andvari.app.AndroidOfflineArtifacts
 import io.silencelen.andvari.app.KdfReKey
@@ -12,6 +10,7 @@ import io.silencelen.andvari.app.PersonalDeviceState
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.app.androidHttpClient
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
@@ -118,7 +117,7 @@ object AutofillUnlock {
         val originKey = OriginNamespace.originKey(baseUrl)
         // The same policy and purge rules as the main app, under its own fence-less policy read below.
         val coordinator = PolicyCoordinator(store, AndroidOfflineArtifacts(appContext.noBackupFilesDir), VaultSession, AndroidClocks)
-        val api = AndvariApi(baseUrl, HttpClient(OkHttp), session.tokens(), { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform "android"
+        val api = AndvariApi(baseUrl, androidHttpClient(), session.tokens(), { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform "android"
 
         // A4: the autofill process fetches /client-policy on its ONLINE path (cheap, unauthenticated)
         // so an admin's `offlineCacheAllowed` flip reaches this process too, and persists

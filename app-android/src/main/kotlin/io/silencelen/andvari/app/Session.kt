@@ -390,7 +390,10 @@ class SessionStore(context: Context) : SessionPersistence {
 
     override fun updateTokens(t: Tokens?) {
         if (t == null) { clear(); return }
-        prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).apply()
+        // commit(), not apply(): the server has already spent the old refresh token, so a process death
+        // that lost this write would replay it at the next refresh and revoke the device. The refresh
+        // stores its pair off the main thread (AndvariApi), so this never blocks the UI.
+        prefs.edit().putString("accessToken", t.accessToken).putString("refreshToken", t.refreshToken).commit()
     }
 
     /**
