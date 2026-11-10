@@ -164,7 +164,10 @@ finds no account, before minting (the belt for a database emptied any other way,
 Known limitation, recorded here and in the report: andvari has **no "promote to admin" route** — admin is set only on
 the invite — and an existing member's address cannot be invited (`email_taken`). So the last-admin blocker is resolved
 only by a NEW admin account (or a recovered disabled admin). A promote route is a natural follow-up; it is out of scope
-(it is a new admin power with its own threat model).
+(it is a new admin power with its own threat model). The web copy says exactly that — "andvari can't make an existing
+account an admin — an account is an admin only if it was invited as one", then where to invite one — so nobody hunts
+for a "make admin" control; the Admin console's last-admin disable refusal, which used to say "Make another account an
+admin first", now says the same.
 
 The refusal is audited `account_delete_denied` (meta: the kinds, ids-free), written inside the transaction, which then
 **commits** (with the consumed TOTP step) before the `409` is thrown — the `disableUser` pattern, so the audit row
@@ -354,7 +357,8 @@ residual (spec 05 R19).
    household recovery backup, invites it sent that nobody used) and the M vaults it will leave (what it saved there stays
    for the others), "This can't be undone", and a "Back up first" link.
 3. **Blockers**, when the preview has any: each on its own line with a link — "Open “Family” settings →" (Sharing, the
-   vault's settings, where Transfer and Delete live) or "Open Administration →" for `last_admin` — and the form is not
+   vault's settings, where Transfer and Delete live) or "Open Administration →" for `last_admin`, whose sentence says no
+   existing account can be made an admin and the way out is a new account invited as one (§5) — and the form is not
    shown. An unknown kind is listed as a blocker this version cannot explain ("Reload to update, or ask whoever runs your
    server"), and a refusal that named nothing still reads as blocked; neither offers the form.
 4. **The form**, when there are none: "Type your email" (must match the session's address, trimmed and case-folded; the

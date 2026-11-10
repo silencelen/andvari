@@ -72,8 +72,18 @@ describe("blockerLines — one sentence per blocker, with where to resolve it", 
   it("explains the last-admin role and links to Administration", () => {
     const [line] = blockerLines([{ kind: "last_admin", others: 3 }], vaultName);
     expect(line!.text).toContain("You're the only admin of this andvari server, and 3 other people have accounts on it.");
-    expect(line!.text).toContain("Invite someone as an admin first");
     expect(line!.link).toEqual({ kind: "admin" });
+  });
+
+  it("says exactly that no existing account can be made an admin — only a new one invited as an admin resolves it", () => {
+    const [line] = blockerLines([{ kind: "last_admin", others: 1 }], vaultName);
+    expect(line!.text).toContain("1 other person has an account on it.");
+    expect(line!.text).toContain("andvari can't make an existing account an admin — an account is an admin only if it was invited as one.");
+    expect(line!.text).toContain("Invite a new admin first (Administration → Users → Invite a user, with “Admin” ticked, for an address that has no account yet)");
+    // There is no promote route (spec 03 §11), so neither surface may point at a "make admin" control that does not exist.
+    const admin = readFileSync(fileURLToPath(new URL("./Admin.tsx", import.meta.url)), "utf8");
+    expect(admin).toContain("andvari can't make an existing account an admin: invite a new admin first");
+    for (const text of [line!.text, admin]) expect(text).not.toMatch(/make (another|one of them|someone|a member) (account )?an admin/i);
   });
 
   it("an unknown kind is a blocker it cannot explain — listed, never dropped, in the server's order", () => {

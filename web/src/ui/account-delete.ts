@@ -57,8 +57,10 @@ export function blockerLines(blockers: AccountDeleteBlocker[], vaultName: (vault
       };
     }
     if (b.kind === "last_admin") {
+      // Exact on purpose: there is no promote route (spec 03 §11, §13), so the copy must not send anyone hunting for a
+      // "make admin" control — the only way is a NEW account invited as an admin.
       return {
-        text: `You're the only admin of this andvari server, and ${people(b.others)} ${b.others === 1 ? "has an account" : "have accounts"} on it. Invite someone as an admin first (Administration → invite, with “admin” ticked), then come back.`,
+        text: `You're the only admin of this andvari server, and ${people(b.others)} ${b.others === 1 ? "has an account" : "have accounts"} on it. andvari can't make an existing account an admin — an account is an admin only if it was invited as one. Invite a new admin first (Administration → Users → Invite a user, with “Admin” ticked, for an address that has no account yet), then come back.`,
         link: { kind: "admin" },
         linkLabel: "Open Administration →",
       };
