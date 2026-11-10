@@ -44,8 +44,17 @@ import {
   wipeVaultCache,
   type Session,
 } from "./session";
-import { ACCOUNT_DELETED_NOTICE, ACCOUNT_FORGOTTEN_NOTICE } from "./account-delete";
-import type { DeletionEnd, DeletionTrack } from "./DeleteAccount";
+import {
+  ACCOUNT_DELETED_NOTICE,
+  ACCOUNT_FORGOTTEN_NOTICE,
+  DELETION_HOLD_LIMIT_MS,
+  DELETION_MOST_LIKELY_DONE,
+  type DeletionWatch,
+  type DeletionWatchAction,
+  IDLE_DELETION_WATCH,
+  stepDeletionWatch,
+} from "./account-delete";
+import { DeletionOutcomeUnknownCard, type DeletionEnd, type DeletionTrack } from "./DeleteAccount";
 import { adoptSharedPair, dropOnSignOutElsewhere, idleTimerUserId, lockTabTokens, revokeForSignOut, storageVerdict } from "./tabsession";
 
 /** `notice` (F26): one-line reason rendered on the auth card — why the user is looking
@@ -54,7 +63,10 @@ type Phase =
   | { kind: "loading" }
   | { kind: "welcome"; notice?: string }
   | { kind: "unlock"; session: Session; notice?: string }
-  | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta };
+  | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta }
+  /** Account deletion: the session ended while the deletion request was in flight and its answer never came — the
+   *  vault is closed and the session wiped; the card offers to forget the account here, or to sign in and check. */
+  | { kind: "deletionUnknown"; userId: string; email: string; notice?: string };
 
 const UPGRADE_NOTICE = "This tab is running an older version — reload to update.";
 // Cut M (v2 #16): pre-lock warning copy — the listed gestures are exactly the activity
@@ -212,7 +224,21 @@ export function App() {
   // concurrently leaves the landing to onAccountDeleted. Cleared by the next unlock.
   const deletedAccountRef = useRef<string | null>(null);
 
-  const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user") => {
+  // Account deletion (spec 03 §13 client duties; design 2026-11-10 §11): App's side of the deletion request — the hold on
+  // a session end that lands while it is in flight, and what each ending does with it — is the pure step function
+  // account-delete.ts stepDeletionWatch (tested there); these refs are its state. `deletionWhoRef`: the account the request
+  // is for, for the outcome-unknown card's Forget. The timer is the belt to the request's own timeout: no hold outlives
+  // DELETION_HOLD_LIMIT_MS, whatever the card reports.
+  const deletionWatchRef = useRef<DeletionWatch>(IDLE_DELETION_WATCH);
+  const deletionWhoRef = useRef<{ userId: string; email: string } | null>(null);
+  const deletionHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearDeletionHold = () => {
+    if (deletionHoldTimerRef.current !== null) clearTimeout(deletionHoldTimerRef.current);
+    deletionHoldTimerRef.current = null;
+  };
+
+  // `deletionUnknown` (account deletion): land on DeletionOutcomeUnknownCard for that account instead of the sign-in card.
+  const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user", deletionUnknown?: { userId: string; email: string }) => {
     const uid = loadSession()?.userId ?? null;
     const unsynced = uid ? await pendingSyncCount(uid) : 0;
     // Audit F07 kept the gate this comment describes — a fully-synced device still took the whole
@@ -247,7 +273,8 @@ export function App() {
     // Account deletion: the server's `revoked` frame to this tab can start this sign-out just before the deletion's own
     // answer lands; onAccountDeleted then did the wipe and owns the landing (its notice), so don't overwrite it here.
     if (uid !== null && deletedAccountRef.current === uid) return;
-    setPhase({ kind: "welcome", notice: revoked ? lostCount : [lostCount, REVOKE_UNCONFIRMED].filter(Boolean).join(" ") });
+    const line = revoked ? lostCount : [lostCount, REVOKE_UNCONFIRMED].filter(Boolean).join(" ");
+    setPhase(deletionUnknown ? { kind: "deletionUnknown", ...deletionUnknown, notice: line } : { kind: "welcome", notice: line });
   }, []);
 
   // Account deletion (spec 03 §13 client duty; design 2026-11-10 §11): the server CONFIRMED it, so this browser forgets
@@ -258,12 +285,13 @@ export function App() {
   // follow through the session key's `storage` event. A `revoked` frame the server sends this tab's socket at the same
   // moment may start the ordinary revoked sign-out first: deletedAccountRef tells that sign-out to leave the landing to
   // this handler, whichever of the two finishes last. `end` is how the account went: `confirmed` by the server's answer,
-  // or `forgotten` — the member's choice after an unknown outcome, once the account no longer signed in. The wipe is the
-  // same; only the notice differs (a forgotten account may, rarely, still exist).
+  // or `forgotten` — the member's choice on DeletionOutcomeUnknownCard, after the session ended while the request was in
+  // flight. The wipe is the same; only the notice differs (a forgotten account may, rarely, still exist).
   const onAccountDeleted = useCallback((userId: string, email: string, end: DeletionEnd) => {
     deletedAccountRef.current = userId;
-    deletionInFlightRef.current = false;
-    deferredEndRef.current = null;
+    deletionWatchRef.current = IDLE_DELETION_WATCH;
+    deletionWhoRef.current = null;
+    clearDeletionHold();
     lockRevokeRef.current = null;
     // Its synchronous half (session, tab token slot, userId-scoped keys, self-identity records) has run by the time the
     // call returns, so dropping the pair next writes nothing back; the IndexedDB delete then completes on its own (the
@@ -273,15 +301,6 @@ export function App() {
     clearBreachCache();
     setPhase({ kind: "welcome", notice: end === "confirmed" ? ACCOUNT_DELETED_NOTICE : ACCOUNT_FORGOTTEN_NOTICE });
   }, []);
-
-  // Account deletion, defect class "the answer was lost": the server revokes every socket of the account the moment its
-  // deletion commits, so when the HTTP answer itself is lost (a proxy's 502 after the commit) this tab's socket would sign
-  // it out as "revoked" and unmount the card before it could say the outcome is unknown and offer to forget the account —
-  // leaving this browser's self-identity records behind. While the request is in flight, a session end is therefore HELD;
-  // when it settles: a definitive refusal (nothing was deleted) means the end was real, and it runs now; any other ending
-  // leaves the card in charge (it checks, and offers to forget the account once it no longer signs in).
-  const deletionInFlightRef = useRef(false);
-  const deferredEndRef = useRef<SessionEndKind | null>(null);
 
   // F26/F27 lock propagation channel: locking KEEPS the persisted session, so the
   // `storage` event can no longer signal it — locks are announced explicitly.
@@ -362,36 +381,51 @@ export function App() {
   // explicit WS `revoked` frame is a revocation; a dead session at ticket mint is
   // ordinary expiry (laptop asleep past the refresh lifetime) and saying "revoked"
   // there would be a false alarm.
+  // `notice` (account deletion) replaces the kind's own line where the deletion's state says more.
   const endSession = useCallback(
-    (kind: SessionEndKind) =>
+    (kind: SessionEndKind, notice?: string) =>
       kind === "revoked"
-        ? void signOut("This device's access was revoked.", "revoked") // server-initiated: silent-drop
-        : void signOut("Your session ended — sign in again.", "expired"), // expiry: surface the lost count
+        ? void signOut(notice ?? "This device's access was revoked.", "revoked") // server-initiated: silent-drop
+        : void signOut(notice ?? "Your session ended — sign in again.", "expired"), // expiry: surface the lost count
     [signOut],
   );
-  const onRevoked = useCallback(
-    (kind: SessionEndKind) => {
-      if (deletionInFlightRef.current) {
-        deferredEndRef.current ??= kind; // held until the deletion request settles (see deletionInFlightRef)
-        return;
-      }
-      endSession(kind);
+  // Account deletion: what stepDeletionWatch decided. Only the vault and unlock phases still hold a session to end (the
+  // tab may have locked while the request was in flight); once the session is gone — the outcome-unknown card, or the
+  // sign-in card after the deletion's own wipe — a late settle must not pull the member off that screen.
+  const applyDeletionAction = useCallback(
+    (a: DeletionWatchAction) => {
+      const phaseKind = phaseRef.current.kind;
+      if (a.kind === "none" || (phaseKind !== "vault" && phaseKind !== "unlock")) return;
+      if (a.kind === "end_session") endSession(a.end, a.notice);
+      else void signOut(undefined, a.end, deletionWhoRef.current ?? undefined); // offer_forget
     },
-    [endSession],
+    [endSession, signOut],
   );
-  const onDeletionTrack = useCallback(
-    (event: DeletionTrack) => {
-      if (event === "started") {
-        deletionInFlightRef.current = true;
-        deferredEndRef.current = null;
-        return;
-      }
-      deletionInFlightRef.current = false;
-      const held = deferredEndRef.current;
-      deferredEndRef.current = null;
-      if (event === "refused" && held !== null) endSession(held); // nothing was deleted: the end was real
+  const stepDeletion = useCallback(
+    (e: DeletionTrack) => {
+      const { watch, action } = stepDeletionWatch(deletionWatchRef.current, e);
+      deletionWatchRef.current = watch;
+      if (!watch.inFlight) clearDeletionHold();
+      applyDeletionAction(action);
     },
-    [endSession],
+    [applyDeletionAction],
+  );
+  // Every session end goes through the deletion watch: idle, it is the ordinary sign-out; during a deletion request it is
+  // held, and acted on when the request settles (never dropped).
+  const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind }), [stepDeletion]);
+  const onDeletionTrack = useCallback(
+    (event: DeletionTrack, who: { userId: string; email: string }) => {
+      if (event.kind === "started") {
+        deletionWhoRef.current = who;
+        clearDeletionHold();
+        deletionHoldTimerRef.current = setTimeout(() => {
+          deletionHoldTimerRef.current = null;
+          stepDeletion({ kind: "hold_expired" });
+        }, DELETION_HOLD_LIMIT_MS);
+      }
+      stepDeletion(event);
+    },
+    [stepDeletion],
   );
 
   // Which account is live in THIS tab (vault/unlock phases) — read by the storage
@@ -495,7 +529,8 @@ export function App() {
   // bar survives lock/unlock/sign-out and every in-vault navigation; it blocks
   // nothing — the server serves the web bundle, so the one Reload click IS the update.
   // BL-1: the current lock/sign-out/enroll reason line (welcome + unlock phases carry it).
-  const phaseNotice = phase.kind === "welcome" || phase.kind === "unlock" ? phase.notice : undefined;
+  const phaseNotice =
+    phase.kind === "welcome" || phase.kind === "unlock" ? phase.notice : phase.kind === "deletionUnknown" ? DELETION_MOST_LIKELY_DONE : undefined;
   // B2-11: the nudge shows only in the vault phase, and a belt against the org forbidding
   // caching between the unlock-time check and a fresh policy landing (§E.4 pin wins anyway).
   const cacheNudgeVisible = phase.kind === "vault" && cacheNudge !== null && policy?.offlineCacheAllowed !== false;
@@ -587,8 +622,19 @@ export function App() {
           usageFlushRef.current = fn;
         }}
         onAccountDeleted={(end) => onAccountDeleted(deletingUserId, vaultEmail, end)}
-        onDeletionTrack={onDeletionTrack}
+        onDeletionTrack={(event) => onDeletionTrack(event, { userId: deletingUserId, email: vaultEmail })}
       />
+    );
+  }
+
+  if (phase.kind === "deletionUnknown") {
+    const p = phase;
+    return withUpgradeBar(
+      <DeletionOutcomeUnknownCard
+        notice={p.notice}
+        onForget={() => onAccountDeleted(p.userId, p.email, "forgotten")}
+        onSignIn={() => setPhase({ kind: "welcome" })}
+      />,
     );
   }
 

@@ -1,4 +1,4 @@
-import { AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, type ApiClient } from "../api/client";
+import { AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, type ApiClient, type SessionEndKind } from "../api/client";
 import type { AccountDeleteBlocker, AccountDeletePreview } from "../api/types";
 import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
 import { ReauthFailedError, ReauthStaleSessionError, type Account } from "../vault/account";
@@ -169,8 +169,9 @@ export function deleteErrorText(e: unknown): string {
   return "Something went wrong and your account was not deleted — try again.";
 }
 
-/** Shown when the deletion request got no answer that says what happened — none at all, a 5xx, or a reply that is not
- *  the server's — so the server may or may not have committed it (spec 03 §13: never reported as either). */
+/** Shown when the deletion request got no answer that says what happened — none at all (or none within the request's
+ *  timeout), a 5xx, or a reply that is not the server's — so the server may or may not have committed it (spec 03 §13:
+ *  never reported as either). */
 export const OUTCOME_UNKNOWN =
   "The server didn't answer in a way that says whether your account was deleted — it may have been. Check below, or reload andvari and sign in: if your account is gone, the deletion went through.";
 
@@ -187,10 +188,17 @@ export const SESSION_ENDED = "Your session ended — nothing was deleted. Sign i
 export const SESSION_ENDED_OUTCOME_UNKNOWN =
   "Your session ended, so andvari can't tell whether your account was deleted. Sign in to find out: if your account still exists, you can.";
 
+/** App's card when the session ended WHILE the deletion request was in flight and its answer never came: that end was, most
+ *  likely, the deletion's own revocation (the server revokes the account's sockets the moment the deletion commits). */
+export const DELETION_MOST_LIKELY_DONE =
+  "Your session ended while your account was being deleted, and the server's answer never arrived — the deletion most likely went through. You can make this browser forget the account: its sign-in, its offline copy and everything else it kept for it. Or sign in to check: if your account still exists, you can.";
+
 export type DeletionOutcome =
   | { kind: "deleted"; deletedAt: number }
   | { kind: "blocked"; blockers: AccountDeleteBlocker[] }
-  | { kind: "error"; message: string; code?: string }
+  /** Refused, or failed before the request was sent. `unanswered`: the server could not be reached at all, so this says
+   *  nothing about the account (every other error is an answer from a live session, or a local check after one). */
+  | { kind: "error"; message: string; code?: string; unanswered?: true }
   | { kind: "unknown" }
   /** The server answered 401: this session no longer works (the account may be gone). */
   | { kind: "session_gone" };
@@ -198,9 +206,9 @@ export type DeletionOutcome =
 /**
  * The submit. The master-password proof is derived through the account's fenced reauth (`Account.reauthAuthKey`: the KDF
  * floor, only this session's salt, and the derivation proved by opening this session's UVK), so a wrong password is caught
- * HERE and never sent. Then the one request; `onSend` fires just before it (App defers a session end that lands while it
- * is in flight). A transport failure, a 5xx or a reply that is not the server's JSON is the ambiguous case — it may have
- * committed — and is reported as `unknown`, never as a failure; a 401, before or on the request, is `session_gone`.
+ * HERE and never sent. Then the one request; `onSend` fires just before it (App holds a session end that lands while it is
+ * in flight). A transport failure, a timeout, a 5xx or a reply that is not the server's JSON is the ambiguous case — it may
+ * have committed — and is reported as `unknown`, never as a failure; a 401, before or on the request, is `session_gone`.
  */
 export async function runAccountDeletion(
   client: Pick<ApiClient, "accountKeys" | "deleteAccount">,
@@ -213,6 +221,7 @@ export async function runAccountDeletion(
     currentAuthKey = await account.reauthAuthKey(input.password, await client.accountKeys());
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
+    if (e instanceof TypeError) return { kind: "error", message: deleteErrorText(e), unanswered: true };
     return { kind: "error", message: deleteErrorText(e), ...(e instanceof ApiError ? { code: e.code } : {}) };
   }
   const totp = input.totpRequired ? totpDigits(input.totp) : "";
@@ -244,9 +253,9 @@ export async function checkDeletion(client: Pick<ApiClient, "accountDeletePrevie
 /**
  * The card's flow state, as a pure function of what happened (account-delete.test.ts pins it). `unknown` is sticky until a
  * check or a later answer settles it. A 401 after an unknown outcome is NOT read as the deletion: it says only that this
- * session ended, which a revocation does too, so the card says the account may still exist and offers nothing to forget.
- * `totpRequired` turns on when the server asks for a code the preview did not know about (TOTP enrolled on another device
- * mid-flow).
+ * session ended, which a revocation does too, so the card says the account may still exist and offers nothing to forget —
+ * and App, which handles every session end (stepDeletionWatch), signs out. `totpRequired` turns on when the server asks
+ * for a code the preview did not know about (TOTP enrolled on another device mid-flow).
  */
 export interface DeleteFlowState {
   unknown: boolean;
@@ -273,7 +282,7 @@ export function afterOutcome(s: DeleteFlowState, o: DeletionOutcome): DeleteFlow
     case "error":
       return {
         ...base,
-        unknown: false,
+        unknown: o.unanswered ? s.unknown : false,
         err: o.message,
         totpRequired: s.totpRequired || o.code === "totp_code_required",
       };
@@ -291,13 +300,114 @@ export function afterCheck(s: DeleteFlowState, c: DeletionCheck): DeleteFlowStat
   }
 }
 
-/** Which way a deletion request ended, for App's deferral of a session end that landed while it was in flight:
- *  `refused` — the server answered and nothing was deleted, so a session end that arrived meanwhile was real and runs now;
- *  `settled` — anything else (an unknown outcome, a 401 after one): the card takes it from there. */
-export function deletionTrackEvent(state: DeleteFlowState, o: DeletionOutcome): "refused" | "settled" {
-  if (o.kind === "blocked" || o.kind === "error") return "refused";
-  if (o.kind === "session_gone" && !state.unknown) return "refused";
-  return "settled";
+/**
+ * App's side of a deletion request (spec 03 §13 client duties; design 2026-11-10 §11), as a pure step function so the node
+ * test environment can pin it. The server revokes every socket of the account the moment a deletion commits, so a session
+ * end — the WebSocket `revoked` frame, or `expired` at a ticket re-mint — can land while the request is still in flight,
+ * and signing out right then would unmount the card before it learns the outcome. Such an end is HELD while the request is
+ * in flight, and acted on — never dropped — when it settles:
+ *  - deleted: App's wipe takes over;
+ *  - the server answered and refused (nothing was deleted), or the request was never sent: the end was real → the
+ *    ordinary sign-out;
+ *  - the answer was lost: the end was, most likely, the deletion's own revocation → App leaves the vault for a card that
+ *    offers to forget the account on this browser, or to sign in and check (`offer_forget`);
+ *  - a 401: this request deleted nothing, and the session is over → sign out.
+ * The hold is bounded twice: the request times out (ApiClient.deleteTimeoutMs), and App steps `hold_expired` after
+ * DELETION_HOLD_LIMIT_MS in case no settle ever arrives.
+ * After an unknown outcome, a session end seen at any OTHER time — a revocation that lands later, a 401 on the check or on
+ * a retry — cannot be told from a real one, so App signs out saying the account may still exist, and nothing offers to
+ * forget it: forgetting wipes the spec 01 §5 self-identity records, which exist precisely to catch an account that changed
+ * under this browser (an admin's recovery). Only an end seen during the request itself counts as the deletion's own.
+ */
+export interface DeletionWatch {
+  /** Between `started` (just before the POST) and its settle. */
+  inFlight: boolean;
+  /** The first session end that landed while in flight. */
+  held: SessionEndKind | null;
+  /** The last request's outcome is unknown, and nothing since has settled it. */
+  unknown: boolean;
+}
+
+export const IDLE_DELETION_WATCH: DeletionWatch = { inFlight: false, held: null, unknown: false };
+
+/** Longer than the request can take — ApiClient.deleteTimeoutMs for the POST, plus a token refresh's own bounds between a
+ *  401 and its one re-send — so it fires only when no settle ever arrives. */
+export const DELETION_HOLD_LIMIT_MS = 120_000;
+
+/** How a request ended, for App: `unsent` — it never reached the server (nothing learned about the account). */
+export type DeletionSettle = "deleted" | "refused" | "unsent" | "unknown" | "session_gone";
+
+export type DeletionWatchEvent =
+  | { kind: "started" }
+  | { kind: "settled"; outcome: DeletionSettle }
+  | { kind: "checked"; result: "still_here" | "session_ended" | "unreachable" }
+  | { kind: "session_end"; end: SessionEndKind }
+  | { kind: "hold_expired" };
+
+export type DeletionWatchAction =
+  | { kind: "none" }
+  /** Sign out (the self-identity records stay); `notice` replaces the session-end kind's own line. */
+  | { kind: "end_session"; end: SessionEndKind; notice?: string }
+  /** Leave the vault for the card that offers to forget the account (DELETION_MOST_LIKELY_DONE). */
+  | { kind: "offer_forget"; end: SessionEndKind };
+
+export function settledOutcome(o: DeletionOutcome): DeletionSettle {
+  switch (o.kind) {
+    case "deleted":
+      return "deleted";
+    case "blocked":
+      return "refused";
+    case "error":
+      return o.unanswered ? "unsent" : "refused";
+    case "unknown":
+      return "unknown";
+    case "session_gone":
+      return "session_gone";
+  }
+}
+
+export function checkedResult(c: DeletionCheck): "still_here" | "session_ended" | "unreachable" {
+  return c.kind === "unknown" ? "unreachable" : c.kind;
+}
+
+export function stepDeletionWatch(w: DeletionWatch, e: DeletionWatchEvent): { watch: DeletionWatch; action: DeletionWatchAction } {
+  const none: DeletionWatchAction = { kind: "none" };
+  const idle = IDLE_DELETION_WATCH;
+  // After an unknown outcome, an end this browser cannot tie to the deletion: sign out, and say the account may still exist.
+  const ended = (end: SessionEndKind, notice?: string): DeletionWatchAction =>
+    w.unknown ? { kind: "end_session", end, notice: SESSION_ENDED_OUTCOME_UNKNOWN } : { kind: "end_session", end, ...(notice ? { notice } : {}) };
+  if (e.kind === "started") {
+    // A held end is kept, never dropped (there is none in practice: every settle consumes it).
+    return { watch: { ...w, inFlight: true }, action: none };
+  }
+  if (e.kind === "session_end") {
+    if (w.inFlight) return { watch: { ...w, held: w.held ?? e.end }, action: none };
+    return { watch: idle, action: ended(e.end) };
+  }
+  if (e.kind === "hold_expired") {
+    return w.inFlight ? stepDeletionWatch(w, { kind: "settled", outcome: "unknown" }) : { watch: w, action: none };
+  }
+  if (e.kind === "checked") {
+    if (e.result === "still_here") return { watch: { ...w, unknown: false }, action: none };
+    if (e.result === "session_ended") return { watch: idle, action: ended("expired") };
+    return { watch: w, action: none };
+  }
+  switch (e.outcome) {
+    case "deleted":
+      return { watch: idle, action: none };
+    case "refused":
+      // The server answered a live session, so the account exists: an earlier unknown is settled too, and an end held
+      // meanwhile was a real one.
+      return { watch: idle, action: w.held ? { kind: "end_session", end: w.held } : none };
+    case "unsent":
+      // Nothing reached the server, so nothing was learned about the account.
+      return w.held ? { watch: idle, action: ended(w.held) } : { watch: { ...w, inFlight: false }, action: none };
+    case "unknown":
+      if (w.held) return { watch: idle, action: { kind: "offer_forget", end: w.held } };
+      return { watch: { ...idle, unknown: true }, action: none };
+    case "session_gone":
+      return { watch: idle, action: w.held ? ended(w.held) : ended("expired", SESSION_ENDED) };
+  }
 }
 
 /** The notice on the sign-in card after a deletion this browser ran. */

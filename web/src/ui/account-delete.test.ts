@@ -14,18 +14,24 @@ import {
   BLOCKED_UNEXPLAINED,
   blockerLines,
   checkDeletion,
+  checkedResult,
   deleteErrorText,
+  DELETION_MOST_LIKELY_DONE,
   deletionSummary,
-  deletionTrackEvent,
+  type DeletionWatch,
+  type DeletionWatchEvent,
   emailConfirmed,
+  IDLE_DELETION_WATCH,
   initialFlow,
   NOT_DELETED_AFTER_CHECK,
   OUTCOME_UNKNOWN,
   runAccountDeletion,
   SESSION_ENDED,
   SESSION_ENDED_OUTCOME_UNKNOWN,
+  settledOutcome,
+  stepDeletionWatch,
 } from "./account-delete";
-import { DeleteAccountBody, deleteFormReady, type DeleteAccountView } from "./DeleteAccount";
+import { DeleteAccountBody, deleteFormReady, DeletionOutcomeUnknownCard, type DeleteAccountView } from "./DeleteAccount";
 import { UNREACHABLE } from "./errors";
 
 /**
@@ -187,7 +193,7 @@ describe("runAccountDeletion — the submit", () => {
     const lost = fakes({ del: async () => { throw new TypeError("Failed to fetch"); } });
     expect(await runAccountDeletion(lost.client, lost.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "unknown" });
     const early = fakes({ keys: async () => { throw new TypeError("Failed to fetch"); } });
-    expect(await runAccountDeletion(early.client, early.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "error", message: UNREACHABLE });
+    expect(await runAccountDeletion(early.client, early.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "error", message: UNREACHABLE, unanswered: true });
     expect(early.client.deleteAccount).not.toHaveBeenCalled();
   });
 
@@ -255,15 +261,14 @@ describe("TOTP enrolled after the preview — the server asks for a code the car
   });
 });
 
-describe("the flow after an answer — unknown is never \"not deleted\", and a 401 never says the account is gone", () => {
+describe("the card's flow after an answer — unknown is never \"not deleted\", and a 401 never says the account is gone", () => {
   const start = initialFlow();
 
-  it("unknown is sticky, and a 401 after it says the account may still exist — nothing is offered to forget", () => {
+  it("unknown is sticky, and a 401 after it says the account may still exist (App signs out, nothing is forgotten)", () => {
     const unknown = afterOutcome(start, { kind: "unknown" });
     expect(unknown.unknown).toBe(true);
     expect(unknown.err).toBe("");
-    const ended = afterOutcome(unknown, { kind: "session_gone" });
-    expect(ended.err, "no 'nothing was deleted' after an unknown outcome, and no 'deleted' either").toBe(SESSION_ENDED_OUTCOME_UNKNOWN);
+    expect(afterOutcome(unknown, { kind: "session_gone" }).err).toBe(SESSION_ENDED_OUTCOME_UNKNOWN);
     expect(SESSION_ENDED_OUTCOME_UNKNOWN).toContain("can't tell whether your account was deleted");
   });
 
@@ -271,26 +276,19 @@ describe("the flow after an answer — unknown is never \"not deleted\", and a 4
     expect(afterOutcome(start, { kind: "session_gone" }).err).toBe(SESSION_ENDED);
   });
 
-  it("a definitive answer clears unknown: a refusal with blockers, or an error sentence", () => {
+  it("a definitive answer clears unknown; a failure that never reached the server does not", () => {
     const unknown = afterOutcome(start, { kind: "unknown" });
     expect(afterOutcome(unknown, { kind: "blocked", blockers: [{ kind: "last_admin", vaultId: null, others: 1 }] })).toMatchObject({ unknown: false, refused: [{ kind: "last_admin", vaultId: null, others: 1 }] });
     expect(afterOutcome(unknown, { kind: "error", message: "That master password isn't right.", code: "reauth_failed" })).toMatchObject({ unknown: false, err: "That master password isn't right." });
+    expect(afterOutcome(unknown, { kind: "error", message: UNREACHABLE, unanswered: true })).toMatchObject({ unknown: true, err: UNREACHABLE });
   });
 
-  it("the check: still here settles it; a 401 says only that the session ended (a revocation's or the deletion's)", () => {
+  it("the check: still here settles it; a 401 only ends the session; no answer changes nothing", () => {
     const unknown = afterOutcome(start, { kind: "unknown" });
     const preview = { blockers: [], deletedVaults: [], leftVaults: [], totpRequired: false };
     expect(afterCheck(unknown, { kind: "still_here", preview })).toMatchObject({ unknown: false, info: NOT_DELETED_AFTER_CHECK });
     expect(afterCheck(unknown, { kind: "session_ended" })).toMatchObject({ unknown: true, err: SESSION_ENDED_OUTCOME_UNKNOWN });
     expect(afterCheck(unknown, { kind: "unknown" })).toMatchObject({ unknown: true, err: UNREACHABLE });
-  });
-
-  it("App runs a held session end only when the server definitively refused (nothing was deleted)", () => {
-    expect(deletionTrackEvent(start, { kind: "blocked", blockers: [] })).toBe("refused");
-    expect(deletionTrackEvent(start, { kind: "error", message: "x" })).toBe("refused");
-    expect(deletionTrackEvent(start, { kind: "session_gone" })).toBe("refused");
-    expect(deletionTrackEvent(start, { kind: "unknown" })).toBe("settled");
-    expect(deletionTrackEvent(afterOutcome(start, { kind: "unknown" }), { kind: "session_gone" })).toBe("settled");
   });
 });
 
@@ -301,6 +299,98 @@ describe("checkDeletion — the preview answers 200 only while the account exist
     expect(await checkDeletion({ accountDeletePreview: async () => { throw new ApiError(401, "invalid_credentials", "m"); } })).toEqual({ kind: "session_ended" });
     expect(await checkDeletion({ accountDeletePreview: async () => { throw new TypeError("Failed to fetch"); } })).toEqual({ kind: "unknown" });
     expect(await checkDeletion({ accountDeletePreview: async () => { throw new ApiError(502, "http_502", "m"); } })).toEqual({ kind: "unknown" });
+  });
+});
+
+/**
+ * App's side of the request (stepDeletionWatch): a session end that lands while the request is in flight is held, and
+ * always acted on when it settles — never dropped; only such an end, with the answer lost, offers to forget the account.
+ */
+describe("stepDeletionWatch — a held session end is acted on, never dropped; Forget only for the deletion's own", () => {
+  const run = (events: DeletionWatchEvent[], from: DeletionWatch = IDLE_DELETION_WATCH) => {
+    let w = from;
+    const actions = events.map((e) => {
+      const r = stepDeletionWatch(w, e);
+      w = r.watch;
+      return r.action;
+    });
+    return { watch: w, actions, last: actions[actions.length - 1]! };
+  };
+  const revoked = { kind: "session_end", end: "revoked" } as const;
+  const started = { kind: "started" } as const;
+  const settled = (outcome: "deleted" | "refused" | "unsent" | "unknown" | "session_gone") => ({ kind: "settled", outcome }) as const;
+
+  it("idle, a session end is the ordinary sign-out", () => {
+    expect(run([revoked]).last).toEqual({ kind: "end_session", end: "revoked" });
+  });
+
+  it("in flight it is held; the answer lost → the deletion's own revocation, most likely: offer to forget", () => {
+    const r = run([started, revoked, settled("unknown")]);
+    expect(r.actions[1], "held, not acted on yet").toEqual({ kind: "none" });
+    expect(r.last).toEqual({ kind: "offer_forget", end: "revoked" });
+    expect(r.watch).toEqual(IDLE_DELETION_WATCH);
+  });
+
+  it("a revocation during an unknown outcome still ends the session — whichever comes first", () => {
+    // The answer is lost first, then the revocation lands: it cannot be tied to the deletion → sign out, keep the records.
+    const later = run([started, settled("unknown"), revoked]);
+    expect(later.last).toEqual({ kind: "end_session", end: "revoked", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
+    // The revocation lands first and the request then times out (unknown): it is acted on, not dropped.
+    expect(run([started, revoked, settled("unknown")]).last.kind).toBe("offer_forget");
+  });
+
+  it("the server refused (nothing deleted): a held end was real → the ordinary sign-out; no end → nothing", () => {
+    expect(run([started, revoked, settled("refused")]).last).toEqual({ kind: "end_session", end: "revoked" });
+    expect(run([started, settled("refused")]).last).toEqual({ kind: "none" });
+    // …and the refusal proves the account exists, so a later end is ordinary again.
+    expect(run([started, settled("unknown"), started, settled("refused"), revoked]).last).toEqual({ kind: "end_session", end: "revoked" });
+  });
+
+  it("a 401 on the request ends the session: 'nothing was deleted', or — after an unknown outcome — 'can't tell'", () => {
+    expect(run([started, settled("session_gone")]).last).toEqual({ kind: "end_session", end: "expired", notice: SESSION_ENDED });
+    expect(run([started, settled("unknown"), started, settled("session_gone")]).last).toEqual({ kind: "end_session", end: "expired", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
+    expect(run([started, revoked, settled("session_gone")]).last).toEqual({ kind: "end_session", end: "revoked" });
+  });
+
+  it("B: after an unknown outcome, a 401 on the check never offers to forget — the account may still exist", () => {
+    const r = run([started, settled("unknown"), { kind: "checked", result: "session_ended" }]);
+    expect(r.last).toEqual({ kind: "end_session", end: "expired", notice: SESSION_ENDED_OUTCOME_UNKNOWN });
+    expect(r.actions.some((a) => a.kind === "offer_forget")).toBe(false);
+    // A retry whose own window saw no end, then a 401: the same — never Forget.
+    expect(run([started, settled("unknown"), started, settled("session_gone")]).actions.some((a) => a.kind === "offer_forget")).toBe(false);
+  });
+
+  it("the check finding the account still here settles the unknown; an unreachable check changes nothing", () => {
+    expect(run([started, settled("unknown"), { kind: "checked", result: "still_here" }, revoked]).last).toEqual({ kind: "end_session", end: "revoked" });
+    expect(run([started, settled("unknown"), { kind: "checked", result: "unreachable" }]).watch.unknown).toBe(true);
+  });
+
+  it("a request that never reached the server learns nothing: an earlier unknown stands", () => {
+    expect(run([started, settled("unknown"), settled("unsent")]).watch.unknown).toBe(true);
+  });
+
+  it("the hold expires if no settle ever arrives: a held end is then acted on like a lost answer", () => {
+    expect(run([started, revoked, { kind: "hold_expired" }]).last).toEqual({ kind: "offer_forget", end: "revoked" });
+    const none = run([started, { kind: "hold_expired" }]);
+    expect(none.last).toEqual({ kind: "none" });
+    expect(none.watch).toEqual({ inFlight: false, held: null, unknown: true });
+    expect(run([{ kind: "hold_expired" }]).last, "nothing in flight: nothing to expire").toEqual({ kind: "none" });
+  });
+
+  it("the deletion confirmed: nothing for the watch to do (App's wipe takes over)", () => {
+    expect(run([started, revoked, settled("deleted")])).toMatchObject({ last: { kind: "none" }, watch: IDLE_DELETION_WATCH });
+  });
+
+  it("maps the card's outcomes and checks onto settles", () => {
+    expect(settledOutcome({ kind: "deleted", deletedAt: 1 })).toBe("deleted");
+    expect(settledOutcome({ kind: "blocked", blockers: [] })).toBe("refused");
+    expect(settledOutcome({ kind: "error", message: "x", code: "reauth_failed" })).toBe("refused");
+    expect(settledOutcome({ kind: "error", message: "x" }), "a local refusal after the keys fetch answered").toBe("refused");
+    expect(settledOutcome({ kind: "error", message: UNREACHABLE, unanswered: true })).toBe("unsent");
+    expect(settledOutcome({ kind: "unknown" })).toBe("unknown");
+    expect(settledOutcome({ kind: "session_gone" })).toBe("session_gone");
+    expect(checkedResult({ kind: "unknown" })).toBe("unreachable");
+    expect(checkedResult({ kind: "session_ended" })).toBe("session_ended");
   });
 });
 
@@ -394,10 +484,20 @@ describe("DeleteAccountBody — static render", () => {
     expect(OUTCOME_UNKNOWN).toContain("reload andvari and sign in");
   });
 
-  it("the card itself never offers to forget the account — a 401 after an unknown outcome is not proof it is gone", () => {
+  it("the card itself never offers to forget the account (only App's card does, for the deletion's own session end)", () => {
     for (const v of [view({ unknownOutcome: true }), view({ unknownOutcome: true, err: SESSION_ENDED_OUTCOME_UNKNOWN })]) {
       expect(render(v)).not.toContain("Forget this account");
     }
+  });
+
+  it("App's outcome-unknown card: the deletion most likely went through — forget it here, or sign in to check", () => {
+    const html = renderToStaticMarkup(createElement(DeletionOutcomeUnknownCard, { notice: "2 offline changes could not be synced.", onForget: noop, onSignIn: noop }));
+    expect(html).toContain(DELETION_MOST_LIKELY_DONE.replace(/'/g, "&#x27;"));
+    expect(DELETION_MOST_LIKELY_DONE).toContain("most likely went through");
+    expect(html).toContain("Forget this account on this browser");
+    expect(html).toContain("Sign in to check");
+    expect(html).toContain("2 offline changes could not be synced.");
+    expect(html, "no decrypted vault, no form").not.toContain('type="password"');
   });
 
   it("the check's 'still here' is said as information", () => {
@@ -435,17 +535,25 @@ describe("wiring", () => {
     expect(ACCOUNT_FORGOTTEN_NOTICE, "a forgotten account may, rarely, still exist — the notice says so").toContain("if it still exists");
   });
 
-  it("a session end that lands while the deletion request is in flight is held, and runs only if the server refused", () => {
+  it("every session end goes through the deletion watch; its actions sign out or offer to forget; the hold is bounded", () => {
     const app = read("./App.tsx");
-    const revoked = app.slice(app.indexOf("const onRevoked = useCallback("), app.indexOf("const onDeletionTrack = useCallback("));
-    expect(revoked).toContain("if (deletionInFlightRef.current) {");
-    expect(revoked).toContain("deferredEndRef.current ??= kind;");
+    expect(app).toContain('const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind }), [stepDeletion]);');
+    const step = app.slice(app.indexOf("const stepDeletion = useCallback("), app.indexOf("const onRevoked = useCallback("));
+    expect(step).toContain("stepDeletionWatch(deletionWatchRef.current, e)");
+    expect(step).toContain("if (!watch.inFlight) clearDeletionHold();");
+    const act = app.slice(app.indexOf("const applyDeletionAction = useCallback("), app.indexOf("const stepDeletion = useCallback("));
+    expect(act).toContain("if (a.kind === \"end_session\") endSession(a.end, a.notice);");
+    expect(act, "offer_forget: the session is wiped and App lands on the outcome-unknown card").toContain("void signOut(undefined, a.end, deletionWhoRef.current ?? undefined);");
     const track = app.slice(app.indexOf("const onDeletionTrack = useCallback("));
-    expect(track).toContain('if (event === "refused" && held !== null) endSession(held);');
-    expect(app).toContain("onDeletionTrack={onDeletionTrack}");
+    expect(track).toContain('stepDeletion({ kind: "hold_expired" });');
+    expect(track).toContain("}, DELETION_HOLD_LIMIT_MS);");
+    expect(app).toContain("onDeletionTrack={(event) => onDeletionTrack(event, { userId: deletingUserId, email: vaultEmail })}");
+    expect(app).toContain('onForget={() => onAccountDeleted(p.userId, p.email, "forgotten")}');
     const card = read("./DeleteAccount.tsx");
-    expect(card, "the card reports the request's start just before the POST").toContain('() => onTrack?.("started")');
-    expect(card).toContain("onTrack?.(deletionTrackEvent(before, outcome));");
+    expect(card, "the card reports the request's start just before the POST").toContain('onTrack?.({ kind: "started" });');
+    expect(card).toContain('onTrack?.({ kind: "settled", outcome: settledOutcome(outcome) });');
+    expect(card, "a request App was told about always reports its end").toContain('if (started && !settled) onTrack?.({ kind: "settled", outcome: "unknown" });');
+    expect(card).toContain('onTrack?.({ kind: "checked", result: checkedResult(c) });');
   });
 
   it("a sign-out the server's revoked frame started concurrently leaves the landing to the deletion", () => {
