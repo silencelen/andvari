@@ -69,32 +69,37 @@ class A14EnrollOriginTest {
         assertTrue(notice.contains("enabled = !busy"), "the Cancel button is disabled while an op runs")
     }
 
+    /** Step 7: sign-in and enroll are core's ([SessionEntry]); these pins moved there with the code. */
+    private val entry by lazy { sourceFile("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/SessionEntry.kt").readText() }
+
     @Test
     fun theSignInSavesUnderItsOwnOriginOnlyWhileBound() {
         // A14 review N4: the sign-in saved `Session(store.baseUrl, …)` after its awaits (prelogin, two Argon2id passes,
-        // login). It now captures the origin with the client, as enrollOp does, and aborts with a revoke if it moved.
-        val op = body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "syncNow(engine!!)")
+        // login). It now captures the origin with the client, as the enroll does, and aborts with a revoke if it moved.
+        val op = body(entry, "suspend fun signIn(", "firstSyncAfterBind {")
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
-        assertTrue(op.contains("val a = newApi(origin = opOrigin, owner = owner)"))
-        val save = "store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"
-        assertTrue(op.contains("$save\n            owner.userId = s.userId"), "the client writes tokens only into the session it committed")
-        assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey())))"))
-        assertTrue(op.contains("store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"))
-        assertFalse(op.contains("store.save(Session(store.baseUrl,"), "never the live origin")
-        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf("store.save(Session(opOrigin"))
-        assertTrue(abort.contains("a.logout()") && abort.contains("return@op") && abort.contains("signInOriginMoved(opOrigin)"),
+        assertTrue(op.contains("val client = clients.forNewSession(opOrigin)"))
+        val save = "store.save(StoredSession(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"
+        assertTrue(op.contains("$save\n            client.owner.userId = s.userId"), "the client writes tokens only into the session it committed")
+        assertTrue(op.contains("if (!enrollStillBound(opOrigin, null, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag)))"))
+        assertFalse(op.contains("store.save(StoredSession(store.baseUrl"), "never the live origin")
+        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf(save))
+        assertTrue(abort.contains("a.logout()") && abort.contains("return SignInResult.OriginMoved(opOrigin)"),
             "an unbound commit revokes at the issuer, saves nothing and says so")
+        assertTrue(body(vm, "fun signIn(email: String, password: String, totp: String? = null)", "\n    }\n").contains("is SignInResult.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = signInOriginMoved(outcome.origin)); return@op }"))
         assertTrue(signInOriginMoved("https://a.example").contains("https://a.example"))
     }
 
     @Test
     fun theEnrollSavesUnderItsOwnOriginOnlyWhileBound() {
-        val op = body(vm, "private fun enrollOp(", "syncNow(engine!!)")
+        val op = body(entry, "suspend fun enroll(", "firstSyncAfterBind {")
         assertTrue(op.contains("val opOrigin = store.baseUrl"), "the origin is captured with the client")
-        assertTrue(op.contains("if (!enrollStillBound(opOrigin, opPending, store.baseUrl, store.pendingServer, probeFence.isCurrent(opTag, store.currentOriginKey())))"))
-        assertTrue(op.contains("store.save(Session(opOrigin, s.userId, email, s.accessToken, s.refreshToken))"))
-        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf("store.save(Session(opOrigin"))
-        assertTrue(abort.contains("a.logout()") && abort.contains("return@op"), "an unbound commit revokes at the issuer and saves nothing")
+        assertTrue(op.contains("if (!enrollStillBound(opOrigin, opPending, store.baseUrl.orEmpty(), store.pendingServer, coordinator.probeIsCurrent(opTag)))"))
+        val save = "store.save(StoredSession(opOrigin, s.userId, r.email, s.accessToken, s.refreshToken))"
+        assertTrue(op.contains(save))
+        val abort = op.substring(op.indexOf("if (!enrollStillBound("), op.indexOf(save))
+        assertTrue(abort.contains("a.logout()") && abort.contains("return EnrollOutcome.OriginMoved(opOrigin)"), "an unbound commit revokes at the issuer and saves nothing")
+        assertTrue(body(vm, "private fun enrollOp(", "\n    }\n").contains("is EnrollOutcome.OriginMoved -> { _ui.value = _ui.value.copy(busy = false, error = enrollOriginMoved(outcome.origin)); return@op }"))
     }
 
     private val sessionStore by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/app/Session.kt").readText() }

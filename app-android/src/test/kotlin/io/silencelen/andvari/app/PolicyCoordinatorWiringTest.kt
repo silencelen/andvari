@@ -72,7 +72,10 @@ class PolicyCoordinatorWiringTest {
         assertTrue(vm.contains("{ store.updateTokensFor(owner, it) }"), "the main app's clients")
         assertTrue(span(clients, "fun forSession(", "\n    }\n").contains("{ store.updateTokensFor(owner, it) }"), "the autofill unlock's client (core's SessionClients)")
         assertFalse(vm.contains("{ store.updateTokens(it) }") || autofill.contains("{ store.updateTokens(it) }"), "an unbound write is the regression")
-        assertTrue(Regex("""owner\.userId = s\.userId""").findAll(vm).count() == 2, "sign-in and enroll name the session they committed")
+        // Step 7: sign-in and enroll are core's (SessionEntry).
+        val entry = File(core, "SessionEntry.kt").readText()
+        assertTrue(Regex("""client\.owner\.userId = s\.userId""").findAll(entry).count() == 2, "sign-in and enroll name the session they committed")
+        assertTrue(Regex("""val client = clients\.forNewSession\(opOrigin\)""").findAll(entry).count() == 2, "through a client that writes no tokens before that")
         // Review round 2: the client's own refresh token is part of the match (TokenOwnerTest), and the
         // compare and the write are one step: every writer of the stored session holds the same lock.
         assertTrue(vm.contains("heldRefreshToken = tokens?.refreshToken"))
@@ -90,8 +93,11 @@ class PolicyCoordinatorWiringTest {
     fun aForbiddingPolicyIsEnforcedOnThePollAndAtBind() {
         val poll = span(vm, "runCatching { current.api.clientPolicy() }", "syncNow(current.engine)")
         assertTrue(poll.contains("if (applyPolicy(p, tag) && !p.offlineCacheAllowed) purgeOfflineData(originKey, current.account.userId)"), "only a reply that passed the fence may purge")
-        // Step 6: one bind (core SessionBinder) for the main app and the autofill unlock alike.
-        assertTrue(span(vm, "private fun bind(a: AndvariApi", "notePasswordUnlockForQuickUnlockOffer()\n    }").contains("binder.bind(a, acct, store.currentOriginKey(), provenance)"))
+        // Steps 6 and 7: one bind (core SessionBinder) for every way into a session, the main app's and the
+        // autofill unlock's alike; the app has no bind of its own.
+        assertFalse(vm.contains("private fun bind(") || vm.contains("VaultSession.bind("), "the app binds only through core")
+        val entry = File(core, "SessionEntry.kt").readText()
+        assertTrue(entry.contains("binder.bind(a, acct, opKey, VaultSession.UnlockProvenance.PASSWORD)") && entry.contains("binder.bind(a, enrolled.account, opKey, VaultSession.UnlockProvenance.PASSWORD)"), "sign-in and enroll")
         val bind = span(binder, "fun bind(api: AndvariApi", "\n    }\n")
         val purge = bind.indexOf("if (!allowed) coordinator.purgeForbidden(originKey, account.userId)")
         assertTrue(purge > -1, "bind drops the blob too, not just the file")

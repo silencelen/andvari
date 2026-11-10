@@ -58,11 +58,15 @@ class BoundedOpWiringTest {
      */
     @Test
     fun theUnlockClassOpsBoundEachServerCallAndAlwaysLand() {
+        // Step 7: sign-in and enroll are core's (SessionEntry); their server legs and first sync are pinned there.
+        val entry = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/SessionEntry.kt").readText()
         val signIn = span("fun signIn(email: String, password: String, totp: String? = null) = op(", "\n    fun unlock(email: String, password: String)")
         assertTrue(signIn.contains("timeoutMs = null)"), "no whole-op bound: it would fire after bind()")
-        assertTrue(signIn.contains("runBounded(BoundedOps.FLAT_MS) { a.prelogin(email) }"))
-        assertTrue(signIn.contains("runBounded(BoundedOps.FLAT_MS) { a.login(LoginRequest("))
-        assertLandsAfterTheFirstSync(signIn, "if (gate) startRecoveryCapture(authKey) else toVault()")
+        val coreSignIn = coreSpan(entry, "suspend fun signIn(", "\n    }\n")
+        assertTrue(coreSignIn.contains("runBounded(BoundedOps.FLAT_MS) { a.prelogin(email) }"))
+        assertTrue(coreSignIn.contains("runBounded(BoundedOps.FLAT_MS) { a.login(LoginRequest("))
+        assertEntryLandsAfterTheFirstSync(coreSignIn, "return SignInResult.EndedBeforeLanding", "return SignInResult.SignedIn(")
+        assertLandsOnTheEntrysVerdict(signIn, "SignInResult.EndedBeforeLanding -> ", "if (proof != null) startRecoveryCapture(proof) else toVault()")
 
         val unlock = span("fun unlock(email: String, password: String) = op(", "\n    // internal (A5c)")
         assertTrue(unlock.contains("timeoutMs = null)"))
@@ -89,10 +93,12 @@ class BoundedOpWiringTest {
 
         val enroll = span("private fun enrollOp(", "\n    // Shown-once recovery secret")
         assertTrue(enroll.contains("timeoutMs = null)"))
-        assertTrue(enroll.contains("runBounded(BoundedOps.FLAT_MS) { a.recoveryPubkey() }"))
-        assertTrue(enroll.contains("runBounded(BoundedOps.FLAT_MS) { a.register(req) }"))
-        assertTrue(enroll.contains("try { boundedPolicy(probe) } finally { probe.close() }"))
-        assertLandsAfterTheFirstSync(enroll, "screen = Screen.RecoverySetup")
+        val coreEnroll = coreSpan(entry, "suspend fun enroll(", "\n    }\n")
+        assertTrue(coreEnroll.contains("runBounded(BoundedOps.FLAT_MS) { a.recoveryPubkey() }"))
+        assertTrue(coreEnroll.contains("runBounded(BoundedOps.FLAT_MS) { a.register(enrolled.request) }"))
+        assertTrue(coreEnroll.contains("try { coordinator.boundedPolicy(probe) } finally { probe.close() }"))
+        assertEntryLandsAfterTheFirstSync(coreEnroll, "return EnrollOutcome.EndedBeforeLanding", "return EnrollOutcome.Enrolled(")
+        assertLandsOnTheEntrysVerdict(enroll, "EnrollOutcome.EndedBeforeLanding -> ", "screen = Screen.RecoverySetup")
     }
 
     /**
@@ -122,6 +128,26 @@ class BoundedOpWiringTest {
         assertTrue(landed.contains("UnlockResult.EndedBeforeLanding -> throw ApiException(401, \"session_ended\""), "and a session that ended in it is never handed to the fill")
     }
 
+    /** Step 7: core's sign-in and enroll run the first sync after the bind and report a session that ended in it. */
+    private fun assertEntryLandsAfterTheFirstSync(body: String, ended: String, landed: String) {
+        val bind = body.indexOf("binder.bind(")
+        val sync = body.indexOf("firstSyncAfterBind { firstSync(c.unlocked.engine) }")
+        assertTrue(bind > -1 && sync > bind, "the first sync after the bind runs under its own bound")
+        val live = body.indexOf("if (!session.isLive(a))", sync)
+        assertTrue(live > sync && body.indexOf(ended, live) > live, "the entry checks its session survived the sync")
+        assertTrue(body.indexOf(landed, live) > live, "before it reports a landing")
+    }
+
+    /** Step 7: the app lands sign-in and enroll where core's verdict says, after the first sync it ran. */
+    private fun assertLandsOnTheEntrysVerdict(body: String, ended: String, landing: String) {
+        assertTrue(body.contains("firstSync = { syncNow(it) }"), "the app's own sync, under core's bound")
+        val e = body.indexOf(ended)
+        assertTrue(e > -1 && body.indexOf("sessionEndedBeforeLanding()", e) > e, "a session that ended in the first sync lands nowhere")
+        val land = body.indexOf(landing)
+        assertTrue(land > -1, "lands: $landing")
+        assertTrue(body.indexOf("showFirstSync(r.firstSync)", land) > land, "what the sync could not do is said on the landing")
+    }
+
     /** Step 6: an unlock lands where the ladder's verdict says, after the first sync it ran. */
     private fun assertLandsOnTheLaddersVerdict(body: String, landing: String) {
         assertTrue(body.contains("UnlockOptions(firstSync = { syncNow(it) })"), "the app's own sync, under the ladder's bound")
@@ -132,16 +158,6 @@ class BoundedOpWiringTest {
         assertTrue(body.indexOf("showFirstSync(r.firstSync)", land) > land, "what the sync could not do is said on the landing")
     }
 
-    private fun assertLandsAfterTheFirstSync(body: String, landing: String) {
-        val sync = body.indexOf("firstSyncAfterBind { syncNow(engine!!) }")
-        assertTrue(sync > -1, "the first sync after bind() runs under its own bound")
-        // Review round 2: a rejection during that sync ends the session; the op must not land on it.
-        val live = body.indexOf("isLive", sync)
-        assertTrue(live > sync, "the op checks its session survived the sync")
-        assertTrue(body.indexOf("sessionEndedBeforeLanding()", sync) in sync until body.indexOf(landing, sync), "before it lands")
-        assertTrue(body.indexOf(landing, sync) > live, "and the landing follows it whatever it did: $landing")
-        assertTrue(body.indexOf("showFirstSync(first)", sync) > sync, "what the sync could not do is said on the landing")
-    }
 
     @Test
     fun theOtherBusyHoldingLegsAreBounded() {
@@ -154,8 +170,6 @@ class BoundedOpWiringTest {
             "runBounded(BoundedOps.importMs(plan.items.size))",
             "runBounded(BoundedOps.rescueCopyMs(bytes, count))",
             // Small JSON under busy.
-            "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfSetup(setup.request) }",
-            "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfConfirm(pieceId) }",
             "runBounded(BoundedOps.FLAT_MS) { block() }",
             // The pre-session legs that hold busy too: the manual switch probe (below) and both recovery steps.
             "runBounded(BoundedOps.RECOVERY_CALL_MS) { a.recoverySelfVerify(email.trim(), authKey) }",
@@ -164,6 +178,11 @@ class BoundedOpWiringTest {
         )) {
             assertTrue(vm.contains(pin), "must stay bounded: $pin")
         }
+        // The §F.9 capture's commit and confirm hold busy too; they moved to core with the capture (step 7).
+        val capture = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/RecoveryCapture.kt").readText()
+        assertTrue(capture.contains("runBounded(BoundedOps.RECOVERY_CALL_MS) { live.api.recoverySelfSetup(setup.request) }"), "must stay bounded: the capture's commit")
+        assertTrue(capture.contains("runBounded(BoundedOps.RECOVERY_CALL_MS) { live.api.recoverySelfConfirm(pieceId) }"), "must stay bounded: the capture's confirm")
+        assertTrue(vm.contains("when (val r = capture.setup(live, authKey))") && vm.contains("when (capture.confirm(live, pieceId))"), "the app's capture is core's")
         // The manual switch's probe holds busy too; it moved to core with the switch (step 5).
         assertTrue(vm.contains("when (val r = serverSwitch.connect(target))"), "the app's Connect is core's")
         val switch = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/ServerSwitch.kt").readText()

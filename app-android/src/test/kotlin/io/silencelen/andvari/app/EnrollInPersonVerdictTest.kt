@@ -104,7 +104,11 @@ class EnrollInPersonVerdictTest {
     fun enrollOpDerivesTheVerdictItselfNeverFromAUiBoolean() {
         val vm = code(vmSource)
         assertFalse(vm.contains("inPersonVerified: Boolean"), "the UI boolean parameter must be gone from enroll()/enrollOp()")
-        assertTrue(vm.contains("val inPersonVerified = inPersonVerdict("), "enrollOp re-asserts the verdict at the state layer")
+        // Step 7: the enroll is core's (SessionEntry.enroll); the VM hands it the raw inputs.
+        val entry = code(File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/SessionEntry.kt").readText())
+        assertTrue(entry.contains("val inPersonVerified = inPersonVerdict("), "enrollOp re-asserts the verdict at the state layer")
+        assertFalse(entry.contains("inPersonVerified: Boolean"), "and takes no verdict from the form")
+        assertTrue(vm.contains("EnrollRequest(invite, email, name, password, waived, typedShortFp, gatePolicy, affirmedRfp, linkPayload, inPersonEntry, inPersonAffirmed, inviteProvenance)"), "the raw evidence crosses to core")
         val main = code(mainSource)
         assertTrue(main.contains("inPersonEntry = inPersonEntry"), "the form hands over the RAW typed code")
         assertTrue(main.contains("inPersonAffirmed = affirmed"), "…the human's first-person affirmation")
