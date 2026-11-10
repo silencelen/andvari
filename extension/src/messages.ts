@@ -337,6 +337,10 @@ export type Req =
   /** Options page + popup (A15): drop the pending previous server without connecting to it ("Not mine"); the
    *  default server is then in effect. */
   | { type: "forgetLegacyServer" }
+  /** Popup ONLY, Safari build: ask the andvari app for its server (native message) and adopt it when it differs — the
+   *  app ran the Trust Gate, so the worker commits it as the options page's Connect does. `app` says what the app
+   *  answered: its server (now in effect), none yet, or nothing (another browser, or no answer). */
+  | { type: "appServer" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
@@ -642,6 +646,8 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                 ? { ok: boolean; url?: string; code?: "invalid" | "storage" | "not_allowed" }
                                               : T extends "forgetLegacyServer"
                                                 ? { ok: boolean }
+                                              : T extends "appServer"
+                                                ? { app: "set" | "none" | "unavailable" }
                                                 : /** C1 §C2 [S7]: the branch matches ONLY these two booleans — no `string` type is
                                                    *  admitted here, so an "origin"/"name"/"subtitle" field can never be added to the
                                                    *  chip's answer without editing this contract line first. */

@@ -71,7 +71,8 @@ import { armGate, withRedeemInFlight } from "./locksequence";
 import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
-import { selfUpdateChannelAllowed } from "./buildtarget";
+import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
+import { appServerToAdopt, askAppServer } from "./appserver";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -237,6 +238,7 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "capturedCredential",
   "passwordReuse",
   "serverInfo", // A15: the popup header / options render — not user activity
+  "appServer", // Safari: the popup asks for the app's server on every open — not user activity
 ]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
@@ -1245,6 +1247,41 @@ async function forgetLegacyServer(): Promise<Res<"forgetLegacyServer">> {
   return { ok: true };
 }
 
+// ---- Safari: the andvari app's server (appserver.ts) ----
+
+/** The app's bundle id. Safari routes a native message to the containing app's extension handler whatever this says. */
+const SAFARI_NATIVE_APP = "com.silencelen.andvari";
+
+let appServerInFlight: Promise<Res<"appServer">> | null = null;
+
+/**
+ * Safari on iOS: ask the andvari app for the server it chose and adopt it when this worker dials another, through
+ * commitServerUrl (the trusted store, then the origin-clean switch) and with no Trust Gate of its own: the person
+ * confirmed this origin in the app. Asked at worker start and on every popup open; concurrent asks share one round
+ * trip. Other builds answer "unavailable" and send nothing.
+ */
+function syncAppServer(): Promise<Res<"appServer">> {
+  if (BUILD_TARGET !== "safari") return Promise.resolve({ app: "unavailable" });
+  appServerInFlight ??= (async (): Promise<Res<"appServer">> => {
+    try {
+      await serverReady;
+      const answer = await askAppServer((msg) => chrome.runtime.sendNativeMessage(SAFARI_NATIVE_APP, msg));
+      const adopt = appServerToAdopt(answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
+      if (adopt !== null) {
+        const r = await commitServerUrl(adopt);
+        if (!r.ok) return { app: "unavailable" }; // the choice could not be kept here: nothing changed
+      }
+      return { app: answer.kind };
+    } catch {
+      return { app: "unavailable" };
+    } finally {
+      appServerInFlight = null;
+    }
+  })();
+  return appServerInFlight;
+}
+void serverReady.then(() => syncAppServer());
+
 /** Apply a server change. Order is the whole story (§4.1): lock under the OLD origin
  *  first — the armed branch stashes the live token pair into the OLD origin's quick-unlock record
  *  (PRESERVED per B2-7, never wiped: an A→B→A round trip keeps A's PIN, bounded by the staleness
@@ -2228,6 +2265,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return commitServerUrl(msg.url);
     case "forgetLegacyServer":
       return forgetLegacyServer();
+    case "appServer":
+      return syncAppServer();
     case "personalAcceptChange":
       // A5b: only our own extension pages (the popup) may confirm a personal-vault change; a content
       // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).

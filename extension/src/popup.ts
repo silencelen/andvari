@@ -14,6 +14,7 @@ import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlo
 import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./serverurl";
 import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
+import { BUILD_TARGET } from "./buildtarget";
 import { displaySite, safeSiteUrl } from "./siteurl";
 import { reuseWarning } from "./reusealert";
 
@@ -1659,12 +1660,26 @@ el("autofill-grant").addEventListener("click", () => {
   })();
 });
 
-void renderServerOrigin();
-// Probe biometric capability BEFORE the first status render so the bio enroll shortcuts appear on the
-// first paint (not only after an interaction re-renders). The probe is fast and never throws out.
-void probeBioCapable().finally(() => void refresh());
-void renderUpdate();
-// Passive connectivity dot — quiet ping on open, result only in the header dot.
-void ask({ type: "ping" }).then((r) => setConn(r?.ok === true, r?.code === "confirm_server"));
-void detectMissingHostGrant();
-void detectMissingBroadGrant();
+/** Safari on iOS: the server comes from the andvari app. */
+const APP_SERVER_NONE = "Choose your server in the andvari app. This extension uses the same one.";
+
+/** Safari: ask the worker to adopt the app's server before anything shows a server; whether the app has none. */
+async function adoptAppServer(): Promise<boolean> {
+  if (BUILD_TARGET !== "safari") return false;
+  const r = await ask({ type: "appServer" });
+  return r?.app === "none";
+}
+
+void adoptAppServer().then((appHasNone) => {
+  void renderServerOrigin();
+  // Probe biometric capability BEFORE the first status render so the bio enroll shortcuts appear on the
+  // first paint (not only after an interaction re-renders). The probe is fast and never throws out.
+  void probeBioCapable().finally(() => void refresh().finally(() => {
+    if (appHasNone) showMsg("info", APP_SERVER_NONE);
+  }));
+  void renderUpdate();
+  // Passive connectivity dot — quiet ping on open, result only in the header dot.
+  void ask({ type: "ping" }).then((r) => setConn(r?.ok === true, r?.code === "confirm_server"));
+  void detectMissingHostGrant();
+  void detectMissingBroadGrant();
+});
