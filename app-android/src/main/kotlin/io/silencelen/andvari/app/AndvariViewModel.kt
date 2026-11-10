@@ -8,8 +8,6 @@ import androidx.compose.runtime.setValue
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
@@ -996,7 +994,7 @@ class AndvariViewModel(
     private fun needsUpdate(): Int = engine?.needsUpdateCount() ?: 0
 
     private fun newApi(tokens: Tokens? = null, origin: String = store.baseUrl): AndvariApi =
-        AndvariApi(origin, HttpClient(OkHttp), tokens, { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform defaults to "android"
+        AndvariApi(origin, androidHttpClient(), tokens, { store.updateTokens(it) }, onSessionRejected = coordinator::onRefreshRefused) // platform defaults to "android"
 
     fun start() {
         viewModelScope.launch {
@@ -1207,7 +1205,7 @@ class AndvariViewModel(
     private fun commitManualSwitch(target: String) {
         _ui.value = _ui.value.copy(trustGate = null, busy = true, error = null)
         viewModelScope.launch {
-            val probe = AndvariApi(target, HttpClient(OkHttp))
+            val probe = AndvariApi(target, androidHttpClient())
             // try/catch rather than runCatching: a cancelled scope (the activity going away
             // mid-probe) must NOT read as a probe verdict and commit a switch on the way out.
             val failure = try {
