@@ -9,6 +9,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
 import io.silencelen.andvari.core.client.Account
+import io.silencelen.andvari.core.client.AccountWipedException
 import io.silencelen.andvari.core.client.session.QuickUnlockRules
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.KdfReKeyCore
@@ -82,7 +83,9 @@ object QuickUnlock {
 
     /** Result of a recover attempt; the caller maps each to the design §5 fallback UX. */
     sealed interface Recover {
-        /** UVK recovered — hand straight to `Account.unlockWithUvk`; the caller zeroes it after. */
+        /** UVK recovered — hand straight to `Account.unlockWithUvk`, which keeps it (its `wipe` zeroes it
+         *  later). On every path where no account took it — another unlock won, the server refused, the key
+         *  did not open the account — the receiver zeroes it (core `UnlockLadder.unlockWithQuick`). */
         class Ok(val uvk: ByteArray) : Recover
         /** User cancelled / pressed "Use master password" / temporary lockout — blob KEPT (A8). */
         data class Fallback(val reason: String?) : Recover
@@ -124,29 +127,8 @@ object QuickUnlock {
     /** True when a well-formed blob of a known version exists for this (origin, user). */
     fun isEnrolled(dir: File, originKey: String, userId: String): Boolean = readBlob(dir, originKey, userId) != null
 
-    /**
-     * A1/A2 freshness: within 30 days of the last REAL full-password unlock, evaluated against a
-     * monotonic high-water clock so a wall-clock rollback cannot re-open the window. Reads (and
-     * advances) the persisted high-water mark as a side effect.
-     */
-    fun isFresh(store: SessionStore, userId: String): Boolean {
-        val now = System.currentTimeMillis()
-        val elapsedNow = android.os.SystemClock.elapsedRealtime()
-        val highWater = store.bumpHighWater(now) // monotonically non-decreasing
-        return QuickUnlockRules.isFreshPure(
-            QuickUnlockRules.FreshnessInputs(
-                nowMs = now,
-                elapsedNowMs = elapsedNow,
-                stampWallMs = store.lastFullPasswordUnlockAt(userId),
-                stampElapsedMs = store.stampElapsedMs(userId),
-                stampBootRefMs = store.stampBootRefMs(userId),
-                highWaterWallMs = highWater,
-                serverFloorMs = store.serverTimeFloorMs,
-                bootIdNow = store.bootCountNow().takeIf { it >= 0 }?.toString(),
-                stampBootId = store.stampBootCount(userId).takeIf { it >= 0 }?.toString(),
-            ),
-        )
-    }
+    // A1/A2 freshness (30 days from the last REAL full-password unlock, against the monotonic high-water
+    // clock) is core's now: `UnlockLadder.quickStatus`, the one view the UI and the unlock share (gap 6).
 
 
     // ---- wipe ----
@@ -206,8 +188,14 @@ object QuickUnlock {
         return when (outcome) {
             is Auth.Ok -> {
                 // A UVK copy egresses core ONLY here (spec 01 §8 enrollment accessor) — sealed
-                // straight into the hardware cipher and zeroed immediately, whatever happens.
-                val uvk = account.uvkCopyForPlatformWrap()
+                // straight into the hardware cipher and zeroed immediately, whatever happens. The vault
+                // may have locked while the prompt was up, and a lock wipes the account's keys: then
+                // there is nothing to wrap, and the orphan key goes.
+                val uvk = try {
+                    account.uvkCopyForPlatformWrap()
+                } catch (e: AccountWipedException) {
+                    wipe(dir, originKey, userId); return Enroll.Failed(null)
+                }
                 try {
                     outcome.cipher.updateAAD(aad(userId))
                     val ct = outcome.cipher.doFinal(uvk)

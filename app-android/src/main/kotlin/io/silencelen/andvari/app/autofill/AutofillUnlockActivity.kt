@@ -50,14 +50,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.silencelen.andvari.app.AndvariTheme
 import io.silencelen.andvari.app.BrandSigil
-import io.silencelen.andvari.app.QuickUnlock
 import io.silencelen.andvari.app.Session
 import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.SigilMark
 import io.silencelen.andvari.app.VaultSession
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.HouseholdCopy
-import io.silencelen.andvari.core.crypto.CryptoException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -140,9 +138,10 @@ class AutofillUnlockActivity : FragmentActivity() {
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         // §7.1: computed ONCE, before the composition, off the same gates the auto-prompt below
         // uses — so the hint appears exactly when a fingerprint was possible and simply is not
-        // set up, and never when the org forbids it or the hardware cannot do it.
-        val couldUseBiometrics = QuickUnlock.isEligible(applicationContext, store) &&
-            !QuickUnlock.isEnrolled(applicationContext.noBackupFilesDir, store.currentOriginKey(), session.userId)
+        // set up, and never when the org forbids it or the hardware cannot do it. Gap 6: they are
+        // the gates the shared ladder itself enforces (§4.2: in the CURRENT origin's namespace).
+        val quick = AutofillUnlock.quickStatus(applicationContext, store, session.userId)
+        val couldUseBiometrics = quick.eligible && !quick.enrolled
         setContent {
             AndvariTheme {
                 UnlockCard(
@@ -162,18 +161,13 @@ class AutofillUnlockActivity : FragmentActivity() {
         // Quick unlock (spec 01 §8 / design §3): over the still-rendered password card, auto-show
         // the BiometricPrompt when eligible + enrolled + within the 30-day window. Any
         // failure/cancel leaves the password card in place (never neither, design §5).
-        val dir = applicationContext.noBackupFilesDir
-        // §4.2: the blob/eligibility/freshness all live in the CURRENT origin's namespace.
-        if (QuickUnlock.isEligible(applicationContext, store) &&
-            QuickUnlock.isEnrolled(dir, store.currentOriginKey(), session.userId) &&
-            QuickUnlock.isFresh(store, session.userId)
-        ) {
+        if (quick.usable) {
             tryBiometricUnlock(store, session, form, inlineRequest)
         }
     }
 
-    /** Recover the UVK behind a BiometricPrompt, then unlock via the UVK path and finish exactly
-     *  like the password path. Never crashes the fill callback (runCatching rails). */
+    /** The shared ladder recovers the UVK behind a BiometricPrompt, then unlocks via the UVK path; this
+     *  finishes exactly like the password path. Never crashes the fill callback (runCatching rails). */
     private fun tryBiometricUnlock(
         store: SessionStore,
         session: Session,
@@ -181,41 +175,34 @@ class AutofillUnlockActivity : FragmentActivity() {
         inlineRequest: InlineSuggestionsRequest?,
     ) {
         if (busy) return
-        val originKey = store.currentOriginKey() // §4.2: recover/wipe stay inside this origin's namespace
         lifecycleScope.launch {
-            when (val r = QuickUnlock.recoverUvk(this@AutofillUnlockActivity, applicationContext.noBackupFilesDir, originKey, session.userId)) {
-                is QuickUnlock.Recover.Ok -> {
-                    busy = true
-                    errorText = null
-                    val result = runCatching {
-                        withContext(Dispatchers.IO) { AutofillUnlock.unlockWithUvk(this@AutofillUnlockActivity, store, session, r.uvk) }
-                    }
-                    result.onSuccess { unlocked ->
-                        finishAfterUnlock(runCatching {
-                            DatasetBuilder.responseForUnlocked(
-                                this@AutofillUnlockActivity, form, unlocked.engine.items(), inlineRequest, trace,
-                            )
-                        }.onFailure { recordException(it) }.getOrNull())
-                    }.onFailure { t ->
-                        busy = false
-                        // design §5: a stale/foreign UVK (identity SEED won't open) wipes the blob;
-                        // an identityPub MISMATCH is a hard fault — keep the blob (evidence), banner.
-                        if (t is CryptoException && !isIdentityMismatch(t)) {
-                            QuickUnlock.wipe(applicationContext.noBackupFilesDir, originKey, session.userId)
-                        }
-                        errorText = friendly(t)
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    // §4.2: the prompt, the recover and any wipe stay inside the CURRENT origin's namespace.
+                    AutofillUnlock.unlockWithQuick(this@AutofillUnlockActivity, store, session) {
+                        runOnUiThread { busy = true; errorText = null } // the prompt released the key
                     }
                 }
-                // Card is already on screen; surface the mapped reason (wipe-class events already
-                // deleted the blob inside recoverUvk).
-                is QuickUnlock.Recover.Fallback -> r.reason?.let { errorText = it }
-                is QuickUnlock.Recover.Wiped -> errorText = r.reason
+            }
+            result.onSuccess { quick ->
+                when (quick) {
+                    is AutofillUnlock.Quick.Unlocked -> finishAfterUnlock(runCatching {
+                        DatasetBuilder.responseForUnlocked(
+                            this@AutofillUnlockActivity, form, quick.unlocked.engine.items(), inlineRequest, trace,
+                        )
+                    }.onFailure { recordException(it) }.getOrNull())
+                    // Card is already on screen; surface the mapped reason (wipe-class events already
+                    // deleted the enrollment).
+                    is AutofillUnlock.Quick.Stay -> quick.message?.let { errorText = it }
+                }
+            }.onFailure { t ->
+                busy = false
+                // design §5: the ladder already wiped a stale/foreign UVK's enrollment; an identityPub
+                // MISMATCH is a hard fault that keeps it (evidence). Either way the banner says why.
+                errorText = friendly(t)
             }
         }
     }
-
-    private fun isIdentityMismatch(t: Throwable): Boolean =
-        t.message?.contains("identity key mismatch") == true
 
     private fun unlockAndFinish(
         store: SessionStore,

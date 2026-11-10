@@ -140,8 +140,16 @@ class A14EnrollOriginTest {
 
     @Test
     fun storedTokensNeverGoToAnotherOrigin() {
-        assertTrue(Regex("""if \(!sessionBelongsTo\(session\.baseUrl, store\.baseUrl\)\)""").findAll(vm).count() >= 2, "password and biometric unlock both check")
+        // Step 6: the check lives in core's one ladder, once per rung (password and quick unlock), before anything is sent.
+        val ladder = sourceFile("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session/UnlockLadder.kt").readText()
+        val check = "if (dialed == null || !sessionBelongsTo(stored.baseUrl, dialed)) return UnlockResult.Elsewhere(stored.baseUrl)"
+        assertTrue(Regex(Regex.escape(check)).findAll(ladder).count() == 2, "password and biometric unlock both check")
+        val quick = body(ladder, "suspend fun unlockWithQuick(", "\n    }\n")
+        assertTrue(quick.indexOf(check) in 0 until quick.indexOf("quickKeys.recover("), "before the prompt, too")
+        assertTrue(vm.contains("ladder.unlockWithPassword(session, password,") && vm.contains("ladder.unlockWithQuick(session, ActivityHost(activity)"), "the main app's unlocks climb it")
+        assertTrue(vm.contains("is UnlockResult.Elsewhere -> ") && vm.contains("error = sessionElsewhere(climbed.sessionOrigin)"), "and say where the session belongs")
         assertTrue(vm.contains("val a = newApi(session.tokens(), origin = session.baseUrl)"), "locked sign-out revokes at the session's own origin")
-        assertTrue(autofill.contains("if (!sessionBelongsTo(session.baseUrl, baseUrl))"), "the autofill unlock checks too")
+        assertTrue(autofill.contains(".unlockWithPassword(session, password, overlay)") && autofill.contains(".unlockWithQuick(session, ActivityHost(activity)"), "the autofill unlock checks too")
+        assertTrue(autofill.contains("is UnlockResult.Elsewhere -> throw IllegalStateException(sessionElsewhere(r.sessionOrigin))"))
     }
 }

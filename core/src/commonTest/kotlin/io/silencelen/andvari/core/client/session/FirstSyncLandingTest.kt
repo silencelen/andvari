@@ -1,12 +1,12 @@
-package io.silencelen.andvari.app
+package io.silencelen.andvari.core.client.session
 
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.UpgradeRequiredException
-import io.silencelen.andvari.core.client.session.runBounded
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -14,7 +14,8 @@ import kotlin.test.assertFailsWith
 /**
  * Audit H10, the post-bind half of sign-in, unlock, quick unlock and enroll: once a session is bound,
  * the first sync decides only what the landing screen also says, never whether the user lands.
- * `BoundedOpWiringTest` pins that every one of those ops lands after it.
+ * `UnlockLadderTest` shows the unlocks landing after it; Android's `BoundedOpWiringTest` pins that its
+ * sign-in and enroll do.
  */
 class FirstSyncLandingTest {
     @Test
@@ -24,7 +25,7 @@ class FirstSyncLandingTest {
 
     @Test
     fun anUnreachableServerLandsOffline() {
-        assertEquals(FirstSync.Offline, firstSyncOutcome(java.io.IOException("connection refused")))
+        assertEquals(FirstSync.Offline, firstSyncOutcome(IOException("connection refused")))
     }
 
     @Test

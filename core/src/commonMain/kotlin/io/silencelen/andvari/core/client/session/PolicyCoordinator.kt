@@ -64,6 +64,11 @@ class PolicyCoordinator(
         live = null
     }
 
+    /** A probe of the current origin failed: its live policy is unknown again, and [cacheAllowed] reads the mirror. */
+    fun forgetLivePolicy() {
+        live = null
+    }
+
     /** A12 (row 80): one policy fetch under a whole-call bound (a timeout reads as unreachable). */
     suspend fun boundedPolicy(probe: AndvariApi, timeoutMs: Long = POLICY_PROBE_TIMEOUT_MS): ClientPolicy =
         runBounded(timeoutMs) { probe.clientPolicy() }

@@ -15,6 +15,12 @@ class PolicyCoordinatorWiringTest {
     private val vm = File(src, "AndvariViewModel.kt").readText()
     private val autofill = File(src, "autofill/AutofillUnlock.kt").readText()
 
+    /** Steps 5 and 6: the clients, the bind and the unlock ladder moved to core; their pins moved with them. */
+    private val core = File("../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/session")
+    private val clients = File(core, "SessionClients.kt").readText()
+    private val binder = File(core, "SessionBinder.kt").readText()
+    private val ladder = File(core, "UnlockLadder.kt").readText()
+
     private fun span(of: String, from: String, to: String): String {
         val a = of.indexOf(from)
         assertTrue(a > -1, "missing: $from")
@@ -27,7 +33,9 @@ class PolicyCoordinatorWiringTest {
     @Test
     fun aDefinitiveInSessionRejectionFollowsThePurgePath() {
         assertTrue(vm.contains("onSessionRejected = coordinator::onRefreshRefused"), "the main app's token holders report a refused refresh")
-        assertTrue(autofill.contains("onSessionRejected = coordinator::onRefreshRefused"), "and so does the autofill-only process's")
+        // The autofill-only process's are built by core's SessionClients, over its own coordinator.
+        assertTrue(autofill.contains("SessionClients(AndroidHttpClients, store, coordinator)"), "and so does the autofill-only process's")
+        assertTrue(span(clients, "fun forSession(", "\n    }\n").contains("coordinator::onRefreshRefused"), "through the shared client builder")
         assertFalse(vm.contains("OfflineData.purge") || autofill.contains("OfflineData.purge"), "every purge goes through the shared rules")
     }
 
@@ -62,13 +70,13 @@ class PolicyCoordinatorWiringTest {
     @Test
     fun tokenWritesAreBoundToTheirSession() {
         assertTrue(vm.contains("{ store.updateTokensFor(owner, it) }"), "the main app's clients")
-        assertTrue(autofill.contains("{ store.updateTokensFor(owner, it) }"), "the autofill unlock's client")
+        assertTrue(span(clients, "fun forSession(", "\n    }\n").contains("{ store.updateTokensFor(owner, it) }"), "the autofill unlock's client (core's SessionClients)")
         assertFalse(vm.contains("{ store.updateTokens(it) }") || autofill.contains("{ store.updateTokens(it) }"), "an unbound write is the regression")
         assertTrue(Regex("""owner\.userId = s\.userId""").findAll(vm).count() == 2, "sign-in and enroll name the session they committed")
         // Review round 2: the client's own refresh token is part of the match (TokenOwnerTest), and the
         // compare and the write are one step: every writer of the stored session holds the same lock.
         assertTrue(vm.contains("heldRefreshToken = tokens?.refreshToken"))
-        assertTrue(autofill.contains("heldRefreshToken = session.refreshToken"))
+        assertTrue(span(clients, "fun forSession(", "\n    }\n").contains("heldRefreshToken = session.refreshToken"))
         val store = File(src, "Session.kt").readText()
         for (fn in listOf("override fun save(s: Session) {", "override fun updateTokens(t: Tokens?) {", "override fun clear() {", "override fun clearSessionTokens() {", "private fun backfillSessionOrigin() {", "override fun replaceTokensIf(")) {
             val body = span(store, fn, "\n    }\n")
@@ -82,15 +90,15 @@ class PolicyCoordinatorWiringTest {
     fun aForbiddingPolicyIsEnforcedOnThePollAndAtBind() {
         val poll = span(vm, "runCatching { current.api.clientPolicy() }", "syncNow(current.engine)")
         assertTrue(poll.contains("if (applyPolicy(p, tag) && !p.offlineCacheAllowed) purgeOfflineData(originKey, current.account.userId)"), "only a reply that passed the fence may purge")
-        val bind = span(vm, "private fun bind(a: AndvariApi", "notePasswordUnlockForQuickUnlockOffer()\n    }")
-        val purge = bind.indexOf("if (!allowed) purgeOfflineData(originKey, acct.userId)")
+        // Step 6: one bind (core SessionBinder) for the main app and the autofill unlock alike.
+        assertTrue(span(vm, "private fun bind(a: AndvariApi", "notePasswordUnlockForQuickUnlockOffer()\n    }").contains("binder.bind(a, acct, store.currentOriginKey(), provenance)"))
+        val bind = span(binder, "fun bind(api: AndvariApi", "\n    }\n")
+        val purge = bind.indexOf("if (!allowed) coordinator.purgeForbidden(originKey, account.userId)")
         assertTrue(purge > -1, "bind drops the blob too, not just the file")
-        assertTrue(bind.indexOf("VaultSession.bind(a, acct, newEngine, provenance)") in 0 until purge, "after the bind, so a replaced engine has released the file")
+        assertTrue(bind.indexOf("session.bind(api, account, engine, provenance)") in 0 until purge, "after the bind, so a replaced engine has released the file")
         assertFalse(bind.contains("deleteCache("), "the file-only delete is the regression")
-        val af = span(autofill, "private suspend fun unlockLocked(", "val unlocked = VaultSession.get()")
-        val afPurge = af.indexOf("if (!cacheAllowed) coordinator.purgeForbidden(originKey, acct.userId)")
-        assertTrue(afPurge > -1, "the autofill unlock's cache path too")
-        assertTrue(af.indexOf("VaultSession.bind(api, acct, engine, provenance)") in 0 until afPurge, "and after its bind")
+        assertTrue(autofill.contains("SessionBinder(store, VaultSession, coordinator, AndroidNamespaceStorage(dir), AndroidClocks)"), "the autofill unlock's cache path too")
+        assertTrue(span(ladder, "private suspend fun underMutex(", "\n    }\n").contains("binder.bind(api, account, originKey, provenance)"), "and the ladder binds only through it")
         assertFalse(vm.contains("session != null && !bound) purgeOfflineData"), "start() no longer skips a bound session")
     }
 
@@ -100,6 +108,8 @@ class PolicyCoordinatorWiringTest {
         assertTrue(vm.contains("coordinator.boundedPolicy(probe)"))
         assertTrue(vm.contains("coordinator.probeIsCurrent(tag)"))
         assertTrue(vm.contains("if (!coordinator.applyPolicy(p, tag)) return false"))
-        assertTrue(autofill.contains("coordinator.recordPolicy(originKey, p)"), "the autofill unlock's policy read uses the same mirrors")
+        // The autofill unlock reads the policy through the ladder's refreshPolicy, into the same mirrors.
+        assertTrue(autofill.contains("UnlockOptions(refreshPolicy = true, adoptOnlyFresh = true)"))
+        assertTrue(span(ladder, "private suspend fun refreshPolicy(", "\n    }\n").contains("coordinator.recordPolicy(originKey, p)"), "the autofill unlock's policy read uses the same mirrors")
     }
 }

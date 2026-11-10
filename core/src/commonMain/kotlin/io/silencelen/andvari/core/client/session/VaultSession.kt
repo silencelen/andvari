@@ -211,6 +211,7 @@ open class VaultSession(
             prev?.let {
                 if (it.engine !== engine) runCatching { it.engine.close() }
                 if (it.api !== api) runCatching { it.api.close() } // never close a reused token-holder
+                if (it.account !== account) it.account.wipe() // gap 7: a replaced account's keys go with it
             }
             // The replaced engine has released its file: whatever waited on it runs now, unless the
             // new engine holds that same file open, in which case it waits on the new one instead.
@@ -236,7 +237,15 @@ open class VaultSession(
             // GET+PUT nearly every time and silently dropped the very records it exists to save.
             // The LOCK itself is not delayed — state and keys drop right here, the engine closes
             // right here; only this one transport's close waits, at most ~2 s.
-            prev?.let { live -> sessionEnd.flush(live) { runCatching { live.api.close() } } }
+            // Survey gap 7: the account's keys are zeroed as the transport closes, not left to the
+            // collector. After the flush (it seals with them) and after the close (nothing a late
+            // operation seals can leave the device), and a seal already running finishes first.
+            prev?.let { live ->
+                sessionEnd.flush(live) {
+                    runCatching { live.api.close() }
+                    live.account.wipe()
+                }
+            }
             state = null
             sessionEnd.clear() // behavioural records must not outlive the session that made them
             prev?.let {
