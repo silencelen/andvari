@@ -137,6 +137,10 @@ const REFRESH_LOCK_WAIT_MS = 20_000;
  *  race does NOT cancel a fetch, and an uncancelled revocation outlives the sign-out (see
  *  logout()). One constant, one clock. */
 export const LOGOUT_TIMEOUT_MS = 5_000;
+/** Account deletion (spec 03 §13): how long `POST /account/delete` may take before its outcome is reported unknown —
+ *  ample for the server's memory-hard verify and a wait on its writer lock. It also bounds App's hold on a session end
+ *  that lands while the request is in flight (account-delete.ts stepDeletionWatch, DELETION_HOLD_LIMIT_MS). */
+export const ACCOUNT_DELETE_TIMEOUT_MS = 60_000;
 
 /**
  * Why the session ended (events() → onRevoked): an explicit server `revoked` frame is
@@ -153,6 +157,22 @@ function timeoutSignal(ms: number): AbortSignal | undefined {
   return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
     ? AbortSignal.timeout(ms)
     : undefined;
+}
+
+/** timeoutSignal, with an AbortController + timer where AbortSignal.timeout is missing: a deadline that must hold
+ *  (account deletion — App holds a session end until the request ends) cannot degrade to an unbounded wait. */
+function deadlineSignal(ms: number): AbortSignal | undefined {
+  const native = timeoutSignal(ms);
+  if (native || typeof AbortController === "undefined") return native;
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
+/** A fetch rejected by its signal: the timeout's TimeoutError, or a plain abort. */
+function isAbort(e: unknown): boolean {
+  const name = typeof e === "object" && e !== null ? (e as { name?: unknown }).name : undefined;
+  return name === "TimeoutError" || name === "AbortError";
 }
 
 /**
@@ -267,7 +287,7 @@ export class ApiClient {
     return accountKeys === s.accountKeys ? s : { ...s, accountKeys };
   }
 
-  private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0): Promise<Response> {
+  private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const used = auth && this.tokens ? this.tokens.accessToken : null;
@@ -278,13 +298,15 @@ export class ApiClient {
       // A PreSerializedJson body goes on the wire byte-for-byte (adminRecovery); everything
       // else is serialized here, as before.
       body: body === undefined ? undefined : body instanceof PreSerializedJson ? body.text : JSON.stringify(body),
+      // Optional deadline (account deletion): one signal for the request and its re-send, so the whole call is bounded.
+      ...(signal ? { signal } : {}),
     });
     if (resp.status === 401 && auth && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
       // A refresh that completed while this request was in flight (another caller's
       // single-flight refresh, or a pair adopted from another tab) already replaced
       // the tokens — retry with the fresh access token instead of rotating again.
-      if (this.tokens.accessToken !== used) return this.raw(method, path, body, auth, attempt + 1);
-      if (await this.tryRefresh()) return this.raw(method, path, body, auth, attempt + 1);
+      if (this.tokens.accessToken !== used) return this.raw(method, path, body, auth, attempt + 1, signal);
+      if (await this.tryRefresh()) return this.raw(method, path, body, auth, attempt + 1, signal);
     }
     return resp;
   }
@@ -788,6 +810,9 @@ export class ApiClient {
     return this.reported("accountDeletePreview", sanitizeDeletePreview(await this.json<AccountDeletePreview>("GET", "/api/v1/account/delete/preview")));
   }
 
+  /** {@link ACCOUNT_DELETE_TIMEOUT_MS}; a field so a test can shorten it. */
+  deleteTimeoutMs = ACCOUNT_DELETE_TIMEOUT_MS;
+
   /**
    * Delete this account. NOT idempotent and never retried here. What the reply proves decides how it surfaces:
    *  - the server's JSON `200 {deletedAt}` — deleted;
@@ -798,11 +823,19 @@ export class ApiClient {
    *  - any 5xx, and any reply that is not the server's JSON (a proxy's error page, a truncated body, a refusal without
    *    the server's `error` code) —
    *    {@link AccountDeleteUnknownError}: the server may have committed (spec 03 §13: unknown, never "not deleted").
-   * A transport failure rejects with the fetch's TypeError, which the caller also treats as unknown. A 401 rides raw()'s one
-   * refresh-and-resend: a 401 means the request was not processed, so the resend is a fresh attempt.
+   * A transport failure rejects with the fetch's TypeError, which the caller also treats as unknown. No answer within
+   * {@link deleteTimeoutMs} aborts the request — {@link AccountDeleteUnknownError} with status 0: it may have reached the
+   * server and committed. A 401 rides raw()'s one refresh-and-resend: a 401 means the request was not processed, so the
+   * resend is a fresh attempt (under the same deadline).
    */
   async deleteAccount(req: AccountDeleteRequest): Promise<AccountDeleteResponse> {
-    const resp = await this.raw("POST", "/api/v1/account/delete", req);
+    let resp: Response;
+    try {
+      resp = await this.raw("POST", "/api/v1/account/delete", req, true, 0, deadlineSignal(this.deleteTimeoutMs));
+    } catch (e) {
+      if (isAbort(e)) throw new AccountDeleteUnknownError(0);
+      throw e;
+    }
     if (resp.status >= 500) throw new AccountDeleteUnknownError(resp.status);
     type Reply = { error?: unknown; message?: unknown; blockers?: unknown; deletedAt?: unknown };
     let body: Reply | null = null;

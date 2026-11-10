@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, ApiClient } from "./client";
+import { ACCOUNT_DELETE_TIMEOUT_MS, AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, ApiClient } from "./client";
 
 /**
  * Account deletion on the wire (spec 03 §13): `GET /account/delete/preview` with its served ids held to the grammar (A10),
@@ -118,6 +118,25 @@ describe("ApiClient.deleteAccount", () => {
       expect(e).not.toBeInstanceOf(ApiError);
       expect((e as AccountDeleteUnknownError).status).toBe(status);
     }
+  });
+
+  it("a hung request ends at its deadline as an UNKNOWN outcome (status 0) — nothing waits on it for ever", async () => {
+    const hung = vi.fn((_url: string | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new DOMException("aborted", "AbortError")));
+      }),
+    );
+    vi.stubGlobal("fetch", hung);
+    const c = client();
+    c.deleteTimeoutMs = 25;
+    const t0 = Date.now();
+    const e = await c.deleteAccount({ confirmEmail: "me@x.com", currentAuthKey: "KEY" }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(AccountDeleteUnknownError);
+    expect((e as AccountDeleteUnknownError).status).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(hung.mock.calls[0]![1]?.signal, "the POST carries the deadline").toBeDefined();
+    expect(client().deleteTimeoutMs, "a minute by default").toBe(ACCOUNT_DELETE_TIMEOUT_MS);
+    expect(ACCOUNT_DELETE_TIMEOUT_MS).toBe(60_000);
   });
 
   it("a reply that is not the server's JSON is UNKNOWN, whatever its status", async () => {

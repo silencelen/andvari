@@ -11,14 +11,17 @@ import {
   type BlockerLine,
   type BlockerLink,
   checkDeletion,
+  checkedResult,
   type DeleteFlowState,
+  DELETION_MOST_LIKELY_DONE,
   deletionSummary,
-  deletionTrackEvent,
+  type DeletionWatchEvent,
   emailConfirmed,
   initialFlow,
   OUTCOME_UNKNOWN,
   previewErrorText,
   runAccountDeletion,
+  settledOutcome,
   totpDigits,
 } from "./account-delete";
 import { Busy } from "./Busy";
@@ -32,15 +35,15 @@ import { Announcer, Msg } from "./Msg";
  * the member types their address, the master password and (when enrolled, or when the server asks) the code. A confirmed
  * deletion hands off to App, which wipes this browser's state for the account and lands on the sign-in card. An answer
  * that does not say what happened is an UNKNOWN outcome: the card says so and offers a check, never a "not deleted" it
- * cannot know — and a 401 after it never a "deleted" either (a revocation ends a session too).
+ * cannot know. A session that ends is App's to handle (stepDeletionWatch): the card reports what happened and words it.
  */
 
-/** How a deletion left this browser: `confirmed` by the server's own answer, or `forgotten` by the member after an
- *  unknown outcome. App wipes the same state either way; the notice differs. */
+/** How a deletion left this browser: `confirmed` by the server's own answer, or `forgotten` by the member on App's
+ *  DeletionOutcomeUnknownCard. App wipes the same state either way; the notice differs. */
 export type DeletionEnd = "confirmed" | "forgotten";
 
-/** The request's lifecycle, for App: `started` just before the POST; then `refused` or `settled` (account-delete.ts). */
-export type DeletionTrack = "started" | "refused" | "settled";
+/** What the card reports to App about its request and its check (account-delete.ts stepDeletionWatch). */
+export type DeletionTrack = DeletionWatchEvent;
 
 export interface DeleteAccountView {
   open: boolean;
@@ -213,7 +216,8 @@ export function DeleteAccountCard({
   email: string;
   /** This browser should forget the account (App wipes its state and lands signed out). */
   onDeleted: (end: DeletionEnd) => void;
-  /** The deletion request's lifecycle, so App can hold back a session end that lands while it is in flight. */
+  /** The request's lifecycle and the check's result, so App can hold a session end that lands while the request is in
+   *  flight and act on it when it settles (never dropped), and tell a deletion's own session end from any other. */
   onTrack?: (event: DeletionTrack) => void;
   onOpenVaultSettings: (vaultId: string) => void;
   onOpenAdmin?: () => void;
@@ -264,15 +268,23 @@ export function DeleteAccountCard({
     if (!preview) return;
     const before = flow;
     setBusy(true);
+    let started = false;
+    let settled = false;
     try {
-      const outcome = await runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired }, () => onTrack?.("started"));
+      const outcome = await runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired }, () => {
+        started = true;
+        onTrack?.({ kind: "started" });
+      });
+      settled = true;
+      onTrack?.({ kind: "settled", outcome: settledOutcome(outcome) });
       if (outcome.kind === "deleted") {
         onDeleted("confirmed");
         return;
       }
-      onTrack?.(deletionTrackEvent(before, outcome));
       setFlow(afterOutcome(before, outcome));
     } finally {
+      // A request App was told about always reports its end, so a session end App holds for it is acted on.
+      if (started && !settled) onTrack?.({ kind: "settled", outcome: "unknown" });
       setPassword("");
       setTotp("");
       setBusy(false);
@@ -285,6 +297,7 @@ export function DeleteAccountCard({
       const c = await checkDeletion(client);
       if (c.kind === "still_here") setPreview(c.preview);
       setFlow((f) => afterCheck(f, c));
+      onTrack?.({ kind: "checked", result: checkedResult(c) });
     } finally {
       setChecking(false);
     }
@@ -322,5 +335,28 @@ export function DeleteAccountCard({
       onCheck={() => void check()}
       onBackup={onBackup}
     />
+  );
+}
+
+/**
+ * App's landing when the session ended WHILE the deletion request was in flight and the request's answer never came
+ * (stepDeletionWatch's `offer_forget`): that end was, most likely, the deletion's own revocation. The vault is already
+ * closed and this browser's session wiped, as at any sign-out; forgetting also drops the userId-scoped state and the
+ * spec 01 §5 self-identity records, so the address can register again here. Signing in instead keeps them — the way to
+ * check, since an account that still exists signs in.
+ */
+export function DeletionOutcomeUnknownCard({ notice, onForget, onSignIn }: { notice?: string; onForget: () => void; onSignIn: () => void }) {
+  return (
+    <div className="auth-shell">
+      <div className="card">
+        <h2>Deleting your account</h2>
+        <Msg kind="info">{DELETION_MOST_LIKELY_DONE}</Msg>
+        {notice && <Msg kind="info">{notice}</Msg>}
+        <div className="actions">
+          <button type="button" className="ghost" style={{ color: "var(--danger)" }} onClick={onForget}>Forget this account on this browser</button>
+          <button type="button" className="ghost" onClick={onSignIn}>Sign in to check</button>
+        </div>
+      </div>
+    </div>
   );
 }

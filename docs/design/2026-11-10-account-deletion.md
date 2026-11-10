@@ -378,23 +378,33 @@ residual (spec 05 R19).
    preview, so such an account had no way to send a code.)
 5. **Submit**: `client.accountKeys()` → `account.reauthAuthKey(password, keys)` (a wrong password is caught LOCALLY and
    never sent) → `POST /account/delete`. Errors map to one sentence each (`ui/account-delete.ts`); a 409 re-renders the
-   blockers from the response. A network failure, any 5xx, or a reply that is not the server's JSON (a proxy's error
-   page, a 200 without `deletedAt`) is an **unknown** outcome — the server may have committed — and is never reported as
-   "not deleted": the card says so, keeps the form for a retry, and offers "Check whether it went through" (the preview
-   answers 200 only while the account exists). A 401 after an unknown outcome — on the retry, or on the check — says only
-   that the session ended, which an admin's revocation, disable or recovery or a password change elsewhere also does: the
-   card says the account may still exist and offers nothing to forget, so the self-identity records (§10), which exist to
-   catch exactly an account that changed under this browser, stay. A 401 with no unknown outcome before it is the
-   ordinary "session ended — nothing was deleted". App holds a session end (the WebSocket `revoked` frame the deletion
-   itself sends, a refused refresh at the socket's ticket mint) while the request is in flight, so the card, not a
-   sign-out, reports the outcome; the held end runs if the server refused. (Independent review, 2026-11-10: the first
-   cut reported a 5xx as "not deleted", and its second read any 401 on the check as "deleted" and offered to forget.)
+   blockers from the response. A network failure, no answer within 60 s (the POST carries an `AbortSignal` deadline),
+   any 5xx, or a reply that is not the server's JSON (a proxy's error page, a 200 without `deletedAt`) is an **unknown**
+   outcome — the server may have committed — and is never reported as "not deleted": the card says so, keeps the form
+   for a retry, and offers "Check whether it went through" (the preview answers 200 only while the account exists).
 6. **Success**: `App.onAccountDeleted` wipes this browser's state for the account — the session and the tab's token
    slot, the offline copy (IndexedDB), every `andvari.*` key scoped to the userId (client state, the cache opt-in, the
    auto-lock and last-export stamps), the in-session breach cache, and the self-identity records (§10) — and lands on the
-   sign-in card with "Your andvari account was deleted…". Other tabs follow through the session key's `storage` event.
-   Device-wide preferences (theme, install id, server address, the device's cache opt-out) are not account data and
-   stay.
+   sign-in card with "Your andvari account was deleted…" (after a forget, step 7: "This browser forgot the account…").
+   Other tabs follow through the session key's `storage` event. Device-wide preferences (theme, install id, server
+   address, the device's cache opt-out) are not account data and stay.
+7. **Session ends** are App's (`account-delete.ts stepDeletionWatch`, a pure step function the tests drive). One that
+   lands while the request is in flight — the WebSocket `revoked` frame the deletion itself sends, a refused refresh at
+   the socket's ticket mint — is HELD, so a sign-out cannot pre-empt the card, and is acted on when the request settles,
+   never dropped (the socket client stops after a `revoked` frame, so a dropped end would leave the decrypted vault open
+   on a dead session until auto-lock):
+   - the server refused, or the request never reached it → the ordinary sign-out;
+   - the answer was lost → the end was, most likely, the deletion's own: App signs out and lands on
+     `DeletionOutcomeUnknownCard` — "Forget this account on this browser" (the step-6 wipe, with "This browser forgot the
+     account…") or "Sign in to check";
+   - a 401 → sign out ("session ended — nothing was deleted", or after an unknown outcome "can't tell").
+   Any other session end after an unknown outcome — a 401 on the check or on a retry, a revocation that lands later —
+   cannot be told from an admin's revocation, disable or recovery or a password change elsewhere, so App signs out
+   saying the account may still exist, keeps the self-identity records and offers no Forget: forgetting would wipe the
+   very records that catch an account that changed under this browser. The hold is bounded twice: the request's
+   deadline, and a 120 s timer in App in case the card never reports a settle. (Independent review, 2026-11-10: the
+   first cut reported a 5xx as "not deleted"; its second cut dropped a held end after an unknown outcome and read any
+   401 on the check as "deleted".)
 
 Logic lives in pure, tested modules (`ui/account-delete.ts`, `session.wipeLocalAccountState`,
 `selfidentity.forgetSelfIdentity`, the API client methods); the card body is a pure render of its model, tested with
@@ -423,9 +433,11 @@ a second admin; the only account deleting itself); the gate (typed email, a wron
 replayed code after a refused attempt, the hourly bucket, the break-glass origin); the WebSocket `revoked` frame and the
 co-member's bell; the offer clear; the pseudonymised trail and its 90-day purge; the device-id pseudonyms (a pruned
 device's too, its journal rows deleted, another account's device left alone, the v17 upgrade's attribution, and a
-source scan of which audit writes name a foreign device); the straggler belt; an admin screen's stale ids not written back; invites; the
-audit-type classification tripwire; and the races — a share, a push + upload and a password change landing between the
-gate and the transaction, plus pushes, pulls and a second deletion racing for real. Web (vitest): the client methods and
-their wire shapes, the blocked-response parsing, a 5xx or non-JSON reply read as unknown, the flow logic (an unknown
-outcome, the check, the forget offer after a 401) and error sentences, App's in-flight hold, the card's static render,
-the local wipe and the self-identity forget.
+source scan of which audit writes name a foreign device); the straggler belt; an admin screen's stale ids not written
+back; invites; the audit-type classification tripwire; and the races — a share, a push + upload and a password change
+landing between the gate and the transaction, plus pushes, pulls and a second deletion racing for real. Web (vitest):
+the client methods and their wire shapes, the blocked-response parsing, a 5xx, non-JSON or timed-out reply read as
+unknown (a hung POST ends at its deadline), the flow logic (an unknown outcome, the check) and error sentences, App's
+session-end watch (a held end acted on at every settle, never dropped; Forget only for an end held during the request;
+a 401 on the check never read as the deletion; the hold's expiry), the card's and the outcome-unknown card's static
+renders, the local wipe and the self-identity forget.
