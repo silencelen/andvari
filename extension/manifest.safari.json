@@ -2,12 +2,13 @@
   "manifest_version": 3,
   "name": "andvari",
   "version": "0.29.1",
-  "description": "Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your own in Options.",
+  "description": "Zero-knowledge password manager — fill and save logins. Uses the server you choose in the andvari app.",
   "permissions": [
     "storage",
     "activeTab",
     "scripting",
-    "alarms"
+    "alarms",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "https://andvari.monahanhosting.com/*",
