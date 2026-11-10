@@ -87,6 +87,10 @@ class SessionStore(context: Context) : SessionPersistence {
         get() = prefs.getString("baseUrl", DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         set(v) = prefs.edit().putString("baseUrl", v).apply()
 
+    override fun moveOrigin(origin: String) {
+        baseUrl = origin
+    }
+
     /**
      * The uncommitted invite-switch marker ([PendingServer]) or null. GLOBAL (not namespaced):
      * exactly one switch can be in flight, and it is about the identity of the current default

@@ -104,6 +104,9 @@ interface SessionPersistence {
     /** The origin this client dials, or null where no origin has been chosen yet (iOS first launch). */
     val baseUrl: String?
 
+    /** Point the client at [origin]. Only [ServerSwitch.moveTo] calls this, after it dropped the session. */
+    fun moveOrigin(origin: String)
+
     /**
      * The uncommitted invite-switch marker, or null. Global: one switch can be in flight, and it
      * is about the identity of the current default origin, not any origin's cached material.

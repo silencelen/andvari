@@ -40,6 +40,14 @@ internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPe
     var stored: StoredSession? = null
     var clearCalls = 0
 
+    /** Session and origin writes, in order. */
+    val writes = mutableListOf<String>()
+
+    override fun moveOrigin(origin: String) {
+        writes += "origin:$origin"
+        baseUrl = origin
+    }
+
     override fun load() = stored
     override fun save(s: StoredSession) {
         stored = s
@@ -62,6 +70,7 @@ internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPe
     }
 
     override fun clearSessionTokens() {
+        writes += "drop-session"
         stored = null
     }
 
