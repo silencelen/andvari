@@ -47,10 +47,6 @@ object BoundedOps {
      *  pushes and a delta pull. Never carries attachment bytes. */
     const val FLAT_MS = 60_000L
 
-    /** An op that runs the KDF and a first sync on the way to an open vault. Phones derive more
-     *  slowly than desktops, and these ops only ever hold a session they are still creating. */
-    const val AUTH_OP_MS = 120_000L
-
     /** One authenticated recovery call: small JSON, and busy is held across it. */
     const val RECOVERY_CALL_MS = 30_000L
 
