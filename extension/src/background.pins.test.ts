@@ -420,7 +420,13 @@ test("A15 review F1: only the gate's commit and 'Not mine' lift the block; the p
   const forget = spanOf(bg, "async function forgetLegacyServer(", "\n}\n");
   assert.ok(forget.includes("if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };"));
   assert.ok(forget.indexOf("forgetPendingServer(") < forget.indexOf("dialBlock = null;"));
-  assert.equal((bg.match(/dialBlock = null;/g) ?? []).length, 2, "nowhere else");
+  // The Safari build's third lift: with no store to keep a choice, the app's own Trust-Gated origin (read through the
+  // native handler, which no page can write) is used for one worker life, once the origin-clean switch applied.
+  const unkept = spanOf(bg, "async function adoptAppServerUnkept(", "\n}\n");
+  assert.ok(unkept.indexOf("await switchChain;") < unkept.indexOf("if (serverUrl !== canonical) return false;"));
+  assert.ok(unkept.indexOf("if (serverUrl !== canonical) return false;") < unkept.indexOf("dialBlock = null;"));
+  assert.equal((bg.match(/adoptAppServerUnkept\(/g) ?? []).length, 2, "defined once, called once: from the Safari-only ask");
+  assert.equal((bg.match(/dialBlock = null;/g) ?? []).length, 3, "nowhere else");
   assert.ok(bg.includes("return { url: serverUrl, trustedStore: trustedStoreOk, block: dialBlock };"));
 });
 

@@ -45,6 +45,7 @@ import type {
   Req,
   Res,
   SaveErrorCode,
+  ServerDiag,
   TotpAddCode,
   TabMsg,
   UnlockCode,
@@ -72,7 +73,7 @@ import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
-import { appServerToAdopt, askAppServer } from "./appserver";
+import { appServerToAdopt, askAppServerDetailed, nativeSender } from "./appserver";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -239,6 +240,7 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "passwordReuse",
   "serverInfo", // A15: the popup header / options render — not user activity
   "appServer", // Safari: the popup asks for the app's server on every open — not user activity
+  "serverDiag",
 ]);
 
 /** Local sentinel for the spec 01 §5 identityPub derive-and-compare hard-fail (E1-1, web
@@ -521,6 +523,9 @@ const custodyReady: Promise<void> = Promise.all([storageAccess, sessionSeal.read
  *  "Not mine" (forgetLegacyServer). A16 review R4: every request the api makes refuses while it stands (makeApi), and
  *  the resync, the socket and sign-out's revoke do not even start. */
 let dialBlock: ServerBlock | null = null;
+/** Safari Details (serverDiag): the step worker start is at, and the migration's outcome. Display only. */
+let startStage = "storage-access";
+let startMigration: string | null = null;
 /** Whether worker start found a trusted store (false: none in this browser mode, or it did not answer in time). */
 let trustedStoreOk = true;
 /** A15 review S1: how long a lock waits for serverReady (the trusted store) — and since A16 for the seal's key
@@ -578,6 +583,7 @@ async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Pr
  *  A lock waits for it only within LOCK_STORE_WAIT_MS (doLock, A15 review S1). Never rejects. */
 const serverReady: Promise<void> = (async () => {
   await storageAccess;
+  startStage = "migration";
   try {
     // A15: move the trust state out of storage.local once (trustmigrate.ts) — and since the A15 review (F2) only when
     // the browser attested an upgrade from a pre-A15 build. A planted pre-A15 serverUrl is NEVER adopted: a
@@ -587,11 +593,15 @@ const serverReady: Promise<void> = (async () => {
     );
     installWaitTimedOut = outcome.kind === "skipped" && outcome.signal === "none";
     startOwedUnrecorded = outcome.kind === "failed" || (outcome.kind === "unavailable" && outcome.timedOut);
+    startMigration = outcome.kind === "unavailable" && outcome.timedOut ? "unavailable (timed out)" : outcome.kind;
+    startStage = "server-state";
     await applyServerState(outcome, true);
   } catch {
     dialBlock = { kind: "unsettled" }; // unreachable in practice (both leaves never throw) — dial nothing
   }
+  startStage = "legacy-namespace";
   if (trustedStoreOk) await adoptLegacyNamespaceOnce();
+  startStage = "ready";
 })();
 /** A16: what a lock needs before it can arm or wipe in the right namespace: the origin (serverReady), the access levels
  *  and the seal's key (custodyReady). doLock waits for it at most LOCK_STORE_WAIT_MS. Never rejects. */
@@ -1063,6 +1073,11 @@ chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
       .catch((e: unknown) => sendResponse({ error: String(e) }));
     return true;
   }
+  // Safari Details: answered from variables, before anything that waits on worker start (which is what it diagnoses).
+  if ((msg as { type?: unknown }).type === "serverDiag") {
+    sendResponse(senderMaySend("serverDiag", sender, EXTENSION_BASE) ? serverDiag() : null);
+    return false;
+  }
   handle(msg, sender)
     .then(sendResponse)
     .catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
@@ -1253,6 +1268,31 @@ async function forgetLegacyServer(): Promise<Res<"forgetLegacyServer">> {
 const SAFARI_NATIVE_APP = "com.silencelen.andvari";
 
 let appServerInFlight: Promise<Res<"appServer">> | null = null;
+/** The last ask, for the popup's Details (serverDiag). No secret: kinds, an error text and what adopting came to. */
+const appServerDiag: Pick<ServerDiag, "native" | "nativeError" | "app" | "adopt"> = { native: "not_asked", nativeError: null, app: null, adopt: null };
+/** How long an ask waits for worker start before it gives up (start is bounded step by step; this bounds the whole). */
+const APP_SERVER_START_WAIT_MS = 12_000;
+
+/** What the popup's Details shows. Reads variables only, so it answers while worker start is still running. */
+function serverDiag(): ServerDiag {
+  return { stage: startStage, migration: startMigration, block: dialBlock?.kind ?? null, store: trustedStoreOk, url: serverUrl, ...appServerDiag };
+}
+
+/**
+ * The trusted store cannot keep a choice in this worker life (no IndexedDB, or it does not answer), and the app named
+ * its server. Use it for this worker life without keeping it: the same origin-clean switch, and the block lifts once
+ * the switch applied. A15 holds: the origin came from the app's own storage through the native handler, which no page
+ * or content script can write, and the app ran the Trust Gate on it. The cost is that nothing is remembered, so every
+ * worker start asks the app again and stays on its start state until the app answers.
+ */
+async function adoptAppServerUnkept(canonical: string): Promise<boolean> {
+  switchChain = switchChain.then(() => applyServerChange(canonical)).catch(() => {});
+  await switchChain;
+  if (serverUrl !== canonical) return false;
+  dialBlock = null;
+  await registerAutofillScripts();
+  return true;
+}
 
 /**
  * Safari on iOS: ask the andvari app for the server it chose and adopt it when this worker dials another, through
@@ -1264,15 +1304,33 @@ function syncAppServer(): Promise<Res<"appServer">> {
   if (BUILD_TARGET !== "safari") return Promise.resolve({ app: "unavailable" });
   appServerInFlight ??= (async (): Promise<Res<"appServer">> => {
     try {
-      await serverReady;
-      const answer = await askAppServer((msg) => chrome.runtime.sendNativeMessage(SAFARI_NATIVE_APP, msg));
-      const adopt = appServerToAdopt(answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
-      if (adopt !== null) {
-        const r = await commitServerUrl(adopt);
-        if (!r.ok) return { app: "unavailable" }; // the choice could not be kept here: nothing changed
+      appServerDiag.native = "waiting_for_start";
+      const started = await Promise.race([serverReady.then(() => true), delay(APP_SERVER_START_WAIT_MS).then(() => false)]);
+      if (!started) return { app: "unavailable" };
+      appServerDiag.native = "asking";
+      const asked = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP));
+      appServerDiag.native = asked.call;
+      appServerDiag.nativeError = asked.error;
+      appServerDiag.app = asked.answer.kind;
+      const adopt = appServerToAdopt(asked.answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
+      if (adopt === null) {
+        appServerDiag.adopt = asked.answer.kind === "set" ? "already in effect" : null;
+        return { app: asked.answer.kind };
       }
-      return { app: answer.kind };
-    } catch {
+      const r = await commitServerUrl(adopt);
+      if (r.ok) {
+        // commitServerUrl lifts the block only when the switch applied; say so when it did not.
+        appServerDiag.adopt = serverUrl === adopt && dialBlock === null ? "adopted" : "kept, but the switch did not apply";
+        return { app: serverUrl === adopt && dialBlock === null ? "set" : "unavailable" };
+      }
+      if (r.code === "storage" && (await adoptAppServerUnkept(adopt))) {
+        appServerDiag.adopt = "adopted for this session (the store did not keep it)";
+        return { app: "set" };
+      }
+      appServerDiag.adopt = `not adopted (${r.code ?? "unknown"})`;
+      return { app: "unavailable" };
+    } catch (e) {
+      appServerDiag.adopt = `failed: ${String(e).slice(0, 200)}`;
       return { app: "unavailable" };
     } finally {
       appServerInFlight = null;
@@ -2267,6 +2325,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return forgetLegacyServer();
     case "appServer":
       return syncAppServer();
+    case "serverDiag":
+      return serverDiag();
     case "personalAcceptChange":
       // A5b: only our own extension pages (the popup) may confirm a personal-vault change; a content
       // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).

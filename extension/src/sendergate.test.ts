@@ -74,6 +74,7 @@ const EXPECTED_REFUSAL: Record<string, unknown> = {
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
   serverInfo: { url: "", trustedStore: false, block: null },
   appServer: { app: "unavailable" },
+  serverDiag: null,
   setServerUrl: { ok: false, code: "not_allowed" },
   forgetLegacyServer: { ok: false },
 };
@@ -105,7 +106,7 @@ test("the gated set includes every session, quick-unlock and card-inventory mess
 // through storage.onChanged, so a content script that wrote that key repointed the extension past this gate. The
 // worker now takes the choice only as a message, and only from our own pages.
 test("A15: setServerUrl (and the server-info pair) are extension-page-only — a content script is refused", () => {
-  for (const type of ["setServerUrl", "serverInfo", "forgetLegacyServer", "appServer"]) {
+  for (const type of ["setServerUrl", "serverInfo", "forgetLegacyServer", "appServer", "serverDiag"]) {
     assert.equal(SENDER_CLASS[type as keyof typeof SENDER_CLASS], "extension", `${type} must be extension-page-only`);
     for (const base of [CHROME_BASE, FIREFOX_BASE]) assert.equal(senderMaySend(type, contentSender, base), false, type);
   }

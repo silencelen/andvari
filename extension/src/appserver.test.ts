@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { APP_SERVER_REQUEST, appServerToAdopt, askAppServer, parseAppServerReply } from "./appserver.ts";
+import { APP_SERVER_REQUEST, appServerToAdopt, askAppServer, askAppServerDetailed, nativeSender, parseAppServerReply } from "./appserver.ts";
 
 const HOME = "https://home.example";
 
@@ -38,6 +38,32 @@ test("asking the app sends the one message and never throws", async () => {
   assert.deepEqual(await askAppServer(() => new Promise(() => {}), 10), { kind: "unavailable" }, "silence is no answer");
 });
 
+test("an ask says how the native call ended", async () => {
+  assert.deepEqual(await askAppServerDetailed(async () => ({ ok: true, type: "appServer", url: null })), { answer: { kind: "none" }, call: "resolved", error: null });
+  assert.deepEqual(await askAppServerDetailed(async () => undefined), { answer: { kind: "unavailable" }, call: "resolved", error: null }, "an empty reply is not a timeout");
+  assert.deepEqual(await askAppServerDetailed(() => new Promise(() => {}), 10), { answer: { kind: "unavailable" }, call: "timeout", error: null });
+  const rejected = await askAppServerDetailed(async () => { throw new Error("no host"); });
+  assert.equal(rejected.call, "rejected");
+  assert.equal(rejected.error, "Error: no host");
+});
+
+test("the native call prefers browser.runtime, then chrome's callback form, and rejects when there is neither", async () => {
+  const calls: string[] = [];
+  const browser = { runtime: { sendNativeMessage: (app: string, msg: unknown) => { calls.push(`browser:${app}:${JSON.stringify(msg)}`); return Promise.resolve("b"); } } };
+  const chromeNs = {
+    runtime: {
+      lastError: null as { message?: string } | null,
+      sendNativeMessage: (_app: string, _msg: unknown, cb?: (r: unknown) => void) => { calls.push("chrome"); cb?.("c"); },
+    },
+  };
+  assert.equal(await nativeSender({ browser, chrome: chromeNs }, "app")(APP_SERVER_REQUEST), "b");
+  assert.deepEqual(calls, ['browser:app:{"type":"appServer"}']);
+  assert.equal(await nativeSender({ chrome: chromeNs }, "app")(APP_SERVER_REQUEST), "c");
+  chromeNs.runtime.lastError = { message: "denied" };
+  await assert.rejects(nativeSender({ chrome: chromeNs }, "app")(APP_SERVER_REQUEST), /denied/);
+  await assert.rejects(nativeSender({}, "app")(APP_SERVER_REQUEST), /not available/);
+});
+
 test("only the Safari build adopts, only the app's origin, and only when it differs", () => {
   const set = { kind: "set", url: HOME } as const;
   assert.equal(appServerToAdopt(set, "https://andvari.monahanhosting.com", "safari"), HOME);
@@ -53,10 +79,14 @@ test("only the Safari build adopts, only the app's origin, and only when it diff
 // manifest (only) may talk to the app.
 test("the worker adopts the app's server through commitServerUrl, in the Safari build only", () => {
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
-  const fn = bg.slice(bg.indexOf("function syncAppServer"), bg.indexOf("function syncAppServer") + 1500);
+  const fn = bg.slice(bg.indexOf("function syncAppServer"), bg.indexOf("function syncAppServer") + 2600);
   assert.match(fn, /BUILD_TARGET !== "safari"/);
   assert.match(fn, /appServerToAdopt\(/);
   assert.match(fn, /await commitServerUrl\(adopt\)/);
+  // Without a store the app's origin is used for this worker life only, and only after the kept commit refused.
+  assert.match(fn, /r\.code === "storage" && \(await adoptAppServerUnkept\(adopt\)\)/);
+  // The Details answer never waits on worker start.
+  assert.match(bg, /type === "serverDiag"\) \{\s*sendResponse\(senderMaySend\("serverDiag", sender, EXTENSION_BASE\) \? serverDiag\(\) : null\);/);
   assert.match(bg, /case "appServer":\s*return syncAppServer\(\);/);
   const gate = readFileSync(new URL("./sendergate.ts", import.meta.url), "utf8");
   assert.match(gate, /appServer: "extension"/);
