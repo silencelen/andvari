@@ -407,7 +407,8 @@ async function loadUnlocked(): Promise<void> {
     })();
   }, 350);
   startTotp();
-  el<HTMLInputElement>("search").focus();
+  // Safari on iOS: no focus on the search field. It would raise the keyboard over the list the moment it appears.
+  if (BUILD_TARGET !== "safari") el<HTMLInputElement>("search").focus();
 }
 
 /** activeTab (granted by opening the popup) exposes the page URL on http/https only. */
@@ -1808,18 +1809,51 @@ function renderAppLocked(unlocked: boolean): void {
   el("sign-out").hidden = true;
 }
 
-/** Face ID in the app's handler, then the list. The button is the retry after a cancel or a failure. */
+/** An unlock is in flight: Face ID is up, or its answer is on its way. */
+let appUnlockPending = false;
+
+/**
+ * Face ID in the app's handler, then the list. The button is the retry after a cancel or a failure.
+ *
+ * iOS puts the system's Face ID sheet over Safari, and may suspend this page while it is up (how far is not
+ * documented for an extension's popup: the page may be hidden, frozen with its timers and message answers held, or
+ * the popup dismissed outright, which is what a device showed). So nothing here depends on the answer to this one
+ * message arriving: while the unlock is pending the popup also asks the worker for its status once a second and
+ * whenever the page becomes visible again, and whichever says "unlocked" first ends the wait. A hide or an unload in
+ * between closes nothing, and a popup opened afresh finds the worker unlocked and shows the list.
+ */
 async function appUnlock(): Promise<void> {
+  if (appUnlockPending) return; // one prompt at a time
+  appUnlockPending = true;
   const button = el<HTMLButtonElement>("app-unlock");
-  if (button.disabled) return; // one prompt at a time
   button.disabled = true;
   button.textContent = "Waiting for Face ID…";
   clearMsg();
-  const r = await ask({ type: "appUnlock" });
-  button.disabled = false;
-  button.textContent = "Unlock with Face ID";
-  if (r?.state === "openApp") showMsg("info", r.message ?? "Open andvari and unlock it, then try again.");
-  else if (r?.state === "unavailable" || r === undefined) showMsg("err", "Couldn’t reach the andvari app. Open it once, then try again.");
+  let poll: number | undefined;
+  let onVisible: (() => void) | undefined;
+  try {
+    const answered = ask({ type: "appUnlock" });
+    const seenUnlocked = new Promise<"unlocked">((resolve) => {
+      const check = (): void => void ask({ type: "status" }).then((s) => (s?.unlocked ? resolve("unlocked") : undefined));
+      poll = window.setInterval(check, 1000);
+      onVisible = () => {
+        if (document.visibilityState === "visible") check();
+      };
+      document.addEventListener("visibilitychange", onVisible);
+    });
+    const gaveUp = new Promise<"timeout">((resolve) => window.setTimeout(() => resolve("timeout"), 70_000));
+    const r = await Promise.race([answered, seenUnlocked, gaveUp]);
+    if (r !== "unlocked" && r !== "timeout") {
+      if (r?.state === "openApp") showMsg("info", r.message ?? "Open andvari and unlock it, then try again.");
+      else if (r?.state === "unavailable" || r === undefined) showMsg("err", "Couldn’t reach the andvari app. Open it once, then try again.");
+    }
+  } finally {
+    if (poll !== undefined) window.clearInterval(poll);
+    if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+    appUnlockPending = false;
+    button.disabled = false;
+    button.textContent = "Unlock with Face ID";
+  }
   await refresh();
 }
 el("app-unlock").addEventListener("click", () => void appUnlock());
@@ -1832,18 +1866,36 @@ async function appUnlockOnOpen(): Promise<void> {
   appUnlockOffered = true;
   const s = await ask({ type: "status" });
   const info = await ask({ type: "serverInfo" });
-  if (s && !s.unlocked && info && !info.block) await appUnlock();
+  if (!s || s.unlocked || !info || info.block) return;
+  // The popup is painted before the prompt is asked for: two animation frames put the unlock view on screen, and
+  // 400 ms more lets Safari finish presenting the sheet (its presentation animation is about a third of a second).
+  // A system sheet raised while Safari is still presenting ours is the surest way to have ours dropped.
+  await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 400));
+  await appUnlock();
 }
 
-// Safari: the worker keeps the app's list only while this popup is open; the port's close tells it to drop it.
 if (BUILD_TARGET === "safari") {
-  try {
-    // Kept on the window for the popup's whole life: an unreferenced port can be collected, and its disconnect
-    // tells the worker the popup closed.
-    (window as unknown as { andvariPopupPort?: chrome.runtime.Port }).andvariPopupPort = chrome.runtime.connect({ name: "andvari-popup" });
-  } catch {
-    /* no port: the worker's own timer still drops the list */
-  }
+  // Something is on screen from the first frame, before any message has been answered: the unlock view.
+  showView(false);
+  renderAppLocked(false);
+  // Nothing fails silently into a blank popup: an error anywhere in this page is shown, over the unlock view.
+  const showFailure = (what: unknown): void => {
+    try {
+      el("locked").hidden = false;
+      el("app-locked").hidden = false;
+      showMsg("err", `andvari hit a problem: ${String(what instanceof Error ? `${what.name}: ${what.message}` : what).slice(0, 300)}`);
+    } catch {
+      /* the page is too broken to say so */
+    }
+  };
+  window.addEventListener("error", (e) => showFailure(e.error ?? e.message));
+  window.addEventListener("unhandledrejection", (e) => showFailure(e.reason));
+  // Nothing is closed when this page goes away. On iOS the system's Face ID sheet DISMISSES the popup (build 15 on a
+  // device: Face ID came up, and afterwards there was no popup): if the popup's going away locked the vault, the
+  // unlock it had just asked for would be thrown away, and opening the popup again would only ask again. The unlock
+  // belongs to the worker and lasts its 90 seconds; opening the popup again within them shows the list. Lock, in the
+  // popup, ends it at once.
 }
 
 /** Safari on iOS: the server comes from the andvari app. */

@@ -10,7 +10,8 @@ import type { BuildTarget } from "./buildtarget.ts";
  *  - `vaultSecret` answers with ONE thing of one login, for the item id asked: its username and password, or its
  *    current one-time code. Never both in one answer.
  * This worker keeps the list and the handler's ticket in memory only ([AppVault]); nothing decrypted is written to any
- * storage, and both are dropped when the popup closes, on Lock, and after [APP_VAULT_LIFETIME_MS].
+ * storage, and both are dropped on Lock and after [APP_VAULT_LIFETIME_MS]. They are NOT tied to the popup's page: on
+ * iOS the Face ID sheet dismisses the popup, and the unlock has to be there when it is opened again.
  *
  * LEAF module: no chrome import. The worker passes the native-message call in.
  */
