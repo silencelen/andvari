@@ -275,6 +275,15 @@ final class AppModel: ObservableObject {
         controller.discardPendingSave(id: id)
     }
 
+    /// Take back one login the app saved by itself at unlock.
+    func undoAppliedSave(_ id: String) async -> Outcome {
+        await run { try await $0.undoAppliedSave(id: id) }
+    }
+
+    func dismissAppliedSaves() {
+        controller.dismissAppliedSaves()
+    }
+
     func refresh() async -> Outcome {
         await run { try await $0.refresh() }
     }
