@@ -116,6 +116,12 @@ interface SessionPersistence {
     /** The stored session, or null. Carries its own origin; see [StoredSession.baseUrl]. */
     fun load(): StoredSession?
 
+    /**
+     * Whose session is stored, read without its tokens: for a process that must never hold them (the iOS extensions),
+     * which fills only for the account that is signed in now. Null when no session is stored.
+     */
+    fun storedIdentity(): StoredIdentity? = load()?.let { StoredIdentity(it.baseUrl, it.userId, it.email) }
+
     fun save(s: StoredSession)
 
     /** Persist a rotation; null is the refused-refresh path: the stored session is over. */
@@ -208,3 +214,6 @@ fun SessionPersistence.updateTokensFor(owner: TokenOwner, t: Tokens?) {
  */
 fun sessionOriginForBackfill(baseUrl: String, pending: PendingServer?): String? =
     if (pending != null && !switchDropsSession(pending.origin, baseUrl)) null else baseUrl
+
+/** The account a stored session belongs to, without its tokens ([SessionPersistence.storedIdentity]). */
+data class StoredIdentity(val baseUrl: String, val userId: String, val email: String)

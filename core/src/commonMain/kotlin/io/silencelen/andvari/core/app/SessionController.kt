@@ -11,6 +11,7 @@ import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.CaptureConfirm
@@ -629,6 +630,7 @@ open class SessionController(
         }
         session.lock() // the engine releases its cache before the cache is deleted
         zeroSecrets()
+        dropFillSnapshot() // whatever the stored session says: nothing shared with the extensions outlives a sign-out
         stored?.userId?.let { userId ->
             // §4.2: the namespace of the origin the session lived at; other origins are never touched.
             store.baseUrl?.let(OriginCanon::originKey)?.let { originKey ->
@@ -875,12 +877,22 @@ open class SessionController(
                 fillSnapshots.delete()
                 return
             }
+            // Only what this app shows: the login items its engine opened, and the vault and grant rows of the vaults
+            // they live in. The engine's trust state (held vaults, held key tags) stays in the app; a row it refused or
+            // set aside is not in the snapshot, so the extension cannot open what the app would not.
+            val shown = live.engine.items().filter { it.doc.type == "login" }
+            val ids = shown.mapTo(HashSet()) { it.itemId }
+            val vaultIds = shown.mapTo(HashSet()) { it.vaultId }
             val snap = FillSnapshot(
                 origin = OriginCanon.canonicalOrigin(origin), userId = stored.userId, email = stored.email, keys = keys,
-                vaults = live.engine.vaultRows(), grants = live.engine.grants(), items = live.engine.envelopes(), writtenAtMs = clocks.wallMs(),
+                vaults = live.engine.vaultRows().filter { it.vaultId in vaultIds },
+                grants = live.engine.grants().filter { it.vaultId in vaultIds },
+                items = live.engine.envelopes().filter { it.itemId in ids },
+                writtenAtMs = clocks.wallMs(),
             )
-            fillSnapshots.write(snap.encode())
-        }
+            // A snapshot that could not be replaced is removed: a stale one must not outlive what it mirrored.
+            if (!fillSnapshots.write(snap.encode())) fillSnapshots.delete()
+        }.onFailure { runCatching { fillSnapshots.delete() } }
     }
 
     /** Everything the extensions share for one account goes together: the snapshot, the save key and the queued saves. */
@@ -976,7 +988,9 @@ open class SessionController(
         if (!coordinator.cacheAllowed(originKey)) return@guarded emptyList()
         live.engine.items().flatMap { item ->
             val login = item.doc.login?.takeIf { item.doc.type == "login" && !it.username.isNullOrEmpty() } ?: return@flatMap emptyList()
-            login.uris.mapNotNull { UriMatch.normalizeHost(it) }.distinct().map { CredentialIdentity(item.itemId, it, login.username!!, !login.totp.isNullOrEmpty()) }
+            // Web addresses only: an app-package address (androidapp://…) names an Android app, never a domain.
+            login.uris.mapNotNull { (UriMatch.parseSavedUri(it) as? SavedUri.Web)?.host }.distinct()
+                .map { CredentialIdentity(item.itemId, it, login.username!!, !login.totp.isNullOrEmpty()) }
         }
     }
 

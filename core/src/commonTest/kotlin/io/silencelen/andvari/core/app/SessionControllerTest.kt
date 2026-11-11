@@ -84,7 +84,7 @@ open class SessionControllerTest {
             )
         }
 
-        val item = ItemDoc(type = "login", name = "Example", login = LoginData(username = "fam", password = "hunter2", uris = listOf("https://login.example.com/x"), totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"))
+        val item = ItemDoc(type = "login", name = "Example", login = LoginData(username = "fam", password = "hunter2", uris = listOf("https://login.example.com/x", "androidapp://com.foo.app"), totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"))
         const val ITEM_ID = "00000000-0000-4000-8000-0000000000c1"
 
         /** The item sealed under the personal vault's key, as a cache holds it. */
@@ -356,6 +356,89 @@ open class SessionControllerTest {
         assertTrue(calls.isEmpty(), "the extension never contacts the server")
         fill.close()
         assertNull(fill.credential(ITEM_ID), "closed: the keys are gone")
+    }
+
+    @Test
+    fun aSuggestionsRecordIsFilledOnlyForItsOwnSiteAndNeverOverPlainHttp() = test {
+        unlocked()
+        controller.enableQuickUnlock(null)
+        val fill = autofill()
+        quickKeys.next = { QuickRecover.Ok(enrolled.account.uvkCopyForPlatformWrap()) }
+        assertEquals(FillUnlock.Unlocked, fill.unlock(BiometricHost.None))
+        assertTrue(fill.matches(ITEM_ID, listOf("login.example.com")))
+        assertTrue(fill.matches(ITEM_ID, listOf("https://login.example.com/sign-in")))
+        assertFalse(fill.matches(ITEM_ID, listOf("evil.example.net")), "a record offered for another site is not filled there")
+        assertFalse(fill.matches(ITEM_ID, listOf("com.foo.app")), "an Android app address is not a web domain")
+        assertFalse(fill.matches(ITEM_ID, listOf("http://login.example.com/sign-in")), "saved for https: not for the cleartext page")
+        assertFalse(fill.logins(listOf("http://login.example.com/")).single().matches)
+        assertFalse(fill.matches("no-such-item", listOf("login.example.com")))
+    }
+
+    @Test
+    fun theSnapshotHoldsOnlyWhatTheAppShows() = test {
+        seedSession()
+        // A row the app's engine cannot open (a vault it holds no key for): the app lists nothing for it.
+        val cache = namespaces.caches.getValue("$homeKey/${reg.userId}")
+        cache.upsertItem(sealed.copy(itemId = "00000000-0000-4000-8000-0000000000c2", vaultId = "00000000-0000-4000-8000-0000000000ff"), null)
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        val snap = assertNotNull(FillSnapshot.decode(assertNotNull(snapshots.bytes)))
+        assertEquals(listOf(ITEM_ID), snap.items.map { it.itemId }, "a row the app does not show is not handed to the extension")
+        assertTrue(snap.vaults.all { it.vaultId == reg.personalVault.vaultId } && snap.grants.all { it.vaultId == reg.personalVault.vaultId })
+    }
+
+    @Test
+    fun anUnlockThatFinishesAfterTheFillWasClosedKeepsNothing() = test {
+        unlocked()
+        controller.enableQuickUnlock(null)
+        val fill = autofill()
+        quickKeys.next = {
+            fill.close() // the sheet went away while Face ID was up
+            QuickRecover.Ok(enrolled.account.uvkCopyForPlatformWrap())
+        }
+        assertEquals(FillUnlock.Cancelled, fill.unlock(BiometricHost.None))
+        assertNull(fill.credential(ITEM_ID))
+        assertTrue(fill.logins(listOf("login.example.com")).isEmpty())
+    }
+
+    @Test
+    fun theExtensionFillsOnlyForTheAccountThatIsSignedInNow() = test {
+        unlocked()
+        controller.enableQuickUnlock(null)
+        val fill = autofill()
+        assertEquals(FillAvailability.Ready(EMAIL), fill.availability())
+        // The session changed hands (or ended) and a snapshot was left behind.
+        store.save(StoredSession(HOME, "someone-else", "other@example.com", "a2", "r2"))
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), fill.availability())
+        val prompts = quickKeys.prompts
+        assertEquals(FillUnlock.OpenApp(AutofillVault.NO_SNAPSHOT), fill.unlock(BiometricHost.None))
+        assertEquals(prompts, quickKeys.prompts, "no prompt for an account that is not signed in")
+    }
+
+    @Test
+    fun aKeyThatNoLongerOpensTheAccountIsWipedByTheExtensionToo() = test {
+        unlocked()
+        controller.enableQuickUnlock(null)
+        val fill = autofill()
+        quickKeys.next = { QuickRecover.Ok(crypto.randomBytes(32)) } // a stale or foreign UVK
+        assertEquals(FillUnlock.OpenApp(AutofillVault.USE_APP), fill.unlock(BiometricHost.None))
+        assertTrue("$homeKey/${reg.userId}" in quickKeys.wiped, "the next unlock is the password's, in the app")
+    }
+
+    @Test
+    fun aSnapshotThatCannotBeReplacedIsRemovedAndSignOutAlwaysRemovesIt() = test {
+        unlocked()
+        assertNotNull(snapshots.bytes)
+        snapshots.refuse = true
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD)) // every landing rewrites the snapshot
+        assertNull(snapshots.bytes, "a stale snapshot does not outlive a failed write")
+        snapshots.refuse = false
+        snapshots.bytes = "left behind".encodeToByteArray()
+        store.clear() // the stored session is already gone when sign-out runs
+        controller.signOut()
+        assertNull(snapshots.bytes)
     }
 
     @Test
