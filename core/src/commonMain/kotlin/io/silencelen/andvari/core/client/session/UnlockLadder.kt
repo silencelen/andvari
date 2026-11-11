@@ -121,28 +121,15 @@ class UnlockLadder(
     private val quickKeys: QuickUnlockKeys,
     private val clocks: Clocks,
 ) {
+    private val gates = QuickGates(store, quickKeys, clocks)
+
     /**
      * The quick-unlock gates for [userId] at the origin the client dials (spec 01 §8.1): the policy permits a
      * durable unlock secret and was seen within 7 days (A4), a strong biometric is usable, a key is wrapped, and
      * the last full-password unlock is recent enough (A1/A2). Reading it advances the high-water clock, as every
      * freshness check does.
      */
-    fun quickStatus(userId: String?): QuickStatus {
-        val originKey = store.baseUrl?.let(OriginCanon::originKey)
-        val origin = originKey?.let(store::origin)
-        val permits = origin != null && QuickUnlockRules.policyPermits(origin.cacheAllowed, origin.policyFetchedAt, clocks.wallMs())
-        val eligible = permits && quickKeys.hasStrongBiometric()
-        val enrolled = originKey != null && userId != null && quickKeys.isEnrolled(originKey, userId)
-        val fresh = enrolled && isFresh(originKey, userId)
-        val refusal = when {
-            !permits -> QuickGate.POLICY
-            !eligible -> QuickGate.NO_BIOMETRIC
-            !enrolled -> QuickGate.NOT_ENROLLED
-            !fresh -> QuickGate.EXPIRED
-            else -> null
-        }
-        return QuickStatus(eligible, enrolled, fresh, refusal)
-    }
+    fun quickStatus(userId: String?): QuickStatus = gates.status(userId)
 
     /**
      * Turn quick unlock on for the live session's account: the platform's prompt consents and the UVK is wrapped under
@@ -343,26 +330,4 @@ class UnlockLadder(
     /** The self-identity pin of [stored]'s account at [originKey] (design §2.4): this device's record wins over the server's. */
     private fun pinFor(originKey: String, stored: StoredSession): ByteArray? =
         store.origin(originKey).identityPins().pinFor(stored.email, stored.userId)
-
-    /** A1/A2 freshness of [userId]'s last full-password unlock at [originKey], against the monotonic high-water clock. */
-    private fun isFresh(originKey: String, userId: String): Boolean {
-        val now = clocks.wallMs()
-        val elapsedNow = clocks.monotonicMs()
-        val highWater = store.bumpHighWater(now) // monotonically non-decreasing
-        val origin = store.origin(originKey)
-        val stamp = origin.passwordStamp(userId)
-        return QuickUnlockRules.isFreshPure(
-            QuickUnlockRules.FreshnessInputs(
-                nowMs = now,
-                elapsedNowMs = elapsedNow,
-                stampWallMs = stamp?.wallMs ?: 0L,
-                stampElapsedMs = stamp?.monotonicMs ?: 0L,
-                stampBootRefMs = stamp?.bootRefMs ?: 0L,
-                highWaterWallMs = highWater,
-                serverFloorMs = origin.serverTimeFloorMs,
-                bootIdNow = clocks.bootId(),
-                stampBootId = stamp?.bootId,
-            ),
-        )
-    }
 }

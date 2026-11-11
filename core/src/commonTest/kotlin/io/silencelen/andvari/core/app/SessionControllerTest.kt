@@ -109,6 +109,7 @@ open class SessionControllerTest {
         val calls = mutableListOf<String>()
         val seen = mutableListOf<AppState>()
         val shared = mutableListOf<String?>()
+        val snapshots = InMemoryFillSnapshots()
 
         /** Route answers by path suffix; a test swaps them. The account keys are offline by default (cached keys open). */
         val routes = mutableMapOf<String, suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData>(
@@ -133,7 +134,10 @@ open class SessionControllerTest {
             override val deviceName = "test device"
         }
 
-        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0) { shared += it }
+        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots)
+
+        /** The AutoFill extension's view of the same shared state: its own vault object, as in another process. */
+        fun autofill() = AutofillVault(store, snapshots, quickKeys, clocks, http)
 
         /** Let the work a landing started on the UI loop finish, until [done]. */
         suspend fun settle(done: () -> Boolean) = withTimeout(10_000) {
@@ -318,6 +322,81 @@ open class SessionControllerTest {
         assertEquals(clocks.wall, store.origin(homeKey).policyFetchedAt)
         assertEquals(QuickGate.NOT_ENROLLED, controller.state.quickUnlock.refusal)
         assertNull(controller.state.quickUnlock.reason, "turned off is not a problem to explain")
+    }
+
+    // ---- the AutoFill extension's snapshot ----
+
+    @Test
+    fun theExtensionFillsFromTheSnapshotWithTheQuickUnlockKeyAndNoNetwork() = test {
+        unlocked()
+        val fill = autofill()
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NOT_ENROLLED), fill.availability(), "quick unlock is off: the extension cannot unlock")
+        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
+        controller.onBackground() // the app is locked and suspended while the extension runs
+        assertEquals(FillAvailability.Ready(EMAIL), fill.availability())
+        assertTrue(fill.logins(listOf("login.example.com")).isEmpty(), "nothing is readable before the prompt")
+
+        quickKeys.next = { QuickRecover.Fallback(null) }
+        assertEquals(FillUnlock.Cancelled, fill.unlock(BiometricHost.None))
+        assertNull(fill.credential(ITEM_ID))
+
+        calls.clear()
+        quickKeys.next = { QuickRecover.Ok(enrolled.account.uvkCopyForPlatformWrap()) }
+        assertEquals(FillUnlock.Unlocked, fill.unlock(BiometricHost.None))
+        val login = fill.logins(listOf("https://login.example.com/sign-in")).single()
+        assertTrue(login.matches)
+        assertEquals("fam", login.username)
+        assertFalse(fill.logins(listOf("evil.example.net")).single().matches, "listed, but not as a match for another site")
+        assertEquals(FillCredential("fam", "hunter2"), fill.credential(ITEM_ID))
+        assertEquals(6, fill.oneTimeCode(ITEM_ID)?.length)
+        assertTrue(calls.isEmpty(), "the extension never contacts the server")
+        fill.close()
+        assertNull(fill.credential(ITEM_ID), "closed: the keys are gone")
+    }
+
+    @Test
+    fun theSnapshotHoldsNoPlaintextAndNoToken() = test {
+        unlocked()
+        val text = assertNotNull(snapshots.bytes).decodeToString()
+        for (secret in listOf("hunter2", "JBSWY3DPEHPK3PXP", "Example", "\"a1\"", "\"r1\"", "accessToken", "refreshToken", PASSWORD)) assertFalse(text.contains(secret), secret)
+        val snap = assertNotNull(FillSnapshot.decode(snapshots.bytes!!))
+        assertEquals(HOME, snap.origin)
+        assertEquals(listOf(ITEM_ID), snap.items.map { it.itemId })
+    }
+
+    @Test
+    fun theExtensionsGatesAreTheAppsGates() = test {
+        unlocked()
+        controller.enableQuickUnlock(null)
+        val fill = autofill()
+        clocks.wall += 8 * DAY // the policy was last seen over 7 days ago
+        clocks.mono += 8 * DAY
+        assertEquals(FillAvailability.OpenApp(AutofillVault.POLICY_UNSEEN), fill.availability())
+        quickKeys.next = { QuickRecover.Ok(enrolled.account.uvkCopyForPlatformWrap()) }
+        val prompts = quickKeys.prompts
+        assertEquals(FillUnlock.OpenApp(AutofillVault.POLICY_UNSEEN), fill.unlock(BiometricHost.None))
+        assertEquals(prompts, quickKeys.prompts, "refused before any prompt")
+    }
+
+    @Test
+    fun aForbiddingPolicyLeavesNoSnapshotAndSignOutRemovesIt() = test {
+        seedSession()
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(offlineCacheAllowed = false)), HttpStatusCode.OK, headers) }
+        controller.startAndLand()
+        controller.unlock(PASSWORD)
+        assertNull(snapshots.bytes, "no offline cache, so no snapshot")
+        assertTrue(controller.credentialIdentities().isEmpty())
+    }
+
+    @Test
+    fun signOutRemovesTheSnapshotAndTheSuggestions() = test {
+        unlocked()
+        assertEquals(listOf(CredentialIdentity(ITEM_ID, "login.example.com", "fam", true)), controller.credentialIdentities())
+        assertNotNull(snapshots.bytes)
+        controller.signOut()
+        assertNull(snapshots.bytes)
+        assertTrue(controller.credentialIdentities().isEmpty())
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability())
     }
 
     @Test

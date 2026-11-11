@@ -19,3 +19,13 @@ fun HttpClient.httpsOnly(exempt: Set<String>): HttpClient {
     }
     return this
 }
+
+/**
+ * A client that sends nothing: every request fails as an [IOException] before it leaves. The iOS AutoFill extension
+ * builds its read-only engine on one, because the account has a single token holder and the extension is not it
+ * (design 2026-11-09, "AutoFill").
+ */
+fun HttpClient.offlineOnly(): HttpClient {
+    plugin(HttpSend).intercept { request -> throw IOException("this process never contacts ${request.url.host}") }
+    return this
+}
