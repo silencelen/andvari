@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 
 /// iOS itself: Settings, Safari, and the pieces of the keyboard that belong to AutoFill.
@@ -219,6 +220,33 @@ extension UITestCase {
             }
         }
         return nil
+    }
+
+    /// Whether iOS has reacted to a focused field: Safari's offer, or a keyboard.
+    var fieldHasInput: Bool { fillOfferButton.exists || safari.keyboards.firstMatch.exists }
+
+    /// Tap a page's field until iOS reacts. A Safari that has just started sometimes takes the first tap as focus
+    /// only, with neither a keyboard nor an offer.
+    func focus(_ field: XCUIElement, heading: String) {
+        field.tap()
+        if waitUntil(4, { self.fieldHasInput }) { return }
+        safari.webViews.staticTexts[heading].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1)
+        field.tap()
+        _ = waitUntil(5) { self.fieldHasInput }
+    }
+
+    /// The codes RFC 6238 gives for the seeded secret around now (one step either side).
+    func expectedOneTimeCodes() -> [String] {
+        let key = SymmetricKey(data: Data("12345678901234567890".utf8))
+        let step = UInt64(Date().timeIntervalSince1970) / 30
+        return [step - 1, step, step + 1].map { counter in
+            var bigEndian = counter.bigEndian
+            let mac = Array(HMAC<Insecure.SHA1>.authenticationCode(for: Data(bytes: &bigEndian, count: 8), using: key))
+            let offset = Int(mac[19] & 0x0f)
+            let binary = (UInt32(mac[offset] & 0x7f) << 24) | (UInt32(mac[offset + 1]) << 16) | (UInt32(mac[offset + 2]) << 8) | UInt32(mac[offset + 3])
+            return String(format: "%06d", binary % 1_000_000)
+        }
     }
 
     func webField(_ label: String) -> XCUIElement {
