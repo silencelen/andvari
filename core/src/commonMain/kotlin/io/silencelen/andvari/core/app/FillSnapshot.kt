@@ -60,7 +60,11 @@ class InMemoryFillSnapshots : FillSnapshotStore {
     var bytes: ByteArray? = null
     var writes = 0
 
+    /** When set, a write fails and changes nothing (a full disk). */
+    var refuse = false
+
     override fun write(bytes: ByteArray): Boolean {
+        if (refuse) return false
         this.bytes = bytes
         writes++
         return true

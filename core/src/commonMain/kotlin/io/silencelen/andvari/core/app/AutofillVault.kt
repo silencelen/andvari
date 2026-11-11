@@ -16,6 +16,7 @@ import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.offlineOnly
+import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlin.coroutines.cancellation.CancellationException
@@ -72,13 +73,22 @@ class AutofillVault(
     private val crypto by lazy { createCryptoProvider() }
     private var open: Open? = null
 
+    /** Bumped by every [unlock] and [close]: an unlock that finishes after a later close keeps nothing. */
+    private var generation = 0
+
     private class Open(val account: Account, val engine: SyncEngine, val api: AndvariApi)
 
-    /** The snapshot of the origin the app dials, or null. */
+    /**
+     * The snapshot of the account that is signed in at the origin the app dials, or null. The stored session is read
+     * without its tokens ([SessionPersistence.storedIdentity]): a snapshot left behind by another account, or by a
+     * session that has ended, opens nothing.
+     */
     private fun snapshot(): FillSnapshot? {
         val dialed = store.baseUrl ?: return null
+        val who = store.storedIdentity() ?: return null
         val snap = snapshots.read()?.let(FillSnapshot::decode) ?: return null
-        return snap.takeIf { runCatching { OriginCanon.originKey(it.origin) == OriginCanon.originKey(dialed) }.getOrDefault(false) }
+        val sameOrigin = runCatching { OriginCanon.originKey(snap.origin) == OriginCanon.originKey(dialed) && OriginCanon.originKey(who.baseUrl) == OriginCanon.originKey(dialed) }.getOrDefault(false)
+        return snap.takeIf { sameOrigin && it.userId == who.userId }
     }
 
     private fun refusal(gate: QuickGate, originKey: String): String = when (gate) {
@@ -108,6 +118,7 @@ class AutofillVault(
     @Throws(CancellationException::class)
     suspend fun unlock(host: BiometricHost): FillUnlock {
         close()
+        val mine = generation
         val snap = snapshot() ?: return FillUnlock.OpenApp(NO_SNAPSHOT)
         val originKey = OriginCanon.originKey(snap.origin)
         gates.status(snap.userId).refusal?.let { return FillUnlock.OpenApp(refusal(it, originKey)) }
@@ -121,13 +132,27 @@ class AutofillVault(
         var api: AndvariApi? = null
         try {
             val pin = store.origin(originKey).identityPins().pinFor(snap.email, snap.userId)
-            account = Account.unlockWithUvk(snap.userId, uvk, snap.keys, selfIdentityPub = pin).also { taken = true }
+            account = try {
+                Account.unlockWithUvk(snap.userId, uvk, snap.keys, selfIdentityPub = pin).also { taken = true }
+            } catch (e: CryptoException) {
+                // As the app's ladder (spec 01 §5): a seed that will not open under the recovered UVK is a stale or
+                // foreign key, so it is wiped and the next unlock is the password's, in the app. An identity
+                // mismatch is a security fault: the enrollment stays as evidence.
+                if (e.message?.contains("identity key mismatch") != true) quickKeys.wipe(originKey, snap.userId)
+                throw e
+            }
             val cache = InMemoryVaultCache()
             snap.vaults.forEach(cache::upsertVault)
             snap.grants.forEach(cache::upsertGrant)
             snap.items.forEach { cache.upsertItem(it, null) }
             api = AndvariApi(snap.origin, http.create().offlineOnly(), platform = http.wirePlatform)
             val engine = SyncEngine(api, account, cache).also { it.hydrate() }
+            // The fill was closed (or started again) while the prompt was up: nothing is kept.
+            if (mine != generation) {
+                account.wipe()
+                api.close()
+                return FillUnlock.Cancelled
+            }
             open = Open(account, engine, api)
             return FillUnlock.Unlocked
         } catch (t: Throwable) {
@@ -139,10 +164,26 @@ class AutofillVault(
         }
     }
 
-    /** The logins, those matching one of [hosts] first. Empty while locked. */
+    /**
+     * Whether a login's web addresses match one of the service [identifiers] iOS asked for (a domain or a URL). The
+     * host rule is the shared one ([UriMatch]). A plain-http page matches only an address saved as http: a login saved
+     * for https is not offered to the cleartext page of the same host.
+     */
+    private fun matchesAny(uris: List<String>, identifiers: List<String>): Boolean = identifiers.any { identifier ->
+        val host = UriMatch.normalizeHost(identifier) ?: return@any false
+        val offered = if (identifier.trim().startsWith("http://", ignoreCase = true)) uris.filter { it.trim().startsWith("http://", ignoreCase = true) } else uris
+        UriMatch.matchLogins(offered, FillTarget(host, ""))
+    }
+
+    /** Whether [itemId] is a login for one of [identifiers]: asked before a suggestion's record is filled. */
+    fun matches(itemId: String, identifiers: List<String>): Boolean {
+        val login = open?.engine?.item(itemId)?.doc?.login ?: return false
+        return matchesAny(login.uris, identifiers)
+    }
+
+    /** The logins, those matching one of [hosts] (domains or URLs) first. Empty while locked. */
     fun logins(hosts: List<String>): List<FillLogin> {
         val live = open ?: return emptyList()
-        val targets = hosts.mapNotNull { UriMatch.normalizeHost(it) }.map { FillTarget(it, "") }
         return live.engine.items()
             .filter { it.doc.type == "login" && it.doc.login != null }
             .map { item ->
@@ -152,7 +193,7 @@ class AutofillVault(
                     name = item.doc.name,
                     username = login.username.orEmpty(),
                     host = login.uris.firstOrNull()?.let { UriMatch.normalizeHostUnicode(it) ?: UriMatch.normalizeHost(it) },
-                    matches = targets.any { UriMatch.matchLogins(login.uris, it) },
+                    matches = matchesAny(login.uris, hosts),
                     hasTotp = !login.totp.isNullOrEmpty(),
                 )
             }
@@ -173,6 +214,7 @@ class AutofillVault(
 
     /** End the fill: the account's keys are zeroed. Idempotent. */
     fun close() {
+        generation++
         val live = open ?: return
         open = null
         runCatching { live.account.wipe() }

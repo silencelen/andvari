@@ -137,6 +137,11 @@ class PrefsSessionPersistence(
 
     // ---- under [lock] ----
 
+    /** The session's non-secret half only: the secret store is not read, so a process without it still knows who is signed in. */
+    override fun storedIdentity(): StoredIdentity? = synchronized(lock) {
+        prefs.getString(SESSION)?.let { runCatching { json.decodeFromString(SessionMeta.serializer(), it) }.getOrNull() }?.let { StoredIdentity(it.baseUrl, it.userId, it.email) }
+    }
+
     private fun loadLocked(): StoredSession? {
         val meta = prefs.getString(SESSION)?.let { runCatching { json.decodeFromString(SessionMeta.serializer(), it) }.getOrNull() } ?: return null
         val pair = secrets.read(TOKENS)?.let { runCatching { json.decodeFromString(TokenPair.serializer(), it) }.getOrNull() } ?: return null
