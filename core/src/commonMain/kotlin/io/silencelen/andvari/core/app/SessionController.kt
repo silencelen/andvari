@@ -11,6 +11,7 @@ import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.autofill.UriMatch
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.CaptureConfirm
 import io.silencelen.andvari.core.client.session.CaptureSetup
@@ -82,6 +83,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param biometricHost what the platform's biometric prompt needs, with the reason it shows.
  * @param tickMs the idle check's period while started; 0 runs no ticker (tests drive [tick]).
  * @param serverShare where the confirmed server is published for the app's own extensions.
+ * @param fillSnapshots where the AutoFill extension's encrypted snapshot is kept; nothing is written by default.
  */
 open class SessionController(
     private val store: SessionPersistence,
@@ -94,6 +96,7 @@ open class SessionController(
     private val biometricHost: (reason: String?) -> BiometricHost,
     private val tickMs: Long,
     private val serverShare: ServerShare = ServerShare {},
+    private val fillSnapshots: FillSnapshotStore = FillSnapshotStore.None,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + uiContext)
     private val session = VaultSession(clocks)
@@ -102,7 +105,10 @@ open class SessionController(
     private val coordinator = PolicyCoordinator(
         store,
         object : OfflineArtifacts {
-            override fun deleteVaultCache(originKey: String, userId: String) = namespaces.deleteVaultCache(originKey, userId)
+            override fun deleteVaultCache(originKey: String, userId: String) {
+                namespaces.deleteVaultCache(originKey, userId)
+                dropFillSnapshot() // the extension's copy of the same rows goes with the cache, on every purge
+            }
             override fun wipeQuickUnlock(originKey: String, userId: String) = quickKeys.wipe(originKey, userId)
         },
         session,
@@ -244,7 +250,10 @@ open class SessionController(
         when (val r = serverSwitch.connect(target)) {
             is SwitchResult.Switched -> {
                 gateTarget = null
-                if (r.droppedSession) zeroSecrets() // the old server's session and its in-flight secrets end here
+                if (r.droppedSession) {
+                    zeroSecrets() // the old server's session and its in-flight secrets end here
+                    dropFillSnapshot()
+                }
                 update { cleared(it, null).copy(trustGate = null, server = store.baseUrl, policy = null, serverUnreachable = false) }
                 landOnStoredState(probe = true)
                 ActionResult.Ok
@@ -548,6 +557,7 @@ open class SessionController(
         val outcome = live.engine.save(itemId, doc, existing?.vaultId)
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
+        writeFillSnapshot()
         ActionResult.Ok
     }
 
@@ -559,6 +569,7 @@ open class SessionController(
         val outcome = live.engine.remove(itemId)
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
+        writeFillSnapshot()
         ActionResult.Ok
     }
 
@@ -575,6 +586,7 @@ open class SessionController(
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         update { it.copy(busy = false, items = summaries(it.query), notice = SYNCED) }
+        writeFillSnapshot()
         ActionResult.Ok
     }
 
@@ -616,6 +628,7 @@ open class SessionController(
             // §4.2: the namespace of the origin the session lived at; other origins are never touched.
             store.baseUrl?.let(OriginCanon::originKey)?.let { originKey ->
                 namespaces.deleteVaultCache(originKey, userId)
+                dropFillSnapshot()
                 quickKeys.wipe(originKey, userId) // a sign-out always takes the quick-unlock key and its stamp (spec 01 §8.1)
                 store.origin(originKey).clearPasswordStamp(userId)
             }
@@ -734,7 +747,10 @@ open class SessionController(
     /** The tokenless policy probe of the origin the client dials; a forbidding answer purges that origin's namespace. */
     private suspend fun probePolicy() {
         when (val p = serverSwitch.probePolicy()) {
-            is PolicyProbe.Applied -> update { it.copy(policy = policyView(p.policy), serverUnreachable = false) }
+            is PolicyProbe.Applied -> {
+                update { it.copy(policy = policyView(p.policy), serverUnreachable = false) }
+                if (!p.policy.offlineCacheAllowed) dropFillSnapshot() else writeFillSnapshot()
+            }
             is PolicyProbe.Failed -> if (p.current) update { it.copy(policy = null, serverUnreachable = true) }
             PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
         }
@@ -833,6 +849,51 @@ open class SessionController(
         }
         refreshQuick()
         refreshPolicyIfStale()
+        writeFillSnapshot()
+    }
+
+    /**
+     * The AutoFill extension's snapshot (design 2026-11-09): the live engine's rows, still under their vault keys,
+     * replaced after every landing, sync and edit. Nothing is written, and the last one is removed, when the origin's
+     * policy forbids an offline cache. A row the server has not confirmed yet is not in it.
+     */
+    private fun writeFillSnapshot() {
+        if (fillSnapshots === FillSnapshotStore.None) return
+        runCatching {
+            val live = session.get() ?: return
+            val origin = store.baseUrl ?: return
+            val originKey = OriginCanon.originKey(origin)
+            val stored = store.load()
+            val keys = store.origin(originKey).loadAccountKeys(live.account.userId)
+            if (!coordinator.cacheAllowed(originKey) || stored == null || keys == null || stored.userId != live.account.userId) {
+                fillSnapshots.delete()
+                return
+            }
+            val snap = FillSnapshot(
+                origin = OriginCanon.canonicalOrigin(origin), userId = stored.userId, email = stored.email, keys = keys,
+                vaults = live.engine.vaultRows(), grants = live.engine.grants(), items = live.engine.envelopes(), writtenAtMs = clocks.wallMs(),
+            )
+            fillSnapshots.write(snap.encode())
+        }
+    }
+
+    private fun dropFillSnapshot() {
+        runCatching { fillSnapshots.delete() }
+    }
+
+    /**
+     * What the system's AutoFill suggestions may know (iOS `ASCredentialIdentityStore`): one entry per web address of
+     * each login that has a username. Empty while locked, and when the policy forbids an offline cache, so the host
+     * then clears the system's copy. No password leaves through here.
+     */
+    fun credentialIdentities(): List<CredentialIdentity> = guarded({ emptyList() }) {
+        val live = session.get() ?: return@guarded emptyList()
+        val originKey = store.baseUrl?.let(OriginCanon::originKey) ?: return@guarded emptyList()
+        if (!coordinator.cacheAllowed(originKey)) return@guarded emptyList()
+        live.engine.items().flatMap { item ->
+            val login = item.doc.login?.takeIf { item.doc.type == "login" && !it.username.isNullOrEmpty() } ?: return@flatMap emptyList()
+            login.uris.mapNotNull { UriMatch.normalizeHost(it) }.distinct().map { CredentialIdentity(item.itemId, it, login.username!!, !login.totp.isNullOrEmpty()) }
+        }
     }
 
     private fun showFirstSync(first: FirstSync) {
@@ -979,6 +1040,7 @@ open class SessionController(
             try {
                 syncNow(live.engine)
                 if (session.get() === live) update { it.copy(syncing = false, items = summaries(it.query)) } else update { it.copy(syncing = false) }
+                writeFillSnapshot()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 if (t is UpgradeRequiredException) {

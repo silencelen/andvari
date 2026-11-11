@@ -251,3 +251,15 @@ sealed class ServerChoice {
 interface Subscription {
     fun close()
 }
+
+/**
+ * A login as the system's AutoFill suggestions need it (iOS `ASCredentialIdentityStore`): the host and the username
+ * in the clear, never a password. One per web address of a login.
+ */
+data class CredentialIdentity(
+    val itemId: String,
+    /** The normalized host of one of the login's web addresses. */
+    val host: String,
+    val username: String,
+    val hasTotp: Boolean,
+)
