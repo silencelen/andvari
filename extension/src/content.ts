@@ -758,7 +758,13 @@ async function maybeCardChip(target: EventTarget | null, viaClick = false): Prom
 
 let lastOpen: { input: HTMLInputElement; t: number } | null = null;
 
+// The Safari build has no in-page login menu: iOS's own AutoFill fills from the andvari app. The literal comparison is
+// what esbuild folds (build.mjs defines the target), so the menu's code is cut from that bundle, not just skipped;
+// loaded unbundled (tests), the target is undefined and the menu is on. buildtarget.loginFillOverlayAllowed is the rule.
+declare const __ANDVARI_TARGET__: string | undefined;
+
 function maybeOpen(target: EventTarget | null): void {
+  if (__ANDVARI_TARGET__ === "safari") return;
   if (filling || !(target instanceof HTMLInputElement)) return;
   const f = formFor(target);
   if (!f) return;
@@ -779,7 +785,7 @@ function maybeOpen(target: EventTarget | null): void {
   const now = Date.now();
   if (lastOpen && lastOpen.input === target && now - lastOpen.t < 400) return; // focusin+click pair
   lastOpen = { input: target, t: now };
-  void openFor(target, f);
+  if (__ANDVARI_TARGET__ !== "safari") void openFor(target, f); // the one call: folded away, the menu's code leaves the Safari bundle
 }
 
 async function openFor(anchor: HTMLInputElement, f: LoginForm): Promise<void> {

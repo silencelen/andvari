@@ -19,3 +19,9 @@ export const BUILD_TARGET: BuildTarget =
 export function selfUpdateChannelAllowed(target: BuildTarget = BUILD_TARGET): boolean {
   return target !== "safari";
 }
+
+/** On iOS the system's AutoFill fills logins (the andvari app's credential provider), so the Safari build never puts
+ *  its own fill menu on a login field. Save capture and the popup are unaffected. */
+export function loginFillOverlayAllowed(target: BuildTarget = BUILD_TARGET): boolean {
+  return target !== "safari";
+}
