@@ -51,6 +51,11 @@ openssl x509 -req -in "$WORK/site.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca.key" 
 
 nohup python3 "$HERE/serve-site.py" "$HERE/site" "$UITEST_SITE_PORT" "$UITEST_HTTP_PORT" "$WORK/site.pem" "$WORK/site.key" > "$WORK/site.log" 2>&1 &
 echo $! > "$WORK/site.pid"
-sleep 1
-kill -0 "$(cat "$WORK/site.pid")" || { cat "$WORK/site.log"; echo "the test site exited"; exit 1; }
+for _ in $(seq 1 30); do
+  curl -fsS -o /dev/null "http://127.0.0.1:$UITEST_HTTP_PORT/index.html" 2> /dev/null \
+    && curl -fsSk -o /dev/null "https://127.0.0.1:$UITEST_SITE_PORT/index.html" 2> /dev/null && break
+  kill -0 "$(cat "$WORK/site.pid")" 2> /dev/null || { cat "$WORK/site.log"; echo "the test site exited"; exit 1; }
+  sleep 1
+done
+curl -fsSk -o /dev/null "https://127.0.0.1:$UITEST_SITE_PORT/index.html" || { cat "$WORK/site.log"; echo "the test site never answered"; exit 1; }
 echo "backend up: $UITEST_SERVER_ORIGIN, $UITEST_SITE_ORIGIN, $UITEST_HTTP_ORIGIN"
