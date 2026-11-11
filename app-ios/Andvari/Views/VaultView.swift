@@ -308,9 +308,14 @@ private struct PendingSaveRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(pending.host)
+            Text(pending.plainHttp ? "http://\(pending.host)" : pending.host)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Palette.ink)
+            if pending.plainHttp {
+                Text("Captured on a page that was not encrypted.")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.danger)
+            }
             Text(pending.username.isEmpty ? "No username" : pending.username)
                 .font(.subheadline)
                 .foregroundStyle(Palette.inkDim)
