@@ -25,7 +25,9 @@ await esbuild.build({
     "kdf-worker": "src/kdf-worker.ts",
   },
   bundle: true,
-  format: "esm",
+  // Safari on iOS did not load the ES-module background page (2026-11), so that build is classic scripts throughout:
+  // each entry is one self-contained IIFE, which also loads unchanged from the pages' <script type="module"> tags.
+  format: target === "safari" ? "iife" : "esm",
   target: "es2022",
   outdir: "dist",
   logLevel: "info",
@@ -42,6 +44,10 @@ cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html 
 cpSync("theme-boot.js", "dist/theme-boot.js"); // H134 pre-paint theme stamp; <script>d by popup/options/connector (classic, not bundled — a deferred module flashes the wrong palette)
 cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backstop (E1-4); loads dist/offscreen.js
 cpSync("connector.html", "dist/connector.html"); // 0.17.0 biometric ceremony window; loads dist/connector.js + popup.css
+if (target === "safari") {
+  cpSync("safari-boot.js", "dist/safari-boot.js"); // the background page's first script: load marker + error capture
+  cpSync("safari-diag.js", "dist/safari-diag.js"); // the popup's reader for what it recorded
+}
 cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png
 cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip
 console.log(`built → dist/ (${target}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

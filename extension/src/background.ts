@@ -854,9 +854,9 @@ function brokerBioCeremony(req: BioReq): Promise<BioResult> {
 
 // The connector window closed without posting a result → the user dismissed the OS prompt / closed it
 // → cancel. (A posted result clears pendingBio first, so this no-ops for the normal path.)
-chrome.windows.onRemoved.addListener((wid) => {
+atLoad("windows.onRemoved", () => chrome.windows.onRemoved.addListener((wid) => {
   if (pendingBio && pendingBio.windowId === wid) resolvePendingBio({ ok: false, error: "connector closed" });
-});
+}));
 
 /** Sender-verified connector RPC. Only our own connector PAGE may drive a ceremony. The gate is the
  *  sender's extension-origin URL — NOT `sender.tab === undefined`: a `chrome.windows.create({type:
@@ -1021,8 +1021,26 @@ function persistTokens(): Promise<void> {
 }
 // ---- one-time per SW life; listeners MUST register synchronously (MV3 wake requirement) ----
 
-void chrome.action.setBadgeBackgroundColor({ color: BADGE_BG });
-void chrome.action.setBadgeTextColor({ color: BADGE_INK });
+/**
+ * One top-level registration. An engine that lacks the API (iOS Safari has no badge text colour, and may lack others)
+ * throws here, and at top level one throw ends the whole background page: every listener after it never registers and
+ * no message is answered. So each registration stands alone, and a failure is recorded where the Safari build's
+ * Details can show it (safari-boot.js).
+ */
+function atLoad(label: string, register: () => void): void {
+  try {
+    register();
+  } catch (e) {
+    try {
+      (globalThis as { __andvariBootRecord?: (label: string, e: unknown) => void }).__andvariBootRecord?.(label, e);
+    } catch {
+      /* nowhere to record it */
+    }
+  }
+}
+
+atLoad("action.setBadgeBackgroundColor", () => void chrome.action.setBadgeBackgroundColor({ color: BADGE_BG }));
+atLoad("action.setBadgeTextColor", () => void chrome.action.setBadgeTextColor({ color: BADGE_INK }));
 
 // ---- G4 context menu + keyboard command (design 2026-07-23 §G4) ----
 // Data-free discovery: both the "andvari" editable-context menu item and the manifest
@@ -1063,7 +1081,7 @@ try {
 // (The storage.session TRUSTED_CONTEXTS precondition for quick unlock is set up beside serverReady, above: A15 awaits
 // it, and serverReady/doLock wait for it.)
 
-chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
+atLoad("runtime.onMessage", () => chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
   // 0.17.0 biometric connector RPC — a PRIVATE protocol (not part of Req), handled before the normal
   // dispatch and gated on a same-extension connector-page sender inside handleBioConnector.
   const bio = msg as unknown as { __bio?: unknown };
@@ -1082,23 +1100,23 @@ chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
     .then(sendResponse)
     .catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
   return true; // keep the channel open for the async response
-});
+}));
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+atLoad("alarms.onAlarm", () => chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "autolock") void doLock("idle");
   else if (alarm.name === "resync") {
     void resync(); // the ≤5-min staleness floor…
     void ensureSocket(true); // …and the guaranteed live-socket revival after SW death (T3)
   } else if (alarm.name === UPDATE_ALARM) void checkForUpdate();
   else if (alarm.name === CLIPBOARD_CLEAR_ALARM) void clearClipboardBackstop();
-});
+}));
 
 // The self-update check runs on its OWN daily schedule, independent of lock state (it reads only
 // the public downloads manifest — no vault, no session). A reload/update fires onInstalled, which
 // re-checks against the NEW installed version and so clears a now-satisfied signal immediately.
 // Both hooks also reconcile the dynamic autofill registration (B2-5) — install/update is exactly
 // when a stale or missing registration is most likely.
-chrome.runtime.onInstalled.addListener((details) => {
+atLoad("runtime.onInstalled", () => chrome.runtime.onInstalled.addListener((details) => {
   // A16 review R1: an install, update, reload or browser update — storage.session is the browser's fresh one.
   browserSessionReported();
   // A15 review F2: the browser's own word on whether this start follows an upgrade from a pre-A15 build — the ONLY
@@ -1109,12 +1127,12 @@ chrome.runtime.onInstalled.addListener((details) => {
   const late = serverReady.then(() => lateInstallSignal(sig)).catch(() => {});
   void late.then(() => checkForUpdate(true));
   void late.then(registerAutofillScripts);
-});
-chrome.runtime.onStartup.addListener(() => {
+}));
+atLoad("runtime.onStartup", () => chrome.runtime.onStartup.addListener(() => {
   browserSessionReported(); // A16 review R1: a browser start — storage.session is the browser's fresh one
   void checkForUpdate(true);
   void serverReady.then(registerAutofillScripts);
-});
+}));
 void (async () => {
   // Survive SW recycling without resetting the period on every wake (that would starve a
   // 1440-min alarm): create it only when absent. The wake-path check is throttled by ULAST.
@@ -1422,7 +1440,7 @@ export async function purgeOriginNamespace(originKey: string): Promise<void> {
 
 // Re-offer a pending save once the post-login navigation lands. Belt: the content script also
 // polls pendingSave on load; braces: this reaches SPAs that "complete" without a fresh script.
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+atLoad("tabs.onUpdated", () => chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "complete") return;
   void (async () => {
     await ensureLoaded();
@@ -1441,7 +1459,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       /* content not injected in that tab (yet) — its own pendingSave poll covers it */
     }
   })();
-});
+}));
 
 // S3 registry hygiene (F28, Tier 1 §7): a top-level navigation invalidates every frame's recorded
 // card form AND any armed card grant — clear both the moment the tab starts LOADING, before the
@@ -1450,7 +1468,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 // window would be a `tabs`-permission bump; the status === "complete" listener above is the
 // permission-less precedent). bfcache back-navigations never re-fire content init — there the
 // [T4] rescanCardForms sig reset is what restores the offer.
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+atLoad("tabs.onUpdated", () => chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status !== "loading") return;
   grants.delete(tabId); // q39: a navigation voids the login grant too — it was minted for the OLD document
   cardGrants.delete(tabId);
@@ -1493,9 +1511,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       topOriginPendingClear.delete(tabId);
     }
   })();
-});
+}));
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+atLoad("tabs.onRemoved", () => chrome.tabs.onRemoved.addListener((tabId) => {
   grants.delete(tabId);
   cardGrants.delete(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b]
@@ -1511,7 +1529,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     await ensureLoaded();
     if (tabs.delete(tabId)) persistTabs();
   })();
-});
+}));
 
 // ---- session custody ----
 
@@ -2547,7 +2565,8 @@ function deriveMasterKeyAsync(password: string, params: KdfParams, salt: Uint8Ar
     };
     let worker: Worker;
     try {
-      worker = new Worker(chrome.runtime.getURL("kdf-worker.js"), { type: "module" });
+      // The Safari build's bundles are classic scripts (build.mjs), its worker included.
+      worker = new Worker(chrome.runtime.getURL("kdf-worker.js"), { type: BUILD_TARGET === "safari" ? "classic" : "module" });
     } catch {
       inline(); // nested workers not supported here → run inline
       return;
@@ -4948,3 +4967,6 @@ async function linkUri(msg: Extract<Req, { type: "linkUri" }>, sender: chrome.ru
   const doc: ItemDoc = { ...it.doc, login: { ...it.doc.login, uris: [...kept, uri] } };
   return putExisting(it, doc);
 }
+
+// Safari Details: this script evaluated to its end (safari-boot.js records when; absent on other builds).
+(globalThis as { __andvariBootReady?: () => void }).__andvariBootReady?.();

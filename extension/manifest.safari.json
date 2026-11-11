@@ -27,9 +27,9 @@
   },
   "background": {
     "scripts": [
+      "safari-boot.js",
       "background.js"
     ],
-    "type": "module",
     "persistent": false
   },
   "action": {

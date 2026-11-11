@@ -1612,8 +1612,10 @@ async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean
   };
   show();
   const d = await ask({ type: "serverDiag" });
-  if (!d) lines.push("Worker diagnostics: no answer");
-  else {
+  if (!d) {
+    lines.push("Worker diagnostics: no answer");
+    lines.push(...(await backgroundBootLines()));
+  } else {
     lines.push(
       `Worker start: ${d.stage}${d.migration ? ` (migration: ${d.migration})` : ""}`,
       `Block: ${d.block ?? "none"}`,
@@ -1629,6 +1631,40 @@ async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean
   const said = own.answer.kind === "set" ? own.answer.url : own.answer.kind;
   lines.push(`App ask (popup): ${own.call}${own.error ? ` — ${own.error}` : ""}; answer: ${said}`);
   show();
+}
+
+/**
+ * What the background page recorded about its own load (safari-boot.js), read by safari-diag.js: a classic script
+ * loaded on demand, because this page itself never touches storage. Display only.
+ */
+async function backgroundBootLines(): Promise<string[]> {
+  type Boot = { readError?: string; "diag.backgroundLoadedAt"?: unknown; "diag.backgroundReadyAt"?: unknown; "diag.backgroundErrors"?: unknown };
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tag = document.createElement("script");
+      tag.src = "safari-diag.js";
+      tag.onload = () => resolve();
+      tag.onerror = () => reject(new Error("safari-diag.js did not load"));
+      document.head.append(tag);
+    });
+    const read = (globalThis as { __andvariBackgroundDiag?: () => Promise<Boot> }).__andvariBackgroundDiag;
+    if (!read) return ["Background record: reader missing"];
+    const got = await Promise.race([read(), new Promise<Boot>((r) => setTimeout(() => r({ readError: "timed out" }), 3000))]);
+    if (got.readError) return [`Background record: ${got.readError}`];
+    const out = [
+      `Background loaded at: ${String(got["diag.backgroundLoadedAt"] ?? "never")}`,
+      `Background finished loading at: ${String(got["diag.backgroundReadyAt"] ?? "never")}`,
+    ];
+    const errors = Array.isArray(got["diag.backgroundErrors"]) ? (got["diag.backgroundErrors"] as Record<string, unknown>[]) : [];
+    if (errors.length === 0) out.push("Background errors: none recorded");
+    for (const e of errors.slice(0, 5)) {
+      out.push(`Background ${String(e.kind)}: ${String(e.message)}${e.where ? ` @ ${String(e.where)}` : ""}`);
+      if (e.stack) out.push(String(e.stack).slice(0, 1500));
+    }
+    return out;
+  } catch (e) {
+    return [`Background record: ${String(e)}`];
+  }
 }
 
 /** Wave-3 route (design §5.1): Firefox MV3 grants NO host permissions at install (optional-by-
