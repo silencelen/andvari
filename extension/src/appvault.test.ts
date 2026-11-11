@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { APP_VAULT_LIFETIME_MS, AppVault, parseOpenReply, parseSecretReply, vaultFromApp } from "./appvault.ts";
+import { APP_VAULT_LIFETIME_MS, AppVault, describeDiag, parseOpenReply, parseSecretReply, vaultFromApp } from "./appvault.ts";
 
 const TICKET = "ab".repeat(32);
 const item = { itemId: "i1", name: "Example", username: "fam", uris: ["https://login.example.com/x"], hasTotp: true };
@@ -73,6 +73,18 @@ test("the worker's vault: locked until opened, one secret per ask, gone on close
   now += APP_VAULT_LIFETIME_MS;
   assert.equal(vault.unlocked, false, "the list does not outlive its lifetime");
   assert.deepEqual(vault.items(), []);
+});
+
+test("the handler's account of its process is kept as numbers and booleans only", async () => {
+  assert.equal(describeDiag({ diag: { pid: 71, processAgeSeconds: 3, hadVault: true, ticketFound: false, note: "text is dropped", nested: {} } }), "pid=71 processAgeSeconds=3 hadVault=true ticketFound=false");
+  assert.equal(describeDiag({ ok: true }), null);
+  assert.equal(describeDiag("x"), null);
+  const vault = new AppVault(async (m) =>
+    m.type === "vaultOpen" ? { ...opened, diag: { pid: 71, hadVault: false } } : { ok: true, type: "vaultSecret", state: "secret", username: "a", password: "b", diag: { pid: 72, ticketFound: false } },
+  );
+  await vault.open();
+  await vault.secret("i1", "login");
+  assert.deepEqual(vault.diag, { open: "pid=71 hadVault=false", secret: "pid=72 ticketFound=false" }, "two pids: the process did not survive between the messages");
 });
 
 test("a handler that throws, stays silent or answers nonsense opens nothing", async () => {

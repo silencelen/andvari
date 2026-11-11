@@ -96,6 +96,22 @@ export function parseSecretReply(reply: unknown, want: AppVaultWant): AppVaultSe
   return username === null || password === null ? { state: "unavailable" } : { state: "login", username, password };
 }
 
+/**
+ * What the handler said about its own process in a reply (`diag`): its pid and age, and whether it still held the
+ * vault and recognised the ticket. No secret. Shown in the popup's Details, because whether iOS keeps the handler's
+ * process between two messages can only be seen on a device.
+ */
+export function describeDiag(reply: unknown): string | null {
+  if (typeof reply !== "object" || reply === null) return null;
+  const d = (reply as { diag?: unknown }).diag;
+  if (typeof d !== "object" || d === null) return null;
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(d as Record<string, unknown>).slice(0, 12)) {
+    if (typeof v === "number" || typeof v === "boolean") out.push(`${k.slice(0, 24)}=${String(v)}`);
+  }
+  return out.length > 0 ? out.join(" ") : null;
+}
+
 type NativeSend = (msg: { type: string; ticket?: string; itemId?: string; want?: AppVaultWant; name?: string }) => Promise<unknown>;
 
 function bounded(p: Promise<unknown>, ms: number): Promise<unknown> {
@@ -116,6 +132,8 @@ export class AppVault {
   private opened: { ticket: string; email: string | null; items: AppVaultItem[]; until: number } | null = null;
   private readonly send: NativeSend;
   private readonly now: () => number;
+  /** The handler's own account of its process at the last open and the last secret (Details). */
+  readonly diag: { open: string | null; secret: string | null } = { open: null, secret: null };
 
   constructor(send: NativeSend, now: () => number = Date.now) {
     this.send = send;
@@ -149,7 +167,9 @@ export class AppVault {
     this.close();
     let result: AppVaultOpened;
     try {
-      result = parseOpenReply(await bounded(this.send({ type: "vaultOpen" }), APP_VAULT_PROMPT_TIMEOUT_MS));
+      const reply = await bounded(this.send({ type: "vaultOpen" }), APP_VAULT_PROMPT_TIMEOUT_MS);
+      this.diag.open = describeDiag(reply);
+      result = parseOpenReply(reply);
     } catch {
       result = { state: "unavailable" };
     }
@@ -171,7 +191,9 @@ export class AppVault {
     const item = live.items.find((i) => i.itemId === itemId);
     if (item === undefined) return { state: "refused" };
     try {
-      return parseSecretReply(await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want, name: item.name }), APP_VAULT_PROMPT_TIMEOUT_MS), want);
+      const reply = await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want, name: item.name }), APP_VAULT_PROMPT_TIMEOUT_MS);
+      this.diag.secret = describeDiag(reply);
+      return parseSecretReply(reply, want);
     } catch {
       return { state: "unavailable" };
     }
