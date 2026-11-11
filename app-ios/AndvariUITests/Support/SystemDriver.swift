@@ -67,11 +67,20 @@ extension UITestCase {
 
     /// The system's Face ID sheet, when a face did not match: give up on it.
     func dismissBiometricPrompt() {
-        for candidate in [springboard, XCUIApplication(bundleIdentifier: "com.apple.CoreAuthUI")] {
-            for title in ["Cancel", "Use master password"] where candidate.buttons[title].exists {
-                candidate.buttons[title].tap()
-                return
-            }
+        let cancel = springboard.buttons.matching(identifier: "com.apple.localauthentication.ax.authentication.button.cancel").firstMatch
+        if waitUntil(5, { cancel.exists }) {
+            cancel.tap()
+            Thread.sleep(forTimeInterval: 1)
+        }
+    }
+
+    /// Flip a Settings-style switch row: the row's label takes a tap without changing anything, its inner control does.
+    func flip(_ toggle: XCUIElement) {
+        let inner = toggle.switches.firstMatch
+        if inner.exists {
+            inner.tap()
+        } else {
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
         }
     }
 
@@ -137,7 +146,7 @@ extension UITestCase {
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
         XCUIDevice.shared.system.open(URL(string: url)!)
-        if !waitUntil(30, {
+        if !waitUntil(60, {
             // Safari's first run may put a sheet of its own over the page.
             for title in ["Continue", "Not Now", "Close"] where browser.buttons[title].exists && !browser.webViews.staticTexts[heading].exists {
                 browser.buttons[title].tap()
@@ -153,4 +162,57 @@ extension UITestCase {
     func dumpKeyboardArea(_ name: String) {
         dumpTree(safari, as: name)
     }
+
+    // MARK: - Shared setup for the AutoFill tests
+
+    /// andvari turned on under AutoFill From, with the app unlocked since, so its suggestions are in the system's
+    /// store. Done once per run; a test that needs it and cannot have it fails with the reason, it does not pass.
+    func requireAutoFillProvider() {
+        if SystemState.providerEnabled { return }
+        prepareAppForFilling()
+        XCTAssertTrue(openAutoFillSettings(), "Settings has no AutoFill & Passwords screen")
+        let toggle = autoFillProviderSwitch
+        require(toggle, "the andvari switch under AutoFill From")
+        if !isOn(toggle) {
+            flip(toggle)
+            Thread.sleep(forTimeInterval: 2)
+            answerSystemAlerts()
+        }
+        XCTAssertTrue(waitUntil(5) { self.isOn(self.autoFillProviderSwitch) }, "andvari could not be turned on as an AutoFill provider")
+        settingsApp.terminate()
+        relaunchAndUnlock()
+        SystemState.providerEnabled = true
+    }
+
+    /// Everything on screen that is not the page: Safari's own tree and SpringBoard's, where system sheets live.
+    func dumpEverything(_ name: String) {
+        dumpTree(safari, as: name + "-safari")
+        dumpTree(springboard, as: name + "-springboard")
+    }
+
+    /// An element anywhere in Safari or SpringBoard whose label contains [text] and that is not part of the page.
+    func offered(_ text: String) -> XCUIElement? {
+        for application in [safari, springboard] {
+            let matches = application.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", text))
+            for index in 0..<min(matches.count, 8) {
+                let candidate = matches.element(boundBy: index)
+                // The page's own fields carry the word too ("Username"); what iOS offers sits in the lower half.
+                if candidate.exists && candidate.isHittable && candidate.frame.minY > application.frame.height * 0.45 {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
+
+    func webField(_ label: String) -> XCUIElement {
+        let text = safari.webViews.textFields[label]
+        return text.exists ? text : safari.webViews.secureTextFields[label]
+    }
+}
+
+/// What earlier tests of this run already set up.
+enum SystemState {
+    static var providerEnabled = false
+    static var extensionEnabled = false
 }

@@ -67,7 +67,8 @@ final class Recorder: NSObject, XCTestObservation {
             status = "passed"
         } else {
             status = "failed"
-            message = failures[name]?.joined(separator: "\n") ?? "failed"
+            // XCTest appends whole UI trees to some failures; the result bundle keeps them.
+            message = failures[name]?.map { String($0.prefix(1500)) }.joined(separator: "\n") ?? "failed"
         }
         entries.append(Entry(test: name, status: status, message: message, seconds: run?.totalDuration ?? 0, screenshots: shots[name] ?? []))
         write()
