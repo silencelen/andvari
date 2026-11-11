@@ -53,8 +53,10 @@ data class AppState(
     val totpRequired: Boolean,
     /** UNLOCK (and WELCOME after a sign-out): the account the stored session belongs to. */
     val accountEmail: String?,
-    /** VAULT: logins an extension captured, waiting for the person to save or discard each ([PendingSaveView]). */
+    /** VAULT: captured logins that could not be saved by themselves; each says why and can be saved or discarded. */
     val pendingSaves: List<PendingSaveView>,
+    /** VAULT: captured logins this unlock saved by itself, until dismissed; each can be undone ([AppliedSaveView]). */
+    val appliedSaves: List<AppliedSaveView>,
     /** The quick-unlock gates: the Face ID button shows when [QuickUnlockView.usable]. */
     val quickUnlock: QuickUnlockView,
     /** Why the vault locked or the session ended, for UNLOCK and WELCOME; null when nothing needs saying. */
@@ -86,7 +88,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, pendingSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -166,6 +168,8 @@ data class ItemDetail(
     val updatedAt: Long,
     /** This account may change the item (a reader of a shared vault may not). */
     val editable: Boolean,
+    /** How many earlier passwords the login keeps in its history (an automatic save adds the one it replaced). */
+    val previousPasswords: Int,
 )
 
 /** A secret field of an item, read only on an explicit reveal or copy. */
@@ -275,5 +279,17 @@ data class PendingSaveView(
     /** The name of the login whose password saving would replace; null when saving adds a new login. */
     val replaces: String?,
     /** It was captured on a plain-http page: the row says so, and it is saved as an http address. */
+    val plainHttp: Boolean,
+    /** Why it was not saved by itself (offline, no personal vault, a login in a shared vault matches); null while that is still being tried. */
+    val reason: String?,
+)
+
+/** A captured login the app saved by itself at unlock. No secret. */
+data class AppliedSaveView(
+    val id: String,
+    val host: String,
+    val username: String,
+    /** The login's name when its password was replaced (the old one is in the login's password history); null for a new login. */
+    val replaced: String?,
     val plainHttp: Boolean,
 )
