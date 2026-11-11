@@ -58,6 +58,25 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         mode = .configuration
     }
 
+    /// iOS 26.2: the system offers to save a login to andvari. This process cannot reach the server and holds no
+    /// key, so the login is sealed to the account's public key and queued for the app, which shows it before it is
+    /// written. No unlock and no interface are needed for that.
+    @available(iOS 26.2, *)
+    override func performWithoutUserInteractionIfPossible(savePasswordRequest: ASSavePasswordRequest) {
+        let credential = savePasswordRequest.credential
+        let queued = vault.queueSave(
+            id: savePasswordRequest.sessionID,
+            site: savePasswordRequest.serviceIdentifier.identifier,
+            username: credential.user,
+            password: credential.password
+        )
+        if queued == .queued {
+            extensionContext.completeSavePasswordRequest(completionHandler: nil)
+        } else {
+            extensionContext.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.failed.rawValue))
+        }
+    }
+
     // MARK: - View
 
     override func viewDidLoad() {

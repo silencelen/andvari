@@ -253,6 +253,21 @@ final class AppModel: ObservableObject {
         await run { try await $0.deleteItem(itemId: itemId) }
     }
 
+    // MARK: - Logins captured by the extensions
+
+    /// The captured password, for the person to check before saving it.
+    func pendingSavePassword(_ id: String) -> String? {
+        controller.pendingSavePassword(id: id)
+    }
+
+    func confirmPendingSave(_ id: String) async -> Outcome {
+        await run { try await $0.confirmPendingSave(id: id) }
+    }
+
+    func discardPendingSave(_ id: String) {
+        controller.discardPendingSave(id: id)
+    }
+
     func refresh() async -> Outcome {
         await run { try await $0.refresh() }
     }

@@ -57,6 +57,18 @@ struct VaultView: View {
                 }
                 .listRowBackground(Palette.raised)
             }
+            if !model.state.pendingSaves.isEmpty {
+                Section {
+                    ForEach(model.state.pendingSaves, id: \.id) { pending in
+                        PendingSaveRow(pending: pending)
+                    }
+                } header: {
+                    SectionTitle("Logins to save")
+                } footer: {
+                    Text("Captured while you signed in. Nothing is saved until you choose Save.")
+                }
+                .listRowBackground(Palette.raised)
+            }
             if let syncMessage {
                 Section {
                     Plate(text: syncMessage, tone: .error) {
@@ -284,5 +296,59 @@ private struct SectionTitle: View {
         Text(text)
             .font(.footnote.weight(.semibold))
             .foregroundStyle(Palette.inkFaint)
+    }
+}
+
+/// A login an extension captured: shown in full, with its password on request, before the person saves or discards it.
+private struct PendingSaveRow: View {
+    @EnvironmentObject private var model: AppModel
+    let pending: PendingSaveView
+    @State private var shown: String?
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(pending.host)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Palette.ink)
+            Text(pending.username.isEmpty ? "No username" : pending.username)
+                .font(.subheadline)
+                .foregroundStyle(Palette.inkDim)
+            Text(pending.replaces.map { "Replaces the password of \($0)" } ?? "A new login")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkFaint)
+            if let shown {
+                Text(shown)
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(Palette.ink)
+                    .textSelection(.enabled)
+            }
+            if let failure {
+                Text(failure)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.danger)
+            }
+            HStack(spacing: 16) {
+                Button("Save") {
+                    Task {
+                        let outcome = await model.confirmPendingSave(pending.id)
+                        failure = outcome == .ok ? nil : outcome.message
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                Button(shown == nil ? "Show password" : "Hide password") {
+                    shown = shown == nil ? model.pendingSavePassword(pending.id) : nil
+                }
+                .font(.subheadline)
+                Spacer()
+                Button("Discard", role: .destructive) {
+                    model.discardPendingSave(pending.id)
+                }
+                .font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.state.busy)
+        }
+        .padding(.vertical, 4)
     }
 }
