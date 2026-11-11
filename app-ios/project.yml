@@ -16,6 +16,22 @@ settings:
     KOTLIN_TARGET[sdk=iphonesimulator*]: iosSimulatorArm64
     FRAMEWORK_SEARCH_PATHS: $(inherited) $(SRCROOT)/../core/build/bin/$(KOTLIN_TARGET)/releaseFramework
     OTHER_LDFLAGS: $(inherited) -framework AndvariCore -lsqlite3 -lc++
+# Explicit, because a project with any shared scheme stops getting one made per target. "Andvari" is what the
+# builds use, unchanged; "AndvariUITests" adds the simulator UI tests (app-ios/uitest/README.md).
+schemes:
+  Andvari:
+    build:
+      targets:
+        Andvari: all
+  AndvariUITests:
+    build:
+      targets:
+        Andvari: all
+        AndvariUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - AndvariUITests
 targets:
   Andvari:
     type: application
@@ -119,3 +135,21 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Distribution"
         TARGETED_DEVICE_FAMILY: "1"
         PROVISIONING_PROFILE_SPECIFIER: "com.silencelen.andvari.autofill AppStore"
+  # UI tests for the iOS Simulator only (.github/workflows/ios-uitest.yml). Never part of an archive: the
+  # Andvari scheme does not build it.
+  AndvariUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [AndvariUITests]
+    dependencies:
+      - target: Andvari
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Andvari
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        # The tests drive the app from outside and link none of it, so not the Kotlin core either.
+        OTHER_LDFLAGS: ""
