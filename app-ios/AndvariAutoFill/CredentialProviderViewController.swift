@@ -19,6 +19,14 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     private var logins: [FillLogin] = []
     private var shown: [FillLogin] = []
     private var started = false
+    /// The unlock in flight, so it is cancelled when the request ends first.
+    private var unlocking: Task<Void, Never>?
+    /// The request has been answered (completed or cancelled): nothing may answer it again.
+    private var finished = false
+    private var hostObserver: NSObjectProtocol?
+    private var listTimeout: Timer?
+    /// How long an unlocked list may stay up before the keys are dropped and the request is cancelled.
+    private static let listLifetime: TimeInterval = 120
 
     private let message = UILabel()
     private let table = UITableView(frame: .zero, style: .insetGrouped)
@@ -43,6 +51,8 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     override func prepareInterfaceToProvideCredential(for credentialRequest: any ASCredentialRequest) {
+        // The site iOS is filling for: the record is completed only if it is still a login for that site.
+        hosts = [credentialRequest.credentialIdentity.serviceIdentifier.identifier]
         guard let record = credentialRequest.credentialIdentity.recordIdentifier else {
             mode = .list
             return
@@ -120,11 +130,28 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         super.viewDidAppear(animated)
         guard !started else { return }
         started = true
+        // The app this sheet is over went to the background: the fill is over, and so is the unlock.
+        hostObserver = NotificationCenter.default.addObserver(forName: .NSExtensionHostDidEnterBackground, object: nil, queue: .main) { [weak self] _ in
+            self?.fail(.userCanceled)
+        }
         start()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        end()
+    }
+
+    /// Stop everything that could still act: the unlock in flight, the timer, and the keys.
+    private func end() {
+        unlocking?.cancel()
+        unlocking = nil
+        listTimeout?.invalidate()
+        listTimeout = nil
+        if let hostObserver {
+            NotificationCenter.default.removeObserver(hostObserver)
+            self.hostObserver = nil
+        }
         vault.close()
     }
 
@@ -137,9 +164,12 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
             show(blocked.message)
             return
         }
-        Task { @MainActor in
+        unlocking = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 let result = try await vault.unlock(reason: "Unlock andvari to fill")
+                // The request ended while Face ID was up: the core kept nothing, and nothing is answered twice.
+                guard !Task.isCancelled, !finished else { return }
                 if let blocked = result as? FillUnlock.OpenApp {
                     show(blocked.message)
                 } else if result is FillUnlock.Unlocked {
@@ -156,7 +186,14 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     private func unlocked() {
         switch mode {
         case let .single(record, oneTimeCode):
-            complete(itemId: record, oneTimeCode: oneTimeCode)
+            // The suggestion named a record; fill it only if it is a login for the site being filled. Otherwise the
+            // person picks from the list, where what matches this site is marked.
+            if vault.matches(itemId: record, identifiers: hosts) {
+                complete(itemId: record, oneTimeCode: oneTimeCode)
+            } else {
+                mode = oneTimeCode ? .oneTimeCodeList : .list
+                unlocked()
+            }
         case .oneTimeCodeList:
             logins = vault.logins(hosts: hosts).filter(\.hasTotp)
             showList()
@@ -176,6 +213,11 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         search.isHidden = false
         table.isHidden = false
         table.reloadData()
+        // An unlocked list does not stay up indefinitely with the keys in memory.
+        listTimeout?.invalidate()
+        listTimeout = Timer.scheduledTimer(withTimeInterval: Self.listLifetime, repeats: false) { [weak self] _ in
+            self?.fail(.userCanceled)
+        }
     }
 
     private func show(_ text: String) {
@@ -188,12 +230,14 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     // MARK: - Completing
 
     private func complete(itemId: String, oneTimeCode: Bool) {
-        defer { vault.close() }
+        guard !finished else { return }
+        defer { end() }
         if oneTimeCode {
             guard #available(iOS 18.0, *), let code = vault.oneTimeCode(itemId: itemId) else {
                 fail(.credentialIdentityNotFound)
                 return
             }
+            finished = true
             extensionContext.completeOneTimeCodeRequest(using: ASOneTimeCodeCredential(code: code))
             return
         }
@@ -201,11 +245,14 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
             fail(.credentialIdentityNotFound)
             return
         }
+        finished = true
         extensionContext.completeRequest(withSelectedCredential: ASPasswordCredential(user: credential.username, password: credential.password))
     }
 
     private func fail(_ code: ASExtensionError.Code) {
-        vault.close()
+        end()
+        guard !finished else { return }
+        finished = true
         extensionContext.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue))
     }
 
