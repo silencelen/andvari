@@ -142,19 +142,35 @@ extension UITestCase {
 
     // MARK: - Safari
 
-    /// Open [url] in Safari and wait for the page's heading.
+    /// Open [url] in a fresh Safari and wait for the page's heading.
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
+        browser.terminate()
         XCUIDevice.shared.system.open(URL(string: url)!)
-        if !waitUntil(60, {
-            // Safari's first run may put a sheet of its own over the page.
-            for title in ["Continue", "Not Now", "Close"] where browser.buttons[title].exists && !browser.webViews.staticTexts[heading].exists {
-                browser.buttons[title].tap()
-            }
-            return browser.webViews.staticTexts[heading].exists
-        }) {
+        let shown = { browser.webViews.staticTexts[heading].exists }
+        if waitUntil(20, shown) { return }
+        // A Safari that was not running may come up on its start page and drop the address: type it, as a person would.
+        let address = browser.textFields["TabBarItemTitle"]
+        if address.exists {
+            address.tap()
+            Thread.sleep(forTimeInterval: 1)
+            browser.typeText(url + "\n")
+        }
+        if !waitUntil(40, shown) {
             dumpTree(browser, as: "safari-no-page")
             XCTFail("Safari did not show \(url)")
+        }
+    }
+
+    /// Safari's own offer for a field it recognises: a sheet naming the site, the login and the provider.
+    var fillOfferButton: XCUIElement { safari.buttons["FillPasswordButton"] }
+
+    /// Close Safari's offer sheet, leaving the keyboard and its AutoFill keys.
+    func closeFillOffer() {
+        let close = safari.buttons["xmark"]
+        if close.exists {
+            close.tap()
+            Thread.sleep(forTimeInterval: 1)
         }
     }
 
