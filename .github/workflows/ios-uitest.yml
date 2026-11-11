@@ -106,6 +106,10 @@ jobs:
         run: |
           mkdir -p out
           app-ios/uitest/start-backend.sh "$RUNNER_TEMP/uitest-backend"
+          # The site answers under its names, with a certificate its CA vouches for: what Safari will ask of it.
+          . app-ios/uitest/env.sh
+          curl -fsS --cacert "$RUNNER_TEMP/uitest-backend/ca.pem" "$UITEST_SITE_ORIGIN/login.html" | grep -q "Sign in"
+          curl -fsS "$UITEST_HTTP_ORIGIN/login.html" | grep -q "Sign in"
 
       - name: Boot a fresh simulator
         run: |
@@ -169,7 +173,7 @@ jobs:
           # What the simulator's system said about the app and its extensions, for a failure nobody can watch.
           if [ -n "${UITEST_UDID:-}" ]; then
             xcrun simctl spawn "$UITEST_UDID" log show --last 45m --style compact \
-              --predicate 'process BEGINSWITH "Andvari" OR (eventMessage CONTAINS[c] "andvari" AND NOT process IN {"installcoordinationd", "CoreSimulatorBridge", "runningboardd", "SpringBoard", "backboardd", "lsd", "installd"})' \
+              --predicate 'process BEGINSWITH "Andvari" OR (process == "MobileSafari" AND eventMessage CONTAINS[c] "uitest.test") OR (eventMessage CONTAINS[c] "andvari" AND NOT process IN {"installcoordinationd", "CoreSimulatorBridge", "runningboardd", "SpringBoard", "backboardd", "lsd", "installd"})' \
               > out/simulator.log 2>&1 || true
           fi
           ls -la out out/screenshots 2>/dev/null | head -150

@@ -113,12 +113,7 @@ extension UITestCase {
         let toggle = quickUnlockSwitch
         require(toggle, "the Face ID switch")
         guard isOn(toggle) != on else { return }
-        let inner = toggle.switches.firstMatch
-        if inner.exists {
-            inner.tap()
-        } else {
-            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
-        }
+        flip(toggle)
     }
 
     func isOn(_ toggle: XCUIElement) -> Bool {

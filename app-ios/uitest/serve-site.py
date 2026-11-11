@@ -40,7 +40,9 @@ def main():
     secure = http.server.ThreadingHTTPServer(("127.0.0.1", int(https_port)), handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
-    secure.socket = context.wrap_socket(secure.socket, server_side=True)
+    # The handshake happens on the connection's own thread, at its first read: a client that connects and
+    # says nothing must not hold up the accept loop.
+    secure.socket = context.wrap_socket(secure.socket, server_side=True, do_handshake_on_connect=False)
     plain = http.server.ThreadingHTTPServer(("127.0.0.1", int(http_port)), handler)
     threading.Thread(target=plain.serve_forever, daemon=True).start()
     secure.serve_forever()

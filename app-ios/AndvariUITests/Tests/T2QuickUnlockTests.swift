@@ -60,11 +60,8 @@ final class T2QuickUnlockTests: UITestCase {
             Biometrics.noMatch()
             Thread.sleep(forTimeInterval: 3)
             XCTAssertNotEqual(currentScreen(), .vault, "a non-matching face opened the vault")
-            // The system's sheet offers a second try or to give up.
-            for title in ["Cancel", "Use master password"] where springboard.buttons[title].exists {
-                springboard.buttons[title].tap()
-                break
-            }
+            shot("face-not-recognized")
+            dismissBiometricPrompt()
         }
         step("password-still-works") {
             expectScreen(.unlock)
