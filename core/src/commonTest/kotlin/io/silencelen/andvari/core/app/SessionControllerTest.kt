@@ -350,6 +350,7 @@ open class SessionControllerTest {
         val login = fill.logins(listOf("https://login.example.com/sign-in")).single()
         assertTrue(login.matches)
         assertEquals("fam", login.username)
+        assertEquals(listOf("https://login.example.com/x"), login.uris, "web addresses only")
         assertFalse(fill.logins(listOf("evil.example.net")).single().matches, "listed, but not as a match for another site")
         assertEquals(FillCredential("fam", "hunter2"), fill.credential(ITEM_ID))
         assertEquals(6, fill.oneTimeCode(ITEM_ID)?.length)

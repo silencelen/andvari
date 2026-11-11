@@ -6,6 +6,7 @@ import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.autofill.FillTarget
+import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.Clocks
@@ -50,6 +51,8 @@ data class FillLogin(
     /** It matches one of the hosts the fill is for. */
     val matches: Boolean,
     val hasTotp: Boolean,
+    /** Its web addresses (not secret: addresses, not credentials), for a caller that applies its own site rule. */
+    val uris: List<String>,
 )
 
 /** The one item a fill completes with. */
@@ -195,6 +198,7 @@ class AutofillVault(
                     host = login.uris.firstOrNull()?.let { UriMatch.normalizeHostUnicode(it) ?: UriMatch.normalizeHost(it) },
                     matches = matchesAny(login.uris, hosts),
                     hasTotp = !login.totp.isNullOrEmpty(),
+                    uris = login.uris.filter { UriMatch.parseSavedUri(it) is SavedUri.Web },
                 )
             }
             .sortedWith(compareByDescending<FillLogin> { it.matches }.thenBy { it.name.lowercase() })
