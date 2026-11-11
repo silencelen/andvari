@@ -109,16 +109,21 @@ final class AppModel: ObservableObject {
     private func syncCredentialIdentities(_ next: AppState) {
         switch Screen(next.screen) {
         case .vault where next.query.isEmpty:
-            let key = next.items.map { "\($0.itemId)|\($0.username ?? "")|\($0.host ?? "")|\($0.hasTotp)" }.joined(separator: "\n")
+            // The account and the policy are part of the key: a policy that starts forbidding the offline cache, or
+            // another account, rebuilds the suggestions even when the list looks the same (the core then returns none).
+            let allowed = next.policy?.offlineCacheAllowed == true
+            let rows = next.items.map { "\($0.itemId)|\($0.username ?? "")|\($0.host ?? "")|\($0.hasTotp)" }.joined(separator: "\n")
+            let key = "\(next.accountEmail ?? "")|\(next.server ?? "")|\(allowed)\n\(rows)"
             guard key != suggestedKey else { return }
             suggestedKey = key
             CredentialIdentities.replace(controller.credentialIdentities())
-        case .welcome, .chooseServer:
-            guard suggestedKey != nil else { return }
+        case .vault, .unlock, .recoveryReveal, .recoveryCapture, .loading:
+            break
+        case .welcome, .chooseServer, .trustGate, .upgradeRequired:
+            // No session behind these screens (an unlock screen has one): nothing may stay suggested.
+            guard next.accountEmail == nil, suggestedKey != nil else { return }
             suggestedKey = nil
             CredentialIdentities.clear()
-        default:
-            break
         }
     }
 
