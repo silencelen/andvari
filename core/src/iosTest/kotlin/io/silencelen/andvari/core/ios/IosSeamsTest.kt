@@ -3,6 +3,8 @@
 package io.silencelen.andvari.core.ios
 
 import io.ktor.client.request.get
+import io.silencelen.andvari.core.app.AutofillVault
+import io.silencelen.andvari.core.app.FillAvailability
 import io.silencelen.andvari.core.client.session.InMemorySecrets
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
 import io.silencelen.andvari.core.client.session.StoredSession
@@ -57,6 +59,63 @@ class IosSeamsTest {
             seams.serverShare.publish(null)
             assertNull(NSUserDefaults(suiteName = suite).stringForKey(IOS_APP_SERVER_KEY), "no server: the extension is told there is none")
         } finally {
+            NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+        }
+    }
+
+    @Test
+    fun theShippingLayoutSharesStateButNeverTheTokens() {
+        val config = IosStorageConfig()
+        assertEquals(IOS_APP_GROUP, config.defaultsSuite)
+        assertEquals(IOS_APP_GROUP, config.keychainAccessGroup, "the quick-unlock blob and key are readable by the AutoFill extension")
+        // The extensions' persistence has no secret store behind it: a session never loads there.
+        assertNull(NoSecrets.read("session.tokens"))
+        assertFalse(NoSecrets.write("session.tokens", "x"))
+    }
+
+    @Test
+    fun anOlderLayoutMovesToTheSharedSuiteOnce() {
+        val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val standard = NSUserDefaults.standardUserDefaults
+        try {
+            standard.setObject("https://home.example", forKey = "baseUrl")
+            standard.setObject("12345", forKey = "ns.0123456789abcdef.policyFetchedAt")
+            standard.setObject("keep", forKey = "somethingElse")
+            val seams = IosSeams(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null))
+            assertEquals("https://home.example", seams.store.baseUrl)
+            assertEquals(12345L, seams.store.origin("0123456789abcdef").policyFetchedAt)
+            assertNull(standard.stringForKey("baseUrl"), "moved, not copied")
+            assertEquals("keep", standard.stringForKey("somethingElse"))
+            // A second start moves nothing: a value that reappears in the old place is not adopted.
+            standard.setObject("https://other.example", forKey = "baseUrl")
+            assertEquals("https://home.example", IosSeams(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null)).store.baseUrl)
+        } finally {
+            for (k in listOf("baseUrl", "ns.0123456789abcdef.policyFetchedAt", "somethingElse")) standard.removeObjectForKey(k)
+            NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+        }
+    }
+
+    @Test
+    fun theSnapshotFileIsReplacedWholeAndTheExtensionReadsIt() {
+        val dir = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
+        val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        try {
+            NSFileManager.defaultManager.createDirectoryAtPath(dir, withIntermediateDirectories = true, attributes = null, error = null)
+            val path = "$dir/autofill-snapshot.json"
+            val files = FileFillSnapshots(path)
+            assertNull(files.read())
+            assertTrue(files.write("one".encodeToByteArray()))
+            assertTrue(files.write("two-longer".encodeToByteArray()))
+            assertEquals("two-longer", files.read()?.decodeToString())
+            assertFalse(NSFileManager.defaultManager.fileExistsAtPath("$path.tmp"), "no temporary file is left")
+            // The extension's vault over the same file: a file that is not a snapshot is no snapshot.
+            val fill = IosAutofill(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null), path)
+            assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), fill.availability())
+            assertTrue(fill.logins(listOf("example.com")).isEmpty())
+            files.delete()
+            assertNull(files.read())
+        } finally {
+            NSFileManager.defaultManager.removeItemAtPath(dir, error = null)
             NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
         }
     }
