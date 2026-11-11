@@ -40,6 +40,7 @@ import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSFileProtectionCompleteUnlessOpen
 import platform.Foundation.NSFileProtectionKey
+import platform.Foundation.NSFileSize
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSString
 import platform.Foundation.NSURL
@@ -274,13 +275,25 @@ internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
         if (bytes == null) runCatching { fm.removeItemAtPath("$dir/$KEY_FILE", error = null) } else writeWhole("$dir/$KEY_FILE", bytes)
     }
 
+    /**
+     * The entries, bounded before anything is read: a file is sized first and never read past the entry bound, at
+     * most [SaveQueue.MAX_ENTRIES] are returned, and whatever else sits in the directory as an entry (a name that is
+     * not an id, an oversized file, one past the count) is removed. Another process writes here.
+     */
     override fun entries(): Map<String, ByteArray> {
         val out = LinkedHashMap<String, ByteArray>()
         for (name in names().sorted()) {
-            if (!name.startsWith(ENTRY_PREFIX) || !name.endsWith(ENTRY_SUFFIX)) continue
+            if (name == KEY_FILE) continue
+            val path = "$dir/$name"
             val id = name.removePrefix(ENTRY_PREFIX).removeSuffix(ENTRY_SUFFIX)
-            if (!SaveQueue.validId(id)) continue
-            runCatching { fm.contentsAtPath("$dir/$name")?.toByteArray() }.getOrNull()?.let { out[id] = it }
+            val listed = name.startsWith(ENTRY_PREFIX) && name.endsWith(ENTRY_SUFFIX) && SaveQueue.validId(id)
+            val size = runCatching { (fm.attributesOfItemAtPath(path, error = null)?.get(NSFileSize) as? Number)?.toLong() }.getOrNull()
+            if (!listed || size == null || size > SaveQueue.MAX_ENTRY_BYTES || out.size >= SaveQueue.MAX_ENTRIES) {
+                // A temporary file of a write in flight is left to its writer for a moment; everything else goes.
+                if (!name.endsWith(".tmp")) runCatching { fm.removeItemAtPath(path, error = null) }
+                continue
+            }
+            runCatching { fm.contentsAtPath(path)?.toByteArray() }.getOrNull()?.let { out[id] = it }
         }
         return out
     }

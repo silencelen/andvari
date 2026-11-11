@@ -70,6 +70,8 @@ import platform.Security.kSecAttrService
 import platform.Security.kSecClass
 import platform.Security.kSecClassGenericPassword
 import platform.Security.kSecClassKey
+import platform.Security.kSecMatchLimit
+import platform.Security.kSecMatchLimitOne
 import platform.Security.kSecKeyAlgorithmECIESEncryptionCofactorX963SHA256AESGCM
 import platform.Security.kSecPrivateKeyAttrs
 import platform.Security.kSecReturnRef
@@ -301,12 +303,20 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
 
 /**
  * Remove every quick-unlock blob under [service] and every Secure Enclave key of this app, in whatever access group
- * they are. Run once, before the enrollment moves to the shared group: nothing made there exists yet. Returns whether
- * both are gone (deleted, or never there).
+ * they are. Run before the enrollment moves to [sharedGroup], and never once something is enrolled there. Returns
+ * whether the old enrollment is gone (deleted, never there, or superseded).
  */
-internal fun sweepLegacyQuickUnlock(service: String): Boolean = runCatching {
+internal fun sweepLegacyQuickUnlock(service: String, sharedGroup: String): Boolean = runCatching {
     val owned = CfOwned()
     try {
+        // The sweep cannot name the old group, so it matches every group. Once anything is enrolled in the shared
+        // group (a start that was cut short after the sweep, then a new enrollment), there is nothing old left that
+        // matters, and sweeping again would destroy the new enrollment: the move is finished.
+        val enrolled = SecItemCopyMatching(
+            owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service), kSecAttrAccessGroup to owned.retain(sharedGroup), kSecMatchLimit to kSecMatchLimitOne),
+            null,
+        )
+        if (enrolled == errSecSuccess) return@runCatching true
         val blobs = SecItemDelete(owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service)))
         val keys = SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID to kSecAttrTokenIDSecureEnclave))
         listOf(blobs, keys).all { it == errSecSuccess || it == errSecItemNotFound }
