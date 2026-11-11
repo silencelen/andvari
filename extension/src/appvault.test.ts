@@ -214,3 +214,41 @@ test("every list the Safari popup renders from is answered by the app's vault, n
   const asked = [...popup.matchAll(/if \(!(\w+) \|\| \1\.locked\) return relocked\(\);/g)].length;
   assert.equal(asked, 4, "a new list in the popup needs its answer in the Safari lane too");
 });
+
+// Build 15 on a device: Face ID came up and then there was no popup. iOS dismisses the popup when the system's Face ID
+// sheet appears, and the popup's going away (a port disconnect) closed the vault the same unlock was opening, so every
+// reopening asked again. The unlock now belongs to the worker for its lifetime, whatever the popup's page does.
+test("an unlock survives the popup going away while Face ID is up, and a reopened popup finds the list", async () => {
+  const sent: string[] = [];
+  let answerOpen: (v: unknown) => void = () => {};
+  const vault = new AppVault(async (m) => {
+    sent.push(m.type);
+    if (m.type === "vaultOpen") return new Promise((resolve) => (answerOpen = resolve));
+    return { ok: true, type: "vaultClose" };
+  });
+  const pending = vault.open();
+  // The page is hidden, shown, and gone while the prompt is up. None of that reaches the vault: there is no call for
+  // it. Even an explicit close that lands mid-prompt has nothing to close, and the answer is still honoured.
+  vault.close();
+  assert.equal(vault.unlocked, false);
+  answerOpen(opened);
+  assert.equal((await pending).state, "open");
+  assert.equal(vault.unlocked, true, "the answer that arrives after the popup went away is kept");
+  // The popup is opened again: it renders from the worker, with no second prompt.
+  assert.deepEqual(vault.listAnswer(vault.items()).items.map((i) => i.itemId).sort(), ["i0", "i1"]);
+  assert.deepEqual(sent, ["vaultOpen"], "one unlock, nothing closed");
+  // An empty or odd card list is a list, never "locked".
+  assert.deepEqual(vault.listAnswer([]), { locked: false, items: [] });
+  assert.deepEqual(vault.listAnswer([undefined, null]), { locked: false, items: [undefined, null] });
+});
+
+test("the Safari worker ties the vault to nothing in the popup's page", () => {
+  const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
+  assert.ok(!/onConnect\.addListener/.test(bg), "no port: its disconnect closed the vault during Face ID");
+  const popup = readFileSync(new URL("./popup.ts", import.meta.url), "utf8");
+  assert.ok(!/addEventListener\("(pagehide|unload|beforeunload)"/.test(popup), "the popup's unload locks nothing");
+  assert.ok(!popup.includes("runtime.connect("));
+  // The prompt is asked for only after the unlock view has been painted and the sheet has settled.
+  const onOpen = popup.slice(popup.indexOf("async function appUnlockOnOpen("), popup.indexOf("async function appUnlockOnOpen(") + 1400);
+  assert.ok(onOpen.indexOf("requestAnimationFrame(() => requestAnimationFrame(") > 0 && onOpen.indexOf("requestAnimationFrame(") < onOpen.indexOf("await appUnlock();"));
+});

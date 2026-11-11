@@ -3831,6 +3831,15 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
       } satisfies Res<"status">;
     case "appUnlock": {
       const r = await vault.open();
+      // The Face ID sheet may have dismissed the popup that asked. Bring it back if the engine lets a worker do
+      // that (best effort: where it does not, the person taps the toolbar item again and finds the list).
+      if (r.state === "open") {
+        try {
+          void (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup?.()?.catch(() => {});
+        } catch {
+          /* openPopup unsupported here */
+        }
+      }
       return (r.state === "openApp" ? { ok: false, state: r.state, message: r.message } : { ok: r.state === "open", state: r.state }) satisfies Res<"appUnlock">;
     }
     case "lock":
@@ -3933,14 +3942,9 @@ async function activePageHost(): Promise<string | null> {
   }
 }
 
-// The list lives for one popup: when the popup's port closes, the list goes and the handler wipes its keys.
-atLoad("runtime.onConnect", () =>
-  chrome.runtime.onConnect.addListener((port) => {
-    if (APP_VAULT === null || port.name !== "andvari-popup") return;
-    port.onDisconnect.addListener(() => APP_VAULT.close());
-  }),
-);
-
+// The list lives for the vault's own lifetime (90 s) or until Lock. Nothing ties it to the popup's page: on iOS the
+// system's Face ID sheet dismisses the popup, and a port's disconnect (build 15) then closed the vault that the very
+// same unlock was opening, so every reopening asked for Face ID again and never showed a list.
 // ---- end of the Safari app-vault lane ----
 
 /**
