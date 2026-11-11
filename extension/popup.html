@@ -139,6 +139,13 @@
         </p>
       </section>
 
+      <!-- Safari on iOS: no sign-in here. The vault is the andvari app's, opened by Face ID in the extension's native
+           handler; this is the whole locked view in that build (popup.ts renderAppLocked). -->
+      <section id="app-locked" class="qu-block" hidden>
+        <button id="app-unlock" class="primary">Unlock with Face ID</button>
+        <p class="qu-antiphish" role="note">Your logins come from the andvari app on this iPhone. andvari never asks for a password on a web page.</p>
+      </section>
+
       <!-- The full master-password form. Hidden while an armed PIN entry is showing (the toggle above). -->
       <div id="qu-master-form">
         <div class="field">

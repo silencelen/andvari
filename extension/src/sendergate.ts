@@ -88,6 +88,7 @@ export const SENDER_CLASS = {
   // Safari: the app's server is adopted only on our own popup's word (and the worker's own start).
   appServer: "extension",
   serverDiag: "extension",
+  appUnlock: "extension",
 } as const satisfies Record<ReqType, SenderClass>;
 
 type ExtensionOnly = { [K in ReqType]: (typeof SENDER_CLASS)[K] extends "extension" ? K : never }[ReqType];
@@ -146,6 +147,7 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
   forgetLegacyServer: { ok: false },
   appServer: { app: "unavailable" },
   serverDiag: null,
+  appUnlock: { ok: false, state: "unavailable" },
 };
 
 /** The two halves of [SENDER_CLASS], for the tests and for readers. */
