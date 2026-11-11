@@ -148,3 +148,69 @@ test("each capture is queued under its own id, and the old session is retired be
   const sync = bg.slice(bg.indexOf("function syncAppServer("), bg.indexOf("function syncAppServer(") + 1500);
   assert.match(sync, /await Promise\.race\(\[ownSessionRetired, delay\(APP_SERVER_START_WAIT_MS\)\]\);/);
 });
+
+// Build 14 on a device: after Face ID the popup flipped between the unlock screen and the list without end. The popup
+// goes back to its unlock screen whenever a list answers "locked"; the status and the login lists came from the app's
+// vault, but the card list fell through to the worker's own session, which this build never has, and said "locked".
+// Every render therefore read unlocked, then locked, then asked again.
+test("one unlock is one view change: every list agrees with the status on every tick, and rendering asks the handler nothing", async () => {
+  const sent: string[] = [];
+  let handlerRestarted = false;
+  const vault = new AppVault(async (m) => {
+    sent.push(m.type);
+    if (m.type === "vaultOpen") return opened;
+    // After a restart the handler knows no ticket: it prompts again itself (naming the login) and still answers.
+    if (m.type === "vaultSecret") return { ok: true, type: "vaultSecret", state: "secret", username: "fam", password: "hunter2", diag: { ticketFound: !handlerRestarted } };
+    return { ok: true, type: "vaultClose" };
+  });
+  /** What the popup shows after one render: the unlock screen if the status or ANY list says locked. */
+  const view = (): "locked" | "unlocked" => {
+    const lists = [vault.listAnswer(vault.items()), vault.listAnswer(vault.items()), vault.listAnswer<never>([])]; // this site, all logins, cards
+    return vault.unlocked && lists.every((l) => !l.locked) ? "unlocked" : "locked";
+  };
+  const seen: string[] = [view()];
+  const render = (): void => {
+    const v = view();
+    if (v !== seen.at(-1)) seen.push(v);
+  };
+
+  await vault.open();
+  for (let tick = 0; tick < 10; tick++) render(); // the popup's status poll, once a second
+  assert.deepEqual(seen, ["locked", "unlocked"], "locked to unlocked exactly once");
+  assert.deepEqual(sent, ["vaultOpen"], "no handler call on render");
+
+  handlerRestarted = true; // iOS ended the handler's process; the worker cannot know and does not need to
+  for (let tick = 0; tick < 5; tick++) render();
+  assert.equal((await vault.secret("i1", "login")).state, "login");
+  for (let tick = 0; tick < 5; tick++) render();
+  assert.deepEqual(seen, ["locked", "unlocked"], "a dead handler process does not change the view");
+  assert.deepEqual(sent, ["vaultOpen", "vaultSecret"], "one unlock, one secret, nothing closed");
+  assert.equal(vault.diag.secret, "ticketFound=false");
+
+  vault.close(); // Lock, or the popup went away
+  render();
+  assert.deepEqual(seen, ["locked", "unlocked", "locked"]);
+  assert.deepEqual(sent, ["vaultOpen", "vaultSecret", "vaultClose"]);
+});
+
+test("a secret the app's gates refuse ends the vault; a cancelled prompt does not", async () => {
+  let answer: unknown = { ok: true, type: "vaultSecret", state: "cancelled" };
+  const vault = new AppVault(async (m) => (m.type === "vaultOpen" ? opened : m.type === "vaultSecret" ? answer : { ok: true, type: "vaultClose" }));
+  await vault.open();
+  assert.deepEqual(await vault.secret("i1", "login"), { state: "cancelled" });
+  assert.equal(vault.unlocked, true);
+  answer = { ok: true, type: "vaultSecret", state: "openApp", message: "Open andvari" };
+  assert.equal((await vault.secret("i1", "login")).state, "openApp");
+  assert.equal(vault.unlocked, false);
+});
+
+test("every list the Safari popup renders from is answered by the app's vault, none by the worker's own session", () => {
+  const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
+  const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf("function appVaultList("));
+  for (const type of ["status", "matches", "allItems", "cardItems"]) assert.ok(lane.includes(`case "${type}":`), `${type} is answered in the lane`);
+  assert.match(lane, /return vault\.listAnswer<CardItem>\(\[\]\)/);
+  // The popup's lists, as it asks for them once unlocked: each one's "locked" sends it back to the unlock screen.
+  const popup = readFileSync(new URL("./popup.ts", import.meta.url), "utf8");
+  const asked = [...popup.matchAll(/if \(!(\w+) \|\| \1\.locked\) return relocked\(\);/g)].length;
+  assert.equal(asked, 4, "a new list in the popup needs its answer in the Safari lane too");
+});

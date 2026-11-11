@@ -3846,7 +3846,12 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     }
     case "allItems":
       if (sender.tab !== undefined) return { locked: !vault.unlocked, items: [] } satisfies Res<"allItems">;
-      return { locked: !vault.unlocked, items: appVaultList(msg.query) } satisfies Res<"allItems">;
+      return vault.listAnswer(appVaultList(msg.query)) satisfies Res<"allItems">;
+    case "cardItems":
+      // The snapshot holds logins only. Answered here, by the vault's own notion of locked: the ordinary handler
+      // answers from the worker's session, which this build never has, and its "locked" sent the popup back to the
+      // unlock screen after every successful unlock.
+      return vault.listAnswer<CardItem>([]) satisfies Res<"cardItems">;
     case "reveal":
       return appVaultReveal(msg, sender);
     case "totp":

@@ -153,6 +153,15 @@ export class AppVault {
     return this.live()?.email ?? null;
   }
 
+  /**
+   * The answer to every list the popup asks for (this site's logins, all logins, cards): ONE notion of locked, the
+   * vault's. The popup returns to its unlock screen when any list says locked, so a list answered from anywhere else
+   * (the worker's own, absent session said "locked" for cards) made it flip between the two screens without end.
+   */
+  listAnswer<T>(items: T[]): { locked: boolean; items: T[] } {
+    return this.live() === null ? { locked: true, items: [] } : { locked: false, items };
+  }
+
   /** The logins, by name. Empty while locked. */
   items(): AppVaultItem[] {
     return this.live()?.items ?? [];
@@ -193,7 +202,11 @@ export class AppVault {
     try {
       const reply = await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want, name: item.name }), APP_VAULT_PROMPT_TIMEOUT_MS);
       this.diag.secret = describeDiag(reply);
-      return parseSecretReply(reply, want);
+      const result = parseSecretReply(reply, want);
+      // The app's gates refuse now (signed out, policy, Face ID off): this vault is over. A cancel, or a handler
+      // that had to prompt again, changes nothing here.
+      if (result.state === "openApp") this.close();
+      return result;
     } catch {
       return { state: "unavailable" };
     }
