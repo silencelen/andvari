@@ -84,6 +84,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param tickMs the idle check's period while started; 0 runs no ticker (tests drive [tick]).
  * @param serverShare where the confirmed server is published for the app's own extensions.
  * @param fillSnapshots where the AutoFill extension's encrypted snapshot is kept; nothing is written by default.
+ * @param saveQueue where the extensions queue captured logins for this app to import; none by default.
  */
 open class SessionController(
     private val store: SessionPersistence,
@@ -97,6 +98,7 @@ open class SessionController(
     private val tickMs: Long,
     private val serverShare: ServerShare = ServerShare {},
     private val fillSnapshots: FillSnapshotStore = FillSnapshotStore.None,
+    private val saveQueue: SaveQueueStore = SaveQueueStore.None,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + uiContext)
     private val session = VaultSession(clocks)
@@ -145,6 +147,9 @@ open class SessionController(
 
     /** H08: a lock on leaving the foreground that waited for a running action. */
     private var backgroundLockPending = false
+
+    /** The captured logins shown in [AppState.pendingSaves], opened; never in the state, gone at every lock. */
+    private val pendingSaves = LinkedHashMap<String, CapturedLogin>()
 
     /** The policy probe a landing started ([refreshPolicyIfStale]), while it runs. */
     private var policyRefresh: Job? = null
@@ -850,6 +855,7 @@ open class SessionController(
         refreshQuick()
         refreshPolicyIfStale()
         writeFillSnapshot()
+        refreshSaveQueue()
     }
 
     /**
@@ -877,8 +883,86 @@ open class SessionController(
         }
     }
 
+    /** Everything the extensions share for one account goes together: the snapshot, the save key and the queued saves. */
     private fun dropFillSnapshot() {
         runCatching { fillSnapshots.delete() }
+        runCatching { saveQueue.clear() }
+        pendingSaves.clear()
+        update { if (it.pendingSaves.isEmpty()) it else it.copy(pendingSaves = emptyList()) }
+    }
+
+    /**
+     * Publish the account the extensions may seal a captured login to, and open what they queued (design 2026-11-09,
+     * "Saving"). An entry that is not a save sealed to this account at this origin is removed; so is one whose login
+     * the vault already holds. Nothing is written to the vault here: [confirmPendingSave] does that, one at a time.
+     * No key is published, and the queue is emptied, when the origin's policy forbids keeping data on the device.
+     */
+    private fun refreshSaveQueue() {
+        if (saveQueue === SaveQueueStore.None) return
+        runCatching {
+            val live = session.get() ?: return
+            val origin = store.baseUrl ?: return
+            if (!coordinator.cacheAllowed(OriginCanon.originKey(origin))) {
+                saveQueue.clear()
+                pendingSaves.clear()
+                update { it.copy(pendingSaves = emptyList()) }
+                return
+            }
+            val publication = SaveQueue.publication(origin, live.account)
+            if (saveQueue.publication()?.contentEquals(publication) != true) saveQueue.publish(publication)
+            pendingSaves.clear()
+            val logins = live.engine.items().filter { it.doc.type == "login" }
+            for ((id, bytes) in saveQueue.entries()) {
+                val login = SaveQueue.open(live.account, origin, bytes)
+                val same = login != null && logins.any { sameLogin(it, login) && it.doc.login?.password == login.password }
+                if (login == null || same) saveQueue.remove(id) else pendingSaves[id] = login
+            }
+            val views = pendingSaves.map { (id, login) ->
+                PendingSaveView(id, UriMatch.normalizeHostUnicode(login.site) ?: login.site, login.username, logins.firstOrNull { sameLogin(it, login) }?.doc?.name)
+            }
+            update { it.copy(pendingSaves = views) }
+        }
+    }
+
+    /** The login [captured] would update: the same username on a web address of the same host. */
+    private fun sameLogin(item: VaultItem, captured: CapturedLogin): Boolean {
+        val host = UriMatch.normalizeHost(captured.site) ?: return false
+        val login = item.doc.login ?: return false
+        return login.username.orEmpty() == captured.username && login.uris.any { UriMatch.normalizeHost(it) == host }
+    }
+
+    /** The password of a pending save, for the person to check before saving it; null when it is gone. */
+    fun pendingSavePassword(id: String): String? = guarded({ null }) { pendingSaves[id]?.password }
+
+    /**
+     * Save one captured login: a new login in the personal vault, or the new password of the login it replaces
+     * ([PendingSaveView.replaces]). The entry leaves the queue once the vault took it.
+     */
+    @Throws(CancellationException::class)
+    suspend fun confirmPendingSave(id: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val captured = pendingSaves[id] ?: return@action ActionResult.NotDone(null)
+        val existing = live.engine.items().firstOrNull { it.doc.type == "login" && sameLogin(it, captured) }
+        if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        val host = UriMatch.normalizeHost(captured.site) ?: return@action ActionResult.Failed(ITEM_GONE)
+        val doc = existing?.doc?.let { it.copy(login = (it.login ?: LoginData()).copy(password = captured.password)) }
+            ?: ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf("https://$host")))
+        busy()
+        val outcome = live.engine.save(existing?.itemId, doc, existing?.vaultId)
+        if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
+        saveQueue.remove(id)
+        update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
+        refreshSaveQueue()
+        writeFillSnapshot()
+        ActionResult.Ok
+    }
+
+    /** Discard one captured login: it leaves the queue and nothing is written. */
+    fun discardPendingSave(id: String) {
+        if (session.get() == null) return
+        runCatching { saveQueue.remove(id) }
+        pendingSaves.remove(id)
+        update { s -> s.copy(pendingSaves = s.pendingSaves.filter { it.id != id }) }
     }
 
     /**
@@ -990,6 +1074,7 @@ open class SessionController(
 
     private fun lock(reason: String?) {
         session.lock()
+        pendingSaves.clear()
         zeroSecrets()
         backgroundLockPending = false
         val stored = store.load()
@@ -1058,6 +1143,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
+        pendingSaves = emptyList(),
     )
 
     private companion object {

@@ -1970,6 +1970,13 @@ class Account private constructor(
      */
     fun uvkCopyForPlatformWrap(): ByteArray = withKeys { uvk.copyOf() }
 
+    /**
+     * Open a login an extension sealed to [identityPub] for this account to import (the iOS save queue,
+     * `core.app.SaveQueue`). The plaintext is a proposal the person confirms, never a key: the caller checks its
+     * magic and its account before showing it. A seal that does not open throws.
+     */
+    fun openQueuedSave(sealed: ByteArray): ByteArray = withKeys { crypto.sealOpen(identityPub, identityPriv, sealed) }
+
     fun decryptItem(item: WireItem): ItemDoc {
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")
         // Fail closed on documents from a NEWER format: unknown-field preservation (spec 02
