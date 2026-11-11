@@ -3,7 +3,7 @@
 
 usage: serve-site.py <dir> <https port> <http port> <cert.pem> <key.pem>
 
-A POST is answered with a page that says what was submitted (field names only, never values), so a
+A POST is answered with a page that says what was submitted (field names, and a one-time code), so a
 form submission navigates like a real sign-in and the browser's save offer has something to follow.
 """
 import functools
@@ -19,9 +19,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         names = ", ".join(sorted(fields)) or "nothing"
+        # A one-time code is spent once it is submitted, so the page may show it; nothing else is echoed.
+        code = (fields.get("code") or [""])[0]
+        shown = "<p id=code>Code: %s</p>" % code if code.isdigit() and len(code) <= 8 else ""
         body = (
             "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>Submitted</title><h1 id=done>Submitted</h1><p id=fields>Fields: %s</p>" % names
+            "<title>Submitted</title><h1 id=done>Submitted</h1><p id=fields>Fields: %s</p>%s" % (names, shown)
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")

@@ -45,8 +45,7 @@ final class T3SystemIntegrationTests: UITestCase {
         let username = webField("Username")
         step("username-focused") {
             require(username, "the page's username field")
-            username.tap()
-            Thread.sleep(forTimeInterval: 3)
+            focus(username, heading: "Sign in")
             dumpEverything("username-focused")
         }
         step("offer-names-site-login-and-andvari") {
@@ -78,32 +77,29 @@ final class T3SystemIntegrationTests: UITestCase {
         let username = webField("Username")
         step("username-focused") {
             require(username, "the page's username field")
-            username.tap()
-            Thread.sleep(forTimeInterval: 3)
+            focus(username, heading: "Sign in")
         }
         step("offer-closed") {
             closeFillOffer()
             if !safari.keyboards.firstMatch.exists {
                 username.tap()
                 Thread.sleep(forTimeInterval: 2)
+                closeFillOffer()
             }
-            closeFillOffer()
-            dumpEverything("keyboard-after-offer-closed")
+            XCTAssertTrue(waitUntil(5) { self.safari.keyboards.firstMatch.exists }, "no keyboard after the offer was closed")
         }
         step("passwords-key") {
-            guard let key = offered("Passwords") ?? offered("AutoFill") ?? offered("Password") else {
-                XCTFail("the keyboard has no Passwords key to open the list with")
-                return
-            }
+            let key = safari.buttons["Passwords"]
+            require(key, "the Passwords key above the keyboard", timeout: 5)
             key.tap()
-            Thread.sleep(forTimeInterval: 2)
-            dumpEverything("after-passwords-key")
-            // With more than one provider iOS asks which one.
-            if !fillOfferButton.exists, let chooser = offered("andvari") {
-                chooser.tap()
-                Thread.sleep(forTimeInterval: 1.5)
-                dumpEverything("after-choosing-andvari")
-            }
+        }
+        step("andvari-chosen") {
+            // With two providers on, iOS asks which one's list to open.
+            let chooser = safari.buttons["andvari"]
+            require(chooser, "andvari in the provider chooser", timeout: 8)
+            chooser.tap()
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpEverything("after-choosing-andvari")
         }
         step("list-after-face-id") {
             let header = "For this site"
@@ -133,26 +129,25 @@ final class T3SystemIntegrationTests: UITestCase {
         let code = webField("Verification code")
         step("code-focused") {
             require(code, "the page's code field")
-            code.tap()
-            Thread.sleep(forTimeInterval: 3)
+            focus(code, heading: "One-time code")
             dumpEverything("code-focused")
         }
-        step("code-offered") {
-            guard let suggestion = offered("andvari") ?? offered(Fixture.siteUser) ?? offered("code") else {
-                XCTFail("the keyboard offered no one-time code from andvari")
-                return
-            }
+        step("code-offered-by-andvari") {
+            let suggestion = safari.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] 'code' AND label CONTAINS[c] 'andvari'")).firstMatch
+            require(suggestion, "andvari's code above the keyboard", timeout: 8)
             suggestion.tap()
-            Thread.sleep(forTimeInterval: 1.5)
-            dumpEverything("code-tapped")
         }
-        step("code-filled") {
-            XCTAssertTrue(matchFaceUntil(25) { ((code.value as? String) ?? "").range(of: #"^\d{6}$"#, options: .regularExpression) != nil }, "no six-digit code was filled, the field holds \(String(describing: code.value))")
+        step("code-filled-and-right") {
+            // Safari submits a form once its code is filled, so the page that follows is where the code is read.
+            let shown = safari.webViews.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Code: '")).firstMatch
+            XCTAssertTrue(matchFaceUntil(30) { shown.exists }, "no code reached the site")
+            let filled = String(shown.label.dropFirst("Code: ".count))
+            XCTAssertTrue(expectedOneTimeCodes().contains(filled), "the site received \(filled), which is not the code for the seeded secret now")
         }
     }
 
     /// A plain-http page is offered the login saved as http and not the https site's.
-    func test05_SafariPlainHttpPage() {
+    func test05_SafariPlainHttpPage() throws {
         step("provider-on") {
             requireAutoFillProvider()
         }
@@ -162,15 +157,19 @@ final class T3SystemIntegrationTests: UITestCase {
         let username = webField("Username")
         step("username-focused") {
             require(username, "the page's username field")
-            username.tap()
-            Thread.sleep(forTimeInterval: 3)
+            focus(username, heading: "Sign in")
+            Thread.sleep(forTimeInterval: 2)
             dumpEverything("http-username-focused")
         }
-        step("only-the-http-login") {
-            let text = containing("saved in", in: safari)
-            XCTAssertTrue(waitUntil(5) { text.exists }, "nothing was offered on the plain-http page")
-            XCTAssertTrue(text.label.contains("“bob”"), "the login saved for the http address was not the one offered: \(text.label)")
-            XCTAssertFalse(text.label.contains("“\(Fixture.siteUser)”"), "the https site's login was offered on a plain-http page")
+        let offer = containing("saved in", in: safari)
+        step("https-login-not-offered") {
+            XCTAssertFalse(offer.exists && offer.label.contains("“\(Fixture.siteUser)”"), "the https site's login was offered on a plain-http page")
+        }
+        if !offer.exists && !safari.buttons["Passwords"].exists {
+            try skip("Safari in the iOS \(systemVersion.major).\(systemVersion.minor) simulator offers nothing from an AutoFill provider on a plain-http page: no offer sheet and no Passwords key above the keyboard (see the screenshot). The login saved for the http address is in the system's store like the others, so the rule that only it is offered here cannot be shown either way.")
+        }
+        step("the-http-login-is-offered") {
+            XCTAssertTrue(offer.exists && offer.label.contains("“bob”"), "the login saved for the http address was not the one offered")
         }
     }
 
@@ -190,32 +189,33 @@ final class T3SystemIntegrationTests: UITestCase {
         step("form-typed") {
             let username = webField("Username")
             require(username, "the page's username field")
-            username.tap()
-            Thread.sleep(forTimeInterval: 1)
+            focus(username, heading: "Sign up")
             username.typeText(user)
             let password = safari.webViews.secureTextFields["New password"]
             password.tap()
             Thread.sleep(forTimeInterval: 2)
-            dumpEverything("new-password-focused")
-            // iOS may put its own strong password in the field; typing over it is what a person with their own does.
-            if let own = offered("Choose My Own Password") ?? offered("Other Options") {
-                own.tap()
-                Thread.sleep(forTimeInterval: 1)
+            shot("strong-password-offer")
+            // iOS offers a password of its own, to be saved in andvari; a person with their own closes that.
+            closeFillOffer()
+            if !safari.keyboards.firstMatch.exists {
+                password.tap()
+                Thread.sleep(forTimeInterval: 1.5)
+                closeFillOffer()
             }
             password.typeText("Saved-Passw0rd-1")
         }
-        step("submitted") {
+        step("save-offered-with-andvari") {
             safari.webViews.buttons["Create account"].tap()
-            Thread.sleep(forTimeInterval: 3)
-            dumpEverything("after-submit")
-        }
-        step("save-offered") {
-            guard let save = offered("Save Password") ?? offered("Save") else {
+            let alert = safari.alerts["Save Password?"]
+            if !waitUntil(10, { alert.exists }) {
+                dumpEverything("no-save-alert")
                 XCTFail("iOS did not offer to save the new login")
-                return
             }
-            save.tap()
-            Thread.sleep(forTimeInterval: 3)
+            XCTAssertTrue(alert.buttons["andvari"].exists, "andvari is not among the places to save to")
+        }
+        step("saved-to-andvari") {
+            safari.alerts["Save Password?"].buttons["andvari"].tap()
+            Thread.sleep(forTimeInterval: 4)
             dumpEverything("after-save")
         }
         step("arrives-in-the-app") {
@@ -224,10 +224,9 @@ final class T3SystemIntegrationTests: UITestCase {
             reachVaultAnyWay()
             let saved = containing("from AutoFill", in: app)
             let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", user)).firstMatch
-            if !waitUntil(15, { saved.exists || row.exists }) {
-                dumpTree(app, as: "no-saved-login")
-                XCTFail("the saved login did not arrive in the app")
-            }
+            let arrived = waitUntil(15) { saved.exists && row.exists }
+            dumpTree(app, as: "after-save-in-app")
+            XCTAssertTrue(arrived, "the saved login did not arrive in the app (list header shown: \(saved.exists), its username shown: \(row.exists))")
         }
     }
 
@@ -288,11 +287,44 @@ final class T3SystemIntegrationTests: UITestCase {
         }
         step("page") {
             openInSafari(Fixture.siteOrigin + "/login.html", heading: "Sign in")
+            // With the extension on, the page's field takes focus and Safari's offer covers the toolbar.
+            _ = waitUntil(5) { self.fillOfferButton.exists }
+            closeFillOffer()
+            dumpTree(safari, as: "page-with-extension")
+        }
+        step("site-permission") {
+            // The extension asks to see this site: a banner with Review, then how long to allow it.
+            let review = safari.buttons["Review"]
+            if waitUntil(4, { review.exists }) {
+                review.tap()
+                Thread.sleep(forTimeInterval: 2)
+                dumpEverything("permission-review")
+                let choices = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Always Allow'"))
+                if choices.count > 0 {
+                    choices.element(boundBy: 0).tap()
+                    Thread.sleep(forTimeInterval: 2)
+                    dumpEverything("permission-allowed")
+                    let second = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Always Allow'"))
+                    if second.count > 0 && second.element(boundBy: 0).isHittable {
+                        second.element(boundBy: 0).tap()
+                        Thread.sleep(forTimeInterval: 2)
+                    }
+                }
+            }
+            _ = waitUntil(3) { self.fillOfferButton.exists }
             closeFillOffer()
         }
         step("page-menu") {
             let menu = safari.buttons["PageFormatMenuButton"]
-            require(menu, "Safari's page menu button")
+            if !waitUntil(10, { menu.exists && menu.isHittable }) {
+                // A keyboard hides the toolbar.
+                safari.webViews.staticTexts["Sign in"].firstMatch.tap()
+                closeFillOffer()
+            }
+            if !waitUntil(10, { menu.exists && menu.isHittable }) {
+                dumpTree(safari, as: "no-page-menu")
+                XCTFail("Safari's page menu button is not reachable")
+            }
             menu.tap()
             Thread.sleep(forTimeInterval: 2)
             dumpEverything("page-menu")
@@ -352,8 +384,11 @@ final class T3SystemIntegrationTests: UITestCase {
             app.terminate()
             launchApp()
             expectScreen(.unlock)
+            // The screen asks for a face by itself; the system's sheet only offers Cancel once a face has failed.
             Thread.sleep(forTimeInterval: 2)
+            Biometrics.noMatch()
             dismissBiometricPrompt()
+            XCTAssertTrue(waitUntil(8) { self.element("unlock.sign-out").isEnabled }, "the Face ID prompt is still up")
         }
         step("field-focused") {
             masterPasswordField.tap()
