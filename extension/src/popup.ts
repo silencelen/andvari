@@ -770,8 +770,12 @@ async function scheduleClipboardClear(): Promise<void> {
   clipClearTimer = window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), Math.max(1, s) * 1000);
 }
 
-async function fillItem(itemId: string): Promise<void> {
-  const r = await ask({ type: "fillFromPopup", itemId });
+async function fillItem(itemId: string, confirmedOtherSite = false): Promise<void> {
+  const r = await ask({ type: "fillFromPopup", itemId, confirmedOtherSite });
+  if (r?.needsConfirm) {
+    confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);
+    return;
+  }
   // Cut M (v2 #14): ok is now the FILL outcome (the content script's ground truth), not message
   // delivery — close only when something actually landed in the page; otherwise stay open and
   // render the canon sentence for the seam code (never the SW's raw `error` debug string).
@@ -780,6 +784,37 @@ async function fillItem(itemId: string): Promise<void> {
   } else {
     showMsg("err", fillErrorCopy(r?.code));
   }
+}
+
+/**
+ * Safari: a login saved for one site is about to be filled on another. Nothing has been filled yet; this names both
+ * hosts and fills only on a second, explicit tap. Every string is textContent.
+ */
+function confirmOtherSite(itemId: string, savedFor: string, page: string): void {
+  document.getElementById("other-site-confirm")?.remove();
+  const box = document.createElement("div");
+  box.id = "other-site-confirm";
+  box.setAttribute("role", "alertdialog");
+  box.style.cssText = "margin:8px 0;padding:10px;border:1px solid currentColor;border-radius:8px";
+  const text = document.createElement("p");
+  text.style.margin = "0 0 8px";
+  text.textContent = `This login is saved for ${savedFor}. You are on ${page}. Fill it here only if you trust this page.`;
+  const fill = document.createElement("button");
+  fill.type = "button";
+  fill.className = "primary";
+  fill.textContent = `Fill on ${page}`;
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "link dim";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => box.remove());
+  fill.addEventListener("click", () => {
+    box.remove();
+    void fillItem(itemId, true);
+  });
+  box.append(text, fill, cancel);
+  el("msg").insertAdjacentElement("afterend", box);
+  cancel.focus();
 }
 
 /** The list payload already carries the username (safe subset) — no reveal round-trip. */

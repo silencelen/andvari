@@ -639,8 +639,11 @@ test("A16 review R4: nothing dials while a server is pending — the api refuses
   assert.ok(rs.indexOf("if (dialBlock) return;") > -1 && rs.indexOf("if (dialBlock) return;") < rs.indexOf("api.sync(0)"));
   const sock = spanOf(bg, "async function ensureSocket(reset = false): Promise<void> {", "\n}\n");
   assert.ok(sock.indexOf("if (dialBlock) return;") > -1 && sock.indexOf("if (dialBlock) return;") < sock.indexOf("startEvents("));
-  // The only AndvariApi built outside makeApi is sign-out's revoker, which is gated by hand.
-  assert.equal((bg.match(/new AndvariApi\(/g) ?? []).length, 2);
+  // The only AndvariApi built outside makeApi are the two revokers, each gated by hand: sign-out's, and the Safari
+  // build's retirement of the session an earlier build made.
+  assert.equal((bg.match(/new AndvariApi\(/g) ?? []).length, 3);
+  const retire = spanOf(bg, "async function retireOwnSession(", "const ownSessionRetired");
+  assert.ok(retire.indexOf("if (dialBlock !== null) return;") > -1 && retire.indexOf("if (dialBlock !== null) return;") < retire.indexOf("new AndvariApi("));
 });
 
 test("A16: quick unlock cannot be enrolled where it cannot arm", () => {
