@@ -8,8 +8,12 @@ import io.silencelen.andvari.core.app.FillCredential
 import io.silencelen.andvari.core.app.FillLogin
 import io.silencelen.andvari.core.app.FillSnapshotStore
 import io.silencelen.andvari.core.app.FillUnlock
+import io.silencelen.andvari.core.app.SaveQueue
+import io.silencelen.andvari.core.app.SaveQueueStore
+import io.silencelen.andvari.core.app.SaveQueued
 import io.silencelen.andvari.core.app.ServerShare
 import io.silencelen.andvari.core.app.SessionController
+import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.HttpClients
 import io.silencelen.andvari.core.client.session.IosClocks
@@ -19,6 +23,7 @@ import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SecretStore
 import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.httpsOnly
+import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.coroutines.Dispatchers
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSUserDefaults
@@ -77,6 +82,7 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     1_000L,
     seams.serverShare,
     seams.snapshots,
+    seams.saveQueue,
 ) {
     constructor(config: IosStorageConfig) : this(IosSeams(config))
 
@@ -84,7 +90,11 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
 }
 
 /** The platform seams one controller uses. Building them migrates an older layout once ([migrate]). */
-internal class IosSeams(config: IosStorageConfig, snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath)) {
+internal class IosSeams(
+    config: IosStorageConfig,
+    snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath),
+    savesDir: String? = config.sharedSuite?.let(::groupSavesDir),
+) {
     private val prefs = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
@@ -98,6 +108,7 @@ internal class IosSeams(config: IosStorageConfig, snapshotPath: String? = config
     val quickKeys: QuickUnlockKeys = quickUnlockKeys(config)
     val serverShare: ServerShare = config.sharedSuite?.let(::AppGroupServerShare) ?: ServerShare {}
     val snapshots: FillSnapshotStore = snapshotPath?.let(::FileFillSnapshots) ?: FillSnapshotStore.None
+    val saveQueue: SaveQueueStore = savesDir?.let(::FileSaveQueue) ?: SaveQueueStore.None
 
     private companion object {
         const val MOVED = "ios.sharedLayout.v1"
@@ -136,6 +147,10 @@ internal fun quickUnlockKeys(config: IosStorageConfig): QuickUnlockKeys =
 internal fun groupSnapshotPath(group: String): String? =
     NSFileManager.defaultManager.containerURLForSecurityApplicationGroupIdentifier(group)?.path?.let { "$it/autofill-snapshot.json" }
 
+/** The save queue's directory in [group]'s container; null where the group is not provisioned. */
+internal fun groupSavesDir(group: String): String? =
+    NSFileManager.defaultManager.containerURLForSecurityApplicationGroupIdentifier(group)?.path?.let { "$it/saves" }
+
 /** A secret store that holds nothing: the extensions' view of the session's tokens. */
 internal object NoSecrets : SecretStore {
     override fun read(name: String): String? = null
@@ -147,8 +162,10 @@ internal object NoSecrets : SecretStore {
  * The AutoFill extension's vault (design 2026-11-09, "AutoFill"), and the Safari handler's: the shared state read
  * from the App Group, the snapshot, and the quick-unlock key behind Face ID. It has no tokens and sends nothing.
  */
-class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: String?) {
-    constructor() : this(IosStorageConfig(), groupSnapshotPath(IOS_APP_GROUP))
+class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: String?, savesDir: String?) {
+    constructor() : this(IosStorageConfig(), groupSnapshotPath(IOS_APP_GROUP), groupSavesDir(IOS_APP_GROUP))
+
+    private val saves: SaveQueueStore = savesDir?.let(::FileSaveQueue) ?: SaveQueueStore.None
 
     private val vault = AutofillVault(
         PrefsSessionPersistence(UserDefaultsPrefs(config.defaultsSuite), NoSecrets),
@@ -171,6 +188,16 @@ class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: S
     fun credential(itemId: String): FillCredential? = vault.credential(itemId)
 
     fun oneTimeCode(itemId: String): String? = vault.oneTimeCode(itemId)
+
+    /**
+     * Queue a login the system asked this extension to save (iOS 26.2): sealed to the account's public key, for the app
+     * to show and import at its next unlock. [id] names the form's session, so a later event for the same form
+     * replaces its entry. Needs no unlock and sends nothing.
+     */
+    fun queueSave(id: String, site: String, username: String, password: String): SaveQueued =
+        runCatching { SaveQueue.enqueue(saves, createCryptoProvider(), saveId(id), site, username, password, IosClocks.wallMs(), "autofill") }.getOrDefault(SaveQueued.REFUSED)
+
+    private fun saveId(raw: String): String = "s-" + OriginCanon.pathSafe(raw).filter { it.isLetterOrDigit() || it == '-' }.take(48).ifEmpty { "form" }
 
     /** End the fill: the keys are zeroed. */
     fun close() = vault.close()

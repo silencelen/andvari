@@ -3,6 +3,8 @@
 package io.silencelen.andvari.core.ios
 
 import io.silencelen.andvari.core.app.FillSnapshotStore
+import io.silencelen.andvari.core.app.SaveQueue
+import io.silencelen.andvari.core.app.SaveQueueStore
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.VaultCache
@@ -240,5 +242,62 @@ internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
     override fun delete() {
         runCatching { NSFileManager.defaultManager.removeItemAtPath(path, error = null) }
         runCatching { NSFileManager.defaultManager.removeItemAtPath("$path.tmp", error = null) }
+    }
+}
+
+/**
+ * The save queue in a directory of the App Group container: `key.json` is the published key, and each queued save is
+ * `q-<id>.json`. The Safari extension's native handler writes entries in this same layout
+ * (SafariWebExtensionHandler.swift). Every write is a rename into place; entries are ciphertext.
+ */
+internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
+    private val fm get() = NSFileManager.defaultManager
+    private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
+
+    private fun writeWhole(path: String, bytes: ByteArray): Boolean = runCatching {
+        fm.createDirectoryAtPath(dir, withIntermediateDirectories = true, attributes = attributes, error = null)
+        NSURL.fileURLWithPath(dir).setResourceValue(true, forKey = NSURLIsExcludedFromBackupKey, error = null)
+        val tmp = "$path.tmp"
+        if (!fm.createFileAtPath(tmp, contents = bytes.toNSData(), attributes = attributes)) return@runCatching false
+        if (rename(tmp, path) != 0) {
+            fm.removeItemAtPath(tmp, error = null)
+            return@runCatching false
+        }
+        true
+    }.getOrDefault(false)
+
+    private fun names(): List<String> = runCatching { fm.contentsOfDirectoryAtPath(dir, error = null)?.mapNotNull { it as? String } }.getOrNull().orEmpty()
+
+    override fun publication(): ByteArray? = runCatching { fm.contentsAtPath("$dir/$KEY_FILE")?.toByteArray() }.getOrNull()
+
+    override fun publish(bytes: ByteArray?) {
+        if (bytes == null) runCatching { fm.removeItemAtPath("$dir/$KEY_FILE", error = null) } else writeWhole("$dir/$KEY_FILE", bytes)
+    }
+
+    override fun entries(): Map<String, ByteArray> {
+        val out = LinkedHashMap<String, ByteArray>()
+        for (name in names().sorted()) {
+            if (!name.startsWith(ENTRY_PREFIX) || !name.endsWith(ENTRY_SUFFIX)) continue
+            val id = name.removePrefix(ENTRY_PREFIX).removeSuffix(ENTRY_SUFFIX)
+            if (!SaveQueue.validId(id)) continue
+            runCatching { fm.contentsAtPath("$dir/$name")?.toByteArray() }.getOrNull()?.let { out[id] = it }
+        }
+        return out
+    }
+
+    override fun put(id: String, bytes: ByteArray): Boolean = SaveQueue.validId(id) && writeWhole("$dir/$ENTRY_PREFIX$id$ENTRY_SUFFIX", bytes)
+
+    override fun remove(id: String) {
+        if (SaveQueue.validId(id)) runCatching { fm.removeItemAtPath("$dir/$ENTRY_PREFIX$id$ENTRY_SUFFIX", error = null) }
+    }
+
+    override fun clear() {
+        for (name in names()) runCatching { fm.removeItemAtPath("$dir/$name", error = null) }
+    }
+
+    private companion object {
+        const val KEY_FILE = "key.json"
+        const val ENTRY_PREFIX = "q-"
+        const val ENTRY_SUFFIX = ".json"
     }
 }
