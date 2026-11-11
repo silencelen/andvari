@@ -352,8 +352,9 @@ function relocked(): void {
   showView(false);
   // a11y 4a: a mid-session relock hid the unlocked view under focus — move focus to a real
   // element (#email) instead of letting it fall to <body>. showMsg is a live region (2a) so
-  // the reason is announced.
-  el("email").focus();
+  // the reason is announced. (Safari has no email field: its one button takes the focus.)
+  if (BUILD_TARGET === "safari") renderAppLocked(false);
+  el(BUILD_TARGET === "safari" ? "app-unlock" : "email").focus();
   showMsg("info", "Session locked — unlock to continue.");
   // Re-query status so an armed quick-unlock (an idle autolock ARMS it — spec 01 §8.4) shows its PIN
   // field; refresh() refines the focus + lock-notice (an idle notice supersedes the message above).
@@ -847,7 +848,8 @@ function totpChip(itemId: string): HTMLElement {
   ring.setAttribute("aria-hidden", "true"); // decorative countdown visual (5b conveys it as text)
   const code = document.createElement("span");
   code.className = "code";
-  code.textContent = "······";
+  // Safari: no live code is shown (it is released only on a copy), so the chip says what a tap does.
+  code.textContent = BUILD_TARGET === "safari" ? "copy code" : "······";
   code.setAttribute("aria-hidden", "true"); // a11y 3b: digits out of the accessible name
   // a11y 5b: seconds-left as a described-by description (read on focus, not per-tick) so the
   // countdown is available to AT without re-announcing and without polluting the button name.
@@ -900,6 +902,9 @@ async function tickTotp(): Promise<void> {
     relocked();
     return;
   }
+  // Safari: a code is released only when the person copies it (appvault.ts), so there is nothing to tick. Asking
+  // anyway got "no code" every second and hid each chip a second after it was drawn — the popup's flicker.
+  if (BUILD_TARGET === "safari") return;
   // quality-perf--4: the asks go out CONCURRENTLY. Serially awaiting one message per chip made the
   // codes flip visibly staggered across the second at double-digit chip counts, and stretched the
   // popup⇄SW round-trips over the whole tick. No protocol change — same N messages, in flight at
@@ -1615,7 +1620,10 @@ async function renderServerOrigin(): Promise<void> {
     if (BUILD_TARGET === "safari") void renderServerDetails(node, info === undefined);
     return;
   }
-  document.getElementById("server-details")?.remove();
+  // Safari: the Details stay reachable (collapsed) while the app-backed vault is being proven on devices; they show
+  // whether the native handler's process survived between the unlock and a fill.
+  if (BUILD_TARGET === "safari") void renderServerDetails(node, false);
+  else document.getElementById("server-details")?.remove();
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
   // a11y-webext--5: the element is a bare <span> (role=generic), and aria-label is PROHIBITED on a
@@ -1632,9 +1640,14 @@ async function renderServerOrigin(): Promise<void> {
  * opened, how the ask of the app ended, and what the app answers this popup directly. Every string is textContent.
  */
 async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean): Promise<void> {
-  document.getElementById("server-details")?.remove();
+  // Built once and filled only when opened. Rebuilding it on every header render (each refresh re-renders the header)
+  // redrew this block and sent the app a native message every time: part of the popup's flicker.
+  const existing = document.getElementById("server-details");
+  if (existing?.dataset["silent"] === String(serverInfoSilent)) return;
+  existing?.remove();
   const box = document.createElement("details");
   box.id = "server-details";
+  box.dataset["silent"] = String(serverInfoSilent);
   box.style.cssText = "font-size:11px;margin-top:4px;word-break:break-word";
   const summary = document.createElement("summary");
   summary.textContent = "Details";
@@ -1642,6 +1655,13 @@ async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean
   body.style.whiteSpace = "pre-wrap";
   box.append(summary, body);
   after.insertAdjacentElement("afterend", box);
+  box.addEventListener("toggle", () => {
+    if (box.open) void fillServerDetails(body, serverInfoSilent);
+  });
+}
+
+/** The Details' lines, gathered when the disclosure is opened (and again each time it is reopened). */
+async function fillServerDetails(body: HTMLElement, serverInfoSilent: boolean): Promise<void> {
   const lines: string[] = [`Worker answered serverInfo: ${serverInfoSilent ? "no" : "yes"}`];
   const show = (): void => {
     body.textContent = lines.join("\n");
@@ -1660,6 +1680,8 @@ async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean
       `App ask (worker): ${d.native}${d.nativeError ? ` — ${d.nativeError}` : ""}`,
       `App answered: ${d.app ?? "–"}`,
       `Adoption: ${d.adopt ?? "–"}`,
+      `Handler at unlock: ${d.vaultOpen ?? "–"}`,
+      `Handler at last fill or copy: ${d.vaultSecret ?? "–"}`,
     );
   }
   show();
@@ -1786,16 +1808,32 @@ function renderAppLocked(unlocked: boolean): void {
   el("sign-out").hidden = true;
 }
 
-el("app-unlock").addEventListener("click", async () => {
+/** Face ID in the app's handler, then the list. The button is the retry after a cancel or a failure. */
+async function appUnlock(): Promise<void> {
   const button = el<HTMLButtonElement>("app-unlock");
+  if (button.disabled) return; // one prompt at a time
   button.disabled = true;
+  button.textContent = "Waiting for Face ID…";
   clearMsg();
   const r = await ask({ type: "appUnlock" });
   button.disabled = false;
+  button.textContent = "Unlock with Face ID";
   if (r?.state === "openApp") showMsg("info", r.message ?? "Open andvari and unlock it, then try again.");
   else if (r?.state === "unavailable" || r === undefined) showMsg("err", "Couldn’t reach the andvari app. Open it once, then try again.");
   await refresh();
-});
+}
+el("app-unlock").addEventListener("click", () => void appUnlock());
+
+/** Once per popup open: Face ID comes up by itself. A relock while the popup stays open (the 90 s window) does not
+ *  prompt again on its own; the button does. */
+let appUnlockOffered = false;
+async function appUnlockOnOpen(): Promise<void> {
+  if (BUILD_TARGET !== "safari" || appUnlockOffered) return;
+  appUnlockOffered = true;
+  const s = await ask({ type: "status" });
+  const info = await ask({ type: "serverInfo" });
+  if (s && !s.unlocked && info && !info.block) await appUnlock();
+}
 
 // Safari: the worker keeps the app's list only while this popup is open; the port's close tells it to drop it.
 if (BUILD_TARGET === "safari") {
@@ -1822,6 +1860,7 @@ void adoptAppServer().then((appHasNone) => {
   // first paint (not only after an interaction re-renders). The probe is fast and never throws out.
   void probeBioCapable().finally(() => void refresh().finally(() => {
     if (appHasNone) showMsg("info", APP_SERVER_NONE);
+    else void appUnlockOnOpen();
   }));
   void renderUpdate();
   // Passive connectivity dot — quiet ping on open, result only in the header dot.

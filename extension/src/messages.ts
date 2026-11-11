@@ -770,4 +770,8 @@ export type ServerDiag = {
   nativeError: string | null;
   app: "set" | "none" | "unavailable" | null;
   adopt: string | null;
+  /** Safari: the native handler's account of its own process at the last unlock and the last secret (pid, age, whether
+   *  it still held the vault and knew the ticket); null before either. */
+  vaultOpen: string | null;
+  vaultSecret: string | null;
 };

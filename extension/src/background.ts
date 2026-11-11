@@ -1298,7 +1298,10 @@ const APP_SERVER_START_WAIT_MS = 12_000;
 
 /** What the popup's Details shows. Reads variables only, so it answers while worker start is still running. */
 function serverDiag(): ServerDiag {
-  return { stage: startStage, migration: startMigration, block: dialBlock?.kind ?? null, store: trustedStoreOk, url: serverUrl, ...appServerDiag };
+  return {
+    stage: startStage, migration: startMigration, block: dialBlock?.kind ?? null, store: trustedStoreOk, url: serverUrl, ...appServerDiag,
+    vaultOpen: APP_VAULT?.diag.open ?? null, vaultSecret: APP_VAULT?.diag.secret ?? null,
+  };
 }
 
 /**
