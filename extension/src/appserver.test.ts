@@ -39,9 +39,13 @@ test("asking the app sends the one message and never throws", async () => {
 });
 
 test("an ask says how the native call ended", async () => {
-  assert.deepEqual(await askAppServerDetailed(async () => ({ ok: true, type: "appServer", url: null })), { answer: { kind: "none" }, call: "resolved", error: null });
-  assert.deepEqual(await askAppServerDetailed(async () => undefined), { answer: { kind: "unavailable" }, call: "resolved", error: null }, "an empty reply is not a timeout");
-  assert.deepEqual(await askAppServerDetailed(() => new Promise(() => {}), 10), { answer: { kind: "unavailable" }, call: "timeout", error: null });
+  assert.deepEqual(await askAppServerDetailed(async () => ({ ok: true, type: "appServer", url: null })), { answer: { kind: "none" }, call: "resolved", error: null, nativeSave: false });
+  assert.deepEqual(await askAppServerDetailed(async () => undefined), { answer: { kind: "unavailable" }, call: "resolved", error: null, nativeSave: false }, "an empty reply is not a timeout");
+  assert.deepEqual(await askAppServerDetailed(() => new Promise(() => {}), 10), { answer: { kind: "unavailable" }, call: "timeout", error: null, nativeSave: false });
+  // The system's own save prompt (iOS 26.2): only an explicit true counts.
+  assert.equal((await askAppServerDetailed(async () => ({ ok: true, type: "appServer", url: null, nativeSave: true }))).nativeSave, true);
+  assert.equal((await askAppServerDetailed(async () => ({ ok: true, type: "appServer", url: null, nativeSave: "yes" }))).nativeSave, false);
+  assert.equal((await askAppServerDetailed(async () => ({ ok: false, nativeSave: true }))).nativeSave, false);
   const rejected = await askAppServerDetailed(async () => { throw new Error("no host"); });
   assert.equal(rejected.call, "rejected");
   assert.equal(rejected.error, "Error: no host");

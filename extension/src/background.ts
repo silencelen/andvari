@@ -74,6 +74,7 @@ import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, p
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
 import { appServerToAdopt, askAppServerDetailed, nativeSender } from "./appserver";
+import { queueSaveToApp, savesThroughApp } from "./appsave";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -1286,6 +1287,9 @@ async function forgetLegacyServer(): Promise<Res<"forgetLegacyServer">> {
 const SAFARI_NATIVE_APP = "com.silencelen.andvari";
 
 let appServerInFlight: Promise<Res<"appServer">> | null = null;
+/** Safari: whether this iOS offers to save passwords to andvari itself (26.2 and later; the handler says). While it
+ *  does, this extension captures nothing and shows no save prompt. Null until the handler has answered once. */
+let systemSavesPasswords: boolean | null = null;
 /** The last ask, for the popup's Details (serverDiag). No secret: kinds, an error text and what adopting came to. */
 const appServerDiag: Pick<ServerDiag, "native" | "nativeError" | "app" | "adopt"> = { native: "not_asked", nativeError: null, app: null, adopt: null };
 /** How long an ask waits for worker start before it gives up (start is bounded step by step; this bounds the whole). */
@@ -1328,6 +1332,7 @@ function syncAppServer(): Promise<Res<"appServer">> {
       appServerDiag.native = "asking";
       const asked = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP));
       appServerDiag.native = asked.call;
+      if (asked.call === "resolved") systemSavesPasswords = asked.nativeSave;
       appServerDiag.nativeError = asked.error;
       appServerDiag.app = asked.answer.kind;
       const adopt = appServerToAdopt(asked.answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
@@ -4380,6 +4385,13 @@ async function capturedCredential(
   // site be credited as that site, and mint a pending update of the user's login there.
   const bound = captureBinding(sender.origin);
   if (!bound) return { ok: false };
+  // Safari on iOS 26.2 and later: the system offers the save itself, through the andvari app's AutoFill extension.
+  // Nothing is captured here, so no prompt of ours can appear beside it. Asked once per worker life, before the first
+  // capture is kept.
+  if (savesThroughApp(BUILD_TARGET)) {
+    if (systemSavesPasswords === null) await syncAppServer();
+    if (systemSavesPasswords === true) return { ok: true };
+  }
   const host = bound.host;
   const st = tabs.get(tabId) ?? {};
 
@@ -4476,6 +4488,20 @@ async function capturedCredential(
   return { ok: true, pending: publicPending(pending) };
 }
 
+/** Safari: hand the tab's pending capture to the andvari app. The pending is dropped only once the app's queue took it. */
+async function saveThroughApp(tabId: number, st: TabState, pending: NonNullable<TabState["pending"]>): Promise<Res<"resolvePendingSave">> {
+  const send = nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP) as unknown as Parameters<typeof queueSaveToApp>[0];
+  const capture = { id: `t${tabId}-${pending.frameId}`, site: pending.uri ?? `https://${pending.host}`, username: pending.username, password: pending.password };
+  const r = await queueSaveToApp(send, capture, Date.now());
+  if (r === "queued") {
+    st.pending = undefined;
+    tabs.set(tabId, st);
+    persistTabs();
+    return { ok: true, viaApp: true };
+  }
+  return { ok: false, code: r === "no_account" ? "app_no_account" : r === "refused" ? "rejected" : "app_unavailable" };
+}
+
 async function resolvePendingSave(
   action: "save" | "dismiss",
   sender: chrome.runtime.MessageSender,
@@ -4505,6 +4531,10 @@ async function resolvePendingSave(
     persistTabs();
     return { ok: true };
   }
+
+  // Safari on iOS: this extension has no session to save with. The capture is sealed to the app's account and queued
+  // for the app, which shows it before writing anything (appsave.ts).
+  if (savesThroughApp(BUILD_TARGET)) return saveThroughApp(tabId, st, pending);
 
   // Pending survives a locked failure so unlock → save can still land it. The surface maps the
   // CODE to copy — the SW's raw "locked" string must never reach the banner (extux-03).

@@ -23,7 +23,7 @@ import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
-import { fillErrorCopy, saveErrorCopy, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
+import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
   type CaptureCardFields,
@@ -1032,7 +1032,7 @@ function offerBanner(pending: PendingSave): void {
     pending,
     async () => {
       const r = await safeSend({ type: "resolvePendingSave", action: "save" });
-      if (r?.ok) return { ok: true, text: "Saved to the hoard." };
+      if (r?.ok) return { ok: true, text: r.viaApp === true ? SAVE_SENT_TO_APP : "Saved to the hoard." };
       if (r?.code === "locked") {
         // Unlock-prompt (2026-08-12): don't just NAME the unlock — summon it. The SW kept this
         // Save click as approval (pending.approved), so unlocking lands the save with no second

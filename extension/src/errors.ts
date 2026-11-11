@@ -27,7 +27,7 @@ type UnlockCode =
   | "server_error"
   | "network"
   | "unknown";
-type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed";
+type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
 type RevealFailCode = "locked" | "not_allowed";
@@ -147,8 +147,15 @@ export function unlockErrorCopy(code: UnlockCode | undefined): string {
  *  click summons the unlock screen and shows SAVE_UNLOCK_* below instead. The rung stays for the
  *  card banner's narrow lock-mid-resolve race (a locked card capture never records a pending, so
  *  there is nothing an unlock could finish there). */
+/** Safari on iOS: the save was handed to the andvari app. */
+export const SAVE_SENT_TO_APP = "Sent to andvari. Open the app to finish saving.";
+
 export function saveErrorCopy(code: SaveErrorCode | undefined): string {
   switch (code) {
+    case "app_no_account":
+      return "Could not save — open the andvari app and sign in first.";
+    case "app_unavailable":
+      return "Could not save — open the andvari app, then try again.";
     case "locked":
       return "Could not save — unlock andvari and try again.";
     case "no_personal_vault":
