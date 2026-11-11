@@ -98,14 +98,13 @@ extension UITestCase {
     }
 
     func confirmSignOut() {
-        // The confirmation repeats the title of the button that raised it, so there are two until it is answered;
-        // the dialog's is the later one in the tree.
-        let all = app.buttons.matching(NSPredicate(format: "label == 'Sign out'"))
-        if !waitUntil(8, { all.count >= 2 }) {
+        // The confirmation repeats the title of the button that raised it; the dialog's own has no identifier.
+        let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign out' AND identifier == ''")).firstMatch
+        if !waitUntil(8, { confirm.exists && confirm.isHittable }) {
             dumpTree(app, as: "no-sign-out-confirmation")
             XCTFail("the sign-out confirmation did not appear")
         }
-        all.element(boundBy: all.count - 1).tap()
+        confirm.tap()
         expectScreen(.welcome)
     }
 

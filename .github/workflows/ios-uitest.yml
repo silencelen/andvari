@@ -46,23 +46,58 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Everything Gradle and npm produce for this job, keyed on every input they read. A change to the app's
+      # Swift or to the tests alone skips the Kotlin/Native link, which is most of a cold run.
+      - name: Restore the built core, Safari files and server
+        id: built
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            core/build/bin/iosSimulatorArm64/releaseFramework
+            app-ios/AndvariSafari/web
+            server/build/libs/andvari-server.jar
+            tools/uitest-seed/build/libs/andvari-uitest-seed.jar
+          key: uitest-built-${{ runner.os }}-${{ hashFiles('core/**', 'server/**', 'tools/uitest-seed/**', 'extension/**', 'spec/**', 'gradle/**', '*.gradle.kts', 'gradle.properties', 'docs/self-hosting.md', 'deploy/**', 'scripts/ci/build-libsodium-ios.sh', 'app-ios/scripts/prepare.sh') }}
+
       - name: Restore libsodium
+        if: steps.built.outputs.cache-hit != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: core/build/libsodium
           key: libsodium-ios-${{ hashFiles('scripts/ci/build-libsodium-ios.sh') }}
 
       - name: Kotlin/Native tools cache
+        if: steps.built.outputs.cache-hit != 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
 
       - name: Kotlin framework and Safari files
+        if: steps.built.outputs.cache-hit != 'true'
         run: app-ios/scripts/prepare.sh iosSimulatorArm64
 
       - name: Server and seeding tool
+        if: steps.built.outputs.cache-hit != 'true'
         run: ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx3g :server:shadowJar :tools:uitest-seed:shadowJar
+
+      - name: Keep the built core, Safari files and server
+        if: steps.built.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            core/build/bin/iosSimulatorArm64/releaseFramework
+            app-ios/AndvariSafari/web
+            server/build/libs/andvari-server.jar
+            tools/uitest-seed/build/libs/andvari-uitest-seed.jar
+          key: ${{ steps.built.outputs.cache-primary-key }}
+
+      # The stand-in quick-unlock key is compiled for the simulator only (core/src/iosSimulatorArm64Main); the
+      # device framework is checked for its absence in ios-core.yml. Here: it is really in the build under test.
+      - name: The simulator build has its stand-in quick-unlock key
+        run: |
+          scripts/ci/binary-has-text.py core/build/bin/iosSimulatorArm64/releaseFramework/AndvariCore.framework/AndvariCore \
+            "simulator-only software quick-unlock key"
 
       - name: Names for the test site
         run: echo "127.0.0.1 site.andvari-uitest.test plainhttp-uitest.test" | sudo tee -a /etc/hosts
@@ -134,7 +169,7 @@ jobs:
           # What the simulator's system said about the app and its extensions, for a failure nobody can watch.
           if [ -n "${UITEST_UDID:-}" ]; then
             xcrun simctl spawn "$UITEST_UDID" log show --last 45m --style compact \
-              --predicate 'process CONTAINS "Andvari" OR process == "andvari" OR eventMessage CONTAINS[c] "andvari"' \
+              --predicate 'process BEGINSWITH "Andvari" OR (eventMessage CONTAINS[c] "andvari" AND NOT process IN {"installcoordinationd", "CoreSimulatorBridge", "runningboardd", "SpringBoard", "backboardd", "lsd", "installd"})' \
               > out/simulator.log 2>&1 || true
           fi
           ls -la out out/screenshots 2>/dev/null | head -150
