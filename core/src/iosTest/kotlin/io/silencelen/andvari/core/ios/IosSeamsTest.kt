@@ -5,9 +5,12 @@ package io.silencelen.andvari.core.ios
 import io.ktor.client.request.get
 import io.silencelen.andvari.core.app.AutofillVault
 import io.silencelen.andvari.core.app.FillAvailability
+import io.silencelen.andvari.core.app.SaveQueued
 import io.silencelen.andvari.core.client.session.InMemorySecrets
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
 import io.silencelen.andvari.core.client.session.StoredSession
+import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.runBlocking
 import kotlinx.io.IOException
@@ -109,11 +112,29 @@ class IosSeamsTest {
             assertEquals("two-longer", files.read()?.decodeToString())
             assertFalse(NSFileManager.defaultManager.fileExistsAtPath("$path.tmp"), "no temporary file is left")
             // The extension's vault over the same file: a file that is not a snapshot is no snapshot.
-            val fill = IosAutofill(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null), path)
+            val fill = IosAutofill(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null), path, "$dir/saves")
             assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), fill.availability())
             assertTrue(fill.logins(listOf("example.com")).isEmpty())
             files.delete()
             assertNull(files.read())
+
+            // The save queue beside it: no key published, so the extension queues nothing.
+            assertEquals(SaveQueued.NO_ACCOUNT, fill.queueSave("session 1", "shop.example", "me", "pw"))
+            val queue = FileSaveQueue("$dir/saves")
+            val key = createCryptoProvider().boxKeypairFromSeed(ByteArray(32) { 7 })
+            queue.publish("""{"v":1,"origin":"https://home.example","userId":"u1","identityPub":"${Bytes.toB64(key.publicKey)}"}""".encodeToByteArray())
+            assertEquals(SaveQueued.QUEUED, fill.queueSave("session 1", "shop.example", "me", "pw"))
+            assertEquals(SaveQueued.QUEUED, fill.queueSave("session 1", "shop.example", "me", "pw2"), "the same form replaces its entry")
+            assertEquals(SaveQueued.QUEUED, fill.queueSave("session/2", "shop.example", "me", "pw"))
+            val entries = queue.entries()
+            assertEquals(2, entries.size)
+            assertTrue(entries.values.none { it.decodeToString().contains("password") || it.decodeToString().contains("shop.example") }, "sealed at rest")
+            assertFalse(queue.put("../escape", "x".encodeToByteArray()))
+            queue.remove(entries.keys.first())
+            assertEquals(1, queue.entries().size)
+            queue.clear()
+            assertTrue(queue.entries().isEmpty())
+            assertNull(queue.publication())
         } finally {
             NSFileManager.defaultManager.removeItemAtPath(dir, error = null)
             NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
