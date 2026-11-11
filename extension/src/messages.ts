@@ -221,7 +221,7 @@ export type ServerBlockWire = { kind: "confirm"; origin: string; keepable: boole
 
 /** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
  *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
-export type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed";
+export type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 
 /** TOTP-add failure code (setTotp, design 2026-08-12) — mapped to copy by the
  *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = a tab sender (the
@@ -596,7 +596,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                   : T extends "pendingSave"
                     ? { pending: PendingSave | null }
                     : T extends "resolvePendingSave"
-                      ? { ok: boolean; code?: SaveErrorCode; error?: string }
+                      ? { ok: boolean; code?: SaveErrorCode; error?: string; /** Safari: handed to the andvari app, which saves it at its next unlock. */ viaApp?: boolean }
                       : T extends "linkUri"
                         ? { ok: boolean; error?: string }
                         : T extends "generate"

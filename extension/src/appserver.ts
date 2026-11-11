@@ -40,7 +40,19 @@ export function parseAppServerReply(reply: unknown): AppServerAnswer {
 export type NativeCall = "resolved" | "rejected" | "timeout";
 
 /** One ask: the answer, how the call ended, and the error text when it was rejected. Nothing here is secret. */
-export type AppServerAsk = { answer: AppServerAnswer; call: NativeCall; error: string | null };
+export type AppServerAsk = {
+  answer: AppServerAnswer;
+  call: NativeCall;
+  error: string | null;
+  /** The handler said this iOS has the system's own save prompt for password managers (iOS 26.2): the extension then
+   *  shows no save prompt of its own. False for anything but an explicit `nativeSave: true`. */
+  nativeSave: boolean;
+};
+
+/** Whether the handler's reply says the system saves passwords to andvari itself. */
+export function replySaysNativeSave(reply: unknown): boolean {
+  return typeof reply === "object" && reply !== null && (reply as { ok?: unknown }).ok === true && (reply as { nativeSave?: unknown }).nativeSave === true;
+}
 
 const SILENCE = Symbol("silence");
 
@@ -55,11 +67,11 @@ export async function askAppServerDetailed(
       timer = setTimeout(() => resolve(SILENCE), timeoutMs);
     });
     const reply = await Promise.race([sendNative(APP_SERVER_REQUEST), silence]);
-    if (reply === SILENCE) return { answer: { kind: "unavailable" }, call: "timeout", error: null };
-    return { answer: parseAppServerReply(reply), call: "resolved", error: null };
+    if (reply === SILENCE) return { answer: { kind: "unavailable" }, call: "timeout", error: null, nativeSave: false };
+    return { answer: parseAppServerReply(reply), call: "resolved", error: null, nativeSave: replySaysNativeSave(reply) };
   } catch (e) {
     const text = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    return { answer: { kind: "unavailable" }, call: "rejected", error: text.slice(0, 200) };
+    return { answer: { kind: "unavailable" }, call: "rejected", error: text.slice(0, 200), nativeSave: false };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
