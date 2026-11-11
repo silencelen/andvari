@@ -85,9 +85,8 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Distribution"
         TARGETED_DEVICE_FAMILY: "1"
         PROVISIONING_PROFILE_SPECIFIER: "com.silencelen.andvari.safari AppStore"
-        # This extension runs JavaScript only and does not use the Kotlin core.
-        OTHER_LDFLAGS: $(inherited)
-        FRAMEWORK_SEARCH_PATHS: $(inherited)
+        # The native handler opens the app's snapshot through the Kotlin core (the same read-only vault as AutoFill),
+        # so this target links it, as the base settings say.
   AndvariAutoFill:
     type: app-extension
     platform: iOS
