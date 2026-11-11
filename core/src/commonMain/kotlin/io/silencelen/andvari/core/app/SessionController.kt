@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.OriginProbeFence
+import io.silencelen.andvari.core.client.PasswordHistoryEntry
 import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.UpgradeRequiredException
@@ -153,6 +154,10 @@ open class SessionController(
     /** The captured logins shown in [AppState.pendingSaves], opened; never in the state, gone at every lock. */
     private val pendingSaves = LinkedHashMap<String, PendingSave>()
 
+    /** What this unlock saved by itself ([AppState.appliedSaves]), with what its undo needs; gone at every lock. */
+    private val appliedSaves = LinkedHashMap<String, Applied>()
+    private var applyingSaves: Job? = null
+
     /** The policy probe a landing started ([refreshPolicyIfStale]), while it runs. */
     private var policyRefresh: Job? = null
 
@@ -204,6 +209,7 @@ open class SessionController(
         checkIdleLock()
         backgroundSync()
         refreshPolicyIfStale()
+        refreshSaveQueue() // a login captured while the app was open in the background
     }
 
     /** The app left the foreground: the vault locks (a suspended app cannot run the idle timer). */
@@ -512,6 +518,7 @@ open class SessionController(
             hasPassword = !doc.login?.password.isNullOrEmpty(), hasNotes = !doc.notes.isNullOrEmpty(),
             hasTotp = !doc.login?.totp.isNullOrEmpty(), favorite = doc.favorite, updatedAt = item.updatedAt,
             editable = doc.type == "login" && role != "reader" && live.account.canSealUnder(item.vaultId),
+            previousPasswords = doc.login?.passwordHistory?.size ?: 0,
         )
     }
 
@@ -901,7 +908,8 @@ open class SessionController(
         runCatching { fillSnapshots.delete() }
         runCatching { saveQueue.clear() }
         pendingSaves.clear()
-        update { if (it.pendingSaves.isEmpty()) it else it.copy(pendingSaves = emptyList()) }
+        appliedSaves.clear()
+        update { if (it.pendingSaves.isEmpty() && it.appliedSaves.isEmpty()) it else it.copy(pendingSaves = emptyList(), appliedSaves = emptyList()) }
     }
 
     /**
@@ -939,14 +947,124 @@ open class SessionController(
             }
             val views = pendingSaves.map { (id, pending) ->
                 val login = pending.login
-                PendingSaveView(id, UriMatch.normalizeHostUnicode(login.site) ?: login.site, login.username, pending.target?.let { t -> logins.firstOrNull { it.itemId == t.itemId }?.doc?.name }, plainHttp(login.site))
+                PendingSaveView(id, UriMatch.normalizeHostUnicode(login.site) ?: login.site, login.username, pending.target?.let { t -> logins.firstOrNull { it.itemId == t.itemId }?.doc?.name }, plainHttp(login.site), pending.reason)
             }
             update { it.copy(pendingSaves = views, notice = if (unreadable > 0) SAVES_UNREADABLE else it.notice) }
+            // The person already said yes, in the system's save prompt or the extension's: what can be saved is saved
+            // now, without a second tap.
+            if (pendingSaves.values.any { it.reason == null } && applyingSaves?.isActive != true) {
+                applyingSaves = scope.launch { applyQueuedSaves(live) }
+            }
         }
     }
 
+    /**
+     * Save the captured logins by themselves (owner decision 2026-11-11: a save the person agreed to must not wait
+     * for a second confirmation). The queue is writable by the extension processes, so what is automatic is narrow:
+     *  - a NEW login is added to the personal vault;
+     *  - a new password replaces an existing one only in a login of the person's own vaults, matched once by host,
+     *    scheme and username when the entry was opened, and only if that login has not changed since; the password
+     *    it replaces is appended to the login's password history, and [undoAppliedSave] puts the login back;
+     *  - nothing is written to a vault shared with the person: a capture that matches a login there stays in
+     *    [AppState.pendingSaves] with the reason, as does one that cannot be saved now.
+     */
+    private suspend fun applyQueuedSaves(live: VaultSession.Unlocked) {
+        for ((id, pending) in pendingSaves.toList()) {
+            if (session.get() !== live) return
+            if (pending.reason != null || pendingSaves[id] !== pending) continue
+            val captured = pending.login
+            val logins = live.engine.items().filter { it.doc.type == "login" }
+            val host = UriMatch.normalizeHost(captured.site)
+            pending.reason = when {
+                host == null -> SAVE_NOT_A_SITE
+                replaceTarget(logins, captured, live.account) != pending.target -> SAVE_TARGET_CHANGED
+                pending.target == null && logins.any { sameLogin(it, captured) } -> SAVE_SHARED_MATCH
+                pending.target == null && live.account.personalVaultId.isEmpty() -> HouseholdCopy.NO_PERSONAL_VAULT
+                else -> null
+            }
+            if (pending.reason != null) continue
+            val existing = pending.target?.let { t -> logins.first { it.itemId == t.itemId } }
+            val before = logins.mapTo(HashSet()) { it.itemId }
+            try {
+                live.engine.save(existing?.itemId, savedDoc(existing, captured, host!!), existing?.vaultId)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                pending.reason = HouseholdCopy.forError(t)
+                continue
+            }
+            if (session.get() !== live) return
+            saveQueue.remove(id)
+            pendingSaves.remove(id)
+            val createdId = if (existing == null) live.engine.items().firstOrNull { it.itemId !in before && it.doc.type == "login" }?.itemId else null
+            appliedSaves[id] = Applied(captured, existing, createdId)
+        }
+        if (session.get() !== live) return
+        val logins = live.engine.items().filter { it.doc.type == "login" }
+        update { s ->
+            s.copy(
+                items = summaries(s.query),
+                pendingSaves = pendingSaves.map { (id, p) ->
+                    PendingSaveView(id, UriMatch.normalizeHostUnicode(p.login.site) ?: p.login.site, p.login.username, p.target?.let { t -> logins.firstOrNull { it.itemId == t.itemId }?.doc?.name }, plainHttp(p.login.site), p.reason)
+                },
+                appliedSaves = appliedViews(),
+            )
+        }
+        writeFillSnapshot()
+    }
+
+    private fun appliedViews(): List<AppliedSaveView> = appliedSaves.map { (id, a) ->
+        AppliedSaveView(id, UriMatch.normalizeHostUnicode(a.login.site) ?: a.login.site, a.login.username, a.replaced?.doc?.name, plainHttp(a.login.site))
+    }
+
+    /** The document a save of [captured] writes: the existing login with its new password and the old one kept in its history, or a new login. */
+    private fun savedDoc(existing: VaultItem?, captured: CapturedLogin, host: String): ItemDoc {
+        if (existing == null) {
+            val address = (if (plainHttp(captured.site)) "http://" else "https://") + host
+            return ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
+        }
+        val login = existing.doc.login ?: LoginData()
+        val old = login.password.orEmpty()
+        val history = if (old.isEmpty() || old == captured.password) login.passwordHistory else login.passwordHistory + PasswordHistoryEntry(old, clocks.wallMs())
+        return existing.doc.copy(login = login.copy(password = captured.password, passwordHistory = history))
+    }
+
+    /**
+     * Undo one automatic save: a login it added is removed (to the trash), and a login whose password it replaced
+     * gets its previous document back, unless it was changed again since, in which case nothing is touched.
+     */
+    @Throws(CancellationException::class)
+    suspend fun undoAppliedSave(id: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val applied = appliedSaves[id] ?: return@action ActionResult.NotDone(null)
+        busy()
+        val replaced = applied.replaced
+        if (replaced != null) {
+            val now = live.engine.item(replaced.itemId)
+            if (now == null || now.doc.login?.password != applied.login.password) return@action idleFailed(UNDO_CHANGED)
+            live.engine.save(replaced.itemId, replaced.doc, replaced.vaultId)
+        } else {
+            val created = applied.createdId?.takeIf { live.engine.item(it) != null } ?: return@action idleFailed(UNDO_CHANGED)
+            live.engine.remove(created)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        appliedSaves.remove(id)
+        update { it.copy(busy = false, items = summaries(it.query), appliedSaves = appliedViews()) }
+        writeFillSnapshot()
+        ActionResult.Ok
+    }
+
+    /** The "saved from AutoFill" notice has been read: the list goes, and with it the chance to undo from here. */
+    fun dismissAppliedSaves() {
+        appliedSaves.clear()
+        update { it.copy(appliedSaves = emptyList()) }
+    }
+
     /** A capture as shown: the login, and the item its Save would update, fixed when it was shown. */
-    private class PendingSave(val login: CapturedLogin, val target: Target?)
+    private class PendingSave(val login: CapturedLogin, val target: Target?, var reason: String? = null)
+
+    /** An automatic save, for its undo: the capture, the login as it was before (a replace), or the id of the login it added. */
+    private class Applied(val login: CapturedLogin, val replaced: VaultItem?, val createdId: String?)
 
     /** The item a Save updates, as it was when the row was shown: what the row named is what gets written, or nothing is. */
     private data class Target(val itemId: String, val rev: Long, val doc: ItemDoc)
@@ -997,9 +1115,7 @@ open class SessionController(
         val existing = pending.target?.let { t -> logins.first { it.itemId == t.itemId } }
         if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
         val host = UriMatch.normalizeHost(captured.site) ?: return@action ActionResult.Failed(ITEM_GONE)
-        val address = (if (plainHttp(captured.site)) "http://" else "https://") + host
-        val doc = existing?.doc?.let { it.copy(login = (it.login ?: LoginData()).copy(password = captured.password)) }
-            ?: ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
+        val doc = savedDoc(existing, captured, host)
         busy()
         val outcome = live.engine.save(existing?.itemId, doc, existing?.vaultId)
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
@@ -1131,6 +1247,7 @@ open class SessionController(
     private fun lock(reason: String?) {
         session.lock()
         pendingSaves.clear()
+        appliedSaves.clear()
         zeroSecrets()
         backgroundLockPending = false
         val stored = store.load()
@@ -1199,7 +1316,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        pendingSaves = emptyList(),
+        pendingSaves = emptyList(), appliedSaves = emptyList(),
     )
 
     private companion object {
@@ -1233,6 +1350,9 @@ open class SessionController(
         const val CHANGE_PASSWORD_FIRST = "Change your master password first, then you can turn on quick unlock."
         const val UNLOCK_WITH_PASSWORD_FIRST = "Unlock with your master password first, then turn quick unlock on."
         const val SAVES_UNREADABLE = "Some logins captured for saving could not be read and were removed. Sign in on that site again to capture them."
+        const val SAVE_SHARED_MATCH = "A login in a shared vault already uses this username here. Save this one as your own, or discard it."
+        const val SAVE_NOT_A_SITE = "This was not captured on a web page andvari can save for."
+        const val UNDO_CHANGED = "That login has changed since, so nothing was undone."
         const val SAVE_TARGET_CHANGED = "Your vault changed since this was captured. Check it again, then save."
         const val QUICK_FORBIDDEN = "Your server doesn't allow unlocking without your master password."
         const val QUICK_POLICY_UNSEEN = "andvari needs to reach your server before this can be turned on. Check your connection."

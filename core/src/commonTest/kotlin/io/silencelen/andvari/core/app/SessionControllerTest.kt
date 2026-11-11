@@ -502,10 +502,13 @@ open class SessionControllerTest {
         assertTrue(controller.state.pendingSaves.isEmpty(), "a locked app shows nothing")
 
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
-        val pending = controller.state.pendingSaves.single()
-        assertEquals(PendingSaveView("a", "shop.example", "me", null, false), pending)
+        // The app tries to save it by itself. This rig's vault has no personal vault to put a new login in (as
+        // [aSaveIsValidatedAndAFailedOneIsSaidNotThrown]), so the capture stays, and says why.
+        settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
+        assertEquals(PendingSaveView("a", "shop.example", "me", null, false, "Choose a vault for this item."), controller.state.pendingSaves.single())
         assertEquals("s3cret-pw", controller.pendingSavePassword("a"))
-        assertEquals(listOf("Example"), controller.state.items.map { it.name }, "nothing is written before the person confirms")
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        assertTrue(controller.state.appliedSaves.isEmpty())
 
         // This rig's vault cannot take a new login offline (as [aSaveIsValidatedAndAFailedOneIsSaidNotThrown]): the
         // failure is a sentence, and the capture stays queued for the next try.
@@ -530,14 +533,19 @@ open class SessionControllerTest {
         capture("same", "login.example.com", "fam", "hunter2") // already in the vault
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
         controller.unlock(PASSWORD)
-        assertEquals(listOf(PendingSaveView("new", "login.example.com", "fam", "Example", false)), controller.state.pendingSaves)
-        assertEquals(setOf("new"), queue.map.keys)
-        assertEquals(ActionResult.Ok, controller.confirmPendingSave("new"))
+        // The person agreed to the save where it was captured: the app applies it by itself and says what it did.
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf(AppliedSaveView("new", "login.example.com", "fam", "Example", false)), controller.state.appliedSaves)
         assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertEquals(1, controller.state.items.size, "updated, not duplicated")
         assertTrue(controller.state.pendingSaves.isEmpty())
-        assertTrue(queue.map.isEmpty())
-        assertNull(controller.pendingSavePassword("new"))
+        assertTrue(queue.map.isEmpty(), "the identical capture was dropped, the applied one left the queue")
+        assertEquals(1, controller.itemDetail(ITEM_ID)?.previousPasswords, "the password it replaced is kept in the login's history")
+        // Undo puts the login back as it was.
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave("new"))
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals(0, controller.itemDetail(ITEM_ID)?.previousPasswords)
+        assertTrue(controller.state.appliedSaves.isEmpty())
     }
 
     @Test
@@ -546,11 +554,13 @@ open class SessionControllerTest {
         controller.lock()
         capture("h", "http://login.example.com/reset", "fam", "from-cleartext")
         controller.unlock(PASSWORD)
-        assertEquals(listOf(PendingSaveView("h", "login.example.com", "fam", null, true)), controller.state.pendingSaves, "not a replacement of the https login")
+        settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
+        assertEquals(listOf(PendingSaveView("h", "login.example.com", "fam", null, true, "Choose a vault for this item.")), controller.state.pendingSaves, "a new login, not a replacement of the https one")
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "the https login is untouched")
     }
 
     @Test
-    fun aSaveWritesWhatItsRowNamedOrNothing() = test {
+    fun anUndoNeverOverwritesALaterChange() = test {
         seedSession()
         val seeded = namespaces.caches.getValue("$homeKey/${reg.userId}")
         namespaces.caches["$homeKey/${reg.userId}"] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
@@ -562,14 +572,18 @@ open class SessionControllerTest {
         controller.lock()
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
         controller.unlock(PASSWORD)
-        assertEquals("Example", controller.state.pendingSaves.single().replaces)
-        // The named login is edited after the row was shown (another save, a sync).
-        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "edited-elsewhere", listOf("https://login.example.com/x"), "", "", false)))
-        assertIs<ActionResult.Failed>(controller.confirmPendingSave("new"))
-        assertEquals("edited-elsewhere", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "nothing was written over the change")
-        assertEquals(listOf("new"), controller.state.pendingSaves.map { it.id }, "the row is shown again, as the vault is now")
-        assertEquals(ActionResult.Ok, controller.confirmPendingSave("new"))
-        assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        // The person changes the login again before reaching for Undo.
+        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "edited-since", listOf("https://login.example.com/x"), "", "", false)))
+        assertIs<ActionResult.Failed>(controller.undoAppliedSave("new"))
+        assertEquals("edited-since", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertFalse(controller.state.busy)
+        controller.dismissAppliedSaves()
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        assertEquals(ActionResult.NotDone(null), controller.undoAppliedSave("new"), "dismissed: nothing left to undo from here")
+        // A lock forgets what was applied; the saved login stays.
+        controller.lock()
+        assertTrue(controller.state.appliedSaves.isEmpty())
     }
 
     @Test
