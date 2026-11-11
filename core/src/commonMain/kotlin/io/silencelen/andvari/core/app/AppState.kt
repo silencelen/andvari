@@ -274,4 +274,6 @@ data class PendingSaveView(
     val username: String,
     /** The name of the login whose password saving would replace; null when saving adds a new login. */
     val replaces: String?,
+    /** It was captured on a plain-http page: the row says so, and it is saved as an http address. */
+    val plainHttp: Boolean,
 )

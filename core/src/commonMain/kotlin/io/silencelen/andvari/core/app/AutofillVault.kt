@@ -17,7 +17,6 @@ import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.offlineOnly
-import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlin.coroutines.cancellation.CancellationException
@@ -135,15 +134,10 @@ class AutofillVault(
         var api: AndvariApi? = null
         try {
             val pin = store.origin(originKey).identityPins().pinFor(snap.email, snap.userId)
-            account = try {
-                Account.unlockWithUvk(snap.userId, uvk, snap.keys, selfIdentityPub = pin).also { taken = true }
-            } catch (e: CryptoException) {
-                // As the app's ladder (spec 01 §5): a seed that will not open under the recovered UVK is a stale or
-                // foreign key, so it is wiped and the next unlock is the password's, in the app. An identity
-                // mismatch is a security fault: the enrollment stays as evidence.
-                if (e.message?.contains("identity key mismatch") != true) quickKeys.wipe(originKey, snap.userId)
-                throw e
-            }
+            // A key that does not open these account keys is NOT wiped here, as the app's ladder would: the snapshot is
+            // a file any process in the App Group can replace, so a planted one must not be able to destroy the
+            // enrollment. The fill fails; the app, which reads the account keys from the server, decides.
+            account = Account.unlockWithUvk(snap.userId, uvk, snap.keys, selfIdentityPub = pin).also { taken = true }
             val cache = InMemoryVaultCache()
             snap.vaults.forEach(cache::upsertVault)
             snap.grants.forEach(cache::upsertGrant)

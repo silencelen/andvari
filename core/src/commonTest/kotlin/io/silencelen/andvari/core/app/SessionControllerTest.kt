@@ -418,13 +418,14 @@ open class SessionControllerTest {
     }
 
     @Test
-    fun aKeyThatNoLongerOpensTheAccountIsWipedByTheExtensionToo() = test {
+    fun aKeyThatDoesNotOpenTheSnapshotFailsTheFillAndWipesNothing() = test {
         unlocked()
         controller.enableQuickUnlock(null)
         val fill = autofill()
         quickKeys.next = { QuickRecover.Ok(crypto.randomBytes(32)) } // a stale or foreign UVK
         assertEquals(FillUnlock.OpenApp(AutofillVault.USE_APP), fill.unlock(BiometricHost.None))
-        assertTrue("$homeKey/${reg.userId}" in quickKeys.wiped, "the next unlock is the password's, in the app")
+        assertFalse("$homeKey/${reg.userId}" in quickKeys.wiped, "the snapshot is a file anything in the group can replace: it never costs the enrollment")
+        assertNull(fill.credential(ITEM_ID))
     }
 
     @Test
@@ -502,7 +503,7 @@ open class SessionControllerTest {
 
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
         val pending = controller.state.pendingSaves.single()
-        assertEquals(PendingSaveView("a", "shop.example", "me", null), pending)
+        assertEquals(PendingSaveView("a", "shop.example", "me", null, false), pending)
         assertEquals("s3cret-pw", controller.pendingSavePassword("a"))
         assertEquals(listOf("Example"), controller.state.items.map { it.name }, "nothing is written before the person confirms")
 
@@ -529,7 +530,7 @@ open class SessionControllerTest {
         capture("same", "login.example.com", "fam", "hunter2") // already in the vault
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
         controller.unlock(PASSWORD)
-        assertEquals(listOf(PendingSaveView("new", "login.example.com", "fam", "Example")), controller.state.pendingSaves)
+        assertEquals(listOf(PendingSaveView("new", "login.example.com", "fam", "Example", false)), controller.state.pendingSaves)
         assertEquals(setOf("new"), queue.map.keys)
         assertEquals(ActionResult.Ok, controller.confirmPendingSave("new"))
         assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
@@ -537,6 +538,58 @@ open class SessionControllerTest {
         assertTrue(controller.state.pendingSaves.isEmpty())
         assertTrue(queue.map.isEmpty())
         assertNull(controller.pendingSavePassword("new"))
+    }
+
+    @Test
+    fun aPlainHttpCaptureIsNeverTheHttpsLoginAndSaysSo() = test {
+        unlocked()
+        controller.lock()
+        capture("h", "http://login.example.com/reset", "fam", "from-cleartext")
+        controller.unlock(PASSWORD)
+        assertEquals(listOf(PendingSaveView("h", "login.example.com", "fam", null, true)), controller.state.pendingSaves, "not a replacement of the https login")
+    }
+
+    @Test
+    fun aSaveWritesWhatItsRowNamedOrNothing() = test {
+        seedSession()
+        val seeded = namespaces.caches.getValue("$homeKey/${reg.userId}")
+        namespaces.caches["$homeKey/${reg.userId}"] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
+            override val durable = true
+        }
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        controller.startAndLand()
+        controller.unlock(PASSWORD)
+        controller.lock()
+        capture("new", "https://login.example.com/reset", "fam", "hunter3")
+        controller.unlock(PASSWORD)
+        assertEquals("Example", controller.state.pendingSaves.single().replaces)
+        // The named login is edited after the row was shown (another save, a sync).
+        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "edited-elsewhere", listOf("https://login.example.com/x"), "", "", false)))
+        assertIs<ActionResult.Failed>(controller.confirmPendingSave("new"))
+        assertEquals("edited-elsewhere", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "nothing was written over the change")
+        assertEquals(listOf("new"), controller.state.pendingSaves.map { it.id }, "the row is shown again, as the vault is now")
+        assertEquals(ActionResult.Ok, controller.confirmPendingSave("new"))
+        assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+    }
+
+    @Test
+    fun anOldCaptureAndAForeignKeyAreDealtWithAtUnlock() = test {
+        unlocked()
+        controller.lock()
+        capture("old", "shop.example", "me", "pw")
+        clocks.wall += SaveQueue.MAX_AGE_MS
+        clocks.mono += SaveQueue.MAX_AGE_MS
+        // Something replaced the published key: what is sealed to it cannot be read by this account.
+        val other = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        queue.key = json.encodeToString(SaveKeyPublication.serializer(), SaveKeyPublication(origin = HOME, userId = reg.userId, identityPub = io.silencelen.andvari.core.crypto.Bytes.toB64(other.publicKey))).encodeToByteArray()
+        capture("lost", "shop.example", "me", "pw")
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy()), HttpStatusCode.OK, headers) }
+        controller.startAndLand()
+        controller.unlock(PASSWORD)
+        assertTrue(controller.state.pendingSaves.isEmpty(), "the stale capture and the unreadable one are gone")
+        assertTrue(queue.map.isEmpty())
+        assertEquals("Some logins captured for saving could not be read and were removed. Sign in on that site again to capture them.", controller.state.notice)
+        assertEquals(enrolled.account.identityPub.toList(), io.silencelen.andvari.core.crypto.Bytes.fromB64(assertNotNull(SaveQueue.decodePublication(queue.key)).identityPub).toList(), "the key is this account's again")
     }
 
     @Test

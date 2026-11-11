@@ -118,6 +118,9 @@ object SaveQueue {
     const val MAX_FIELD_CHARS = 1024
     const val MAX_SITE_CHARS = 2048
 
+    /** A capture nobody confirmed within this long is dropped: a stale password should not be offered as current. */
+    const val MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
+
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val ID = Regex("[A-Za-z0-9-]{1,64}")
 
@@ -149,10 +152,10 @@ object SaveQueue {
 
     /**
      * Open one entry as [account] at [origin]; null for anything that is not a save sealed to this account here: an
-     * oversized or malformed entry, another account's, a seal that does not open, or an inside that names another
-     * account than its outside.
+     * oversized or malformed entry, another account's, a seal that does not open, an inside that names another
+     * account than its outside, or a capture older than [MAX_AGE_MS].
      */
-    fun open(account: Account, origin: String, bytes: ByteArray): CapturedLogin? = runCatching {
+    fun open(account: Account, origin: String, bytes: ByteArray, nowMs: Long): CapturedLogin? = runCatching {
         if (bytes.size > MAX_ENTRY_BYTES) return null
         val entry = json.decodeFromString(QueuedSave.serializer(), bytes.decodeToString())
         val here = OriginCanon.canonicalOrigin(origin)
@@ -165,6 +168,7 @@ object SaveQueue {
         }
         login.takeIf {
             it.magic == MAGIC && it.userId == account.userId && it.origin == here && it.password.isNotEmpty() &&
+                nowMs - it.capturedAtMs < MAX_AGE_MS &&
                 it.password.length <= MAX_FIELD_CHARS && it.username.length <= MAX_FIELD_CHARS && it.site.isNotBlank() && it.site.length <= MAX_SITE_CHARS
         }
     }.getOrNull()
