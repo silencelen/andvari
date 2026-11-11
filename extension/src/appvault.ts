@@ -7,7 +7,8 @@ import type { BuildTarget } from "./buildtarget.ts";
  *
  * Least disclosure across the native-message hop:
  *  - `vaultOpen` answers with names, usernames and web addresses. No password, no one-time code.
- *  - `vaultSecret` answers with ONE login's secret, for the item id asked.
+ *  - `vaultSecret` answers with ONE thing of one login, for the item id asked: its username and password, or its
+ *    current one-time code. Never both in one answer.
  * This worker keeps the list and the handler's ticket in memory only ([AppVault]); nothing decrypted is written to any
  * storage, and both are dropped when the popup closes, on Lock, and after [APP_VAULT_LIFETIME_MS].
  *
@@ -28,8 +29,12 @@ export type AppVaultOpened =
   | { state: "cancelled" }
   | { state: "unavailable" };
 
+/** ONE thing of one login per ask: its username and password, or its current one-time code. Never both. */
+export type AppVaultWant = "login" | "code";
+
 export type AppVaultSecret =
-  | { state: "secret"; username: string; password: string; totpCode: string | null }
+  | { state: "login"; username: string; password: string }
+  | { state: "code"; code: string }
   | { state: "openApp"; message: string }
   | { state: "cancelled" }
   | { state: "refused" }
@@ -70,21 +75,28 @@ export function parseOpenReply(reply: unknown): AppVaultOpened {
   return { state: "open", ticket: r.ticket, email: text(r.email, 320), items };
 }
 
-/** Read the handler's `vaultSecret` reply. */
-export function parseSecretReply(reply: unknown): AppVaultSecret {
+/**
+ * Read the handler's `vaultSecret` reply for what was asked. Only that is kept: a password in an answer to a code
+ * request (or the reverse) is dropped here, whatever the handler sent.
+ */
+export function parseSecretReply(reply: unknown, want: AppVaultWant): AppVaultSecret {
   if (typeof reply !== "object" || reply === null) return { state: "unavailable" };
   const r = reply as Record<string, unknown>;
   if (r.ok !== true || r.type !== "vaultSecret") return { state: "unavailable" };
   if (r.state === "cancelled") return { state: "cancelled" };
   if (r.state === "refused") return { state: "refused" };
   if (r.state === "openApp") return { state: "openApp", message: text(r.message, 300) ?? OPEN_APP_FALLBACK };
+  if (r.state !== "secret") return { state: "unavailable" };
+  if (want === "code") {
+    const code = text(r.totpCode, 16);
+    return code === null || code === "" ? { state: "unavailable" } : { state: "code", code };
+  }
   const username = text(r.username, 4096);
   const password = text(r.password, 4096);
-  if (r.state !== "secret" || username === null || password === null) return { state: "unavailable" };
-  return { state: "secret", username, password, totpCode: text(r.totpCode, 16) };
+  return username === null || password === null ? { state: "unavailable" } : { state: "login", username, password };
 }
 
-type NativeSend = (msg: { type: string; ticket?: string; itemId?: string }) => Promise<unknown>;
+type NativeSend = (msg: { type: string; ticket?: string; itemId?: string; want?: AppVaultWant; name?: string }) => Promise<unknown>;
 
 function bounded(p: Promise<unknown>, ms: number): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -149,15 +161,17 @@ export class AppVault {
   }
 
   /**
-   * One login's secret, only for an item of the open list. The handler may have to prompt again (iOS can end its
-   * process between two messages); that is its decision, and the answer is the same shape.
+   * One thing of one login ([want]), only for an item of the open list. The handler may have to prompt again (iOS can
+   * end its process between two messages); its prompt then names the login, which is why the name travels with the
+   * ask (the handler checks it against the item before it releases anything).
    */
-  async secret(itemId: string): Promise<AppVaultSecret> {
+  async secret(itemId: string, want: AppVaultWant): Promise<AppVaultSecret> {
     const live = this.live();
     if (live === null) return { state: "cancelled" };
-    if (!live.items.some((i) => i.itemId === itemId)) return { state: "refused" };
+    const item = live.items.find((i) => i.itemId === itemId);
+    if (item === undefined) return { state: "refused" };
     try {
-      return parseSecretReply(await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId }), APP_VAULT_PROMPT_TIMEOUT_MS));
+      return parseSecretReply(await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want, name: item.name }), APP_VAULT_PROMPT_TIMEOUT_MS), want);
     } catch {
       return { state: "unavailable" };
     }

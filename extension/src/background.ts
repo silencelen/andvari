@@ -406,7 +406,7 @@ interface TabState {
    *  locked re-offers to one per REOFFER_MIN_GAP_MS (knownlogins.ts reofferDecision owns the
    *  ordering). All three are cleared when the unlock re-offer hands the pending to a live
    *  session, and none ride publicPending. */
-  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
+  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number; appSaveId?: string }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
    *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
    *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
@@ -1330,6 +1330,9 @@ function syncAppServer(): Promise<Res<"appServer">> {
       appServerDiag.native = "waiting_for_start";
       const started = await Promise.race([serverReady.then(() => true), delay(APP_SERVER_START_WAIT_MS).then(() => false)]);
       if (!started) return { app: "unavailable" };
+      // Never while the earlier build's session is still being retired: adopting a server switches the origin, and
+      // the retirement must lock and revoke under the old one.
+      await Promise.race([ownSessionRetired, delay(APP_SERVER_START_WAIT_MS)]);
       appServerDiag.native = "asking";
       const asked = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP));
       appServerDiag.native = asked.call;
@@ -1362,6 +1365,7 @@ function syncAppServer(): Promise<Res<"appServer">> {
   })();
   return appServerInFlight;
 }
+// Safari: the earlier build's own session is retired first (ownSessionRetired), under the origin it was made at.
 void serverReady.then(() => syncAppServer());
 
 /** Apply a server change. Order is the whole story (§4.1): lock under the OLD origin
@@ -2403,7 +2407,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "revealCardField":
       return revealCardField(msg, sender);
     case "fillFromPopup":
-      return fillFromPopup(msg.itemId, sender);
+      return fillFromPopup(msg.itemId, sender, msg.confirmedOtherSite === true);
     case "capturedCredential":
       return capturedCredential(msg, sender);
     case "captureCard":
@@ -3829,9 +3833,14 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     case "lock":
       vault.close();
       return { ok: true } satisfies Res<"lock">;
-    case "matches":
-      // No in-page menu in this build, and a page frame never gets the list.
-      return { locked: !vault.unlocked, matches: [] } satisfies Res<"matches">;
+    case "matches": {
+      // No in-page menu in this build: a page frame never gets a list. The popup gets the logins saved for the site
+      // of the active tab, by the tab's own URL (never the host the message names), so it can lead with them.
+      if (sender.tab !== undefined || !vault.unlocked) return { locked: !vault.unlocked, matches: [] } satisfies Res<"matches">;
+      const page = await activePageHost();
+      const matches = page === null ? [] : appVaultList(undefined).filter((i) => matchLogins(i.uris, { webHost: page, packageName: "" }, pslResolve)).map((i) => ({ ...i, siteMatch: true }));
+      return { locked: false, matches } satisfies Res<"matches">;
+    }
     case "allItems":
       if (sender.tab !== undefined) return { locked: !vault.unlocked, items: [] } satisfies Res<"allItems">;
       return { locked: !vault.unlocked, items: appVaultList(msg.query) } satisfies Res<"allItems">;
@@ -3878,31 +3887,42 @@ async function appVaultReveal(msg: Extract<Req, { type: "reveal" }>, sender: chr
   if (!vault.unlocked) return { ok: false, code: "locked", error: "locked" };
   const it = vault.item(msg.itemId);
   if (!it) return { ok: false, code: "not_allowed", error: "unknown item" };
-  const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);
-  let allowed =
-    revealGate({
-      fromTab: sender.tab !== undefined,
-      explicit: msg.explicit === true,
-      hostMatched: webHost !== null && matchLogins(it.uris, { webHost, packageName: "" }, pslResolve),
-    }) === "allow";
+  let allowed: boolean;
   const tabId = sender.tab?.id;
-  const isTopFrame = sender.frameId === undefined || sender.frameId === 0;
-  if (!allowed && tabId !== undefined && isTopFrame) {
-    if (loginGrantRedeemable(grants.get(tabId), msg.itemId, sender.origin, Date.now())) {
-      grants.delete(tabId); // one-shot
-      allowed = true;
-    }
+  if (tabId === undefined) {
+    // The popup: an explicit copy of one login's password ([revealGate], as in every build).
+    const webHost = normalizeHost(msg.host);
+    allowed = revealGate({ fromTab: false, explicit: msg.explicit === true, hostMatched: webHost !== null && matchLogins(it.uris, { webHost, packageName: "" }, pslResolve) }) === "allow";
+  } else {
+    // A page frame: ONLY by redeeming the popup's one-shot grant, in the top frame, at the origin the grant was
+    // minted for. This build has no in-page menu, so a frame has no reason of its own to ask; a host match alone
+    // releases nothing here.
+    const isTopFrame = sender.frameId === undefined || sender.frameId === 0;
+    allowed = isTopFrame && loginGrantRedeemable(grants.get(tabId), msg.itemId, sender.origin, Date.now());
+    if (allowed) grants.delete(tabId); // one-shot
   }
   if (!allowed) return { ok: false, code: "not_allowed", error: "not allowed for this site" };
-  const r = await vault.secret(msg.itemId);
-  if (r.state !== "secret") return { ok: false, code: r.state === "refused" ? "not_allowed" : "locked", error: r.state };
-  return { ok: true, secret: { username: r.username === "" ? null : r.username, password: r.password, totpCode: r.totpCode } };
+  const r = await vault.secret(msg.itemId, "login");
+  if (r.state !== "login") return { ok: false, code: r.state === "refused" ? "not_allowed" : "locked", error: r.state };
+  // The one-time code is never part of a fill here: it is released on its own, to the popup, when the person copies it.
+  return { ok: true, secret: { username: r.username === "" ? null : r.username, password: r.password, totpCode: null } };
 }
 
 async function appVaultCode(itemId: string): Promise<Res<"totp">> {
-  const r = await APP_VAULT!.secret(itemId);
-  if (r.state !== "secret" || r.totpCode === null) return { ok: false };
-  return { ok: true, code: r.totpCode, secondsLeft: 30 - (Math.floor(Date.now() / 1000) % 30) };
+  const r = await APP_VAULT!.secret(itemId, "code");
+  if (r.state !== "code") return { ok: false };
+  return { ok: true, code: r.code, secondsLeft: 30 - (Math.floor(Date.now() / 1000) % 30) };
+}
+
+/** The host of the active tab's top-level page, from the tab's own URL (readable while the popup is open). */
+async function activePageHost(): Promise<string | null> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const top = tab?.id === undefined ? null : await topOrigin(tab.id);
+    return top === null ? null : normalizeHost(top);
+  } catch {
+    return null;
+  }
 }
 
 // The list lives for one popup: when the popup's port closes, the list goes and the handler wipes its keys.
@@ -3916,21 +3936,52 @@ atLoad("runtime.onConnect", () =>
 // ---- end of the Safari app-vault lane ----
 
 /**
- * Once per install of the build that moved to the app's vault: end the session an earlier Safari build signed in
- * with, and remove what it stored (its tokens, quick-unlock record, cached wraps and item homes for this server).
+ * The build that moved to the app's vault retires the session an earlier Safari build signed in with: its tokens,
+ * quick-unlock record, cached wraps and item homes, for EVERY server it ever used (every `ns.<originKey>.` prefix in
+ * the store, and the origin in effect at start). The local erase is immediate and comes first. The server-side revoke
+ * may not be possible yet (offline, or a server awaiting confirmation): the token pair is then kept, alone, in the
+ * trusted store, and the revoke is tried again at every worker start until the server confirms it or says the
+ * session is already dead. The marker is set only then.
  */
 async function retireOwnSession(): Promise<void> {
   const DONE = "safari.ownSessionRetired";
+  const OWED = "safari.ownSessionRevokeOwed";
   try {
-    if ((await trusted.get(DONE))[DONE] === true) return;
-    await doSignOut();
-    await purgeOriginNamespace(currentOriginKey);
+    const got = await trusted.get(null);
+    if (got[DONE] === true) return;
+    const originAtStart = serverUrl;
+    const keys = new Set<string>([currentOriginKey]);
+    for (const k of Object.keys(got)) {
+      const m = /^ns\.([0-9a-f]{16})\./.exec(k);
+      if (m) keys.add(m[1]!);
+    }
+    // The erase, now: the lock hands back the pair it saw, which is all the revoke needs.
+    const seen: { tokens?: TokenPair } = {};
+    await doLock("signout", seen);
+    void clearBioCred();
+    for (const k of keys) await purgeOriginNamespace(k);
+    let owed = got[OWED] as { origin?: unknown; access?: unknown; refresh?: unknown } | undefined;
+    if (seen.tokens?.access) {
+      owed = { origin: originAtStart, access: seen.tokens.access, refresh: seen.tokens.refresh };
+      await trusted.set({ [OWED]: owed });
+    }
+    if (owed !== undefined && typeof owed.origin === "string" && typeof owed.access === "string") {
+      if (dialBlock !== null) return; // A16 review R4: nothing is dialed while a server is pending; the revoke stays owed
+      const revoker = new AndvariApi(owed.origin, chrome.runtime.getManifest().version);
+      revoker.setTokens(owed.access, typeof owed.refresh === "string" ? owed.refresh : null);
+      const revoked = await Promise.race([revoker.logout(), delay(5000).then(() => false)]);
+      revoker.setTokens(null, null);
+      if (!revoked) return; // not confirmed: the pair stays owed, and the next start tries again
+      await trusted.remove(OWED);
+    }
     await trusted.set({ [DONE]: true });
   } catch {
     /* the store did not answer: the next worker start tries again */
   }
 }
-if (APP_VAULT !== null) void serverReady.then(() => retireOwnSession());
+/** Settles once the retirement has run for this worker life (done, or owed again). Resolved at once in other builds. */
+const ownSessionRetired: Promise<void> = APP_VAULT !== null ? serverReady.then(() => retireOwnSession()) : Promise.resolve();
+
 
 /** Card copy egress — POPUP ONLY (a sender with a tab is a content script ⇒ refused): the
  *  in-page path must have NO route to card data until the frame-origin egress contract ships
@@ -3984,7 +4035,7 @@ function asFillOutcome(v: unknown): FillOutcome | null {
  *  Cut M (v2 #14): `ok` used to mean sendMessage DELIVERY, so the popup closed over a fill
  *  that wrote nothing — now the content script answers its real FillOutcome and ok is true
  *  only when something actually landed in a field. */
-async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillFromPopup">> {
+async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender, confirmedOtherSite = false): Promise<Res<"fillFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
   // Safari: the open list of the app's vault stands in for the session's items; the secret is fetched at the reveal.
   const unlockedNow = APP_VAULT !== null ? APP_VAULT.unlocked : session !== null;
@@ -3999,6 +4050,16 @@ async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSende
   // window); an opaque or unreadable top is never eligible, the card grant's [A1] rule.
   const top = await topOrigin(tab.id);
   if (top === null) return { ok: false, code: "not_allowed", error: "this page cannot be filled" };
+  // Safari: this popup is the only fill surface and lists the whole vault, so a login saved for another site is
+  // filled here only after the person confirmed it, with both hosts named (a look-alike domain is the case).
+  if (APP_VAULT !== null && !confirmedOtherSite) {
+    const page = normalizeHost(top);
+    const uris = APP_VAULT.item(itemId)?.uris ?? [];
+    if (page === null || !matchLogins(uris, { webHost: page, packageName: "" }, pslResolve)) {
+      const savedFor = uris.map((u) => normalizeHost(u)).find((h): h is string => h !== null) ?? "another site";
+      return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: { savedFor, page: page ?? top } };
+    }
+  }
   grants.set(tab.id, { itemId, origin: top, expiresMs: Date.now() + GRANT_TTL_MS });
   const msg: TabMsg = { type: "fillItem", itemId };
   let raw: unknown;
@@ -4657,7 +4718,10 @@ async function capturedCredential(
 /** Safari: hand the tab's pending capture to the andvari app. The pending is dropped only once the app's queue took it. */
 async function saveThroughApp(tabId: number, st: TabState, pending: NonNullable<TabState["pending"]>): Promise<Res<"resolvePendingSave">> {
   const send = nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP) as unknown as Parameters<typeof queueSaveToApp>[0];
-  const capture = { id: `t${tabId}-${pending.frameId}`, site: pending.uri ?? `https://${pending.host}`, username: pending.username, password: pending.password };
+  // One entry per capture, under an id of its own: a later capture in the same tab never replaces one the person was
+  // already told is on its way. A retry of the same pending reuses its id. (The app drops exact duplicates.)
+  pending.appSaveId ??= `c-${[...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  const capture = { id: pending.appSaveId, site: pending.uri ?? `https://${pending.host}`, username: pending.username, password: pending.password };
   const r = await queueSaveToApp(send, capture, Date.now());
   if (r === "queued") {
     st.pending = undefined;

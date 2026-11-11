@@ -386,7 +386,7 @@ export type Req =
    *  whatever tab is ACTIVE, which need not be the sender's): user explicitly picked an item to
    *  fill into the active tab → SW mints a one-shot grant for (tabId,itemId) and forwards
    *  {type:"fillItem"} to that tab's top frame. */
-  | { type: "fillFromPopup"; itemId: string }
+  | { type: "fillFromPopup"; itemId: string; /** Safari: the person confirmed filling a login saved for another site. */ confirmedOtherSite?: boolean }
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
    *  for a copy — the value goes straight to the popup's clipboard write, never into a page
    *  or the popup DOM. Cards are deliberately not uri-bound, so there is no host gate; the
@@ -588,7 +588,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                 ? /** Cut M (v2 #14): `ok` is the FILL outcome, not delivery — true only when the
                    *  content script reports it actually wrote into a field. `outcome` is the full
                    *  verdict; `code` is set on every failure (additive fields, same shape). */
-                  { ok: boolean; outcome?: FillOutcome; code?: FillFailCode; error?: string }
+                  { /** Safari: the login is saved for [savedFor], not for [page]; nothing was filled. Ask, then send confirmedOtherSite. */ needsConfirm?: { savedFor: string; page: string }; ok: boolean; outcome?: FillOutcome; code?: FillFailCode; error?: string }
                 : T extends "capturedCredential"
                   ? { ok: boolean; pending?: PendingSave }
                   : T extends "captureCard"
