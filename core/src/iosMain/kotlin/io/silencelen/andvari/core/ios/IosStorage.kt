@@ -2,6 +2,7 @@
 
 package io.silencelen.andvari.core.ios
 
+import io.silencelen.andvari.core.app.FillSnapshotStore
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.VaultCache
@@ -64,6 +65,7 @@ import platform.Security.kSecMatchLimitOne
 import platform.Security.kSecReturnData
 import platform.Security.kSecValueData
 import platform.posix.memcpy
+import platform.posix.rename
 
 /** Non-secret state in NSUserDefaults: the app's standard defaults, or the [suite] (an App Group, later). */
 internal class UserDefaultsPrefs(suite: String?) : KeyValuePrefs {
@@ -213,4 +215,30 @@ internal fun NSData.toByteArray(): ByteArray {
     val out = ByteArray(n)
     out.usePinned { memcpy(it.addressOf(0), bytes, length) }
     return out
+}
+
+/**
+ * The AutoFill snapshot: one file, replaced by a rename so a reader sees the old one or the new one, never a torn
+ * one. Ciphertext, excluded from backup, with the protection class of the vault cache.
+ */
+internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
+    override fun write(bytes: ByteArray): Boolean = runCatching {
+        val fm = NSFileManager.defaultManager
+        val tmp = "$path.tmp"
+        val attributes = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
+        if (!fm.createFileAtPath(tmp, contents = bytes.toNSData(), attributes = attributes)) return@runCatching false
+        if (rename(tmp, path) != 0) {
+            fm.removeItemAtPath(tmp, error = null)
+            return@runCatching false
+        }
+        NSURL.fileURLWithPath(path).setResourceValue(true, forKey = NSURLIsExcludedFromBackupKey, error = null)
+        true
+    }.getOrDefault(false)
+
+    override fun read(): ByteArray? = runCatching { NSFileManager.defaultManager.contentsAtPath(path)?.toByteArray() }.getOrNull()
+
+    override fun delete() {
+        runCatching { NSFileManager.defaultManager.removeItemAtPath(path, error = null) }
+        runCatching { NSFileManager.defaultManager.removeItemAtPath("$path.tmp", error = null) }
+    }
 }

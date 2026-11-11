@@ -66,7 +66,9 @@ import platform.Security.kSecAttrKeyType
 import platform.Security.kSecAttrKeyTypeECSECPrimeRandom
 import platform.Security.kSecAttrTokenID
 import platform.Security.kSecAttrTokenIDSecureEnclave
+import platform.Security.kSecAttrService
 import platform.Security.kSecClass
+import platform.Security.kSecClassGenericPassword
 import platform.Security.kSecClassKey
 import platform.Security.kSecKeyAlgorithmECIESEncryptionCofactorX963SHA256AESGCM
 import platform.Security.kSecPrivateKeyAttrs
@@ -294,5 +296,21 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
     private companion object {
         /** errSecUserCanceled. */
         const val USER_CANCELED = -128L
+    }
+}
+
+/**
+ * Remove every quick-unlock blob under [service] and every Secure Enclave key of this app, in whatever access group
+ * they are. Run once, before the enrollment moves to the shared group: nothing made there exists yet.
+ */
+internal fun sweepLegacyQuickUnlock(service: String) {
+    runCatching {
+        val owned = CfOwned()
+        try {
+            SecItemDelete(owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service)))
+            SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID to kSecAttrTokenIDSecureEnclave))
+        } finally {
+            owned.release()
+        }
     }
 }
