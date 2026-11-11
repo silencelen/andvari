@@ -301,16 +301,16 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
 
 /**
  * Remove every quick-unlock blob under [service] and every Secure Enclave key of this app, in whatever access group
- * they are. Run once, before the enrollment moves to the shared group: nothing made there exists yet.
+ * they are. Run once, before the enrollment moves to the shared group: nothing made there exists yet. Returns whether
+ * both are gone (deleted, or never there).
  */
-internal fun sweepLegacyQuickUnlock(service: String) {
-    runCatching {
-        val owned = CfOwned()
-        try {
-            SecItemDelete(owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service)))
-            SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID to kSecAttrTokenIDSecureEnclave))
-        } finally {
-            owned.release()
-        }
+internal fun sweepLegacyQuickUnlock(service: String): Boolean = runCatching {
+    val owned = CfOwned()
+    try {
+        val blobs = SecItemDelete(owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service)))
+        val keys = SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID to kSecAttrTokenIDSecureEnclave))
+        listOf(blobs, keys).all { it == errSecSuccess || it == errSecItemNotFound }
+    } finally {
+        owned.release()
     }
-}
+}.getOrDefault(false)

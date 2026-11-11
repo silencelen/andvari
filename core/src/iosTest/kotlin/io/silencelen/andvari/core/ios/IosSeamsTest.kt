@@ -99,6 +99,28 @@ class IosSeamsTest {
     }
 
     @Test
+    fun aMoveCutShortIsFinishedByTheNextStart() {
+        val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val standard = NSUserDefaults.standardUserDefaults
+        try {
+            // An earlier start copied one key and died: the rest is still only in the old place.
+            UserDefaultsPrefs(suite).putString("ns.0123456789abcdef.cacheAllowed", "false")
+            standard.setObject("https://home.example", forKey = "baseUrl")
+            standard.setObject("true", forKey = "ns.0123456789abcdef.cacheAllowed")
+            standard.setObject("777", forKey = "ns.0123456789abcdef.policyFetchedAt")
+            standard.setObject("""{"baseUrl":"https://home.example","userId":"u1","email":"u@example.com"}""", forKey = "session")
+            val seams = IosSeams(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null))
+            assertEquals("https://home.example", seams.store.baseUrl)
+            assertEquals("u1", seams.store.storedIdentity()?.userId, "the session's identity is read without any token")
+            assertEquals(777L, seams.store.origin("0123456789abcdef").policyFetchedAt)
+            assertFalse(seams.store.origin("0123456789abcdef").cacheAllowed, "a value already moved is not overwritten by the old one")
+        } finally {
+            for (k in listOf("baseUrl", "session", "ns.0123456789abcdef.cacheAllowed", "ns.0123456789abcdef.policyFetchedAt")) standard.removeObjectForKey(k)
+            NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+        }
+    }
+
+    @Test
     fun theSnapshotFileIsReplacedWholeAndTheExtensionReadsIt() {
         val dir = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
         val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"

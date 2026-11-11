@@ -121,17 +121,20 @@ internal class IosSeams(
         fun migrate(config: IosStorageConfig, prefs: UserDefaultsPrefs) {
             if (config.defaultsSuite == null || prefs.getString(MOVED) != null) return
             val old = NSUserDefaults.standardUserDefaults
-            if (prefs.getString("baseUrl") == null) {
-                for ((key, value) in old.dictionaryRepresentation()) {
-                    val name = key as? String ?: continue
-                    if (name.startsWith("ns.") || name in GLOBAL_KEYS) (value as? String)?.let { prefs.putString(name, it) }
-                }
+            val ours = old.dictionaryRepresentation().mapNotNull { (key, value) ->
+                val name = key as? String ?: return@mapNotNull null
+                val text = value as? String ?: return@mapNotNull null
+                if (name.startsWith("ns.") || name in GLOBAL_KEYS) name to text else null
             }
-            for (key in old.dictionaryRepresentation().keys) {
-                val name = key as? String ?: continue
-                if (name.startsWith("ns.") || name in GLOBAL_KEYS) old.removeObjectForKey(name)
+            // Safe to interrupt at any point: each key is copied only where the new place has none, the origin last
+            // (it is what says "a layout is here"), and nothing old is removed before every copy has landed. A start
+            // that was cut short runs the whole move again.
+            for ((name, text) in ours.sortedBy { it.first == "baseUrl" }) {
+                if (prefs.getString(name) == null) prefs.putString(name, text)
             }
-            if (config.keychainAccessGroup != null) sweepLegacyQuickUnlock("${config.keychainService}.quickunlock")
+            for ((name, _) in ours) old.removeObjectForKey(name)
+            // The marker is set only once the old enrollment is known to be gone; otherwise the next start tries again.
+            if (config.keychainAccessGroup != null && !sweepLegacyQuickUnlock("${config.keychainService}.quickunlock")) return
             prefs.putString(MOVED, "1")
         }
 
@@ -184,6 +187,9 @@ class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: S
 
     /** The logins, those matching one of [hosts] first; empty while locked. */
     fun logins(hosts: List<String>): List<FillLogin> = vault.logins(hosts)
+
+    /** Whether [itemId] is a login for one of the service [identifiers]: asked before a suggestion's record is filled. */
+    fun matches(itemId: String, identifiers: List<String>): Boolean = vault.matches(itemId, identifiers)
 
     fun credential(itemId: String): FillCredential? = vault.credential(itemId)
 
