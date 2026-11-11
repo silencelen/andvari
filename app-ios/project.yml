@@ -40,7 +40,8 @@ targets:
       path: Andvari/Andvari.entitlements
       properties:
         com.apple.developer.authentication-services.autofill-credential-provider: true
-        # Shared with both extensions. The app writes only its server origin there (IosStorageConfig.sharedSuite).
+        # Shared with both extensions: the non-secret session state, the quick-unlock key, the AutoFill snapshot
+        # and the save queue (IosStorageConfig). The session's tokens are never there.
         com.apple.security.application-groups: [group.com.silencelen.andvari]
     settings:
       base:
