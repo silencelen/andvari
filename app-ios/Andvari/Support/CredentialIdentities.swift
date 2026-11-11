@@ -10,6 +10,17 @@ import AuthenticationServices
 enum CredentialIdentities {
     private static let queue = DispatchQueue(label: "io.silencelen.andvari.credential-identities")
     private static var generation = 0
+    private static let storeTimeout: TimeInterval = 10
+    private static let appGroup = "group.com.silencelen.andvari"
+    private static let providerEnabledKey = "autofillProviderEnabled"
+
+    /// Publish whether andvari is the enabled AutoFill provider, without touching the suggestions (on every return
+    /// to the app: the person changes this in Settings).
+    static func publishProviderState() {
+        ASCredentialIdentityStore.shared.getState { state in
+            UserDefaults(suiteName: appGroup)?.set(state.isEnabled, forKey: providerEnabledKey)
+        }
+    }
 
     static func replace(_ identities: [CredentialIdentity]) {
         let wanted: [(host: String, user: String, record: String, totp: Bool)] = identities.map { ($0.host, $0.username, $0.itemId, $0.hasTotp) }
@@ -19,6 +30,9 @@ enum CredentialIdentities {
             let store = ASCredentialIdentityStore.shared
             let done = DispatchSemaphore(value: 0)
             store.getState { state in
+                // The Safari extension reads this: on iOS 26.2 it leaves saving to the system only while andvari is
+                // the enabled provider (SafariWebExtensionHandler).
+                UserDefaults(suiteName: appGroup)?.set(state.isEnabled, forKey: providerEnabledKey)
                 // Still the latest request? `generation` is only written on this queue, which is waiting on us.
                 guard state.isEnabled, mine == generation else {
                     done.signal()
@@ -34,7 +48,8 @@ enum CredentialIdentities {
                 }
                 store.replaceCredentialIdentities(all) { _, _ in done.signal() }
             }
-            done.wait()
+            // A store that never answers must not hold every later change (a sign-out's clear) behind it.
+            _ = done.wait(timeout: .now() + storeTimeout)
         }
     }
 
@@ -43,7 +58,7 @@ enum CredentialIdentities {
             generation += 1
             let done = DispatchSemaphore(value: 0)
             ASCredentialIdentityStore.shared.removeAllCredentialIdentities { _, _ in done.signal() }
-            done.wait()
+            _ = done.wait(timeout: .now() + storeTimeout)
         }
     }
 

@@ -94,6 +94,7 @@ final class AppModel: ObservableObject {
         }
         endObservation = { observation.close() }
         controller.start()
+        CredentialIdentities.publishProviderState()
     }
 
     private func receive(_ next: AppState) {
@@ -141,6 +142,7 @@ final class AppModel: ObservableObject {
             if wasInBackground {
                 wasInBackground = false
                 controller.onForeground()
+                CredentialIdentities.publishProviderState()
             }
         default:
             break
