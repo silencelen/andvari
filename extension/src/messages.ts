@@ -344,6 +344,10 @@ export type Req =
   /** Popup ONLY, Safari build: why no server is in effect, for the popup's Details. Answered at once, before the
    *  worker's start settles, and carries no secret: stages, kinds and an origin. */
   | { type: "serverDiag" }
+  /** Popup ONLY, Safari build: unlock the andvari app's vault for this popup. The native handler runs Face ID and
+   *  answers with the logins' names, usernames and addresses (appvault.ts); `message` says what to do in the app when
+   *  nothing can be opened here. */
+  | { type: "appUnlock" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
@@ -653,6 +657,8 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                 ? { app: "set" | "none" | "unavailable" }
                                               : T extends "serverDiag"
                                                 ? ServerDiag | null
+                                              : T extends "appUnlock"
+                                                ? { ok: boolean; state: "open" | "openApp" | "cancelled" | "unavailable"; message?: string }
                                                 : /** C1 §C2 [S7]: the branch matches ONLY these two booleans — no `string` type is
                                                    *  admitted here, so an "origin"/"name"/"subtitle" field can never be added to the
                                                    *  chip's answer without editing this contract line first. */

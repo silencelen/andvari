@@ -190,6 +190,7 @@ async function refresh(): Promise<void> {
   }
   showView(s.unlocked);
   renderQuickUnlock(s.quickUnlock, s.unlocked); // spec 01 §8.4 — PIN entry (locked) / offer+settings (unlocked)
+  if (BUILD_TARGET === "safari") renderAppLocked(s.unlocked);
   // E1-6: rescue-issued temporary password — a persistent, non-dismissable strip for the
   // whole unlocked session; it clears only via a fresh unlock whose response drops the flag.
   el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
@@ -1739,6 +1740,36 @@ el("autofill-grant").addEventListener("click", () => {
     }
   })();
 });
+
+/**
+ * Safari on iOS: the locked view is one button. There is no sign-in in this build (the vault is the andvari app's),
+ * so the master-password form, the PIN and the WebAuthn views never show, and neither does Sign out.
+ */
+function renderAppLocked(unlocked: boolean): void {
+  for (const id of ["qu-locked", "qu-bio-locked", "qu-master-form"]) el(id).hidden = true;
+  el("app-locked").hidden = unlocked;
+  el("sign-out").hidden = true;
+}
+
+el("app-unlock").addEventListener("click", async () => {
+  const button = el<HTMLButtonElement>("app-unlock");
+  button.disabled = true;
+  clearMsg();
+  const r = await ask({ type: "appUnlock" });
+  button.disabled = false;
+  if (r?.state === "openApp") showMsg("info", r.message ?? "Open andvari and unlock it, then try again.");
+  else if (r?.state === "unavailable" || r === undefined) showMsg("err", "Couldn’t reach the andvari app. Open it once, then try again.");
+  await refresh();
+});
+
+// Safari: the worker keeps the app's list only while this popup is open; the port's close tells it to drop it.
+if (BUILD_TARGET === "safari") {
+  try {
+    chrome.runtime.connect({ name: "andvari-popup" });
+  } catch {
+    /* no port: the worker's own timer still drops the list */
+  }
+}
 
 /** Safari on iOS: the server comes from the andvari app. */
 const APP_SERVER_NONE = "Choose your server in the andvari app. This extension uses the same one.";

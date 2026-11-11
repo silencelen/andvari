@@ -75,6 +75,7 @@ import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./ser
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
 import { appServerToAdopt, askAppServerDetailed, nativeSender } from "./appserver";
 import { queueSaveToApp, savesThroughApp } from "./appsave";
+import { AppVault, vaultFromApp } from "./appvault";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -2268,6 +2269,11 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
   // answer), nothing that would reach a server runs — no sign-in lane, no connection test (serverstate.ts).
   const held = dialRefusal(msg.type, dialBlock);
   if (held) return held;
+  // Safari on iOS: this extension has no session of its own; the vault is the andvari app's (appvault.ts).
+  if (APP_VAULT !== null) {
+    const viaApp = await appVaultDispatch(msg, sender);
+    if (viaApp !== undefined) return viaApp;
+  }
   switch (msg.type) {
     case "ping": {
       const p = await api.clientPolicy(); // host_permissions + reachability
@@ -3769,6 +3775,163 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
   };
 }
 
+// ---- Safari: the andvari app's vault (appvault.ts) ----
+// Trust boundary, hop by hop (design 2026-11-09, "Safari extension"):
+//   web page → content script: the page can only make the content script report a form or a capture. In the Safari
+//     build the content script has no fill menu and asks for no list.
+//   content script → worker: a page frame may send `reveal` for one item, and gets a secret only (a) for a login whose
+//     saved address matches the frame's BROWSER-SET origin, or (b) by redeeming the popup's one-shot, top-frame,
+//     origin-bound grant. It can never list (`allItems`, `matches` answer nothing), unlock, or read a code.
+//   popup → worker: the popup (an extension page, by the sender gate) may unlock, list, fill the active tab, copy one
+//     login's password or code, and lock.
+//   worker → native handler: `vaultOpen` (names, usernames, addresses), `vaultSecret` (one item), `vaultClose`. Only
+//     the worker can send native messages; the handler answers whoever in this extension asks, so every gate is here.
+
+/** The Safari build's vault; null in every other build, where the worker has its own session. */
+const APP_VAULT: AppVault | null = vaultFromApp(BUILD_TARGET)
+  ? new AppVault(nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP) as unknown as ConstructorParameters<typeof AppVault>[0])
+  : null;
+
+/** A message of the own-session lanes, answered as the sender gate answers a stranger: that lane does not exist here. */
+function noOwnSession(type: Req["type"]): unknown {
+  const verdict = senderGate(type, {}, EXTENSION_BASE);
+  return verdict.refused ? verdict.answer : { ok: false };
+}
+
+/**
+ * The Safari build's answers for every message that would otherwise read or change the worker's own session.
+ * `undefined` means "not this lane's": the ordinary handler runs (server info, save capture, page reports), and with
+ * no session those answer locked or empty.
+ */
+async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown | undefined> {
+  const vault = APP_VAULT!;
+  switch (msg.type) {
+    case "status":
+      return {
+        unlocked: vault.unlocked,
+        count: vault.items().length,
+        email: vault.email,
+        mustChangePassword: false,
+        lockNotice: null,
+        quickUnlock: { enrolled: false, armed: false, attemptsRemaining: 0, offerDismissed: true, kind: null },
+        totpPending: null,
+        personalChange: false,
+        personalChangeText: null,
+        personalProposal: false,
+        waitingGrants: 0,
+        wrongVault: 0,
+        rememberedEmail: null,
+      } satisfies Res<"status">;
+    case "appUnlock": {
+      const r = await vault.open();
+      return (r.state === "openApp" ? { ok: false, state: r.state, message: r.message } : { ok: r.state === "open", state: r.state }) satisfies Res<"appUnlock">;
+    }
+    case "lock":
+      vault.close();
+      return { ok: true } satisfies Res<"lock">;
+    case "matches":
+      // No in-page menu in this build, and a page frame never gets the list.
+      return { locked: !vault.unlocked, matches: [] } satisfies Res<"matches">;
+    case "allItems":
+      if (sender.tab !== undefined) return { locked: !vault.unlocked, items: [] } satisfies Res<"allItems">;
+      return { locked: !vault.unlocked, items: appVaultList(msg.query) } satisfies Res<"allItems">;
+    case "reveal":
+      return appVaultReveal(msg, sender);
+    case "totp":
+      if (sender.tab !== undefined) return { ok: false } satisfies Res<"totp">;
+      // One code, when the person copies it. The popup's once-a-second display ticker gets none: a live code for
+      // every visible row would be a secret per row per second across the native hop.
+      if (msg.forCopy !== true || vault.item(msg.itemId)?.hasTotp !== true) return { ok: false } satisfies Res<"totp">;
+      return appVaultCode(msg.itemId);
+    // The lanes of a session this build does not have: sign-in, its quick unlock, and every vault write.
+    case "unlock":
+    case "unlockTotp":
+    case "cancelTotp":
+    case "unlockWithPin":
+    case "unlockWithBio":
+    case "enrollQuickUnlock":
+    case "enrollQuickUnlockBio":
+    case "disableQuickUnlock":
+    case "dismissQuickUnlockOffer":
+    case "setTotp":
+    case "linkUri":
+    case "signOut":
+    case "personalAcceptChange":
+    case "personalDescribeChange":
+      return noOwnSession(msg.type);
+    default:
+      return undefined;
+  }
+}
+
+function appVaultList(query: string | undefined): MatchItem[] {
+  const q = (query ?? "").trim().toLowerCase();
+  return APP_VAULT!.items()
+    .filter((i) => !q || i.name.toLowerCase().includes(q) || i.username.toLowerCase().includes(q) || i.uris.some((u) => u.toLowerCase().includes(q)))
+    // readOnly: this build writes nothing to the vault, so every write offer is suppressed.
+    .map((i) => ({ itemId: i.itemId, name: i.name, username: i.username === "" ? null : i.username, uris: i.uris, siteMatch: false, hasTotp: i.hasTotp, readOnly: true }));
+}
+
+/** `reveal` with the app's vault behind it: the same gates as [reveal], then ONE item's secret from the handler. */
+async function appVaultReveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.MessageSender): Promise<Res<"reveal">> {
+  const vault = APP_VAULT!;
+  if (!vault.unlocked) return { ok: false, code: "locked", error: "locked" };
+  const it = vault.item(msg.itemId);
+  if (!it) return { ok: false, code: "not_allowed", error: "unknown item" };
+  const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);
+  let allowed =
+    revealGate({
+      fromTab: sender.tab !== undefined,
+      explicit: msg.explicit === true,
+      hostMatched: webHost !== null && matchLogins(it.uris, { webHost, packageName: "" }, pslResolve),
+    }) === "allow";
+  const tabId = sender.tab?.id;
+  const isTopFrame = sender.frameId === undefined || sender.frameId === 0;
+  if (!allowed && tabId !== undefined && isTopFrame) {
+    if (loginGrantRedeemable(grants.get(tabId), msg.itemId, sender.origin, Date.now())) {
+      grants.delete(tabId); // one-shot
+      allowed = true;
+    }
+  }
+  if (!allowed) return { ok: false, code: "not_allowed", error: "not allowed for this site" };
+  const r = await vault.secret(msg.itemId);
+  if (r.state !== "secret") return { ok: false, code: r.state === "refused" ? "not_allowed" : "locked", error: r.state };
+  return { ok: true, secret: { username: r.username === "" ? null : r.username, password: r.password, totpCode: r.totpCode } };
+}
+
+async function appVaultCode(itemId: string): Promise<Res<"totp">> {
+  const r = await APP_VAULT!.secret(itemId);
+  if (r.state !== "secret" || r.totpCode === null) return { ok: false };
+  return { ok: true, code: r.totpCode, secondsLeft: 30 - (Math.floor(Date.now() / 1000) % 30) };
+}
+
+// The list lives for one popup: when the popup's port closes, the list goes and the handler wipes its keys.
+atLoad("runtime.onConnect", () =>
+  chrome.runtime.onConnect.addListener((port) => {
+    if (APP_VAULT === null || port.name !== "andvari-popup") return;
+    port.onDisconnect.addListener(() => APP_VAULT.close());
+  }),
+);
+
+// ---- end of the Safari app-vault lane ----
+
+/**
+ * Once per install of the build that moved to the app's vault: end the session an earlier Safari build signed in
+ * with, and remove what it stored (its tokens, quick-unlock record, cached wraps and item homes for this server).
+ */
+async function retireOwnSession(): Promise<void> {
+  const DONE = "safari.ownSessionRetired";
+  try {
+    if ((await trusted.get(DONE))[DONE] === true) return;
+    await doSignOut();
+    await purgeOriginNamespace(currentOriginKey);
+    await trusted.set({ [DONE]: true });
+  } catch {
+    /* the store did not answer: the next worker start tries again */
+  }
+}
+if (APP_VAULT !== null) void serverReady.then(() => retireOwnSession());
+
 /** Card copy egress — POPUP ONLY (a sender with a tab is a content script ⇒ refused): the
  *  in-page path must have NO route to card data until the frame-origin egress contract ships
  *  (cards design 2026-07-09). Cards are deliberately not uri-bound, so there is no host gate —
@@ -3823,8 +3986,11 @@ function asFillOutcome(v: unknown): FillOutcome | null {
  *  only when something actually landed in a field. */
 async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
-  if (!session) return { ok: false, code: "locked", error: "locked" };
-  if (!session.items.some((i) => i.itemId === itemId && i.doc.type === "login")) {
+  // Safari: the open list of the app's vault stands in for the session's items; the secret is fetched at the reveal.
+  const unlockedNow = APP_VAULT !== null ? APP_VAULT.unlocked : session !== null;
+  if (!unlockedNow) return { ok: false, code: "locked", error: "locked" };
+  const known = APP_VAULT !== null ? APP_VAULT.item(itemId) !== null : session!.items.some((i) => i.itemId === itemId && i.doc.type === "login");
+  if (!known) {
     return { ok: false, code: "not_allowed", error: "unknown item" };
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
