@@ -105,6 +105,7 @@ struct TrustGateSheet: View {
                 )
                 .accessibilityLabel("Server address")
                 .accessibilityValue(gate.origin)
+                .accessibilityIdentifier("gate.origin")
             if gate.punycodeCaution {
                 Caution(text: Wording.punycodeCaution, serious: true)
             }
@@ -138,6 +139,7 @@ struct TrustGateSheet: View {
             }
             .buttonStyle(QuietButtonStyle())
             .disabled(connecting)
+            .accessibilityIdentifier("gate.cancel")
             PrimaryButton(title: "Connect", busy: connecting, action: connect)
                 .disabled(blocked || connecting || model.state.busy)
         }

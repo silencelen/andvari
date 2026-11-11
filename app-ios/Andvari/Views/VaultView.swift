@@ -174,6 +174,7 @@ struct VaultView: View {
             NavigationLink(value: item.itemId) {
                 ItemRow(item: item)
             }
+            .accessibilityIdentifier(AccessID.item(item.name))
             .listRowBackground(Palette.raised)
             .listRowSeparatorTint(Palette.edge)
             .contextMenu {
@@ -249,6 +250,7 @@ struct VaultView: View {
                 Image(systemName: "gearshape")
             }
             .accessibilityLabel("Settings")
+            .accessibilityIdentifier("vault.settings")
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
             if model.state.syncing {
@@ -261,6 +263,7 @@ struct VaultView: View {
                 Image(systemName: "lock")
             }
             .accessibilityLabel("Lock")
+            .accessibilityIdentifier("vault.lock")
             Menu {
                 Button {
                     showNewLogin = true
@@ -281,6 +284,7 @@ struct VaultView: View {
                 Image(systemName: "plus")
             }
             .accessibilityLabel("New item")
+            .accessibilityIdentifier("vault.new-item")
         }
     }
 
@@ -389,6 +393,7 @@ private struct PendingSaveRow: View {
             Text(pending.plainHttp ? "http://\(pending.host)" : pending.host)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Palette.ink)
+                .accessibilityIdentifier("pending.host")
             if pending.plainHttp {
                 Text("Captured on a page that was not encrypted.")
                     .font(.footnote)
@@ -429,6 +434,7 @@ private struct PendingSaveRow: View {
                     }
                 }
                 .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("pending.save")
                 Button(shown == nil ? "Show password" : "Hide password") {
                     shown = shown == nil ? model.pendingSavePassword(pending.id) : nil
                 }

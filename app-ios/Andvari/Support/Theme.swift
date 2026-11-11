@@ -233,6 +233,7 @@ struct PrimaryButton: View {
             }
         }
         .buttonStyle(PrimaryButtonStyle())
+        .accessibilityIdentifier(AccessID.button(title))
     }
 }
 
@@ -427,6 +428,7 @@ struct InputField<Focus: Hashable>: View {
                 .submitLabel(submitLabel)
                 .focused(focus, equals: field)
                 .onSubmit { onSubmit() }
+                .accessibilityIdentifier(AccessID.field(label))
                 .fieldBox(focused: focus.wrappedValue == field)
         }
     }
@@ -530,5 +532,18 @@ struct AuthScroll<Content: View>: View {
             .frame(maxWidth: .infinity)
         }
         .scrollDismissesKeyboard(.interactively)
+    }
+}
+
+// MARK: - Accessibility identifiers
+
+/// Stable names for the UI tests (app-ios/AndvariUITests). They are not spoken and never shown.
+enum AccessID {
+    static func field(_ label: String) -> String { "field." + slug(label) }
+    static func button(_ title: String) -> String { "button." + slug(title) }
+    static func item(_ name: String) -> String { "vault.item." + name }
+
+    private static func slug(_ text: String) -> String {
+        text.lowercased().replacingOccurrences(of: " ", with: "-")
     }
 }

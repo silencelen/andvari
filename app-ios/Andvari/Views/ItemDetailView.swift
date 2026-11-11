@@ -319,6 +319,7 @@ struct ItemDetailView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel(password == nil ? "Show password" : "Hide password")
+                .accessibilityIdentifier("detail.reveal-password")
                 CopyButton(label: "Copy password", copied: copied == "password") {
                     copySecret(.password, as: "password")
                 }
@@ -391,6 +392,7 @@ struct ItemDetailView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(hidden ? "Hidden" : value)
+        .accessibilityIdentifier("detail." + label.lowercased())
     }
 
     private func website(_ uri: String) -> some View {
@@ -531,6 +533,7 @@ struct OneTimeCodeRow: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("One-time code")
             .accessibilityValue(spoken)
+            .accessibilityIdentifier("detail.one-time-code")
             Spacer(minLength: 8)
             if let code {
                 CountdownRing(remaining: code.secondsRemaining, period: code.periodSeconds)
