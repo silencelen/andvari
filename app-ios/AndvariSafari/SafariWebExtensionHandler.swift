@@ -111,6 +111,21 @@ enum AppVaultSession {
     private static var expiry: DispatchWorkItem?
     /// Bumped by every unlock and wipe: an unlock that finishes after a later one keeps nothing.
     private static var generation = 0
+    /// When this process loaded the handler: with the pid, it tells whether two messages met the same process.
+    private static let processStart = Date()
+
+    /// What a reply says about this process, for the popup's Details. No secret: a pid, times and booleans.
+    @MainActor
+    private static func diag(asked: String?) -> [String: Any] {
+        [
+            "pid": Int(ProcessInfo.processInfo.processIdentifier),
+            "processAgeSeconds": Int(Date().timeIntervalSince(processStart)),
+            "hadVault": vault != nil,
+            "ticketGiven": asked != nil,
+            "ticketFound": asked != nil && asked == ticket,
+            "pastDeadline": vault != nil && monotonicNow() >= deadline,
+        ]
+    }
 
     /// Kotlin suspend functions are called from the main thread.
     private static func onMain(_ work: @escaping @MainActor () async -> Void) {
@@ -182,8 +197,9 @@ enum AppVaultSession {
 
     static func open(_ done: @escaping ([String: Any]) -> Void) {
         onMain {
+            let before = diag(asked: nil)
             let (state, message) = await unlock(reason: "Unlock andvari in Safari")
-            var body: [String: Any] = ["ok": true, "type": "vaultOpen", "state": state]
+            var body: [String: Any] = ["ok": true, "type": "vaultOpen", "state": state, "diag": before]
             if let message { body["message"] = message }
             if state == "open", let vault, let ticket {
                 body["ticket"] = ticket
@@ -213,6 +229,13 @@ enum AppVaultSession {
             }
             // The open vault serves only the caller that opened it. Anything else is a new unlock, with a prompt
             // that says which login it is for.
+            let found = diag(asked: asked)
+            let answer = done
+            let done: ([String: Any]) -> Void = { body in
+                var body = body
+                body["diag"] = found
+                answer(body)
+            }
             var ownUnlock = false
             if live() == nil || asked == nil || asked != ticket {
                 guard let name, !name.isEmpty else {

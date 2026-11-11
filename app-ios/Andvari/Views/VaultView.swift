@@ -57,15 +57,29 @@ struct VaultView: View {
                 }
                 .listRowBackground(Palette.raised)
             }
+            if !model.state.appliedSaves.isEmpty {
+                Section {
+                    ForEach(model.state.appliedSaves, id: \.id) { applied in
+                        AppliedSaveRow(applied: applied)
+                    }
+                    Button("Done") {
+                        model.dismissAppliedSaves()
+                    }
+                    .font(.subheadline.weight(.semibold))
+                } header: {
+                    SectionTitle(model.state.appliedSaves.count == 1 ? "Saved 1 login from AutoFill" : "Saved \(model.state.appliedSaves.count) logins from AutoFill")
+                }
+                .listRowBackground(Palette.raised)
+            }
             if !model.state.pendingSaves.isEmpty {
                 Section {
                     ForEach(model.state.pendingSaves, id: \.id) { pending in
                         PendingSaveRow(pending: pending)
                     }
                 } header: {
-                    SectionTitle("Logins to save")
+                    SectionTitle("Logins not saved yet")
                 } footer: {
-                    Text("Captured while you signed in. Nothing is saved until you choose Save.")
+                    Text("These could not be saved by themselves. Save or discard each one.")
                 }
                 .listRowBackground(Palette.raised)
             }
@@ -322,6 +336,11 @@ private struct PendingSaveRow: View {
             Text(pending.replaces.map { "Replaces the password of \($0)" } ?? "A new login")
                 .font(.footnote)
                 .foregroundStyle(Palette.inkFaint)
+            if let reason = pending.reason {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkDim)
+            }
             if let shown {
                 Text(shown)
                     .font(.footnote.monospaced())
@@ -337,7 +356,8 @@ private struct PendingSaveRow: View {
                 Button("Save") {
                     Task {
                         let outcome = await model.confirmPendingSave(pending.id)
-                        failure = outcome == .ok ? nil : outcome.message
+                        // A save that did nothing never passes silently.
+                        failure = outcome == .ok ? nil : (outcome.message ?? "Not saved. Pull down to refresh, then try again.")
                     }
                 }
                 .font(.subheadline.weight(.semibold))
@@ -351,6 +371,45 @@ private struct PendingSaveRow: View {
                 }
                 .font(.subheadline)
             }
+            .buttonStyle(.borderless)
+            .disabled(model.state.busy)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+/// A login the app saved by itself at unlock, with its Undo.
+private struct AppliedSaveRow: View {
+    @EnvironmentObject private var model: AppModel
+    let applied: AppliedSaveView
+    @State private var failure: String?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(applied.plainHttp ? "http://\(applied.host)" : applied.host)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Palette.ink)
+                Text(applied.username.isEmpty ? "No username" : applied.username)
+                    .font(.subheadline)
+                    .foregroundStyle(Palette.inkDim)
+                Text(applied.replaced.map { "New password for \($0). The old one is in its history." } ?? "Added as a new login")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkFaint)
+                if let failure {
+                    Text(failure)
+                        .font(.footnote)
+                        .foregroundStyle(Palette.danger)
+                }
+            }
+            Spacer()
+            Button("Undo") {
+                Task {
+                    let outcome = await model.undoAppliedSave(applied.id)
+                    failure = outcome == .ok ? nil : (outcome.message ?? "Nothing was undone.")
+                }
+            }
+            .font(.subheadline)
             .buttonStyle(.borderless)
             .disabled(model.state.busy)
         }
