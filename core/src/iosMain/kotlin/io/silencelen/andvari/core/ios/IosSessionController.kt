@@ -134,7 +134,7 @@ internal class IosSeams(
             }
             for ((name, _) in ours) old.removeObjectForKey(name)
             // The marker is set only once the old enrollment is known to be gone; otherwise the next start tries again.
-            if (config.keychainAccessGroup != null && !sweepLegacyQuickUnlock("${config.keychainService}.quickunlock")) return
+            if (config.keychainAccessGroup != null && !sweepLegacyQuickUnlock("${config.keychainService}.quickunlock", config.keychainAccessGroup)) return
             prefs.putString(MOVED, "1")
         }
 

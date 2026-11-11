@@ -5,6 +5,7 @@ package io.silencelen.andvari.core.ios
 import io.ktor.client.request.get
 import io.silencelen.andvari.core.app.AutofillVault
 import io.silencelen.andvari.core.app.FillAvailability
+import io.silencelen.andvari.core.app.SaveQueue
 import io.silencelen.andvari.core.app.SaveQueued
 import io.silencelen.andvari.core.client.session.InMemorySecrets
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
@@ -152,6 +153,14 @@ class IosSeamsTest {
             assertEquals(2, entries.size)
             assertTrue(entries.values.none { it.decodeToString().contains("password") || it.decodeToString().contains("shop.example") }, "sealed at rest")
             assertFalse(queue.put("../escape", "x".encodeToByteArray()))
+            // What another process may leave here: an oversized entry, a name that is not an id, a stray file.
+            val fm = NSFileManager.defaultManager
+            fm.createFileAtPath("$dir/saves/q-huge.json", contents = ByteArray(SaveQueue.MAX_ENTRY_BYTES + 1) { 97 }.toNSData(), attributes = null)
+            fm.createFileAtPath("$dir/saves/q-bad id!.json", contents = "x".encodeToByteArray().toNSData(), attributes = null)
+            fm.createFileAtPath("$dir/saves/stray.bin", contents = "x".encodeToByteArray().toNSData(), attributes = null)
+            assertEquals(entries.keys, queue.entries().keys, "only the listed, bounded entries are read")
+            assertFalse(fm.fileExistsAtPath("$dir/saves/q-huge.json") || fm.fileExistsAtPath("$dir/saves/stray.bin"), "the rest is removed")
+            assertEquals("""{"v":1,"origin":"https://home.example","userId":"u1","identityPub":"${Bytes.toB64(key.publicKey)}"}""", queue.publication()?.decodeToString(), "the key file is not an entry")
             queue.remove(entries.keys.first())
             assertEquals(1, queue.entries().size)
             queue.clear()
