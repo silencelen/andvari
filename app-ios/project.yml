@@ -106,6 +106,8 @@ targets:
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
               ProvidesOneTimeCodes: true
+              # iOS 26.2: the system offers to save new logins to andvari (queued for the app to confirm).
+              SupportsSavePasswordCredentials: true
     entitlements:
       path: AndvariAutoFill/AndvariAutoFill.entitlements
       properties:
