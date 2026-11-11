@@ -1838,7 +1838,9 @@ async function appUnlockOnOpen(): Promise<void> {
 // Safari: the worker keeps the app's list only while this popup is open; the port's close tells it to drop it.
 if (BUILD_TARGET === "safari") {
   try {
-    chrome.runtime.connect({ name: "andvari-popup" });
+    // Kept on the window for the popup's whole life: an unreferenced port can be collected, and its disconnect
+    // tells the worker the popup closed.
+    (window as unknown as { andvariPopupPort?: chrome.runtime.Port }).andvariPopupPort = chrome.runtime.connect({ name: "andvari-popup" });
   } catch {
     /* no port: the worker's own timer still drops the list */
   }
