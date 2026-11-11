@@ -15,6 +15,7 @@ import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./
 import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { BUILD_TARGET } from "./buildtarget";
+import { askAppServerDetailed, nativeSender } from "./appserver";
 import { displaySite, safeSiteUrl } from "./siteurl";
 import { reuseWarning } from "./reusealert";
 
@@ -1575,8 +1576,10 @@ async function renderServerOrigin(): Promise<void> {
     node.title = why;
     node.setAttribute("role", "note");
     node.setAttribute("aria-label", why);
+    if (BUILD_TARGET === "safari") void renderServerDetails(node, info === undefined);
     return;
   }
+  document.getElementById("server-details")?.remove();
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
   // a11y-webext--5: the element is a bare <span> (role=generic), and aria-label is PROHIBITED on a
@@ -1585,6 +1588,47 @@ async function renderServerOrigin(): Promise<void> {
   // role that says what this is (an aside about the current state), so the name lands.
   node.setAttribute("role", "note");
   node.setAttribute("aria-label", `Connected server: ${origin}`);
+}
+
+/**
+ * Safari on iOS: nobody can attach a debugger there, so when no server is in effect the header carries a Details
+ * disclosure that says why. Nothing in it is secret: where the worker's start is, the kind of block, whether the store
+ * opened, how the ask of the app ended, and what the app answers this popup directly. Every string is textContent.
+ */
+async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean): Promise<void> {
+  document.getElementById("server-details")?.remove();
+  const box = document.createElement("details");
+  box.id = "server-details";
+  box.style.cssText = "font-size:11px;margin-top:4px;word-break:break-word";
+  const summary = document.createElement("summary");
+  summary.textContent = "Details";
+  const body = document.createElement("div");
+  body.style.whiteSpace = "pre-wrap";
+  box.append(summary, body);
+  after.insertAdjacentElement("afterend", box);
+  const lines: string[] = [`Worker answered serverInfo: ${serverInfoSilent ? "no" : "yes"}`];
+  const show = (): void => {
+    body.textContent = lines.join("\n");
+  };
+  show();
+  const d = await ask({ type: "serverDiag" });
+  if (!d) lines.push("Worker diagnostics: no answer");
+  else {
+    lines.push(
+      `Worker start: ${d.stage}${d.migration ? ` (migration: ${d.migration})` : ""}`,
+      `Block: ${d.block ?? "none"}`,
+      `Store opened: ${d.store ? "yes" : "no"}`,
+      `Worker's server: ${d.url}`,
+      `App ask (worker): ${d.native}${d.nativeError ? ` — ${d.nativeError}` : ""}`,
+      `App answered: ${d.app ?? "–"}`,
+      `Adoption: ${d.adopt ?? "–"}`,
+    );
+  }
+  show();
+  const own = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], "com.silencelen.andvari"));
+  const said = own.answer.kind === "set" ? own.answer.url : own.answer.kind;
+  lines.push(`App ask (popup): ${own.call}${own.error ? ` — ${own.error}` : ""}; answer: ${said}`);
+  show();
 }
 
 /** Wave-3 route (design §5.1): Firefox MV3 grants NO host permissions at install (optional-by-

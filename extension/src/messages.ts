@@ -341,6 +341,9 @@ export type Req =
    *  app ran the Trust Gate, so the worker commits it as the options page's Connect does. `app` says what the app
    *  answered: its server (now in effect), none yet, or nothing (another browser, or no answer). */
   | { type: "appServer" }
+  /** Popup ONLY, Safari build: why no server is in effect, for the popup's Details. Answered at once, before the
+   *  worker's start settles, and carries no secret: stages, kinds and an origin. */
+  | { type: "serverDiag" }
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
@@ -648,6 +651,8 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                 ? { ok: boolean }
                                               : T extends "appServer"
                                                 ? { app: "set" | "none" | "unavailable" }
+                                              : T extends "serverDiag"
+                                                ? ServerDiag | null
                                                 : /** C1 §C2 [S7]: the branch matches ONLY these two booleans — no `string` type is
                                                    *  admitted here, so an "origin"/"name"/"subtitle" field can never be added to the
                                                    *  chip's answer without editing this contract line first. */
@@ -744,3 +749,19 @@ export function chooseCardTarget(
 export function send<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promise<Res<T>> {
   return chrome.runtime.sendMessage(req) as Promise<Res<T>>;
 }
+
+/** The Safari popup's Details (no secret): where worker start is, the block, the store, and the last app-server ask. */
+export type ServerDiag = {
+  /** The step worker start is at: "storage-access", "migration", "server-state", "legacy-namespace" or "ready". */
+  stage: string;
+  /** The migration's outcome kind, once known. */
+  migration: string | null;
+  block: "confirm" | "unsettled" | null;
+  store: boolean;
+  url: string;
+  /** The last ask of the app: how the native call ended, its error text, what it said, and what adopting it came to. */
+  native: "not_asked" | "waiting_for_start" | "asking" | "resolved" | "rejected" | "timeout";
+  nativeError: string | null;
+  app: "set" | "none" | "unavailable" | null;
+  adopt: string | null;
+};
