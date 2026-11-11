@@ -110,6 +110,7 @@ open class SessionControllerTest {
         val seen = mutableListOf<AppState>()
         val shared = mutableListOf<String?>()
         val snapshots = InMemoryFillSnapshots()
+        val queue = InMemorySaveQueue()
 
         /** Route answers by path suffix; a test swaps them. The account keys are offline by default (cached keys open). */
         val routes = mutableMapOf<String, suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData>(
@@ -134,7 +135,10 @@ open class SessionControllerTest {
             override val deviceName = "test device"
         }
 
-        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots)
+        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue)
+
+        /** What an extension does with a captured login: seal it to the published key and queue it. */
+        fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, id, site, username, password, clocks.wall, "safari")
 
         /** The AutoFill extension's view of the same shared state: its own vault object, as in another process. */
         fun autofill() = AutofillVault(store, snapshots, quickKeys, clocks, http)
@@ -397,6 +401,146 @@ open class SessionControllerTest {
         assertNull(snapshots.bytes)
         assertTrue(controller.credentialIdentities().isEmpty())
         assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability())
+    }
+
+    // ---- the extensions' save queue ----
+
+    @Test
+    fun aCapturedLoginIsSealedQueuedShownAndSavedOnlyOnConfirm() = test {
+        assertEquals(SaveQueued.NO_ACCOUNT, capture("a", "https://shop.example/login", "me", "s3cret-pw"), "nobody is signed in: no key to seal to")
+        unlocked()
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        controller.onBackground() // the extension runs while the app is locked
+        assertEquals(SaveQueued.QUEUED, capture("a", "https://shop.example/login", "me", "s3cret-pw"))
+        val kept = queue.map.getValue("a").decodeToString()
+        for (secret in listOf("s3cret-pw", "shop.example", "\"me\"")) assertFalse(kept.contains(secret), "at rest: $secret")
+        assertTrue(controller.state.pendingSaves.isEmpty(), "a locked app shows nothing")
+
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        val pending = controller.state.pendingSaves.single()
+        assertEquals(PendingSaveView("a", "shop.example", "me", null), pending)
+        assertEquals("s3cret-pw", controller.pendingSavePassword("a"))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name }, "nothing is written before the person confirms")
+
+        // This rig's vault cannot take a new login offline (as [aSaveIsValidatedAndAFailedOneIsSaidNotThrown]): the
+        // failure is a sentence, and the capture stays queued for the next try.
+        assertIs<ActionResult.Failed>(controller.confirmPendingSave("a"))
+        assertEquals(listOf("a"), controller.state.pendingSaves.map { it.id })
+        assertEquals(setOf("a"), queue.map.keys)
+        assertFalse(controller.state.busy)
+    }
+
+    @Test
+    fun aCaptureForAKnownLoginOffersItsNewPasswordAndAnIdenticalOneIsDropped() = test {
+        seedSession()
+        // A cache that survives the process, as the app's is: an offline save is honestly queued.
+        val seeded = namespaces.caches.getValue("$homeKey/${reg.userId}")
+        namespaces.caches["$homeKey/${reg.userId}"] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
+            override val durable = true
+        }
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        controller.lock()
+        capture("same", "login.example.com", "fam", "hunter2") // already in the vault
+        capture("new", "https://login.example.com/reset", "fam", "hunter3")
+        controller.unlock(PASSWORD)
+        assertEquals(listOf(PendingSaveView("new", "login.example.com", "fam", "Example")), controller.state.pendingSaves)
+        assertEquals(setOf("new"), queue.map.keys)
+        assertEquals(ActionResult.Ok, controller.confirmPendingSave("new"))
+        assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals(1, controller.state.items.size, "updated, not duplicated")
+        assertTrue(controller.state.pendingSaves.isEmpty())
+        assertTrue(queue.map.isEmpty())
+        assertNull(controller.pendingSavePassword("new"))
+    }
+
+    @Test
+    fun aDiscardedSaveWritesNothing() = test {
+        unlocked()
+        controller.lock()
+        capture("a", "shop.example", "me", "pw")
+        controller.unlock(PASSWORD)
+        controller.discardPendingSave("a")
+        assertTrue(controller.state.pendingSaves.isEmpty())
+        assertTrue(queue.map.isEmpty())
+        assertEquals(1, controller.state.items.size)
+    }
+
+    @Test
+    fun theQueueIsBoundedAndRefusesWhatItCannotKeep() = test {
+        unlocked()
+        assertEquals(SaveQueued.REFUSED, capture("a", "shop.example", "me", ""), "no password, nothing to save")
+        assertEquals(SaveQueued.REFUSED, capture("a", "shop.example", "me", "x".repeat(SaveQueue.MAX_FIELD_CHARS + 1)))
+        assertEquals(SaveQueued.REFUSED, capture("a", "shop.example", "u".repeat(SaveQueue.MAX_FIELD_CHARS + 1), "pw"))
+        assertEquals(SaveQueued.REFUSED, capture("a", "s".repeat(SaveQueue.MAX_SITE_CHARS + 1), "me", "pw"))
+        assertEquals(SaveQueued.REFUSED, capture("../escape", "shop.example", "me", "pw"), "an id is a file name")
+        repeat(SaveQueue.MAX_ENTRIES) { assertEquals(SaveQueued.QUEUED, capture("e$it", "shop$it.example", "me", "pw")) }
+        assertEquals(SaveQueued.REFUSED, capture("one-more", "shop.example", "me", "pw"), "full")
+        assertEquals(SaveQueued.QUEUED, capture("e0", "shop0.example", "me", "pw2"), "the same form's later capture replaces its entry")
+        assertTrue(queue.map.values.all { it.size <= SaveQueue.MAX_ENTRY_BYTES })
+    }
+
+    @Test
+    fun aTamperedForeignOrOversizedEntryIsRemovedNotShown() = test {
+        unlocked()
+        controller.lock()
+        capture("good", "shop.example", "me", "pw")
+        val good = queue.map.getValue("good")
+        // A flipped byte in the seal.
+        val entry = json.decodeFromString(QueuedSave.serializer(), good.decodeToString())
+        val sealed = io.silencelen.andvari.core.crypto.Bytes.fromB64(entry.sealed).also { it[40] = (it[40].toInt() xor 1).toByte() }
+        queue.map["tampered"] = json.encodeToString(QueuedSave.serializer(), entry.copy(sealed = io.silencelen.andvari.core.crypto.Bytes.toB64(sealed))).encodeToByteArray()
+        // Another account's entry, and one relabelled as this account's (its inside still names the other).
+        val other = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        val inside = json.encodeToString(CapturedLogin.serializer(), CapturedLogin(origin = HOME, userId = "someone-else", site = "shop.example", username = "me", password = "pw", capturedAtMs = 1, source = "safari"))
+        val forOther = io.silencelen.andvari.core.crypto.Bytes.toB64(crypto.sealTo(other.publicKey, inside.encodeToByteArray()))
+        queue.map["foreign"] = json.encodeToString(QueuedSave.serializer(), QueuedSave(origin = HOME, userId = "someone-else", sealed = forOther)).encodeToByteArray()
+        val relabelled = io.silencelen.andvari.core.crypto.Bytes.toB64(crypto.sealTo(enrolled.account.identityPub, inside.encodeToByteArray()))
+        queue.map["relabelled"] = json.encodeToString(QueuedSave.serializer(), QueuedSave(origin = HOME, userId = reg.userId, sealed = relabelled)).encodeToByteArray()
+        queue.map["elsewhere"] = json.encodeToString(QueuedSave.serializer(), entry.copy(origin = "https://other.example")).encodeToByteArray()
+        queue.map["garbage"] = "not json".encodeToByteArray()
+        queue.map["huge"] = ByteArray(SaveQueue.MAX_ENTRY_BYTES + 1) { 'a'.code.toByte() }
+
+        controller.unlock(PASSWORD)
+        assertEquals(listOf("good"), controller.state.pendingSaves.map { it.id })
+        assertEquals(setOf("good"), queue.map.keys, "everything else is removed")
+    }
+
+    @Test
+    fun signOutAServerSwitchAndAForbiddingPolicyEmptyTheQueue() = test {
+        unlocked()
+        assertNotNull(queue.key, "the unlocked app publishes the key")
+        assertEquals(SaveQueued.QUEUED, capture("a", "shop.example", "me", "pw"))
+        controller.signOut()
+        assertNull(queue.key)
+        assertTrue(queue.map.isEmpty())
+        assertEquals(SaveQueued.NO_ACCOUNT, capture("b", "shop.example", "me", "pw"))
+    }
+
+    @Test
+    fun aForbiddingPolicyPublishesNoKeyAndKeepsNoQueue() = test {
+        seedSession()
+        queue.map["stale"] = "x".encodeToByteArray()
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(offlineCacheAllowed = false)), HttpStatusCode.OK, headers) }
+        controller.startAndLand()
+        controller.unlock(PASSWORD)
+        assertNull(queue.key)
+        assertTrue(queue.map.isEmpty())
+        assertTrue(controller.state.pendingSaves.isEmpty())
+    }
+
+    @Test
+    fun aServerSwitchEmptiesTheQueue() = test {
+        unlocked()
+        capture("a", "shop.example", "me", "pw")
+        controller.lock()
+        assertNotNull(queue.key, "a lock keeps the key: the extension captures while the app is locked")
+        controller.changeServer()
+        controller.chooseServer("https://other.example")
+        assertEquals(ActionResult.Ok, controller.confirmTrustGate())
+        assertNull(queue.key)
+        assertTrue(queue.map.isEmpty())
     }
 
     @Test

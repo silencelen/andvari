@@ -53,6 +53,8 @@ data class AppState(
     val totpRequired: Boolean,
     /** UNLOCK (and WELCOME after a sign-out): the account the stored session belongs to. */
     val accountEmail: String?,
+    /** VAULT: logins an extension captured, waiting for the person to save or discard each ([PendingSaveView]). */
+    val pendingSaves: List<PendingSaveView>,
     /** The quick-unlock gates: the Face ID button shows when [QuickUnlockView.usable]. */
     val quickUnlock: QuickUnlockView,
     /** Why the vault locked or the session ended, for UNLOCK and WELCOME; null when nothing needs saying. */
@@ -84,7 +86,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, pendingSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -262,4 +264,14 @@ data class CredentialIdentity(
     val host: String,
     val username: String,
     val hasTotp: Boolean,
+)
+
+/** A login an extension captured, shown before anything is written. The password is not here: it is read on request. */
+data class PendingSaveView(
+    val id: String,
+    /** The host it was captured on. */
+    val host: String,
+    val username: String,
+    /** The name of the login whose password saving would replace; null when saving adds a new login. */
+    val replaces: String?,
 )
