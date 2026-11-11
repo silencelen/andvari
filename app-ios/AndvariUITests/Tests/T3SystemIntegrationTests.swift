@@ -49,14 +49,15 @@ final class T3SystemIntegrationTests: UITestCase {
             Thread.sleep(forTimeInterval: 3)
             dumpEverything("username-focused")
         }
-        step("suggestion-tapped") {
-            guard let suggestion = offered(Fixture.siteUser) else {
-                XCTFail("the keyboard offered no andvari login for \(Fixture.siteHost)")
-                return
-            }
-            suggestion.tap()
+        step("offer-names-site-login-and-andvari") {
+            require(fillOfferButton, "Safari's offer to fill from andvari")
+            let text = containing("saved in", in: safari).label
+            XCTAssertTrue(text.contains(Fixture.siteHost) && text.contains(Fixture.siteUser) && text.contains("andvari"), "the offer reads: \(text)")
+        }
+        step("fill-tapped") {
+            fillOfferButton.tap()
             Thread.sleep(forTimeInterval: 1.5)
-            dumpEverything("suggestion-tapped")
+            dumpEverything("fill-tapped")
         }
         step("filled") {
             XCTAssertTrue(matchFaceUntil(25) { (username.value as? String) == Fixture.siteUser }, "the username was not filled, it holds \(String(describing: username.value))")
@@ -80,9 +81,17 @@ final class T3SystemIntegrationTests: UITestCase {
             username.tap()
             Thread.sleep(forTimeInterval: 3)
         }
+        step("offer-closed") {
+            closeFillOffer()
+            if !safari.keyboards.firstMatch.exists {
+                username.tap()
+                Thread.sleep(forTimeInterval: 2)
+            }
+            closeFillOffer()
+            dumpEverything("keyboard-after-offer-closed")
+        }
         step("passwords-key") {
             guard let key = offered("Passwords") ?? offered("AutoFill") ?? offered("Password") else {
-                dumpEverything("no-passwords-key")
                 XCTFail("the keyboard has no Passwords key to open the list with")
                 return
             }
@@ -90,7 +99,7 @@ final class T3SystemIntegrationTests: UITestCase {
             Thread.sleep(forTimeInterval: 2)
             dumpEverything("after-passwords-key")
             // With more than one provider iOS asks which one.
-            if let chooser = offered("andvari") {
+            if !fillOfferButton.exists, let chooser = offered("andvari") {
                 chooser.tap()
                 Thread.sleep(forTimeInterval: 1.5)
                 dumpEverything("after-choosing-andvari")
@@ -158,8 +167,10 @@ final class T3SystemIntegrationTests: UITestCase {
             dumpEverything("http-username-focused")
         }
         step("only-the-http-login") {
-            XCTAssertNil(offered(Fixture.siteUser), "the https site's login was offered on a plain-http page")
-            XCTAssertNotNil(offered("bob"), "the login saved for the http address was not offered")
+            let text = containing("saved in", in: safari)
+            XCTAssertTrue(waitUntil(5) { text.exists }, "nothing was offered on the plain-http page")
+            XCTAssertTrue(text.label.contains("“bob”"), "the login saved for the http address was not the one offered: \(text.label)")
+            XCTAssertFalse(text.label.contains("“\(Fixture.siteUser)”"), "the https site's login was offered on a plain-http page")
         }
     }
 
@@ -264,6 +275,114 @@ final class T3SystemIntegrationTests: UITestCase {
             XCTAssertTrue(isOn(allow), "the extension did not turn on")
             dumpTree(settings, as: "settings-andvari-extension-on")
             SystemState.extensionEnabled = true
+        }
+    }
+
+    /// The extension's popup in Safari: Face ID as it opens, this site's logins first, and a tap fills the page.
+    func test08_SafariExtensionPopupFill() {
+        step("provider-on") {
+            requireAutoFillProvider()
+        }
+        step("extension-on") {
+            XCTAssertTrue(SystemState.extensionEnabled, "the extension was not turned on in Settings (test07)")
+        }
+        step("page") {
+            openInSafari(Fixture.siteOrigin + "/login.html", heading: "Sign in")
+            closeFillOffer()
+        }
+        step("page-menu") {
+            let menu = safari.buttons["PageFormatMenuButton"]
+            require(menu, "Safari's page menu button")
+            menu.tap()
+            Thread.sleep(forTimeInterval: 2)
+            dumpEverything("page-menu")
+        }
+        step("andvari-in-menu") {
+            var entry = safari.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+            if !entry.exists {
+                // The extensions may sit one level down.
+                for title in ["Manage Extensions", "Extensions"] where labelled(title, in: safari).exists {
+                    labelled(title, in: safari).tap()
+                    Thread.sleep(forTimeInterval: 1.5)
+                    dumpEverything("extensions-menu")
+                    break
+                }
+                entry = safari.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+            }
+            require(entry, "andvari in Safari's page menu", timeout: 5)
+            entry.tap()
+            Thread.sleep(forTimeInterval: 3)
+            dumpEverything("popup-opening")
+            // The first use asks whether the extension may see this site.
+            for title in ["Always Allow", "Always Allow on Every Website", "Allow for One Day"] where labelled(title, in: safari).exists {
+                labelled(title, in: safari).tap()
+                Thread.sleep(forTimeInterval: 1.5)
+                break
+            }
+        }
+        step("popup-lists-this-site") {
+            let site = containing("This site", in: safari)
+            let listed = matchFaceUntil(30) { site.exists }
+            dumpEverything("popup")
+            XCTAssertTrue(listed, "the popup did not list this site's logins after Face ID")
+        }
+        step("fill-from-popup") {
+            let row = safari.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", Fixture.siteItem)).firstMatch
+            require(row, "the seeded login in the popup", timeout: 5)
+            row.tap()
+            Thread.sleep(forTimeInterval: 2)
+            dumpEverything("popup-row-tapped")
+            // The detail has a Fill button; a second Face ID may be asked when the handler's process was ended.
+            let fill = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'Fill'")).firstMatch
+            if fill.exists {
+                fill.tap()
+            }
+            let username = webField("Username")
+            XCTAssertTrue(matchFaceUntil(20) { (username.value as? String) == Fixture.siteUser }, "the popup did not fill the page, the field holds \(String(describing: username.value))")
+        }
+    }
+
+    /// AutoFill in an app that has no website: andvari's own unlock field. The key above the keyboard opens the
+    /// provider's list with every login, and choosing one puts its password in the field.
+    func test09_AppFieldCredentialList() {
+        step("provider-on") {
+            requireAutoFillProvider()
+        }
+        step("unlock-screen") {
+            app.terminate()
+            launchApp()
+            expectScreen(.unlock)
+            Thread.sleep(forTimeInterval: 2)
+            dismissBiometricPrompt()
+        }
+        step("field-focused") {
+            masterPasswordField.tap()
+            Thread.sleep(forTimeInterval: 3)
+            dumpTree(app, as: "app-field-focused")
+            dumpTree(springboard, as: "app-field-focused-springboard")
+        }
+        step("passwords-key") {
+            let key = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] 'Passwords' OR label CONTAINS[c] 'AutoFill'")).firstMatch
+            require(key, "the Passwords key above the keyboard", timeout: 5)
+            key.tap()
+            Thread.sleep(forTimeInterval: 2)
+            dumpTree(app, as: "app-after-passwords-key")
+            dumpTree(springboard, as: "app-after-passwords-key-springboard")
+            let chooser = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+            if chooser.exists && chooser.isHittable {
+                chooser.tap()
+            }
+        }
+        step("list-after-face-id") {
+            let row = { [self] in [app, springboard].map { self.labelled("No Address", in: $0) }.first { $0.exists } }
+            let shown = matchFaceUntil(25) { row() != nil }
+            dumpTree(app, as: "app-list")
+            dumpTree(springboard, as: "app-list-springboard")
+            XCTAssertTrue(shown, "andvari's list of logins did not appear over the app")
+            row()?.tap()
+        }
+        step("field-filled") {
+            XCTAssertTrue(waitUntil(10) { !((self.masterPasswordField.value as? String) ?? "").isEmpty && (self.masterPasswordField.value as? String) != "Master password" }, "the field was not filled")
         }
     }
 }
