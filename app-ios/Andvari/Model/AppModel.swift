@@ -78,6 +78,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var gateForInvite = false
 
     private let controller: IosSessionController
+    /// What the system's suggestions were last built from; nil once cleared. Starts non-nil so a signed-out launch clears.
+    private var suggestedKey: String? = ""
     private var endObservation: (() -> Void)?
     private var wasInBackground = false
 
@@ -99,6 +101,25 @@ final class AppModel: ObservableObject {
             gateForInvite = false
         }
         state = next
+        syncCredentialIdentities(next)
+    }
+
+    /// The system's AutoFill suggestions follow the unlocked vault and go when the account does. They hold hosts
+    /// and usernames, never a password; the core returns none when the server forbids an offline cache.
+    private func syncCredentialIdentities(_ next: AppState) {
+        switch Screen(next.screen) {
+        case .vault where next.query.isEmpty:
+            let key = next.items.map { "\($0.itemId)|\($0.username ?? "")|\($0.host ?? "")|\($0.hasTotp)" }.joined(separator: "\n")
+            guard key != suggestedKey else { return }
+            suggestedKey = key
+            CredentialIdentities.replace(controller.credentialIdentities())
+        case .welcome, .chooseServer:
+            guard suggestedKey != nil else { return }
+            suggestedKey = nil
+            CredentialIdentities.clear()
+        default:
+            break
+        }
     }
 
     var screen: Screen { Screen(state.screen) }

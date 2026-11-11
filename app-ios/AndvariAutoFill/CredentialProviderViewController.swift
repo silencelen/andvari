@@ -2,32 +2,239 @@ import AndvariCore
 import AuthenticationServices
 import UIKit
 
-/** Placeholder until the vault snapshot exists: proves the extension loads and can use the core. */
-final class CredentialProviderViewController: ASCredentialProviderViewController {
+/// System AutoFill (design 2026-11-09, "AutoFill"). Fill only: this process never contacts the server and never
+/// runs the password KDF. It reads the app's encrypted snapshot from the App Group, unlocks it with Face ID through
+/// the same Secure Enclave key and gates as the app's quick unlock, hands iOS the one credential, and zeroes the keys.
+final class CredentialProviderViewController: ASCredentialProviderViewController, UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate {
+    private enum Mode {
+        case list
+        case oneTimeCodeList
+        case single(recordIdentifier: String, oneTimeCode: Bool)
+        case configuration
+    }
+
+    private let vault = IosAutofill()
+    private var mode: Mode = .list
+    private var hosts: [String] = []
+    private var logins: [FillLogin] = []
+    private var shown: [FillLogin] = []
+    private var started = false
+
+    private let message = UILabel()
+    private let table = UITableView(frame: .zero, style: .insetGrouped)
+    private let search = UISearchBar()
+
+    // MARK: - Requests from iOS
+
+    override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
+        mode = .list
+        hosts = serviceIdentifiers.map(\.identifier)
+    }
+
+    @available(iOS 18.0, *)
+    override func prepareOneTimeCodeCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
+        mode = .oneTimeCodeList
+        hosts = serviceIdentifiers.map(\.identifier)
+    }
+
+    /// Every fill needs Face ID, so there is never a credential without interaction.
+    override func provideCredentialWithoutUserInteraction(for credentialRequest: any ASCredentialRequest) {
+        fail(.userInteractionRequired)
+    }
+
+    override func prepareInterfaceToProvideCredential(for credentialRequest: any ASCredentialRequest) {
+        guard let record = credentialRequest.credentialIdentity.recordIdentifier else {
+            mode = .list
+            return
+        }
+        var oneTimeCode = false
+        if #available(iOS 18.0, *) {
+            oneTimeCode = credentialRequest.type == .oneTimeCode
+        }
+        mode = .single(recordIdentifier: record, oneTimeCode: oneTimeCode)
+    }
+
+    override func prepareInterfaceForExtensionConfiguration() {
+        mode = .configuration
+    }
+
+    // MARK: - View
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .systemGroupedBackground
 
-        let label = UILabel()
-        label.text = "andvari \(AndvariBridge.shared.coreVersion())\nAutoFill is not ready yet."
-        label.numberOfLines = 0
-        label.textAlignment = .center
+        let bar = UINavigationBar()
+        let item = UINavigationItem(title: "andvari")
+        item.leftBarButtonItem = UIBarButtonItem(systemItem: .cancel, primaryAction: UIAction { [weak self] _ in self?.fail(.userCanceled) })
+        bar.items = [item]
 
-        let close = UIButton(type: .system, primaryAction: UIAction(title: "Close") { [weak self] _ in self?.cancel() })
+        message.numberOfLines = 0
+        message.textAlignment = .center
+        message.textColor = .secondaryLabel
+        message.font = .preferredFont(forTextStyle: .body)
+        message.adjustsFontForContentSizeCategory = true
 
-        let stack = UIStackView(arrangedSubviews: [label, close])
+        search.placeholder = "Search logins"
+        search.delegate = self
+        search.autocapitalizationType = .none
+        search.isHidden = true
+
+        table.dataSource = self
+        table.delegate = self
+        table.isHidden = true
+
+        let stack = UIStackView(arrangedSubviews: [bar, search, message, table])
         stack.axis = .vertical
-        stack.spacing = 16
+        stack.setCustomSpacing(24, after: search)
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: view.layoutMarginsGuide.leadingAnchor),
+            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
 
-    private func cancel() {
-        extensionContext.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.userCanceled.rawValue))
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !started else { return }
+        started = true
+        start()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        vault.close()
+    }
+
+    private func start() {
+        if case .configuration = mode {
+            show("andvari is ready to fill passwords. Turn on Face ID in andvari's Settings, and unlock the app once after signing in.")
+            return
+        }
+        if let blocked = vault.availability() as? FillAvailability.OpenApp {
+            show(blocked.message)
+            return
+        }
+        Task { @MainActor in
+            do {
+                let result = try await vault.unlock(reason: "Unlock andvari to fill")
+                if let blocked = result as? FillUnlock.OpenApp {
+                    show(blocked.message)
+                } else if result is FillUnlock.Unlocked {
+                    unlocked()
+                } else {
+                    fail(.userCanceled)
+                }
+            } catch {
+                fail(.userCanceled)
+            }
+        }
+    }
+
+    private func unlocked() {
+        switch mode {
+        case let .single(record, oneTimeCode):
+            complete(itemId: record, oneTimeCode: oneTimeCode)
+        case .oneTimeCodeList:
+            logins = vault.logins(hosts: hosts).filter(\.hasTotp)
+            showList()
+        case .list, .configuration:
+            logins = vault.logins(hosts: hosts)
+            showList()
+        }
+    }
+
+    private func showList() {
+        shown = logins
+        if logins.isEmpty {
+            show("No logins to fill here yet. Add one in andvari.")
+            return
+        }
+        message.isHidden = true
+        search.isHidden = false
+        table.isHidden = false
+        table.reloadData()
+    }
+
+    private func show(_ text: String) {
+        table.isHidden = true
+        search.isHidden = true
+        message.isHidden = false
+        message.text = text
+    }
+
+    // MARK: - Completing
+
+    private func complete(itemId: String, oneTimeCode: Bool) {
+        defer { vault.close() }
+        if oneTimeCode {
+            guard #available(iOS 18.0, *), let code = vault.oneTimeCode(itemId: itemId) else {
+                fail(.credentialIdentityNotFound)
+                return
+            }
+            extensionContext.completeOneTimeCodeRequest(using: ASOneTimeCodeCredential(code: code))
+            return
+        }
+        guard let credential = vault.credential(itemId: itemId) else {
+            fail(.credentialIdentityNotFound)
+            return
+        }
+        extensionContext.completeRequest(withSelectedCredential: ASPasswordCredential(user: credential.username, password: credential.password))
+    }
+
+    private func fail(_ code: ASExtensionError.Code) {
+        vault.close()
+        extensionContext.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue))
+    }
+
+    // MARK: - Table
+
+    private var matching: [FillLogin] { shown.filter(\.matches) }
+    private var others: [FillLogin] { shown.filter { !$0.matches } }
+
+    private func rows(_ section: Int) -> [FillLogin] {
+        matching.isEmpty ? others : (section == 0 ? matching : others)
+    }
+
+    func numberOfSections(in tableView: UITableView) -> Int {
+        matching.isEmpty || others.isEmpty ? 1 : 2
+    }
+
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        rows(section).count
+    }
+
+    func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        if matching.isEmpty { return "All logins" }
+        return section == 0 ? "For this site" : "Other logins"
+    }
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "login") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "login")
+        let login = rows(indexPath.section)[indexPath.row]
+        var content = cell.defaultContentConfiguration()
+        content.text = login.name
+        content.secondaryText = [login.username, login.host ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+        content.secondaryTextProperties.color = .secondaryLabel
+        cell.contentConfiguration = content
+        return cell
+    }
+
+    func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        let login = rows(indexPath.section)[indexPath.row]
+        var oneTimeCode = false
+        if case .oneTimeCodeList = mode { oneTimeCode = true }
+        complete(itemId: login.itemId, oneTimeCode: oneTimeCode)
+    }
+
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        shown = query.isEmpty ? logins : logins.filter {
+            $0.name.lowercased().contains(query) || $0.username.lowercased().contains(query) || ($0.host ?? "").lowercased().contains(query)
+        }
+        table.reloadData()
     }
 }
