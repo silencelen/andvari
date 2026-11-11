@@ -1579,7 +1579,9 @@ async function renderServerOrigin(): Promise<void> {
     if (BUILD_TARGET === "safari") void renderServerDetails(node, info === undefined);
     return;
   }
-  document.getElementById("server-details")?.remove();
+  // Safari (while the iOS build is being proven on devices): the Details stay reachable, for the Face ID probe.
+  if (BUILD_TARGET === "safari") void renderServerDetails(node, false);
+  else document.getElementById("server-details")?.remove();
   node.textContent = middleTruncateOrigin(origin);
   node.title = origin;
   // a11y-webext--5: the element is a bare <span> (role=generic), and aria-label is PROHIBITED on a
@@ -1631,6 +1633,42 @@ async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean
   const said = own.answer.kind === "set" ? own.answer.url : own.answer.kind;
   lines.push(`App ask (popup): ${own.call}${own.error ? ` — ${own.error}` : ""}; answer: ${said}`);
   show();
+  // One tap: can the extension's native handler raise Face ID, read the snapshot and see the quick-unlock key?
+  const probe = document.createElement("button");
+  probe.type = "button";
+  probe.textContent = "Probe Face ID";
+  probe.style.cssText = "margin-top:6px;font-size:11px";
+  probe.addEventListener("click", () => {
+    probe.disabled = true;
+    lines.push("Probe: asking the handler…");
+    show();
+    const send = nativeSender(globalThis as Parameters<typeof nativeSender>[0], "com.silencelen.andvari") as unknown as (m: { type: string }) => Promise<unknown>;
+    const silence = new Promise<string>((r) => setTimeout(() => r("timeout"), 60_000));
+    void Promise.race([send({ type: "bioProbe" }), silence])
+      .then((reply) => probeLines(reply), (e: unknown) => [`Probe: rejected — ${String(e).slice(0, 200)}`])
+      .then((out) => {
+        lines.pop();
+        lines.push(...out);
+        show();
+        probe.disabled = false;
+      });
+  });
+  box.append(probe);
+}
+
+/** The handler's bioProbe reply as lines. Presence and status codes only; it carries no vault data. */
+function probeLines(reply: unknown): string[] {
+  if (reply === "timeout") return ["Probe: no answer in 60 s"];
+  if (typeof reply !== "object" || reply === null) return [`Probe: unusable reply (${typeof reply})`];
+  const r = reply as Record<string, unknown>;
+  const v = (k: string): string => (r[k] === undefined || r[k] === null ? "–" : String(r[k]).slice(0, 120));
+  return [
+    `Probe biometrics: can=${v("canEvaluate")} (error ${v("canError")}), type=${v("biometryType")}`,
+    `Probe Face ID prompt: ${v("evaluate")} (error ${v("evaluateError")})`,
+    `Probe snapshot: container=${v("container")}, file=${v("snapshot")}, bytes=${v("snapshotBytes")}`,
+    `Probe quick-unlock blob: status ${v("blobStatus")}; key: status ${v("keyStatus")}`,
+    `Probe shared state: server=${v("server")}, session=${v("sessionState")}`,
+  ];
 }
 
 /**
