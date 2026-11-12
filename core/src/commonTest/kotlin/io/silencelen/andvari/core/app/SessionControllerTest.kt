@@ -685,6 +685,30 @@ open class SessionControllerTest {
         assertEquals("sig", saved.dupeAck)
     }
 
+    // ---- lifecycle notices ----
+
+    @Test
+    fun aChangeTheServerRefusedIsToldOnTheVaultScreenUntilDismissed() = test {
+        unlockedWithAPersonalVault()
+        // Saved offline; the server later refuses it for good.
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Queued", "me", "pw", listOf("https://queued.example"), "", "", false)))
+        assertTrue(controller.state.vaultNotices.isEmpty())
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            val results = body.mutations.map { io.silencelen.andvari.core.model.MutationResult(it.mutationId, "rejected", reason = "body_too_large") }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(5, results)), HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = { respond(EMPTY_SYNC, HttpStatusCode.OK, headers) }
+        routes["/account/state"] = { respond("""{"sealedState":null,"seq":0}""", HttpStatusCode.OK, headers) }
+        controller.refresh()
+        val notice = controller.state.vaultNotices.singleOrNull()
+        assertNotNull(notice, "the refusal is said on the vault screen")
+        assertTrue(notice.warning)
+        assertEquals(io.silencelen.andvari.core.client.HouseholdCopy.writeRejectedNotice(1, notice.text.substringAfter("“").substringBefore("”"), "body_too_large"), notice.text, "Android's sentence, word for word")
+        controller.dismissVaultNotice(notice.id)
+        assertTrue(controller.state.vaultNotices.isEmpty())
+    }
+
     // ---- vaults: where a new item goes, moving and copying ----
 
     @Test

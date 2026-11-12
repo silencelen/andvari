@@ -8,6 +8,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.ItemChangedException
@@ -978,7 +979,7 @@ open class SessionController(
         runBounded(BoundedOps.FLAT_MS) { live.engine.restoreDeleted(itemId, deleted.vaultId, doc) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         trashRead = trashRead - itemId
-        update { it.copy(busy = false, items = summaries(it.query), trash = it.trash?.let { trashViews(live) }, notice = ItemCopy.TRASH_RESTORED) }
+        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), trash = it.trash?.let { trashViews(live) }, notice = ItemCopy.TRASH_RESTORED) }
         writeFillSnapshot()
         ActionResult.Ok
     }
@@ -1061,6 +1062,22 @@ open class SessionController(
             update { it.copy(history = historyView(live, itemId, fresh)) }
         }
         ActionResult.Ok
+    }
+
+    // ---- lifecycle notices (spec 03 §11) ----
+
+    /** What the last syncs said about shared vaults, as the vault screen shows it. */
+    private fun vaultNotices(live: VaultSession.Unlocked): List<VaultNoticeView> =
+        runCatching { live.engine.notices() }.getOrDefault(emptyList()).map { n ->
+            val (text, warning) = LifecycleNoticeCopy.body(n)
+            VaultNoticeView(n.id, text, warning)
+        }
+
+    /** The person has read one notice: it goes until something new happens. */
+    fun dismissVaultNotice(id: String) {
+        val live = session.get() ?: return
+        runCatching { live.engine.dismissNotice(id) }
+        update { it.copy(vaultNotices = vaultNotices(live)) }
     }
 
     // ---- vaults: where a new item goes, and moving or copying one (design §8, F18/F19) ----
@@ -1148,7 +1165,7 @@ open class SessionController(
         moveGestures.remove(key)
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         val target = vaultName(live, targetVaultId) ?: "the other vault"
-        update { it.copy(busy = false, items = summaries(it.query), notice = if (move) "Moved to “$target”." else "Copied to “$target”.") }
+        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), notice = if (move) "Moved to “$target”." else "Copied to “$target”.") }
         writeFillSnapshot()
         ActionResult.Ok
     }
@@ -1179,7 +1196,7 @@ open class SessionController(
             return@action failure(t, HouseholdCopy::forSyncError)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
-        update { it.copy(busy = false, items = summaries(it.query), notice = SYNCED) }
+        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), notice = SYNCED) }
         writeFillSnapshot()
         refreshPersonalVault() // a sync can change what the server says the personal vault is
         ActionResult.Ok
@@ -1441,7 +1458,7 @@ open class SessionController(
     private fun toVault() {
         update {
             it.copy(
-                screen = AppScreen.VAULT, items = summaries(it.query), busy = false, error = null, totpRequired = false,
+                screen = AppScreen.VAULT, items = summaries(it.query), vaultNotices = session.get()?.let(::vaultNotices).orEmpty(), busy = false, error = null, totpRequired = false,
                 lockReason = null, recoveryCaptureError = null, recoveryReplacedNotice = false,
             )
         }
@@ -1790,7 +1807,7 @@ open class SessionController(
             }
             try {
                 syncNow(live.engine)
-                if (session.get() === live) update { it.copy(syncing = false, items = summaries(it.query)) } else update { it.copy(syncing = false) }
+                if (session.get() === live) update { it.copy(syncing = false, items = summaries(it.query), vaultNotices = vaultNotices(live)) } else update { it.copy(syncing = false) }
                 writeFillSnapshot()
                 refreshPersonalVault()
             } catch (t: Throwable) {
@@ -1810,7 +1827,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), trash = null, history = null,
+        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), trash = null, history = null,
     )
 
     private companion object {
