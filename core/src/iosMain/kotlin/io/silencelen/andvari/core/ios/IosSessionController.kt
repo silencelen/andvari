@@ -83,6 +83,7 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     seams.serverShare,
     seams.snapshots,
     seams.saveQueue,
+    seams.appliedSaves,
 ) {
     constructor(config: IosStorageConfig) : this(IosSeams(config))
 
@@ -109,6 +110,9 @@ internal class IosSeams(
     val serverShare: ServerShare = config.sharedSuite?.let(::AppGroupServerShare) ?: ServerShare {}
     val snapshots: FillSnapshotStore = snapshotPath?.let(::FileFillSnapshots) ?: FillSnapshotStore.None
     val saveQueue: SaveQueueStore = savesDir?.let(::FileSaveQueue) ?: SaveQueueStore.None
+
+    /** The list of automatic saves, sealed to the account: in the app's own container, never the App Group. */
+    val appliedSaves: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/applied-saves.json")
 
     private companion object {
         const val MOVED = "ios.sharedLayout.v1"

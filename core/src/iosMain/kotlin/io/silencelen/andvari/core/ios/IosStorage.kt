@@ -39,7 +39,10 @@ import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSFileProtectionCompleteUnlessOpen
+import platform.Foundation.NSDate
+import platform.Foundation.NSFileModificationDate
 import platform.Foundation.NSFileProtectionKey
+import platform.Foundation.timeIntervalSinceDate
 import platform.Foundation.NSFileSize
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSString
@@ -227,6 +230,7 @@ internal fun NSData.toByteArray(): ByteArray {
 internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
     override fun write(bytes: ByteArray): Boolean = runCatching {
         val fm = NSFileManager.defaultManager
+        fm.createDirectoryAtPath(path.substringBeforeLast('/'), withIntermediateDirectories = true, attributes = null, error = null)
         val tmp = "$path.tmp"
         val attributes = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
         if (!fm.createFileAtPath(tmp, contents = bytes.toNSData(), attributes = attributes)) return@runCatching false
@@ -289,8 +293,9 @@ internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
             val listed = name.startsWith(ENTRY_PREFIX) && name.endsWith(ENTRY_SUFFIX) && SaveQueue.validId(id)
             val size = runCatching { (fm.attributesOfItemAtPath(path, error = null)?.get(NSFileSize) as? Number)?.toLong() }.getOrNull()
             if (!listed || size == null || size > SaveQueue.MAX_ENTRY_BYTES || out.size >= SaveQueue.MAX_ENTRIES) {
-                // A temporary file of a write in flight is left to its writer for a moment; everything else goes.
-                if (!name.endsWith(".tmp")) runCatching { fm.removeItemAtPath(path, error = null) }
+                // A temporary file of a write in flight is left to its writer; one left behind by a writer that died
+                // (older than a minute) goes with everything else.
+                if (!name.endsWith(".tmp") || staleTmp(path)) runCatching { fm.removeItemAtPath(path, error = null) }
                 continue
             }
             runCatching { fm.contentsAtPath(path)?.toByteArray() }.getOrNull()?.let { out[id] = it }
@@ -306,6 +311,11 @@ internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
 
     override fun clear() {
         for (name in names()) runCatching { fm.removeItemAtPath("$dir/$name", error = null) }
+    }
+
+    private fun staleTmp(path: String): Boolean {
+        val modified = runCatching { fm.attributesOfItemAtPath(path, error = null)?.get(NSFileModificationDate) as? NSDate }.getOrNull() ?: return true
+        return NSDate().timeIntervalSinceDate(modified) > 60.0
     }
 
     private companion object {
