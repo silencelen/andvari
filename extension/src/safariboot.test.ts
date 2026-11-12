@@ -77,3 +77,26 @@ test("every top-level listener registration in the worker stands alone", () => {
   assert.ok(bg.trimEnd().endsWith("__andvariBootReady?.();"), "the last statement marks the end of the load");
   assert.match(bg, /type: BUILD_TARGET === "safari" \? "classic" : "module"/);
 });
+
+// The popup on iPhone sat against the left edge with an empty band on the right: the desktop popup's fixed 360 px
+// column inside a sheet as wide as the screen.
+test("the Safari popup fills the sheet: no fixed pixel width on its root, centred when the sheet is wider, and only in that build", () => {
+  const css = file("popup.safari.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector: string): string => new RegExp(`(?:^|})\\s*${selector}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+  for (const selector of ["html", "body"]) {
+    const body = rule(selector);
+    assert.match(body, /(?:^|;)\s*width:\s*100%/, `${selector} is as wide as the sheet`);
+    assert.ok(!/(?:^|;|\s)(?:min-|max-)?width:\s*\d+(?:\.\d+)?px/.test(body), `${selector} has no pixel width`);
+    assert.match(body, /overflow-x:\s*hidden/, `${selector} cannot scroll sideways`);
+  }
+  const body = rule("body");
+  assert.match(body, /margin-left:\s*auto/);
+  assert.match(body, /margin-right:\s*auto/);
+  assert.match(body, /padding-left:\s*env\(safe-area-inset-left/);
+  assert.match(body, /padding-right:\s*env\(safe-area-inset-right/);
+  // Linked after popup.css so it wins, with a viewport, and only when the target is Safari.
+  const build = file("build.mjs");
+  assert.match(build, /if \(target === "safari"\) \{[\s\S]*?width=device-width, initial-scale=1, viewport-fit=cover[\s\S]*?popup\.safari\.css[\s\S]*?\} else \{\s*cpSync\("popup\.html", "dist\/popup\.html"\);/);
+  assert.ok(!file("popup.html").includes("popup.safari.css"), "the desktop popup's page is untouched");
+  assert.match(file("popup.css"), /html \{ width: 360px; \}/, "the desktop popup keeps its fixed column");
+});

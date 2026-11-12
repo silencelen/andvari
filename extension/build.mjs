@@ -2,7 +2,7 @@
 // references dist-relative names, so `dist/` is what you "Load unpacked". @noble is bundled in
 // (pure JS, no WASM asset) — nothing loads over the network, and no eval, so the MV3 CSP is happy.
 import * as esbuild from "esbuild";
-import { cpSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 // RELEASE=1 → minified, no sourcemaps (what gets zipped for /downloads).
 // Default = debuggable dev build for load-unpacked iteration.
@@ -38,7 +38,20 @@ await esbuild.build({
 });
 
 cpSync({ firefox: "manifest.firefox.json", safari: "manifest.safari.json", chrome: "manifest.json" }[target], "dist/manifest.json");
-cpSync("popup.html", "dist/popup.html");
+if (target === "safari") {
+  // iOS presents the popup as a sheet as wide as the screen: the Safari build's popup gets a viewport and a stylesheet
+  // that lets it fill the sheet (popup.safari.css). The other builds keep the fixed-width desktop popup untouched.
+  const html = readFileSync("popup.html", "utf8");
+  const link = '<link rel="stylesheet" href="popup.css" />';
+  if (!html.includes(link)) throw new Error("popup.html no longer links popup.css the way the Safari build expects");
+  writeFileSync(
+    "dist/popup.html",
+    html.replace(link, `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n    ${link}\n    <link rel="stylesheet" href="popup.safari.css" />`),
+  );
+  cpSync("popup.safari.css", "dist/popup.safari.css");
+} else {
+  cpSync("popup.html", "dist/popup.html");
+}
 cpSync("options.html", "dist/options.html"); // wave-3 options_ui page; <link>s popup.css for the theme
 cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html + options.html <link> it
 cpSync("theme-boot.js", "dist/theme-boot.js"); // H134 pre-paint theme stamp; <script>d by popup/options/connector (classic, not bundled — a deferred module flashes the wrong palette)
