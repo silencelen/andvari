@@ -65,6 +65,8 @@ data class PersonalVaultView(
     val body: String,
     /** "Keep Family": re-designate the vault this device (or the account) already has; null when there is none to keep. */
     val keepLabel: String?,
+    /** What tells the vault to keep apart from the one the server sent (two vaults may share a name); null with [keepLabel]. */
+    val keepDetail: String?,
     /** What the server reports about the vault it names, once that was looked up. */
     val servedDetail: String?,
     /** "Use Family": offered only after [servedDetail] loaded. */
@@ -118,6 +120,24 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         return "As reported by the server: $origin · $holders" + if (info.onThisDevice) " · this device's personal vault" else ""
     }
 
+    /**
+     * What tells one vault from another when their names are the same: how much is in it, when it was created and last
+     * changed, and the end of its id. Facts this device holds; nothing here is the server's say-so except the dates.
+     */
+    private fun facts(live: VaultSession.Unlocked, vaultId: String): String {
+        val items = live.engine.items().filter { it.vaultId == vaultId }
+        val created = live.engine.vaultRows().firstOrNull { it.vaultId == vaultId }?.createdAt?.takeIf { it > 0 }
+        val changed = items.maxOfOrNull { it.updatedAt }?.takeIf { it > 0 }
+        return listOfNotNull(
+            if (items.size == 1) "1 item" else "${items.size} items",
+            created?.let { "created ${day(it)}" },
+            changed?.let { "last changed ${day(it)}" },
+            "id ending ${vaultId.takeLast(6)}",
+        ).joinToString(" · ")
+    }
+
+    private fun day(ms: Long): String = kotlinx.datetime.Instant.fromEpochMilliseconds(ms).toString().take(10)
+
     private fun name(live: VaultSession.Unlocked, vaultId: String): String =
         live.engine.personalChoiceInfo(vaultId).name ?: live.engine.vaultInfos().firstOrNull { it.vaultId == vaultId }?.name ?: "this vault"
 
@@ -149,18 +169,18 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         }
         val own = live.engine.redesignationChoices().map { v ->
             val info = live.engine.personalChoiceInfo(v.vaultId)
-            PersonalChoiceView(v.vaultId, "${v.name} · ${info.itemCount} items", choiceDetail(info))
+            PersonalChoiceView(v.vaultId, "${v.name} · id ending ${v.vaultId.takeLast(6)}", listOf(facts(live, v.vaultId), choiceDetail(info)).filter { it.isNotEmpty() }.joinToString("\n"))
         }
         val proposed = proposal?.let(::proposalView)
         fun view(
             state: PersonalVaultState, title: String, body: String, keep: String? = null, served: String? = null, use: String? = null,
-            choices: List<PersonalChoiceView> = emptyList(), others: List<PersonalChoiceView> = emptyList(),
-        ) = PersonalVaultView(state, title, body, keep, served, use, lookupFailed, choices, others, proposed, error)
+            choices: List<PersonalChoiceView> = emptyList(), others: List<PersonalChoiceView> = emptyList(), keepDetail: String? = null,
+        ) = PersonalVaultView(state, title, body, keep, keepDetail, served, use, lookupFailed, choices, others, proposed, error)
 
         val change = live.engine.personalChange()
         fun servedLine(newName: String) = details?.let { d ->
             val holders = if (d.servedCoHolders.isEmpty()) "nobody else" else d.servedCoHolders.joinToString(", ") { "${it.displayName} (${it.role})" }
-            "$newName, as reported by the server: ${describe(d.servedOrigin)} · also held by $holders."
+            "$newName, as reported by the server: ${describe(d.servedOrigin)} · also held by $holders.\nThe vault the server sent: ${facts(live, d.servedVaultId)}."
         }
         publish(
             when (status) {
@@ -181,13 +201,26 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
                         null
                     } else {
                         val newName = details?.servedName ?: name(live, change.servedVaultId)
-                        val designated = change.currentVaultId.takeIf { it.isNotEmpty() }?.let { details?.currentName ?: name(live, it) }
+                        // The account's record and the server's may name the SAME vault: then there is no conflict to
+                        // describe. A device that never confirmed a personal vault asks once whatever they say (A9 review
+                        // LOW-4), and that is all this is. Saying "X, but the server sent X" made it look like a choice
+                        // between two vaults of one name.
+                        val same = change.currentVaultId == change.servedVaultId
+                        val designated = change.currentVaultId.takeIf { it.isNotEmpty() && !same }?.let { details?.currentName ?: name(live, it) }
                         view(
                             PersonalVaultState.PROPOSED,
-                            if (designated == null) "The server says your personal vault is $newName." else "Your account's personal vault is $designated, but the server sent $newName.",
-                            if (designated == null) "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items have nowhere to go until then."
-                            else "Another of your devices chose $designated, or the server sent an older record. This device uses no personal vault until you decide.",
-                            keep = designated?.let { "Keep $it" }, served = servedLine(newName), use = details?.let { "Use $newName" }, others = own,
+                            when {
+                                same -> "Confirm your personal vault on this device: $newName."
+                                designated == null -> "The server says your personal vault is $newName."
+                                else -> "Your account's personal vault is $designated, but the server sent $newName."
+                            },
+                            when {
+                                same -> "Your account's record and the server name the same vault (id ending ${change.servedVaultId.takeLast(6)}). A device asks once before it uses a personal vault, and this one hasn't been asked yet: new items have nowhere to go until you confirm."
+                                designated == null -> "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items have nowhere to go until then."
+                                else -> "These are two different vaults. Another of your devices chose $designated, or the server sent an older record. This device uses no personal vault until you decide."
+                            },
+                            keep = designated?.let { "Keep $it" }, served = servedLine(newName), use = details?.let { "Use $newName" }, others = if (same) own.filter { it.vaultId != change.servedVaultId } else own,
+                            keepDetail = designated?.let { "The vault your account's record points to: ${facts(live, change.currentVaultId)}." },
                         )
                     }
                 }
@@ -199,8 +232,9 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
                         val oldName = details?.currentName ?: name(live, change.currentVaultId)
                         view(
                             PersonalVaultState.CHANGED, "Your personal vault was changed from $oldName to $newName.",
-                            "Another of your devices changed it, or the server sent an older record. This device still uses $oldName until you decide. If you didn't change it, keep $oldName (it asks for your master password) and tell your admin.",
+                            "These are two different vaults. Another of your devices changed it, or the server sent an older record. This device still uses $oldName until you decide. If you didn't change it, keep $oldName (it asks for your master password) and tell your admin.",
                             keep = "Keep $oldName", served = servedLine(newName), use = details?.let { "Use $newName" },
+                            keepDetail = "The vault this device uses now: ${facts(live, change.currentVaultId)}.",
                         )
                     }
                 }
@@ -208,7 +242,7 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
                     PersonalVaultState.UNCHOSEN, "Your personal vault isn't confirmed yet.",
                     "Until it is, new logins have nowhere to go. Which vault is your personal vault?",
                     choices = live.engine.personalVaultChoices.orEmpty().map { c ->
-                        PersonalChoiceView(c.vaultId, "${c.name ?: "(unnamed)"} · ${c.itemCount} items", choiceDetail(live.engine.personalChoiceInfo(c.vaultId)))
+                        PersonalChoiceView(c.vaultId, "${c.name ?: "(unnamed)"} · id ending ${c.vaultId.takeLast(6)}", listOf(facts(live, c.vaultId), choiceDetail(live.engine.personalChoiceInfo(c.vaultId))).filter { it.isNotEmpty() }.joinToString("\n"))
                     },
                 )
                 else -> view(

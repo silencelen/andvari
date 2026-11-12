@@ -1,6 +1,7 @@
 package io.silencelen.andvari.core.app
 
 import io.silencelen.andvari.core.client.Account
+import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemDoc
@@ -12,6 +13,7 @@ import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.UpgradeRequiredException
 import io.silencelen.andvari.core.client.VaultItem
+import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
 import io.silencelen.andvari.core.client.session.BiometricHost
@@ -534,8 +536,15 @@ open class SessionController(
             username = doc.login?.username?.ifEmpty { null }, uris = doc.login?.uris.orEmpty(),
             hasPassword = !doc.login?.password.isNullOrEmpty(), hasNotes = !doc.notes.isNullOrEmpty(),
             hasTotp = !doc.login?.totp.isNullOrEmpty(), favorite = doc.favorite, updatedAt = item.updatedAt,
-            editable = doc.type == "login" && role != "reader" && live.account.canSealUnder(item.vaultId),
+            editable = (doc.type == "login" || doc.type == "card") && role != "reader" && live.account.canSealUnder(item.vaultId),
             previousPasswords = doc.login?.passwordHistory?.size ?: 0,
+            card = doc.card?.takeIf { doc.type == "card" }?.let { c ->
+                CardDetail(
+                    summary = CardDisplay.subtitle(doc), cardholder = c.cardholderName?.ifEmpty { null },
+                    expiry = listOfNotNull(c.expMonth?.ifEmpty { null }, c.expYear?.ifEmpty { null }).joinToString("/").ifEmpty { null },
+                    postalCode = c.postalCode?.ifEmpty { null }, hasNumber = !c.number.isNullOrEmpty(), hasCode = !c.securityCode.isNullOrEmpty(),
+                )
+            },
         )
     }
 
@@ -547,6 +556,8 @@ open class SessionController(
             SecretField.PASSWORD -> doc.login?.password
             SecretField.NOTES -> doc.notes
             SecretField.TOTP_SECRET -> doc.login?.totp
+            SecretField.CARD_NUMBER -> doc.card?.number
+            SecretField.CARD_CODE -> doc.card?.securityCode
         }?.ifEmpty { null }
     }
 
@@ -600,6 +611,47 @@ open class SessionController(
         )
         busy()
         // INV-EDIT: an edit is sealed under the vault its item lives in; a new login goes to the personal vault.
+        val outcome = live.engine.save(itemId, doc, existing?.vaultId)
+        if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
+        update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
+        writeFillSnapshot()
+        ActionResult.Ok
+    }
+
+    /**
+     * Add a card ([itemId] null) to the personal vault, or save an edit of one. The fields are normalized once, here,
+     * as the other clients do: the number and the code keep their digits only, the expiry is read as a month and a
+     * four-digit year (a whole "07/31" typed into the month is split), and the brand is always worked out from the
+     * number. An expiry that cannot be read is refused, never guessed.
+     */
+    @Throws(CancellationException::class)
+    suspend fun saveCard(itemId: String?, input: CardInput): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (input.name.isBlank()) return@action ActionResult.Failed(CARD_NAME_REQUIRED)
+        val combined = if (input.expMonth.isNotBlank() && CardNormalize.padMonth(input.expMonth) == null && input.expYear.isBlank()) CardNormalize.parseExpiry(input.expMonth) else null
+        val month = combined?.expMonth ?: CardNormalize.padMonth(input.expMonth)
+        val year = combined?.expYear ?: CardNormalize.yearTo4(input.expYear)
+        if ((input.expMonth.isNotBlank() && month == null) || (input.expYear.isNotBlank() && year == null)) return@action ActionResult.Failed(CARD_EXPIRY_INVALID)
+        val existing = itemId?.let { live.engine.item(it) ?: return@action ActionResult.Failed(ITEM_GONE) }
+        if (existing != null && existing.doc.type != "card") return@action ActionResult.Failed(ITEM_GONE)
+        if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        // A copy of the existing document and of its card, never a rebuild: fields this client does not know survive.
+        val base = existing?.doc ?: ItemDoc(type = "card", name = "", card = CardData())
+        val doc = base.copy(
+            name = input.name.trim(),
+            notes = input.notes.ifBlank { null },
+            favorite = input.favorite,
+            card = (base.card ?: CardData()).copy(
+                cardholderName = input.cardholder.trim().ifBlank { null },
+                number = CardNormalize.digitsOnly(input.number).ifBlank { null },
+                expMonth = month,
+                expYear = year,
+                securityCode = CardNormalize.digitsOnly(input.securityCode).ifBlank { null },
+                postalCode = input.postalCode.trim().ifBlank { null },
+                brand = CardNormalize.brand(input.number),
+            ),
+        )
+        busy()
         val outcome = live.engine.save(itemId, doc, existing?.vaultId)
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
@@ -1288,6 +1340,8 @@ open class SessionController(
         const val QUICK_EXPIRED = "Unlock with your master password once to use this again."
         const val QUICK_UNAVAILABLE = "This device has no usable Face ID or Touch ID, or your org doesn't allow it."
         const val QUICK_NOT_ENABLED = "Couldn't turn on quick unlock."
+        const val CARD_NAME_REQUIRED = "Give the card a name."
+        const val CARD_EXPIRY_INVALID = "That expiry date can't be read. Use a month and a year, like 07 and 2031."
         const val NAME_REQUIRED = "Give the login a name."
         const val TOTP_INVALID = "That one-time code key isn't valid base32 or an otpauth:// link."
         const val ITEM_GONE = "This item is no longer here."
