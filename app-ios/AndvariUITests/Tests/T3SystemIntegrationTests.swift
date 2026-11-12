@@ -272,7 +272,9 @@ final class T3SystemIntegrationTests: UITestCase {
                 app.buttons["vault.lock"].tap()
             }
             expectScreen(.unlock)
-            // The screen asks for a face by itself; the system's sheet only offers Cancel once a face has failed.
+            // The screen asks for a face by itself, which makes it busy; the system's sheet only offers Cancel once a
+            // face has failed. Wait for that prompt first, so the test does not type under it.
+            _ = waitUntil(6) { !self.element("unlock.sign-out").isEnabled || self.faceIDCancel != nil }
             let refused = refuseFaceID(until: { self.faceIDCancel == nil && self.element("unlock.sign-out").isEnabled && self.masterPasswordField.isHittable })
             XCTAssertTrue(refused, "the Face ID prompt is still up")
         }
