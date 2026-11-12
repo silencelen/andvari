@@ -1251,6 +1251,46 @@ open class SessionControllerTest {
     }
 
     @Test
+    fun aLockDuringAnAutomaticSaveKeepsTheListTheHoldsAndTheIntent() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        repeat(7) { capture("e$it", "https://shop$it.example/", "me", "pw$it") }
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size + controller.state.pendingSaves.count { it.reason != null } == 7 }
+        val listed = controller.state.appliedSaves.map { it.id }.toSet()
+        val heldBack = controller.state.pendingSaves.map { it.id }.toSet()
+        assertEquals(5, listed.size)
+        controller.lock()
+        capture("late", "https://late.example/", "me", "pw-late")
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        // The automatic save of the new capture is in flight (its push waits) when the app leaves the foreground.
+        val pushing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        routes["/sync/push"] = {
+            pushing.complete(Unit)
+            release.await()
+            throw IOException("unreachable")
+        }
+        withTimeout(10_000) { pushing.await() }
+        val before = assertNotNull(appliedLog.bytes).decodeToString()
+        controller.onBackground() // an automatic save holds no busy: the lock lands at once
+        assertEquals(AppScreen.UNLOCK, controller.state.screen)
+        release.complete(Unit)
+        delay(300) // the write that was cut short finishes failing
+        val after = assertNotNull(appliedLog.bytes, "the lock persisted nothing, and the failed write deleted nothing").decodeToString()
+        assertEquals(before, after, "nothing was written for the session that ended")
+        // The next unlock finds the list, the holds and the intent, and settles the intent.
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.appliedSaves.size >= 5 && controller.state.pendingSaves.count { it.reason == SaveImporter.TOO_MANY } == 2 }
+        assertTrue(controller.state.appliedSaves.map { it.id }.containsAll(listed), "the list survived the lock")
+        assertEquals(heldBack, controller.state.pendingSaves.filter { it.reason == SaveImporter.TOO_MANY }.map { it.id }.toSet(), "the holds too")
+        settle { "late" in controller.state.appliedSaves.map { it.id } }
+        assertEquals(1, controller.state.items.count { it.name == "late.example" }, "the cut-short save is listed once, never written twice")
+        assertTrue(queue.map.keys.none { it == "late" })
+    }
+
+    @Test
     fun anUndoDoesNotRemoveAnAddedLoginThatWasEditedInAnyField() = test {
         unlockedWithAPersonalVault()
         controller.lock()

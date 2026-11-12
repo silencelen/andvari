@@ -72,6 +72,34 @@ internal class SaveImporter(
     val enabled: Boolean get() = queue !== SaveQueueStore.None
 
     private val mutex = Mutex()
+
+    /**
+     * Bumped by every [locked] (and so by [dropAll]): a lock clears memory at once and never waits for the operation
+     * holding [mutex]. That operation (an automatic save whose write fails when the engine closes, say) must then
+     * persist nothing: what it would store was read for a session that has ended, from maps the lock has emptied.
+     */
+    private var generation = 0
+
+    /** The [generation] the operation holding [mutex] began in. */
+    private var opGeneration = -1
+
+    /**
+     * Run [block] holding [mutex], as an operation of the session it was asked for in: the generation is read when the
+     * operation is asked for, before it waits for the mutex, so one that waited out a lock writes nothing either.
+     */
+    private suspend fun <T> op(block: suspend () -> T): T {
+        val asked = generation
+        return mutex.withLock {
+            opGeneration = asked
+            block()
+        }
+    }
+
+    /** Whether the operation holding [mutex] still belongs to the session it began in. */
+    private val opAlive: Boolean get() = opGeneration == generation
+
+    /** Why the stored list is written. Only an emptiness the person caused, or one checked against the vault, removes it. */
+    private enum class Persist { CHANGE, PERSON, VERIFIED }
     private val pending = LinkedHashMap<String, Pending>()
     private val applied = LinkedHashMap<String, AppliedRecord>()
     private var appliedLoaded = false
@@ -121,7 +149,7 @@ internal class SaveImporter(
     private fun replaceListed(itemId: String) = applied.values.any { !it.intent && it.replacedName != null && it.itemId == itemId }
 
     /** Run [block] alone with respect to every save, undo and sync here: the person's own edit or deletion of an item. */
-    suspend fun <T> exclusive(block: suspend () -> T): T = mutex.withLock { block() }
+    suspend fun <T> exclusive(block: suspend () -> T): T = op(block)
 
     // ---- what a capture is ----
 
@@ -183,11 +211,11 @@ internal class SaveImporter(
      * app dials; with [allowed] false (its policy forbids keeping data on the device) no key is published and the queue
      * and the applied list are emptied.
      */
-    suspend fun sync(live: VaultSession.Unlocked, origin: String, allowed: Boolean, apply: Boolean, stillLive: () -> Boolean) = mutex.withLock {
-        if (!enabled || !stillLive()) return@withLock
+    suspend fun sync(live: VaultSession.Unlocked, origin: String, allowed: Boolean, apply: Boolean, stillLive: () -> Boolean) = op {
+        if (!enabled || !stillLive()) return@op
         if (!allowed) {
             dropAll()
-            return@withLock
+            return@op
         }
         // The key the extensions seal to is this account's, whatever the file said: a published key that is not ours
         // (replaced by something else in the App Group, or left by another account) is put right here. What was
@@ -235,7 +263,7 @@ internal class SaveImporter(
             pending[id] = Pending(login, personalTarget(vault, login, live.account), reason)
         }
         // A hold lasts as long as its entry does.
-        if (held.retainAll(pending.keys)) storeApplied(live)
+        if (held.retainAll(pending.keys)) storeApplied(live, Persist.VERIFIED)
         if (apply) applyLocked(live, stillLive)
         vaultNames = { itemId ->
             runCatching { live.engine.item(itemId)?.let { item -> live.engine.vaultInfos().firstOrNull { it.vaultId == item.vaultId }?.name ?: "a vault this device cannot name" } }.getOrNull()
@@ -277,7 +305,7 @@ internal class SaveImporter(
             val vault = logins(live)
             p.target = personalTarget(vault, p.login, live.account)
             p.reason = refusal(p, vault, live.account, clocks.wallMs(), appliedThisRun)
-            if (p.reason == TOO_MANY && held.add(id)) storeApplied(live) // kept: never applied by itself later
+            if (p.reason == TOO_MANY && held.add(id)) storeApplied(live, Persist.CHANGE) // kept: never applied by itself later
             if (p.reason != null) continue
             val record = try {
                 write(live, id, p)
@@ -297,11 +325,13 @@ internal class SaveImporter(
 
     /** The write happened: the entry leaves the queue and the record is listed. */
     private fun finish(live: VaultSession.Unlocked, id: String, record: AppliedRecord) {
+        // A session that ended meanwhile keeps its entry and its stored intent: the next unlock settles them.
+        if (!opAlive) return
         queue.remove(id)
         pending.remove(id)
         held.remove(id)
         applied[id] = record.copy(intent = false)
-        storeApplied(live)
+        storeApplied(live, Persist.CHANGE)
     }
 
     /**
@@ -329,7 +359,7 @@ internal class SaveImporter(
                 }
             }
         }
-        if (changed) storeApplied(live)
+        if (changed) storeApplied(live, Persist.VERIFIED)
     }
 
     /**
@@ -353,7 +383,7 @@ internal class SaveImporter(
             capturedAtMs = captured.capturedAtMs, docDigest = if (target == null) digest(doc) else null,
         )
         applied[id] = record
-        storeApplied(live)
+        storeApplied(live, Persist.CHANGE)
         try {
             if (target == null) {
                 lastOutcome = live.engine.saveWithUploads(null, doc, emptyList(), null, null, itemId)
@@ -369,7 +399,7 @@ internal class SaveImporter(
             throw c // the intent stays stored: the next unlock looks at the vault and settles it
         } catch (t: Throwable) {
             applied.remove(id)
-            storeApplied(live)
+            storeApplied(live, Persist.CHANGE) // nothing, once the session has ended: the intent stays for the next unlock
             throw t
         }
         return record
@@ -384,22 +414,22 @@ internal class SaveImporter(
      * or a new login of their own. What the row showed is what is written: if the login it named changed or went, or
      * one appeared, nothing is written and the row is shown again as the vault is now.
      */
-    suspend fun confirm(live: VaultSession.Unlocked, id: String, stillLive: () -> Boolean): ImportResult = mutex.withLock {
-        val p = pending[id] ?: return@withLock ImportResult.Gone
+    suspend fun confirm(live: VaultSession.Unlocked, id: String, stillLive: () -> Boolean): ImportResult = op {
+        val p = pending[id] ?: return@op ImportResult.Gone
         val vault = logins(live)
         val now = personalTarget(vault, p.login, live.account)
         if (now?.itemId != p.target?.itemId || now?.doc != p.target?.doc) {
             p.target = now
             p.reason = TARGET_CHANGED
             publish(pendingViews(), appliedViews(), false)
-            return@withLock ImportResult.Failed(TARGET_CHANGED)
+            return@op ImportResult.Failed(TARGET_CHANGED)
         }
         if (now == null && live.account.personalVaultId.isEmpty()) {
-            return@withLock ImportResult.Failed(if (live.account.personalStatus != Account.PersonalStatus.CONFIRMED) PERSONAL_UNCONFIRMED else HouseholdCopy.NO_PERSONAL_VAULT)
+            return@op ImportResult.Failed(if (live.account.personalStatus != Account.PersonalStatus.CONFIRMED) PERSONAL_UNCONFIRMED else HouseholdCopy.NO_PERSONAL_VAULT)
         }
-        if (UriMatch.normalizeHost(p.login.site) == null) return@withLock ImportResult.Failed(NOT_A_SITE)
+        if (UriMatch.normalizeHost(p.login.site) == null) return@op ImportResult.Failed(NOT_A_SITE)
         val record = write(live, id, p)
-        if (!stillLive()) return@withLock ImportResult.Gone
+        if (!stillLive()) return@op ImportResult.Gone
         finish(live, id, record)
         wrote()
         publish(pendingViews(), appliedViews(), false)
@@ -407,10 +437,10 @@ internal class SaveImporter(
     }
 
     /** Discard one listed capture: it leaves the queue and nothing is written. */
-    suspend fun discard(live: VaultSession.Unlocked, id: String) = mutex.withLock {
+    suspend fun discard(live: VaultSession.Unlocked, id: String) = op {
         queue.remove(id)
         pending.remove(id)
-        if (held.remove(id)) storeApplied(live)
+        if (held.remove(id)) storeApplied(live, Persist.PERSON)
         publish(pendingViews(), appliedViews(), false)
     }
 
@@ -421,10 +451,10 @@ internal class SaveImporter(
      * password is put back (and its history entry taken out again) only if the login still has the password this
      * save wrote and that history entry on top. Anything else has been changed since, and is left alone.
      */
-    suspend fun undo(live: VaultSession.Unlocked, id: String, stillLive: () -> Boolean): ImportResult = mutex.withLock {
+    suspend fun undo(live: VaultSession.Unlocked, id: String, stillLive: () -> Boolean): ImportResult = op {
         val result = undoLocked(live, id)
         if (result is ImportResult.Done && stillLive()) {
-            storeApplied(live)
+            storeApplied(live, Persist.PERSON)
             wrote()
             publish(pendingViews(), appliedViews(), false)
         }
@@ -432,7 +462,7 @@ internal class SaveImporter(
     }
 
     /** [undo] for every listed save; a failure names how many could not be undone. */
-    suspend fun undoAll(live: VaultSession.Unlocked, stillLive: () -> Boolean): ImportResult = mutex.withLock {
+    suspend fun undoAll(live: VaultSession.Unlocked, stillLive: () -> Boolean): ImportResult = op {
         var failed = 0
         var queued = false
         for (id in applied.keys.toList()) {
@@ -440,9 +470,9 @@ internal class SaveImporter(
                 is ImportResult.Done -> queued = queued || r.queuedOffline
                 else -> failed++
             }
-            if (!stillLive()) return@withLock ImportResult.Gone
+            if (!stillLive()) return@op ImportResult.Gone
         }
-        storeApplied(live)
+        storeApplied(live, Persist.PERSON)
         wrote()
         publish(pendingViews(), appliedViews(), false)
         if (failed == 0) ImportResult.Done(queued) else ImportResult.Failed(if (failed == 1) UNDO_CHANGED else "$failed of these have changed since, so they were not undone.")
@@ -476,21 +506,25 @@ internal class SaveImporter(
         val ids = applied.filterValues { it.itemId == itemId }.keys
         if (ids.isEmpty()) return
         ids.forEach(applied::remove)
-        storeApplied(live)
+        storeApplied(live, Persist.PERSON)
         publish(pendingViews(), appliedViews(), false)
     }
 
     /** The list has been read: it goes, in memory and in storage, and with it the undo from here. */
-    suspend fun dismiss(live: VaultSession.Unlocked) = mutex.withLock {
+    suspend fun dismiss(live: VaultSession.Unlocked) = op {
         applied.clear()
-        storeApplied(live)
+        storeApplied(live, Persist.PERSON)
         publish(pendingViews(), appliedViews(), false)
     }
 
     // ---- lifetime ----
 
-    /** The vault locked: nothing opened stays in memory. The stored list is read again at the next unlock. */
+    /**
+     * The vault locked: nothing opened stays in memory, and nothing is persisted (an operation still running writes
+     * nothing from here, [generation]). The stored list is read again at the next unlock.
+     */
     fun locked() {
+        generation++
         pending.clear()
         applied.clear()
         appliedLoaded = false
@@ -524,9 +558,16 @@ internal class SaveImporter(
         held += stored.held.take(MAX_LISTED)
     }
 
-    private fun storeApplied(live: VaultSession.Unlocked) {
+    /**
+     * Store the list and the holds, sealed to the account. Skipped for an operation whose session has ended (its maps were
+     * emptied by the lock, not by anything that happened to the list). An empty list removes the file only when the
+     * person emptied it ([Persist.PERSON]: Undo, Dismiss, Discard, deleting the login) or the vault showed every record
+     * stale ([Persist.VERIFIED]); otherwise an empty map never overwrites what is stored.
+     */
+    private fun storeApplied(live: VaultSession.Unlocked, why: Persist) {
+        if (!opAlive) return
         if (applied.isEmpty() && held.isEmpty()) {
-            appliedStore.delete()
+            if (why != Persist.CHANGE) appliedStore.delete()
             return
         }
         val sealed = applied.values.toList().takeLast(MAX_LISTED).map { Bytes.toB64(crypto().sealTo(live.account.identityPub, json.encodeToString(AppliedRecord.serializer(), it).encodeToByteArray())) }
