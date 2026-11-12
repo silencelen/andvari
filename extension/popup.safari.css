@@ -1,0 +1,22 @@
+/*
+ * Safari on iOS only (build.mjs links this after popup.css in the Safari build's popup.html, and nowhere else).
+ *
+ * The desktop popup is a fixed 360 px column, because a desktop browser sizes the popup window to its content. On
+ * iPhone the popup is a sheet as wide as the screen, so a 360 px column sat against the left edge with an empty band
+ * on its right. Here the popup fills the sheet. On a wide sheet (iPad, landscape) it stops at a readable measure and
+ * is centred. The safe-area insets are respected on both sides alike, and nothing may scroll sideways.
+ */
+html {
+  width: 100%;
+  overflow-x: hidden;
+}
+body {
+  width: 100%;
+  max-width: 34rem;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  overflow-x: hidden;
+}
