@@ -68,6 +68,7 @@ import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.ClientPolicy
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -174,6 +175,7 @@ open class SessionController(
             writeFillSnapshot()
             refreshSaveQueue()
         },
+        isLive = { session.get() === it },
     )
 
     /** The extensions' save queue: what was captured, what was saved by itself, and its undo ([SaveImporter]). */
@@ -297,6 +299,7 @@ open class SessionController(
             is SwitchResult.Switched -> {
                 gateTarget = null
                 if (r.droppedSession) {
+                    forgetSessionViews()
                     zeroSecrets() // the old server's session and its in-flight secrets end here
                     dropFillSnapshot()
                 }
@@ -808,7 +811,8 @@ open class SessionController(
         )
         busy()
         // INV-EDIT: an edit is sealed under the vault its item lives in; a new login goes to the personal vault.
-        val outcome = live.engine.save(itemId, doc, existing?.vaultId)
+        // Alone with respect to the save queue: an automatic save never writes over this edit from an older read.
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
@@ -849,7 +853,7 @@ open class SessionController(
             ),
         )
         busy()
-        val outcome = live.engine.save(itemId, doc, existing?.vaultId)
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
@@ -861,9 +865,10 @@ open class SessionController(
     suspend fun deleteItem(itemId: String): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         busy()
-        val outcome = live.engine.remove(itemId)
+        val outcome = saves.exclusive {
+            live.engine.remove(itemId).also { if (session.get() === live) runCatching { saves.itemDeletedLocked(live, itemId) } }
+        }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
-        runCatching { saves.itemDeleted(live, itemId) }
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
         ActionResult.Ok
@@ -920,6 +925,7 @@ open class SessionController(
             a.close()
         }
         session.lock() // the engine releases its cache before the cache is deleted
+        forgetSessionViews()
         zeroSecrets()
         dropFillSnapshot() // whatever the stored session says: nothing shared with the extensions outlives a sign-out
         stored?.userId?.let { userId ->
@@ -1161,7 +1167,8 @@ open class SessionController(
         runCatching { personal.render(live) }
         if (live.account.personalStatus == Account.PersonalStatus.CONFIRMED) return
         scope.launch {
-            runCatching { personal.load(live) }.onFailure { if (it is CancellationException) throw it }
+            // Off any action, so the session may have ended meanwhile: the flow checks after every await.
+            if (session.get() === live) runCatching { personal.load(live) }.onFailure { if (it is CancellationException) throw it }
         }
     }
 
@@ -1291,7 +1298,9 @@ open class SessionController(
     /** Discard one listed capture: it leaves the queue and nothing is written. */
     fun discardPendingSave(id: String) {
         if (session.get() == null) return
-        runCatching { saves.discard(id) }
+        val live = session.get() ?: return
+        // Under the queue's own lock; it runs at once unless a save is in progress, and then right after it.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) { runCatching { saves.discard(live, id) }.onFailure { if (it is CancellationException) throw it } }
     }
 
     /** Take back one automatic save ([AppState.appliedSaves]); a login changed since is left alone. */
@@ -1312,7 +1321,8 @@ open class SessionController(
 
     /** The "saved from AutoFill" list has been read: it goes, and with it the undo from here. */
     fun dismissAppliedSaves() {
-        runCatching { saves.dismiss() }
+        val live = session.get() ?: return
+        scope.launch(start = CoroutineStart.UNDISPATCHED) { runCatching { saves.dismiss(live) }.onFailure { if (it is CancellationException) throw it } }
     }
 
     /**
@@ -1425,10 +1435,15 @@ open class SessionController(
         if (session.idleExpired()) lock(idleReason)
     }
 
-    private fun lock(reason: String?) {
-        session.lock()
+    /** Whatever a session's screens held in memory about the vault goes with it, however the session ended. */
+    private fun forgetSessionViews() {
         saves.locked()
         personal.reset()
+    }
+
+    private fun lock(reason: String?) {
+        session.lock()
+        forgetSessionViews()
         zeroSecrets()
         backgroundLockPending = false
         val stored = store.load()
@@ -1438,6 +1453,7 @@ open class SessionController(
 
     /** A definitive in-session rejection: the coordinator locked and purged the session; the sign-in surface, with the reason. */
     private fun endRejectedSession() {
+        forgetSessionViews()
         zeroSecrets()
         update { cleared(it, REASON_SESSION_ENDED).copy(screen = landingScreen(), accountEmail = null, mustChangePassword = false) }
         refreshQuick()

@@ -596,6 +596,51 @@ open class SessionControllerTest {
     }
 
     @Test
+    fun aPersonalVaultLookupThatAnswersAfterTheSessionEndedShowsNothing() = test {
+        seedSession()
+        membersAnswer("1")
+        val answer = routes.getValue("/members")
+        val asked = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        routes["/members"] = { request ->
+            asked.complete(Unit)
+            release.await()
+            answer(request)
+        }
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        withTimeout(10_000) { asked.await() } // the lookup of who else holds the served vault is in flight
+        assertEquals(ActionResult.Ok, controller.signOut())
+        assertNull(controller.state.personalVault)
+        release.complete(Unit)
+        delay(200)
+        assertNull(controller.state.personalVault, "neither the answer nor its failure draws a notice on the sign-in screen")
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+    }
+
+    @Test
+    fun aRaisedPersonalVaultProposalDoesNotSurviveASignOut() = test {
+        seedSession()
+        membersAnswer("1")
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.personalVault?.servedDetail != null }
+        assertEquals(ActionResult.Ok, controller.proposePersonalVault(reg.personalVault.vaultId))
+        assertTrue(assertNotNull(controller.state.personalVault?.proposal?.warning).contains("1@example.com"), "the confirmation names who else can read the vault")
+        assertEquals(ActionResult.Ok, controller.signOut())
+        assertNull(controller.state.personalVault)
+        // The next session on this device starts with no confirmation raised and nobody named.
+        routes["/members"] = { throw IOException("unreachable") }
+        seedSession()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.personalVault?.lookupFailed == true }
+        val notice = assertNotNull(controller.state.personalVault)
+        assertNull(notice.proposal)
+        assertNull(notice.servedDetail)
+        assertNull(notice.useServedLabel, "\"Use\" waits for a lookup made in this session")
+    }
+
+    @Test
     fun aDeviceThatNeverConfirmedItsPersonalVaultAsksOnceAndThenSavesWhatWasWaiting() = test {
         // This account was created elsewhere: the server names a personal vault, and nothing on this device vouches for it.
         seedSession()
@@ -734,7 +779,8 @@ open class SessionControllerTest {
         capture("change", "https://login.example.com/x", "fam", "hunter3")
         controller.unlock(PASSWORD)
         settle { controller.state.pendingSaves.size == 2 && controller.state.pendingSaves.all { it.reason != null } }
-        assertEquals(setOf(SaveImporter.PERSONAL_UNCONFIRMED), controller.state.pendingSaves.map { it.reason }.toSet())
+        // The notice for this state offers nothing to confirm, so the reason does not say "confirm above".
+        assertEquals(setOf(SaveImporter.PERSONAL_RECORD_MISSING), controller.state.pendingSaves.map { it.reason }.toSet())
         assertTrue(controller.state.appliedSaves.isEmpty())
         assertEquals(listOf("Example"), controller.state.items.map { it.name }, "nothing was written")
         assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
@@ -1050,12 +1096,94 @@ open class SessionControllerTest {
         assertEquals("corrected", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertTrue(queue.map.isEmpty() && controller.state.pendingSaves.isEmpty(), "the older capture is dropped, not offered")
         // A further change to the same login in this unlock is not applied by itself.
-        clocks.wall += MINUTE
+        clocks.wall = System_now() + MINUTE // after the login's last change, which the vault stamps with the real time
         capture("third", "https://login.example.com/x", "fam", "yet-another")
         controller.onForeground()
         settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
         assertEquals(SaveImporter.ALREADY_REPLACED, controller.state.pendingSaves.single().reason)
         assertEquals("corrected", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        // Nor in the next unlock, or any after it, while the first replace is still listed.
+        repeat(2) {
+            controller.lock()
+            controller.unlock(PASSWORD)
+            settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
+            assertEquals(SaveImporter.ALREADY_REPLACED, controller.state.pendingSaves.single().reason)
+            assertEquals("corrected", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        }
+        // Once the person has read and dismissed that record, the login can be updated by a save again.
+        controller.dismissAppliedSaves()
+        controller.lock()
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals("yet-another", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+    }
+
+    @Test
+    fun whatTheCapHeldBackIsNeverSavedByItselfLater() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        repeat(7) { capture("e$it", "https://shop$it.example/", "me", "pw$it") }
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size + controller.state.pendingSaves.count { it.reason != null } == 7 }
+        val heldBack = controller.state.pendingSaves.map { it.id }
+        assertEquals(2, heldBack.size)
+        // Fifty forged entries are five automatic saves, not five at every unlock.
+        repeat(2) {
+            controller.lock()
+            controller.unlock(PASSWORD)
+            settle { controller.state.pendingSaves.size == 2 && controller.state.pendingSaves.all { it.reason != null } }
+            controller.onForeground()
+            delay(100)
+            assertEquals(heldBack, controller.state.pendingSaves.map { it.id })
+            assertEquals(listOf(SaveImporter.TOO_MANY, SaveImporter.TOO_MANY), controller.state.pendingSaves.map { it.reason })
+            assertEquals(6, controller.state.items.size)
+        }
+        // Dismissing the list of what was saved does not release them either.
+        controller.dismissAppliedSaves()
+        controller.lock()
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.size == 2 && controller.state.pendingSaves.all { it.reason != null } }
+        assertEquals(6, controller.state.items.size)
+        // By hand they are saved or discarded as before, and the hold goes with the entry.
+        assertEquals(ActionResult.Ok, controller.confirmPendingSave(heldBack[0]))
+        controller.discardPendingSave(heldBack[1])
+        assertEquals(7, controller.state.items.size)
+        assertTrue(controller.state.pendingSaves.isEmpty())
+        controller.dismissAppliedSaves()
+        assertNull(appliedLog.bytes, "nothing is kept once nothing is listed or held")
+    }
+
+    @Test
+    fun anUndoDoesNotRemoveAnAddedLoginThatWasEditedInAnyField() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("added", "https://shop.example/", "me", "pw")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        val added = controller.state.items.single { it.name == "shop.example" }.itemId
+        // The same username and password, but a note and a code were added since: that is the person's work.
+        assertEquals(ActionResult.Ok, controller.saveLogin(added, LoginInput("shop.example", "me", "pw", listOf("https://shop.example"), "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP", "the recovery codes are in the safe", false)))
+        assertEquals(ActionResult.Failed(SaveImporter.UNDO_EDITED), controller.undoAppliedSave("added"))
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
+        assertEquals(listOf("added"), controller.state.appliedSaves.map { it.id }, "the record stays, with the reason said")
+    }
+
+    @Test
+    fun aNewerCaptureIsNotDroppedBecauseAnOlderOneWasAppliedLater() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("first", "https://shop.example/", "me", "pw-1")
+        clocks.wall += 10 * MINUTE
+        controller.unlock(PASSWORD) // applied ten minutes after it was captured
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        controller.lock()
+        // A capture made after the first one, though before the first was applied: it is the newer password.
+        clocks.wall -= 5 * MINUTE
+        capture("second", "https://shop.example/", "me", "pw-2")
+        clocks.wall += 6 * MINUTE
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
+        assertEquals("second", controller.state.pendingSaves.single().id, "listed for the person to decide, not dropped unread")
     }
 
     @Test
