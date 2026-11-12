@@ -64,6 +64,8 @@ data class AppState(
     val recoverVerified: Boolean,
     /** VAULT: what happened to shared vaults since the last look (spec 03 §11), each dismissable. */
     val vaultNotices: List<VaultNoticeView>,
+    /** The shared vaults screen while it is open ([SessionController.openSharing]); null otherwise. */
+    val sharing: SharingView?,
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
@@ -107,7 +109,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, recoverVerified = false, vaultNotices = emptyList(), twoStep = null, trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, recoverVerified = false, vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -212,6 +214,45 @@ data class CardDetail(
     val expMonth: String?,
     val expYear: String?,
 )
+
+/** The vaults this account holds, and the shared vaults it can bring back (spec 03 §10, §11). */
+data class SharingView(
+    /** The personal vault first, then the shared ones by name. */
+    val vaults: List<SharingVaultView>,
+    /** Shared vaults this account deleted that are still in their 7-day grace: Restore brings one back for everyone. */
+    val deleted: List<DeletedVaultView>,
+    /** Shared vaults this account lost access to, a sealed copy of which this device keeps for a while. Read only. */
+    val removed: List<RemovedVaultView>,
+    /** A copy of a vault's items into the personal vault, running ([CopyProgressView]) or done ([copied]). */
+    val copying: CopyProgressView?,
+    /** What the last copy into the personal vault came to. */
+    val copied: String?,
+)
+
+data class SharingVaultView(
+    val vaultId: String,
+    val name: String,
+    val personal: Boolean,
+    /** "owner", "writer" or "reader" in a shared vault; null for the personal vault. */
+    val role: String?,
+    /** The server reports this account as the owner, and this account's own record agrees. */
+    val ownershipConfirmed: Boolean,
+    val itemCount: Int,
+    val attachmentCount: Int,
+)
+
+data class DeletedVaultView(val vaultId: String, val name: String, val deletedAtMs: Long, val purgeAtMs: Long)
+
+data class RemovedVaultView(
+    val vaultId: String,
+    val name: String,
+    /** Why access went and until when the sealed copy is kept, in words. */
+    val line: String,
+    /** The removal could not be verified as a real owner action. */
+    val warning: Boolean,
+)
+
+data class CopyProgressView(val vaultId: String, val done: Int, val total: Int)
 
 /** Two-step sign-in, as the server reports it for this account. */
 data class TwoStepView(

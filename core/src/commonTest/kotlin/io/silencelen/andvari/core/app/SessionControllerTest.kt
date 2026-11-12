@@ -685,6 +685,116 @@ open class SessionControllerTest {
         assertEquals("sig", saved.dupeAck)
     }
 
+    // ---- shared vaults ----
+
+    /** A server that keeps vault rows and grants: creates, renames, deletes and restores what this account asks. */
+    private inner class VaultServer(private val rig: Rig) {
+        val vaults = LinkedHashMap<String, WireVault>()
+        val grants = LinkedHashMap<String, io.silencelen.andvari.core.model.WireGrant>()
+        val removed = mutableListOf<String>()
+        val deleted = mutableListOf<io.silencelen.andvari.core.model.DeletedVaultSummary>()
+        var rev = 100L
+
+        init {
+            vaults[reg.personalVault.vaultId] = WireVault(reg.personalVault.vaultId, "personal", 1, reg.personalVault.metaBlob, 1_000)
+            with(rig) {
+                routes["/account/state"] = { respond("""{"sealedState":null,"seq":0}""", HttpStatusCode.OK, headers) }
+                routes["/sync/push"] = { respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(rev, emptyList())), HttpStatusCode.OK, headers) }
+                routes["/sync"] = { request ->
+                    // A delta (re-sent rows are idempotent); a removal is told once.
+                    val since = request.url.parameters["since"]?.toLongOrNull() ?: 0L
+                    val body = io.silencelen.andvari.core.model.SyncResponse(++rev, since == 0L, vaults.values.toList(), grants.values.toList(), emptyList(), removed.toList())
+                    removed.clear()
+                    respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+                }
+                routes["/vaults/deleted"] = {
+                    respond(json.encodeToString(kotlinx.serialization.builtins.ListSerializer(io.silencelen.andvari.core.model.DeletedVaultSummary.serializer()), deleted.toList()), HttpStatusCode.OK, headers)
+                }
+                routes["/api/v1/vaults"] = { request ->
+                    val req = json.decodeFromString(io.silencelen.andvari.core.model.CreateVaultRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                    vaults[req.vaultId] = WireVault(req.vaultId, "shared", ++rev, req.metaBlob, 2_000)
+                    grants[req.vaultId] = io.silencelen.andvari.core.model.WireGrant(req.vaultId, reg.userId, "owner", req.wrappedVk, rev)
+                    respond("""{"rev":$rev}""", HttpStatusCode.OK, headers)
+                }
+                routes["/meta"] = { request ->
+                    val vaultId = request.url.encodedPath.removeSuffix("/meta").substringAfterLast('/')
+                    val req = json.decodeFromString(io.silencelen.andvari.core.model.VaultMetaUpdateRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                    vaults[vaultId] = vaults.getValue(vaultId).copy(metaBlob = req.metaBlob, rev = ++rev)
+                    respond("""{"rev":$rev}""", HttpStatusCode.OK, headers)
+                }
+                routes["/delete"] = { request ->
+                    val vaultId = request.url.encodedPath.removeSuffix("/delete").substringAfterLast('/')
+                    val req = json.decodeFromString(io.silencelen.andvari.core.model.VaultDeleteRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                    val v = vaults.remove(vaultId)!!
+                    val g = grants.remove(vaultId)!!
+                    removed += vaultId
+                    deleted += io.silencelen.andvari.core.model.DeletedVaultSummary(vaultId, v.metaBlob, g.wrappedVk, 3_000, 3_000 + 7 * DAY, req.deleteId)
+                    respond("""{"rev":${++rev},"purgeAt":${3_000 + 7 * DAY}}""", HttpStatusCode.OK, headers)
+                }
+                routes["/restore"] = { request ->
+                    val vaultId = request.url.encodedPath.removeSuffix("/restore").substringAfterLast('/')
+                    val d = deleted.single { it.vaultId == vaultId }
+                    deleted.remove(d)
+                    vaults[vaultId] = WireVault(vaultId, "shared", ++rev, d.metaBlob, 2_000)
+                    grants[vaultId] = io.silencelen.andvari.core.model.WireGrant(vaultId, reg.userId, "owner", d.wrappedVk, rev)
+                    respond("""{"rev":$rev}""", HttpStatusCode.OK, headers)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun aSharedVaultIsCreatedRenamedDeletedAndRestored() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.openSharing())
+        val start = assertNotNull(controller.state.sharing)
+        assertEquals(listOf(true), start.vaults.map { it.personal }, "the personal vault, and nothing shared yet")
+        assertTrue(start.deleted.isEmpty())
+
+        assertEquals(ActionResult.Failed(SharingCopy.NAME_REQUIRED), controller.createSharedVault("  "))
+        assertEquals(ActionResult.Ok, controller.createSharedVault(" Family "))
+        val family = assertNotNull(controller.state.sharing).vaults.single { !it.personal }
+        assertEquals("Family", family.name)
+        assertEquals("owner", family.role)
+        assertTrue(family.ownershipConfirmed, "created here: this account's own record says it owns it")
+        assertTrue(controller.vaultsForNewItems().any { it.vaultId == family.vaultId && !it.personal }, "and a new item can go there")
+
+        assertEquals(ActionResult.Ok, controller.renameSharedVault(family.vaultId, "Household"))
+        assertEquals("Household", controller.state.sharing?.vaults?.single { !it.personal }?.name)
+        assertEquals(ActionResult.Failed(SharingCopy.OWNER_CANNOT_LEAVE), controller.leaveSharedVault(family.vaultId))
+
+        assertEquals(ActionResult.Failed(SharingCopy.TYPE_THE_NAME), controller.deleteSharedVault(family.vaultId, "household"))
+        assertTrue(server.vaults.containsKey(family.vaultId), "nothing was sent")
+        assertEquals(ActionResult.Ok, controller.deleteSharedVault(family.vaultId, "Household"))
+        val after = assertNotNull(controller.state.sharing)
+        assertTrue(after.vaults.none { it.vaultId == family.vaultId }, "gone from the vaults")
+        assertEquals(listOf("Household"), after.deleted.map { it.name }, "and restorable")
+        assertTrue(after.removed.none { it.vaultId == family.vaultId }, "listed once, under Recently deleted")
+        assertTrue(controller.state.notice!!.contains("You can restore it until"))
+
+        assertEquals(ActionResult.Ok, controller.restoreDeletedVault(family.vaultId))
+        val back = assertNotNull(controller.state.sharing)
+        assertEquals("Household", back.vaults.single { !it.personal }.name)
+        assertTrue(back.deleted.isEmpty())
+        controller.closeSharing()
+        assertNull(controller.state.sharing)
+    }
+
+    @Test
+    fun onlyAnOwnerRenamesOrDeletesAndNothingHappensToAVaultThatIsNotThere() = test {
+        unlockedWithAPersonalVault()
+        VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        val elsewhere = "00000000-0000-4000-8000-0000000000f1"
+        assertEquals(ActionResult.Failed(SharingCopy.OWNER_ONLY), controller.renameSharedVault(reg.personalVault.vaultId, "Mine"), "the personal vault is not a shared one")
+        assertEquals(ActionResult.Failed(SharingCopy.OWNER_ONLY), controller.deleteSharedVault(reg.personalVault.vaultId, "Personal"))
+        assertEquals(ActionResult.Failed(SharingCopy.VAULT_GONE), controller.deleteSharedVault(elsewhere, "x"))
+        assertEquals(ActionResult.Failed(SharingCopy.VAULT_GONE), controller.leaveSharedVault(elsewhere))
+        assertEquals(ActionResult.Failed(SharingCopy.VAULT_GONE), controller.restoreDeletedVault(elsewhere))
+    }
+
     // ---- two-step sign-in ----
 
     @Test
