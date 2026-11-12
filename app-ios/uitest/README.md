@@ -74,7 +74,6 @@ dump; none of them loosens an assertion.
   designation" (its copy of the account state is still empty), and a held proposal is not re-judged once the
   refresh has brought the designation. Without the `hydrate()` first, the same account gets the same-vault
   sentence. Both offer the one "Use Personal"; the first wording says less than it could.
-- **The Safari popup** still shows "Autofill is off — turn on for all sites" in the Safari build.
 
 ### The quick-unlock key
 
