@@ -5,6 +5,7 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CardDisplay
+import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
@@ -913,6 +914,81 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- trash (spec 03 §11: a deleted item is kept 30 days) ----
+
+    /** The trash as last read, each deleted item with its last readable version. Held only while the trash is open. */
+    private var trashRead: Map<String, DeletedItemView> = emptyMap()
+
+    /** Whether this account may write [vaultId]: not a reader of it, and holding its key. */
+    private fun canWrite(live: VaultSession.Unlocked, vaultId: String): Boolean =
+        live.account.roleFor(vaultId) != "reader" && live.account.canSealUnder(vaultId)
+
+    /** A line about [doc] that tells it apart and is never a secret: a login's username, a card's brand and last four. */
+    private fun safeDetail(doc: ItemDoc): String? = when (doc.type) {
+        "login" -> doc.login?.username?.ifEmpty { null }
+        "card" -> CardDisplay.subtitle(doc).ifEmpty { null }
+        else -> null
+    }
+
+    private fun vaultName(live: VaultSession.Unlocked, vaultId: String): String? =
+        runCatching { live.engine.vaultInfos().firstOrNull { it.vaultId == vaultId }?.name }.getOrNull()
+
+    private fun trashViews(live: VaultSession.Unlocked): List<TrashItemView> = trashRead.values.sortedByDescending { it.deletedAt }.map { d ->
+        val doc = d.doc
+        TrashItemView(
+            itemId = d.itemId, name = doc?.name, type = doc?.type, detail = doc?.let(::safeDetail), vault = vaultName(live, d.vaultId),
+            deletedAtMs = d.deletedAt, canRestore = doc != null && canWrite(live, d.vaultId), canPurge = live.account.roleFor(d.vaultId) != "reader",
+        )
+    }
+
+    /** Read the server's trash ([AppState.trash]). Each item is named from its last readable version. */
+    @Throws(CancellationException::class)
+    suspend fun openTrash(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val deleted = runBounded(BoundedOps.FLAT_MS) { live.engine.deletedItems() }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        trashRead = deleted.associateBy { it.itemId }
+        update { it.copy(busy = false, trash = trashViews(live)) }
+        ActionResult.Ok
+    }
+
+    /** The trash screen closed: what was read goes. */
+    fun closeTrash() {
+        trashRead = emptyMap()
+        update { it.copy(trash = null) }
+    }
+
+    /** Bring a deleted item back to its vault, on every device. Its attachments do not come back. */
+    @Throws(CancellationException::class)
+    suspend fun restoreFromTrash(itemId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val deleted = trashRead[itemId] ?: return@action ActionResult.Failed(ItemCopy.TRASH_GONE)
+        val doc = deleted.doc ?: return@action ActionResult.Failed(ItemCopy.TRASH_UNREADABLE)
+        if (!canWrite(live, deleted.vaultId)) return@action ActionResult.Failed(ItemCopy.READ_ONLY)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.restoreDeleted(itemId, deleted.vaultId, doc) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        trashRead = trashRead - itemId
+        update { it.copy(busy = false, items = summaries(it.query), trash = it.trash?.let { trashViews(live) }, notice = ItemCopy.TRASH_RESTORED) }
+        writeFillSnapshot()
+        ActionResult.Ok
+    }
+
+    /** Delete an item for good: it and its history are removed from every device now. */
+    @Throws(CancellationException::class)
+    suspend fun purgeFromTrash(itemId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val deleted = trashRead[itemId] ?: return@action ActionResult.Failed(ItemCopy.TRASH_GONE)
+        if (live.account.roleFor(deleted.vaultId) == "reader") return@action ActionResult.Failed(ItemCopy.READ_ONLY)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.purgeDeleted(itemId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        trashRead = trashRead - itemId
+        update { it.copy(busy = false, trash = it.trash?.let { trashViews(live) }, notice = ItemCopy.TRASH_PURGED) }
+        ActionResult.Ok
+    }
+
     /** Delete an item (it goes to the server's trash). */
     @Throws(CancellationException::class)
     suspend fun deleteItem(itemId: String): ActionResult = action {
@@ -1492,6 +1568,7 @@ open class SessionController(
     private fun forgetSessionViews() {
         saves.locked()
         personal.reset()
+        trashRead = emptyMap()
     }
 
     private fun lock(reason: String?) {
@@ -1567,7 +1644,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(),
+        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), trash = null,
     )
 
     private companion object {
@@ -1631,4 +1708,13 @@ internal object RecoverCopy {
     const val EXPIRED = "Your recovery session expired — start again."
     const val WEAK_PASSWORD = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
     const val DONE = "Master password reset — sign in with your new password."
+}
+
+/** What the trash says. */
+internal object ItemCopy {
+    const val TRASH_RESTORED = "Item restored."
+    const val TRASH_PURGED = "Item deleted for good."
+    const val TRASH_GONE = "That item is no longer in the trash. Open the trash again."
+    const val TRASH_UNREADABLE = "No readable version of this item is left, so it can only be deleted for good."
+    const val READ_ONLY = "You can only view this vault, so this can't be changed here."
 }

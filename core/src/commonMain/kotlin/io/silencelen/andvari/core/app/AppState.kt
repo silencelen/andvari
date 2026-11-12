@@ -1,5 +1,6 @@
 package io.silencelen.andvari.core.app
 
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.session.QuickGate
 
 /**
@@ -61,6 +62,8 @@ data class AppState(
     val accountEmail: String?,
     /** RECOVER: the email and phrase were verified; the screen now asks for the new master password. */
     val recoverVerified: Boolean,
+    /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
+    val trash: List<TrashItemView>?,
     /** VAULT: the personal vault is not confirmed on this device; what the person has to decide. Null when it is. */
     val personalVault: PersonalVaultView?,
     /** VAULT: captured logins that could not be saved by themselves; each says why and can be saved or discarded. */
@@ -98,7 +101,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, recoverVerified = false, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, recoverVerified = false, trash = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -202,6 +205,28 @@ data class CardDetail(
     /** The stored month and year, each as stored ("07", "2031"), for an editor: never re-split from [expiry]. */
     val expMonth: String?,
     val expYear: String?,
+)
+
+/** What the trash screen says above the list. */
+const val TRASH_EXPLANATION: String =
+    "Deleted items are kept for 30 days, then removed automatically. " + HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS + " \"Delete forever\" removes one now."
+
+/** One deleted item in the server's trash. Nothing secret: its name and kind, a username or a card's last four. */
+data class TrashItemView(
+    val itemId: String,
+    /** From its last readable version; null when none could be read (it can then only be deleted for good). */
+    val name: String?,
+    /** "login", "note" or "card"; null when no version could be read. */
+    val type: String?,
+    /** A login's username or a card's brand and last four. */
+    val detail: String?,
+    /** The vault it was deleted from, by the name this device knows it by. */
+    val vault: String?,
+    val deletedAtMs: Long,
+    /** Restore brings it back (without its attachments); false for an unreadable one or a vault this account only reads. */
+    val canRestore: Boolean,
+    /** Delete forever removes it and its history now; false in a vault this account only reads. */
+    val canPurge: Boolean,
 )
 
 /** A secure note being added or edited, as typed. Not a data class: no toString of the text. */

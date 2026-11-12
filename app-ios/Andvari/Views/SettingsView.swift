@@ -72,6 +72,19 @@ struct SettingsView: View {
                 .listRowBackground(Palette.raised)
 
                 Section {
+                    NavigationLink {
+                        TrashView()
+                    } label: {
+                        Label("Trash", systemImage: "trash")
+                    }
+                } header: {
+                    Text("Vault")
+                } footer: {
+                    Text("Items you delete are kept in the trash for 30 days.")
+                }
+                .listRowBackground(Palette.raised)
+
+                Section {
                     LabeledContent("AutoFill", value: autofillOn.map { $0 ? "On" : "Off" } ?? "–")
                     if autofillOn == false {
                         Button("Open AutoFill settings") {

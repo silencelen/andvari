@@ -684,6 +684,81 @@ open class SessionControllerTest {
         assertEquals("sig", saved.dupeAck)
     }
 
+    // ---- trash and history ----
+
+    /** [doc] as the server keeps an archived version of [itemId] in the personal vault. */
+    private fun archived(itemId: String, rev: Long, doc: ItemDoc, archivedAt: Long): io.silencelen.andvari.core.model.ItemVersion {
+        val upload = enrolled.account.encryptItem(reg.personalVault.vaultId, itemId, doc)
+        return io.silencelen.andvari.core.model.ItemVersion(rev, upload.blob, upload.formatVersion, archivedAt)
+    }
+
+    private fun Rig.versionsAnswer(byItem: Map<String, List<io.silencelen.andvari.core.model.ItemVersion>>) {
+        routes["/versions"] = { request ->
+            val itemId = request.url.encodedPath.removeSuffix("/versions").substringAfterLast('/')
+            val body = io.silencelen.andvari.core.model.ItemVersionsResponse(itemId, byItem[itemId].orEmpty())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.ItemVersionsResponse.serializer(), body), HttpStatusCode.OK, headers)
+        }
+    }
+
+    @Test
+    fun theTrashNamesDeletedItemsRestoresOneAndDeletesAnotherForGood() = test {
+        unlockedWithAPersonalVault()
+        val restorable = "00000000-0000-4000-8000-0000000000d1"
+        val unreadable = "00000000-0000-4000-8000-0000000000d2"
+        val vault = reg.personalVault.vaultId
+        routes["/items/deleted"] = {
+            val items = listOf(io.silencelen.andvari.core.model.DeletedItem(restorable, vault, 5_000), io.silencelen.andvari.core.model.DeletedItem(unreadable, vault, 9_000))
+            respond(json.encodeToString(io.silencelen.andvari.core.model.DeletedItemsResponse.serializer(), io.silencelen.andvari.core.model.DeletedItemsResponse(items)), HttpStatusCode.OK, headers)
+        }
+        val old = ItemDoc(type = "login", name = "Old bank", login = LoginData(username = "me", password = "pw-old", uris = listOf("https://bank.example")), attachments = listOf(io.silencelen.andvari.core.client.AttachmentRef("a1", "statement.pdf", 10, "k")))
+        versionsAnswer(mapOf(restorable to listOf(archived(restorable, 7, old, 4_000))))
+        assertEquals(ActionResult.Ok, controller.openTrash())
+        val trash = assertNotNull(controller.state.trash)
+        assertEquals(listOf(unreadable, restorable), trash.map { it.itemId }, "newest deletion first")
+        val readable = trash.single { it.itemId == restorable }
+        assertEquals("Old bank", readable.name)
+        assertEquals("me", readable.detail)
+        assertTrue(readable.canRestore && readable.canPurge)
+        val lost = trash.single { it.itemId == unreadable }
+        assertNull(lost.name)
+        assertFalse(lost.canRestore, "no readable version: it can only be deleted for good")
+        assertTrue(lost.canPurge)
+        assertFalse(controller.state.toString().contains("pw-old"), "no secret is in the state")
+        assertEquals(ActionResult.Failed(ItemCopy.TRASH_UNREADABLE), controller.restoreFromTrash(unreadable))
+
+        // Restore: the version is sealed again for its vault, without the attachments the deletion removed.
+        var restored: io.silencelen.andvari.core.model.ItemUpload? = null
+        routes["/restore"] = { request ->
+            restored = json.decodeFromString(io.silencelen.andvari.core.model.ItemUpload.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            respond("""{"rev":20}""", HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = {
+            val up = assertNotNull(restored)
+            val row = WireItem(restorable, vault, 20, 6_000, 6_000, false, false, up.formatVersion, up.attachmentIds, up.blob)
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), io.silencelen.andvari.core.model.SyncResponse(20, false, emptyList(), emptyList(), listOf(row), emptyList())), HttpStatusCode.OK, headers)
+        }
+        assertEquals(ActionResult.Ok, controller.restoreFromTrash(restorable))
+        val back = enrolled.account.decryptItem(WireItem(restorable, vault, 20, 0, 0, false, false, restored!!.formatVersion, emptyList(), restored!!.blob))
+        assertEquals("pw-old", back.login?.password)
+        assertTrue(back.attachments.isEmpty(), "attachments do not come back")
+        assertTrue(controller.state.items.any { it.itemId == restorable && it.name == "Old bank" }, "in the vault again")
+        assertEquals(listOf(unreadable), controller.state.trash?.map { it.itemId })
+
+        // Delete forever.
+        var purged: String? = null
+        routes["/purge"] = { request ->
+            purged = request.url.encodedPath
+            respond("""{"rev":21}""", HttpStatusCode.OK, headers)
+        }
+        assertEquals(ActionResult.Ok, controller.purgeFromTrash(unreadable))
+        assertTrue(purged!!.contains(unreadable))
+        assertEquals(emptyList(), controller.state.trash)
+        // Closing it, or a lock, forgets what was read.
+        controller.closeTrash()
+        assertNull(controller.state.trash)
+        assertIs<ActionResult.Failed>(controller.restoreFromTrash(restorable))
+    }
+
     // ---- the personal vault ----
 
     /** The members of the personal vault as the server reports them: this account alone. */

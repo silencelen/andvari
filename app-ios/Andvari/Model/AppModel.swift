@@ -318,6 +318,24 @@ final class AppModel: ObservableObject {
         await run { try await $0.saveNote(itemId: itemId, input: input) }
     }
 
+    // MARK: - Trash
+
+    func openTrash() async -> Outcome {
+        await run { try await $0.openTrash() }
+    }
+
+    func closeTrash() {
+        controller.closeTrash()
+    }
+
+    func restoreFromTrash(_ itemId: String) async -> Outcome {
+        await run { try await $0.restoreFromTrash(itemId: itemId) }
+    }
+
+    func purgeFromTrash(_ itemId: String) async -> Outcome {
+        await run { try await $0.purgeFromTrash(itemId: itemId) }
+    }
+
     func deleteItem(_ itemId: String) async -> Outcome {
         await run { try await $0.deleteItem(itemId: itemId) }
     }
