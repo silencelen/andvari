@@ -33,14 +33,23 @@ const noDefaultServer = {
   },
 };
 
+// The pages the Safari build does not ship: the server is chosen in the andvari app (no Options page), quick unlock is
+// the app's Face ID (no WebAuthn connector window), and Chrome's offscreen clipboard document has no use there. The
+// worker refuses their messages in that build too; the check at the end fails the build if any is left in dist/.
+const DESKTOP_ONLY_PAGES = ["options", "connector", "offscreen"];
+
 await esbuild.build({
   entryPoints: {
     background: "src/background.ts",
     content: "src/content.ts",
     popup: "src/popup.ts",
-    options: "src/options.ts", // wave-3 endpoint switcher (options_ui in both manifests)
-    connector: "src/connector.ts", // 0.17.0 biometric quick-unlock WebAuthn ceremony window
-    offscreen: "src/offscreen.ts", // Chrome clipboard-clear backstop document (E1-4); inert on Firefox
+    ...(target === "safari"
+      ? {}
+      : {
+          options: "src/options.ts", // wave-3 endpoint switcher (options_ui in the desktop manifests)
+          connector: "src/connector.ts", // 0.17.0 biometric quick-unlock WebAuthn ceremony window
+          offscreen: "src/offscreen.ts", // Chrome clipboard-clear backstop document (E1-4); inert on Firefox
+        }),
     "kdf-worker": "src/kdf-worker.ts",
   },
   bundle: true,
@@ -72,11 +81,13 @@ if (target === "safari") {
 } else {
   cpSync("popup.html", "dist/popup.html");
 }
-cpSync("options.html", "dist/options.html"); // wave-3 options_ui page; <link>s popup.css for the theme
+if (target !== "safari") cpSync("options.html", "dist/options.html"); // wave-3 options_ui page; <link>s popup.css for the theme
 cpSync("popup.css", "dist/popup.css"); // the ported treasury theme; popup.html + options.html <link> it
 cpSync("theme-boot.js", "dist/theme-boot.js"); // H134 pre-paint theme stamp; <script>d by popup/options/connector (classic, not bundled — a deferred module flashes the wrong palette)
-cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backstop (E1-4); loads dist/offscreen.js
-cpSync("connector.html", "dist/connector.html"); // 0.17.0 biometric ceremony window; loads dist/connector.js + popup.css
+if (target !== "safari") {
+  cpSync("offscreen.html", "dist/offscreen.html"); // Chrome clipboard-clear backstop (E1-4); loads dist/offscreen.js
+  cpSync("connector.html", "dist/connector.html"); // 0.17.0 biometric ceremony window; loads dist/connector.js + popup.css
+}
 if (target === "safari") {
   cpSync("safari-boot.js", "dist/safari-boot.js"); // the background page's first script: load marker + error capture
   cpSync("safari-diag.js", "dist/safari-diag.js"); // the popup's reader for what it recorded
@@ -89,5 +100,7 @@ if (target === "safari") {
   const walk = (dir) => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? walk(join(dir, name)) : [join(dir, name)]));
   const left = walk("dist").filter((f) => !f.endsWith(".png") && readFileSync(f, "utf8").includes(host));
   if (left.length > 0) throw new Error(`the Safari build must name no default server, but ${host} is in: ${left.join(", ")}`);
+  const pages = walk("dist").filter((f) => DESKTOP_ONLY_PAGES.some((p) => f === join("dist", `${p}.html`) || f === join("dist", `${p}.js`)));
+  if (pages.length > 0) throw new Error(`the Safari build must not ship ${pages.join(", ")}`);
 }
 console.log(`built → dist/ (${target}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

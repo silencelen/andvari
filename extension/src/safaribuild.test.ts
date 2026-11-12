@@ -34,3 +34,15 @@ test("in the Safari build, no server chosen means nothing is dialed and no autof
   const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf('case "status":', bg.indexOf("async function appVaultDispatch(")));
   assert.match(lane, /case "ping":\s*\/\/[^\n]*\n\s*return \{ ok: false, error:/);
 });
+
+test("the Safari build ships no Options, connector or offscreen page, and its worker refuses a server change from one", () => {
+  const build = read("../build.mjs");
+  assert.match(build, /const DESKTOP_ONLY_PAGES = \["options", "connector", "offscreen"\];/);
+  assert.match(build, /\.\.\.\(target === "safari"\s*\? \{\}\s*: \{\s*options: "src\/options\.ts"/, "not even bundled");
+  assert.match(build, /if \(target !== "safari"\) cpSync\("options\.html"/);
+  assert.match(build, /if \(pages\.length > 0\) throw new Error\(`the Safari build must not ship/);
+  const bg = read("./background.ts");
+  const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf('case "status":', bg.indexOf("async function appVaultDispatch(")));
+  assert.match(lane, /case "setServerUrl":[\s\S]*?return \{ ok: false, code: "not_allowed" \} satisfies Res<"setServerUrl">;/);
+  assert.match(lane, /case "forgetLegacyServer":\s*return \{ ok: false \} satisfies Res<"forgetLegacyServer">;/);
+});

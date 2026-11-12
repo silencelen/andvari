@@ -3904,6 +3904,12 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     case "ping":
       // This build never contacts the server: the andvari app does, and the popup shows no connection test.
       return { ok: false, error: "the andvari app talks to the server, not this extension" } satisfies Res<"ping">;
+    case "setServerUrl":
+      // The server is the andvari app's: only the app's answer (its own ask, or the popup's relay) changes it here, and
+      // the page that sent this (Options) is not in this build.
+      return { ok: false, code: "not_allowed" } satisfies Res<"setServerUrl">;
+    case "forgetLegacyServer":
+      return { ok: false } satisfies Res<"forgetLegacyServer">;
     case "status":
       return {
         unlocked: vault.unlocked,
