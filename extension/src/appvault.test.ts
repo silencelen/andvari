@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { APP_VAULT_LIFETIME_MS, AppVault, describeDiag, parseOpenReply, parseSecretReply, vaultFromApp } from "./appvault.ts";
+import { APP_VAULT_LIFETIME_MS, AppVault, describeDiag, parseCardReply, parseOpenReply, parseSecretReply, vaultFromApp } from "./appvault.ts";
 
 const TICKET = "ab".repeat(32);
 const item = { itemId: "i1", name: "Example", username: "fam", uris: ["https://login.example.com/x"], hasTotp: true };
@@ -11,7 +11,7 @@ test("the open reply: a list with no secrets, an open-the-app state, a cancel, o
   const r = parseOpenReply(opened);
   assert.equal(r.state, "open");
   assert.deepEqual(r.state === "open" ? Object.keys(r.items[0]!).sort() : [], ["hasTotp", "itemId", "name", "uris", "username"], "an item carries no secret field, whatever the handler sent");
-  assert.deepEqual(parseOpenReply({ ...opened, items: [{ ...item, password: "hunter2", totp: "otpauth://x" }] }), { state: "open", ticket: TICKET, email: "u@example.com", items: [item] }, "a secret the handler should never send is dropped");
+  assert.deepEqual(parseOpenReply({ ...opened, items: [{ ...item, password: "hunter2", totp: "otpauth://x" }] }), { state: "open", ticket: TICKET, email: "u@example.com", items: [item], cards: [] }, "a secret the handler should never send is dropped");
   assert.deepEqual(parseOpenReply({ ok: true, type: "vaultOpen", state: "openApp", message: "Turn on Face ID" }), { state: "openApp", message: "Turn on Face ID" });
   assert.deepEqual(parseOpenReply({ ok: true, type: "vaultOpen", state: "cancelled" }), { state: "cancelled" });
   for (const bad of [
@@ -258,4 +258,55 @@ test("the Safari worker ties the vault to nothing in the popup's page", () => {
   // The prompt is asked for only after the unlock view has been painted and the sheet has settled.
   const onOpen = popup.slice(popup.indexOf("async function appUnlockOnOpen("), popup.indexOf("async function appUnlockOnOpen(") + 1400);
   assert.ok(onOpen.indexOf("requestAnimationFrame(() => requestAnimationFrame(") > 0 && onOpen.indexOf("requestAnimationFrame(") < onOpen.indexOf("await appUnlock();"));
+});
+
+// ---- cards ----
+
+const card = { itemId: "c1", name: "Everyday", subtitle: "Visa ••4242", hasNumber: true, hasExpiry: true, hasCvv: true, hasName: true };
+
+test("cards are listed masked, and a card ask keeps only the fields that were asked for", async () => {
+  const withCards = parseOpenReply({ ...opened, cards: [{ ...card, number: "4242424242424242", cvv: "123" }] });
+  assert.deepEqual(withCards.state === "open" ? withCards.cards : null, [card], "a number the handler should never list is dropped");
+  assert.deepEqual((parseOpenReply(opened) as { cards: unknown[] }).cards, [], "an app build that lists no cards is still an unlock");
+  assert.deepEqual(parseOpenReply({ ...opened, cards: [{ ...card, itemId: "" }] }), { state: "unavailable" });
+
+  const all = { ok: true, type: "vaultSecret", state: "secret", card: { number: "4242424242424242", expMonth: "07", expYear: "2031", cvv: "123", name: "F AM" } };
+  assert.deepEqual(parseCardReply(all, ["number"]), { state: "card", fields: { number: "4242424242424242" } }, "the CVV that came along is dropped");
+  assert.deepEqual(parseCardReply(all, ["expMonth", "expYear"]), { state: "card", fields: { expMonth: "07", expYear: "2031" } });
+  assert.deepEqual(parseCardReply({ ok: true, type: "vaultSecret", state: "secret" }, ["number"]), { state: "unavailable" });
+  assert.deepEqual(parseCardReply({ ok: true, type: "vaultSecret", state: "refused" }, ["number"]), { state: "refused" });
+
+  const sent: { type: string; want?: string; fields?: string[]; itemId?: string; name?: string }[] = [];
+  const vault = new AppVault(async (m) => {
+    sent.push(m);
+    if (m.type === "vaultOpen") return { ...opened, cards: [card] };
+    return all;
+  });
+  assert.deepEqual(await vault.cardFields("c1", ["number"]), { state: "cancelled" }, "locked: nothing is asked");
+  await vault.open();
+  assert.deepEqual(vault.cards(), [card]);
+  assert.deepEqual(vault.listAnswer(vault.cards()), { locked: false, items: [card] });
+  assert.deepEqual(await vault.cardFields("i1", ["number"]), { state: "refused" }, "a login is not a card");
+  assert.deepEqual(await vault.cardFields("c1", ["cvv"]), { state: "card", fields: { cvv: "123" } });
+  assert.deepEqual(sent.at(-1), { type: "vaultSecret", ticket: TICKET, itemId: "c1", want: "card", name: "Everyday", fields: ["cvv"] }, "one card, the one field");
+  assert.deepEqual(await vault.cardFields("c1", []), { state: "card", fields: {} }, "nothing asked: nothing sent");
+  assert.equal(sent.filter((m) => m.type === "vaultSecret").length, 1);
+});
+
+test("the Safari worker fills a card only on https, only by the popup's grant, and asks the app only for the form's fields", () => {
+  const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
+  const fill = bg.slice(bg.indexOf("async function fillCardFromPopup("), bg.indexOf("async function revealCardForFill("));
+  assert.ok(fill.indexOf('if (APP_VAULT !== null && !top.startsWith("https://"))') > 0 && fill.indexOf('!top.startsWith("https://")') < fill.indexOf("cardGrants.set(tab.id"), "refused before any grant is minted");
+  const reveal = bg.slice(bg.indexOf("async function revealCardForFill("), bg.indexOf("// ---- capture → pending save → resolve ----"));
+  assert.match(reveal, /await appVaultCard\(msg\.itemId, cardFieldsForKinds\(grant\.kinds\)\)/);
+  assert.ok(reveal.indexOf("const originOk = sender.origin === grant.origin;") < reveal.indexOf("await appVaultCard("), "the frame and origin checks come before anything is asked of the app");
+  assert.ok(reveal.indexOf("await appVaultCard(") < reveal.indexOf("if (cardGrants.get(tabId) !== grant || grant.expiresMs <= Date.now())"), "the grant is checked again after the app answered");
+  const kinds = bg.slice(bg.indexOf("function cardFieldsForKinds("), bg.indexOf("function appVaultList("));
+  assert.ok(kinds.includes('if (k.has("cardcvv")) out.push("cvv");'), "the CVV is asked for only when the form has a CVV field");
+  const offers = bg.slice(bg.indexOf("async function cardFillOffers("), bg.indexOf("function asCardFillOutcome("));
+  assert.ok(offers.includes('if (APP_VAULT !== null && !top.startsWith("https://")) return none;'));
+  const chip = bg.slice(bg.indexOf("async function cardChipOffer("), bg.indexOf("async function cardChipOffer(") + 900);
+  assert.ok(chip.includes('sender.origin.startsWith("https://")'));
+  const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf("function appVaultCards("));
+  assert.match(lane, /case "revealCardField": \{[\s\S]*?if \(sender\.tab !== undefined\) return \{ ok: false, error: "not allowed from a page" \}/);
 });
