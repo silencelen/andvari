@@ -39,15 +39,13 @@ final class T3SystemIntegrationTests: UITestCase {
         step("provider-on") {
             requireAutoFillProvider()
         }
-        step("page") {
-            openInSafari(Fixture.siteOrigin + "/login.html", heading: "Sign in")
+        step("page-with-username-focused") {
+            if !openUntilFillOffered(Fixture.siteOrigin + "/login.html", heading: "Sign in", field: "Username") {
+                dumpEverything("username-focused")
+                XCTFail("Safari did not offer andvari's login for \(Fixture.siteHost) in three tries")
+            }
         }
         let username = webField("Username")
-        step("username-focused") {
-            require(username, "the page's username field")
-            focus(username, heading: "Sign in")
-            dumpEverything("username-focused")
-        }
         step("offer-names-site-login-and-andvari") {
             require(fillOfferButton, "Safari's offer to fill from andvari")
             let text = containing("saved in", in: safari).label

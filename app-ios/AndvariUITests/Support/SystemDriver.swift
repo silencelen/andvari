@@ -172,6 +172,20 @@ extension UITestCase {
         closeSafariTips()
     }
 
+    /// Open a page and focus one of its fields until Safari offers andvari's login for it. The system's store of
+    /// suggestions is written off the app's main thread, so the first page after an unlock can come too early.
+    func openUntilFillOffered(_ url: String, heading: String, field label: String) -> Bool {
+        for _ in 1...3 {
+            openInSafari(url, heading: heading)
+            let field = webField(label)
+            require(field, "the page's \(label) field")
+            focus(field, heading: heading)
+            if waitUntil(6, { self.fillOfferButton.exists }) { return true }
+            Thread.sleep(forTimeInterval: 5)
+        }
+        return false
+    }
+
     /// Type into a field of the page, closing what Safari offers for it first.
     func typeInPage(_ text: String, field: XCUIElement, heading: String) {
         focus(field, heading: heading)
@@ -191,13 +205,16 @@ extension UITestCase {
         typeInPage(password, field: safari.webViews.secureTextFields[passwordLabel], heading: heading)
         if safari.buttons["Done"].exists { safari.buttons["Done"].tap() }
         safari.webViews.buttons[submit].firstMatch.tap()
-        let choice = safari.alerts.buttons["andvari"]
-        if !waitUntil(12, { choice.exists }) {
+        // A new login: "Save Password?" with a button per provider. A changed one: "Update Password?", which goes
+        // to the provider that holds the login.
+        let save = safari.alerts.buttons["andvari"]
+        let update = safari.alerts["Update Password?"].buttons["Update"]
+        if !waitUntil(12, { save.exists || update.exists }) {
             dumpEverything("no-save-offer")
             return false
         }
         shot("save-offer")
-        choice.tap()
+        if save.exists { save.tap() } else { update.tap() }
         Thread.sleep(forTimeInterval: 4)
         return true
     }
@@ -218,7 +235,7 @@ extension UITestCase {
             return false
         }
         menu.tap()
-        let entry = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+        let entry = safari.cells["andvari"]
         if !waitUntil(8, { entry.exists && entry.isHittable }) {
             dumpTree(safari, as: "no-andvari-in-page-menu")
             XCTFail("andvari is not in Safari's page menu")
