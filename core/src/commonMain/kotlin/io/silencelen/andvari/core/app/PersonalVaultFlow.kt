@@ -87,21 +87,32 @@ data class PersonalVaultView(
  * nothing; "use the served vault" is refused until its co-holders were loaded; keeping or choosing a vault where the
  * server already holds a record replaces it and takes a fresh master-password reauth.
  */
-internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Unit, private val changed: () -> Unit) {
+internal class PersonalVaultFlow(
+    private val publish: (PersonalVaultView?) -> Unit,
+    private val changed: () -> Unit,
+    /** Whether [live] is still the session in force. Nothing is kept or published for one that ended. */
+    private val isLive: (VaultSession.Unlocked) -> Boolean,
+) {
+    /** What the server said about one served vault; used only for that vault ([detailsFor]). */
     private var details: PersonalChangeDetails? = null
     private var lookupFailed = false
     private var proposal: PersonalVaultProposal? = null
     private var proposalKeeps = false
     private var error: String? = null
 
-    /** The vault locked or the account went: nothing pending survives. */
+    /** The session ended, however it did (a lock, a sign-out, a rejected session): nothing pending survives. */
     fun reset() {
         details = null
         lookupFailed = false
         proposal = null
+        proposalKeeps = false
+        needsReauth = false
         error = null
         publish(null)
     }
+
+    /** The details, if they are about the vault the server names NOW: another vault's name or holders are never shown. */
+    private fun detailsFor(servedVaultId: String): PersonalChangeDetails? = details?.takeIf { it.servedVaultId == servedVaultId }
 
     private fun describe(origin: PersonalChoiceInfo.Origin) =
         if (origin == PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER) "received by transfer" else "created by this account"
@@ -162,6 +173,7 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
 
     /** Build the notice for [live] as it stands. Sends nothing. */
     fun render(live: VaultSession.Unlocked) {
+        if (!isLive(live)) return
         val status = live.account.personalStatus
         if (status == Account.PersonalStatus.CONFIRMED) {
             publish(null)
@@ -178,6 +190,7 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         ) = PersonalVaultView(state, title, body, keep, keepDetail, served, use, lookupFailed, choices, others, proposed, error)
 
         val change = live.engine.personalChange()
+        val details = change?.let { detailsFor(it.servedVaultId) }
         fun servedLine(newName: String) = details?.let { d ->
             val holders = if (d.servedCoHolders.isEmpty()) "nobody else" else d.servedCoHolders.joinToString(", ") { "${it.displayName} (${it.role})" }
             "$newName, as reported by the server: ${describe(d.servedOrigin)} · also held by $holders.\nThe vault the server sent: ${facts(live, d.servedVaultId)}."
@@ -262,7 +275,11 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         try {
             when (live.account.personalStatus) {
                 Account.PersonalStatus.PROPOSED, Account.PersonalStatus.CHANGED -> {
-                    if (live.engine.personalChange() != null) details = live.engine.describePersonalChange()
+                    if (live.engine.personalChange() != null) {
+                        val described = live.engine.describePersonalChange()
+                        if (!isLive(live)) return
+                        details = described
+                    }
                     lookupFailed = false
                 }
                 Account.PersonalStatus.ABSENT -> live.engine.personalVaultChoices?.takeIf { it.isNotEmpty() }?.let { live.engine.refreshPersonalChoiceDetails(it.map { c -> c.vaultId }) }
@@ -272,8 +289,12 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {
+            if (!isLive(live)) return
             lookupFailed = true
         }
+        if (!isLive(live)) return
+        // What was loaded for a vault the server no longer names goes; "Use X" then waits for a lookup of the new one.
+        if (details != null && details?.servedVaultId != live.engine.personalChange()?.servedVaultId) details = null
         render(live)
     }
 
@@ -302,13 +323,16 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         }
         val status = live.account.personalStatus
         try {
-            proposal = live.engine.proposePersonalVault(target)
+            val raised = live.engine.proposePersonalVault(target)
+            if (!isLive(live)) return false
+            proposal = raised
             proposalKeeps = keep
             // Only a first designation (no record anywhere) goes without the password.
             needsReauth = status != Account.PersonalStatus.ABSENT
         } catch (c: CancellationException) {
             throw c
         } catch (_: Throwable) {
+            if (!isLive(live)) return false
             proposal = null
             error = "Couldn't check who else holds that vault. Try again when you're connected."
         }
@@ -340,6 +364,7 @@ internal class PersonalVaultFlow(private val publish: (PersonalVaultView?) -> Un
         } catch (t: Throwable) {
             t
         }
+        if (!isLive(live)) return failure == null
         if (failure == null) {
             proposal = null
             details = null

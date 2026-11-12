@@ -42,15 +42,21 @@ internal sealed interface ImportResult {
  *  - a NEW login is added to the personal vault;
  *  - a new password replaces an existing one only in the PERSONAL vault (never a vault shared with the person, and
  *    never one they share out), for the login with the same host, port, scheme and username, and only when the capture
- *    is newer than that login's last change, its scheme is known, and that login was not already replaced in this
- *    unlock; the password it replaces is kept in the login's history;
- *  - at most [MAX_AUTO_PER_RUN] entries are applied per unlock or return to the foreground;
+ *    is newer than that login's last change, its scheme is known, and no earlier automatic replace of that login is
+ *    still listed (one replace per login until the person has dismissed or undone it); the password it replaces is
+ *    kept in the login's history;
+ *  - at most [MAX_AUTO_PER_RUN] entries are applied per unlock or return to the foreground, and an entry that cap
+ *    held back is never applied by itself later (its id is kept, in app-private storage): it waits for the person;
  *  - every automatic save is listed, survives a lock (in app-private storage, sealed to the account), and can be
  *    undone one by one or all at once until the person dismisses the list.
  * Everything else stays listed with its reason, to be saved or discarded by hand.
  *
- * One mutex serializes a sync of the queue, an automatic apply, a manual save and an undo: they all read the vault,
- * decide, and write across suspension points.
+ * A capture's time is the capturing extension's own word, so the freshness rule protects against a stale HONEST capture
+ * (an old entry replayed by the system, a first attempt before a corrected password); it stops no forger. The bounds
+ * that do are the personal-vault-only replace, one listed replace per login, the cap with its kept holds, and the undo.
+ *
+ * One mutex serializes a sync of the queue, an automatic apply, a manual save, an undo, a discard, a dismissal and the
+ * person's own edits and deletions ([exclusive]): they all read the vault, decide, and write across suspension points.
  */
 internal class SaveImporter(
     private val queue: SaveQueueStore,
@@ -70,8 +76,8 @@ internal class SaveImporter(
     private val applied = LinkedHashMap<String, AppliedRecord>()
     private var appliedLoaded = false
 
-    /** Logins whose password an automatic save already replaced in this unlock: one replace per login per unlock. */
-    private val replacedThisUnlock = HashSet<String>()
+    /** Queue entries the per-run cap held back: they stay manual for good. Kept with the applied list. */
+    private val held = LinkedHashSet<String>()
 
     /** How the vault took the last write: applied, or queued for the next sync. */
     private var lastOutcome = SaveOutcome.APPLIED
@@ -99,7 +105,23 @@ internal class SaveImporter(
          * still an intent at the next unlock is settled by looking at the vault ([settleLocked]); it is never listed.
          */
         val intent: Boolean = false,
+        /** When the capture says it was made (0 in a record from before this was kept). */
+        val capturedAtMs: Long = 0,
+        /** A digest of the login as a save ADDED it: an undo removes the login only while it is still exactly that. */
+        val docDigest: String? = null,
     )
+
+    /** What is kept at rest: the records, each sealed to the account, and the ids the cap held back. */
+    @Serializable
+    private data class Stored(val records: List<String> = emptyList(), val held: List<String> = emptyList())
+
+    private fun digest(doc: ItemDoc): String = Bytes.toB64(crypto().sha256(json.encodeToString(ItemDoc.serializer(), doc).encodeToByteArray()))
+
+    /** An automatic replace of this login is still listed: no second one until the person dismissed or undid it. */
+    private fun replaceListed(itemId: String) = applied.values.any { !it.intent && it.replacedName != null && it.itemId == itemId }
+
+    /** Run [block] alone with respect to every save, undo and sync here: the person's own edit or deletion of an item. */
+    suspend fun <T> exclusive(block: suspend () -> T): T = mutex.withLock { block() }
 
     // ---- what a capture is ----
 
@@ -197,7 +219,9 @@ internal class SaveImporter(
         val before = HashMap(pending)
         pending.clear()
         for ((id, login) in opened) {
-            val superseded = login.capturedAtMs < (newest[key(login)] ?: 0L) || applied.values.any { !it.intent && it.site == login.site && it.username == login.username && it.appliedAtMs >= login.capturedAtMs }
+            // Capture time against capture time (a record from before that was kept has only when it was applied).
+            val superseded = login.capturedAtMs < (newest[key(login)] ?: 0L) ||
+                applied.values.any { !it.intent && it.site == login.site && it.username == login.username && (if (it.capturedAtMs > 0) it.capturedAtMs else it.appliedAtMs) >= login.capturedAtMs }
             val already = vault.any { sameLogin(it, login) && it.doc.login?.password == login.password }
             if (superseded || already) {
                 queue.remove(id)
@@ -206,10 +230,12 @@ internal class SaveImporter(
             // An entry already listed keeps its reason; one that was mid-apply when this sync began is judged again,
             // and so is one that only waited for a personal vault, once there is one.
             val was = before[id]
-            val waitedForVault = was?.reason == HouseholdCopy.NO_PERSONAL_VAULT || was?.reason == PERSONAL_UNCONFIRMED
-            val reason = was?.reason?.takeUnless { waitedForVault && live.account.personalStatus == Account.PersonalStatus.CONFIRMED }
+            val waitedForVault = was?.reason == HouseholdCopy.NO_PERSONAL_VAULT || was?.reason == PERSONAL_UNCONFIRMED || was?.reason == PERSONAL_RECORD_MISSING
+            val reason = if (id in held) TOO_MANY else was?.reason?.takeUnless { waitedForVault && live.account.personalStatus == Account.PersonalStatus.CONFIRMED }
             pending[id] = Pending(login, personalTarget(vault, login, live.account), reason)
         }
+        // A hold lasts as long as its entry does.
+        if (held.retainAll(pending.keys)) storeApplied(live)
         if (apply) applyLocked(live, stillLive)
         vaultNames = { itemId ->
             runCatching { live.engine.item(itemId)?.let { item -> live.engine.vaultInfos().firstOrNull { it.vaultId == item.vaultId }?.name ?: "a vault this device cannot name" } }.getOrNull()
@@ -225,13 +251,16 @@ internal class SaveImporter(
             UriMatch.normalizeHost(captured.site) == null -> NOT_A_SITE
             // While the personal-vault question is open (in any of its states) nothing is written by itself: the
             // vault this device would use may not be the one the person, or their other devices, mean.
+            // WITHHELD and UNREADABLE_CACHED have nothing for the person to confirm: the server's record is missing or
+            // unreadable this time, and the notice says so. The reason here says the same, not "confirm above".
+            account.personalStatus == Account.PersonalStatus.WITHHELD || account.personalStatus == Account.PersonalStatus.UNREADABLE_CACHED -> PERSONAL_RECORD_MISSING
             account.personalStatus != Account.PersonalStatus.CONFIRMED -> PERSONAL_UNCONFIRMED
             captured.capturedAtMs > now + CLOCK_SKEW_MS -> FROM_THE_FUTURE
             target == null && vault.any { it.vaultId != account.personalVaultId && sameSite(it, captured) } -> SHARED_MATCH
             target == null && schemeOf(captured.site) == Scheme.UNKNOWN && vault.any { sameSite(it, captured) } -> SCHEME_UNKNOWN
             target == null && account.personalVaultId.isEmpty() -> HouseholdCopy.NO_PERSONAL_VAULT
             target != null && schemeOf(captured.site) == Scheme.UNKNOWN -> SCHEME_UNKNOWN
-            target != null && target.itemId in replacedThisUnlock -> ALREADY_REPLACED
+            target != null && replaceListed(target.itemId) -> ALREADY_REPLACED
             // A capture no newer than the login's last change would roll its password back (a replayed entry).
             target != null && captured.capturedAtMs <= target.updatedAt -> OLDER_THAN_LOGIN
             appliedThisRun >= MAX_AUTO_PER_RUN -> TOO_MANY
@@ -248,6 +277,7 @@ internal class SaveImporter(
             val vault = logins(live)
             p.target = personalTarget(vault, p.login, live.account)
             p.reason = refusal(p, vault, live.account, clocks.wallMs(), appliedThisRun)
+            if (p.reason == TOO_MANY && held.add(id)) storeApplied(live) // kept: never applied by itself later
             if (p.reason != null) continue
             val record = try {
                 write(live, id, p)
@@ -261,7 +291,6 @@ internal class SaveImporter(
             finish(live, id, record)
             appliedThisRun++
             wroteAny = true
-            if (record.replacedName != null) replacedThisUnlock += record.itemId
         }
         if (wroteAny) wrote()
     }
@@ -270,6 +299,7 @@ internal class SaveImporter(
     private fun finish(live: VaultSession.Unlocked, id: String, record: AppliedRecord) {
         queue.remove(id)
         pending.remove(id)
+        held.remove(id)
         applied[id] = record.copy(intent = false)
         storeApplied(live)
     }
@@ -316,13 +346,16 @@ internal class SaveImporter(
         val keep = target != null && old.isNotEmpty() && old != captured.password
         // The id of a new login is minted here, so the undo names exactly the login this save added.
         val itemId = target?.itemId ?: Bytes.uuidV4FromBytes(crypto().randomBytes(16))
-        val record = AppliedRecord(id, captured.site, captured.username, itemId, target?.doc?.name, captured.password, keep, now, intent = true)
+        val address = (if (schemeOf(captured.site) == Scheme.HTTP) "http://" else "https://") + host + (portOf(captured.site)?.let { ":$it" } ?: "")
+        val doc = ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
+        val record = AppliedRecord(
+            id, captured.site, captured.username, itemId, target?.doc?.name, captured.password, keep, now, intent = true,
+            capturedAtMs = captured.capturedAtMs, docDigest = if (target == null) digest(doc) else null,
+        )
         applied[id] = record
         storeApplied(live)
         try {
             if (target == null) {
-                val address = (if (schemeOf(captured.site) == Scheme.HTTP) "http://" else "https://") + host + (portOf(captured.site)?.let { ":$it" } ?: "")
-                val doc = ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
                 lastOutcome = live.engine.saveWithUploads(null, doc, emptyList(), null, null, itemId)
                 // Never "saved" on the save's word alone: the login must be in the vault the list is drawn from.
                 check(live.engine.item(itemId) != null) { "the vault did not keep the new login" }
@@ -374,9 +407,10 @@ internal class SaveImporter(
     }
 
     /** Discard one listed capture: it leaves the queue and nothing is written. */
-    fun discard(id: String) {
+    suspend fun discard(live: VaultSession.Unlocked, id: String) = mutex.withLock {
         queue.remove(id)
         pending.remove(id)
+        if (held.remove(id)) storeApplied(live)
         publish(pendingViews(), appliedViews(), false)
     }
 
@@ -420,6 +454,9 @@ internal class SaveImporter(
         val login = item?.doc?.login
         if (item == null || login == null || login.password.orEmpty() != record.password || login.username.orEmpty() != record.username) return ImportResult.Failed(UNDO_CHANGED)
         val outcome = if (record.replacedName == null) {
+            // Removing is not something an undo can take back: the login must still be exactly what the save added,
+            // in every field (a note, a code or another address added since is the person's work).
+            if (record.docDigest != null && digest(item.doc) != record.docDigest) return ImportResult.Failed(UNDO_EDITED)
             live.engine.remove(record.itemId)
         } else {
             val top = login.passwordHistory.lastOrNull()
@@ -428,15 +465,14 @@ internal class SaveImporter(
             live.engine.save(item.itemId, item.doc.copy(login = restored), item.vaultId)
         }
         applied.remove(id)
-        replacedThisUnlock.remove(record.itemId)
         return ImportResult.Done(outcome == SaveOutcome.QUEUED)
     }
 
     /**
      * The person deleted [itemId] in this app: a save that added it has nothing left to undo, and must never add it
-     * again as a login that "went missing".
+     * again as a login that "went missing". Called inside [exclusive], with the deletion.
      */
-    fun itemDeleted(live: VaultSession.Unlocked, itemId: String) {
+    fun itemDeletedLocked(live: VaultSession.Unlocked, itemId: String) {
         val ids = applied.filterValues { it.itemId == itemId }.keys
         if (ids.isEmpty()) return
         ids.forEach(applied::remove)
@@ -445,9 +481,9 @@ internal class SaveImporter(
     }
 
     /** The list has been read: it goes, in memory and in storage, and with it the undo from here. */
-    fun dismiss() {
+    suspend fun dismiss(live: VaultSession.Unlocked) = mutex.withLock {
         applied.clear()
-        appliedStore.delete()
+        storeApplied(live)
         publish(pendingViews(), appliedViews(), false)
     }
 
@@ -458,7 +494,7 @@ internal class SaveImporter(
         pending.clear()
         applied.clear()
         appliedLoaded = false
-        replacedThisUnlock.clear()
+        held.clear()
         vaultNames = { null }
     }
 
@@ -476,20 +512,25 @@ internal class SaveImporter(
         if (appliedLoaded) return
         appliedLoaded = true
         applied.clear()
-        val sealed = appliedStore.read()?.let { runCatching { json.decodeFromString(ListSerializer(String.serializer()), it.decodeToString()) }.getOrNull() } ?: return
-        for (entry in sealed.take(MAX_LISTED)) {
+        held.clear()
+        val text = appliedStore.read()?.decodeToString() ?: return
+        // Before the holds were kept, the file was the list of sealed records alone.
+        val stored = runCatching { json.decodeFromString(Stored.serializer(), text) }.getOrNull()
+            ?: runCatching { Stored(json.decodeFromString(ListSerializer(String.serializer()), text)) }.getOrNull() ?: return
+        for (entry in stored.records.take(MAX_LISTED)) {
             val record = runCatching { json.decodeFromString(AppliedRecord.serializer(), live.account.openQueuedSave(Bytes.fromB64(entry)).decodeToString()) }.getOrNull() ?: continue
             applied[record.id] = record
         }
+        held += stored.held.take(MAX_LISTED)
     }
 
     private fun storeApplied(live: VaultSession.Unlocked) {
-        if (applied.isEmpty()) {
+        if (applied.isEmpty() && held.isEmpty()) {
             appliedStore.delete()
             return
         }
         val sealed = applied.values.toList().takeLast(MAX_LISTED).map { Bytes.toB64(crypto().sealTo(live.account.identityPub, json.encodeToString(AppliedRecord.serializer(), it).encodeToByteArray())) }
-        appliedStore.write(json.encodeToString(ListSerializer(String.serializer()), sealed).encodeToByteArray())
+        appliedStore.write(json.encodeToString(Stored.serializer(), Stored(sealed, held.toList().takeLast(MAX_LISTED))).encodeToByteArray())
     }
 
     // ---- views ----
@@ -521,14 +562,16 @@ internal class SaveImporter(
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
         const val PERSONAL_UNCONFIRMED = "Confirm your personal vault above first. This is saved once you have."
+        const val PERSONAL_RECORD_MISSING = "The server's record of your personal vault is missing or unreadable right now, so nothing is saved by itself. Check this one and save it yourself, or wait until the record is back."
         const val SHARED_MATCH = "A login outside your personal vault already uses this username here. Save this one as your own, or discard it."
         const val SCHEME_UNKNOWN = "This was captured for the domain only, so andvari can't tell which of your logins it belongs to. Check it, then save or discard."
         const val OLDER_THAN_LOGIN = "This was captured before your login was last changed. Save it only if it is the newer password."
         const val FROM_THE_FUTURE = "This capture is dated in the future. Check it before saving."
-        const val ALREADY_REPLACED = "This login's password was already updated a moment ago. Check this one before saving."
+        const val ALREADY_REPLACED = "A save listed above already updated this login's password. Check this one before saving."
         const val TOO_MANY = "Several logins were captured at once. Check the rest before saving them."
         const val NOT_A_SITE = "This was not captured on a web page andvari can save for."
         const val TARGET_CHANGED = "Your vault changed since this was captured. Check it again, then save."
         const val UNDO_CHANGED = "That login has changed since, so nothing was undone."
+        const val UNDO_EDITED = "That login has been edited since it was saved, so it was not removed. Delete it yourself if you no longer want it."
     }
 }
