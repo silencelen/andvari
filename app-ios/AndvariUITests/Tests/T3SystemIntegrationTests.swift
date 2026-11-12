@@ -177,112 +177,85 @@ final class T3SystemIntegrationTests: UITestCase {
     }
 
     /// iOS 26.2 and later: submitting a new login makes iOS offer to save it to andvari, and the app saves it by
-    /// itself at its next unlock, under "Saved 1 login from AutoFill".
+    /// itself at its next unlock, under "Saved 1 login from AutoFill", into the personal vault.
     func test06_NativeSavePrompt() throws {
         if !systemAtLeast(26, 2) {
             try skip("The save request (SupportsSavePasswordCredentials) needs iOS 26.2; this simulator runs \(systemVersion.major).\(systemVersion.minor).")
         }
         let user = "saved\(Int(Date().timeIntervalSince1970) % 100000)"
-        step("provider-on") {
+        step("provider-on-and-no-saved-list") {
             requireAutoFillProvider()
+            bringAppForward()
+            reachVaultAnyWay()
+            dismissSavedList()
         }
         step("save-offered-and-taken") {
             XCTAssertTrue(submitLoginAndSaveToAndvari(page: "signup.html", heading: "Sign up", user: user, password: "Saved-Passw0rd-1", passwordLabel: "New password", submit: "Create account"), "iOS did not offer to save the new login to andvari")
         }
-        try step("saved-by-itself-at-unlock") {
-            launchApp()
+        let header = app.staticTexts["Saved 1 login from AutoFill"]
+        step("saved-by-itself-at-unlock") {
+            bringAppForward()
             reachVaultAnyWay()
-            let saved = containing("from AutoFill", in: app)
-            let name = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", user)).firstMatch
-            let arrived = waitUntil(15) { saved.exists || name.exists }
-            dumpTree(app, as: "after-save-in-app")
-            XCTAssertTrue(arrived, "the saved login did not reach the app")
-            if !saved.exists && app.staticTexts[KnownDefect.noPersonalVaultMessage].exists {
-                try skip(KnownDefect.noPersonalVault + " Here: the save offer worked and the capture reached the app, where it waits under \"Logins not saved yet\".")
+            if !waitUntil(15, { header.exists }) {
+                dumpTree(app, as: "no-saved-list")
+                XCTFail("the app did not list the login as saved from AutoFill: \(saveListsSummary())")
             }
-            XCTAssertTrue(saved.exists, "the login reached the app but was not saved by itself")
+            let row = app.cells.containing(NSPredicate(format: "label == %@", user)).firstMatch
+            require(row, "the saved login's row", timeout: 5)
+            XCTAssertTrue(row.staticTexts["Added as a new login"].exists, "the row does not say the login was added")
+            XCTAssertTrue(row.staticTexts["In Personal"].exists, "the row does not say the login is in the personal vault")
+        }
+        step("in-the-vault") {
+            dismissSavedList()
+            XCTAssertFalse(header.exists, "Done did not dismiss the list")
+            searchVault(user)
+            XCTAssertTrue(waitUntil(10) { self.vaultRowContaining(user).exists }, "the saved login is not in the vault list")
+            endSearch()
         }
     }
 
     /// Settings > Apps > Safari > Extensions: turn the andvari web extension on and let it run on websites.
     func test07_EnableSafariExtensionInSettings() {
-        let settings = settingsApp
-        step("settings-apps") {
-            settings.terminate()
-            settings.launch()
-            XCTAssertTrue(scrollToAndTap(labelled("Apps", in: settings), in: settings), "Settings has no Apps row")
-            Thread.sleep(forTimeInterval: 1.5)
-            dumpTree(settings, as: "settings-apps")
-        }
-        step("safari-settings") {
-            let search = settings.searchFields.firstMatch
-            if search.exists {
-                search.tap()
-                search.typeText("Safari")
-                Thread.sleep(forTimeInterval: 1.5)
-            }
-            let row = settings.cells.matching(NSPredicate(format: "label BEGINSWITH 'Safari'")).firstMatch
-            let fallback = labelled("Safari", in: settings)
-            XCTAssertTrue(scrollToAndTap(row.exists ? row : fallback, in: settings, swipes: 12), "Settings > Apps has no Safari row")
-            Thread.sleep(forTimeInterval: 1.5)
-            dumpTree(settings, as: "settings-safari")
-        }
-        step("extensions") {
-            XCTAssertTrue(scrollToAndTap(labelled("Extensions", in: settings), in: settings, swipes: 10), "Safari's settings have no Extensions row")
-            Thread.sleep(forTimeInterval: 1.5)
-            dumpTree(settings, as: "settings-extensions")
-        }
-        step("andvari-extension") {
-            let row = settings.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
-            XCTAssertTrue(scrollToAndTap(row, in: settings, swipes: 4), "andvari is not listed under Safari's extensions")
-            Thread.sleep(forTimeInterval: 1.5)
-            dumpTree(settings, as: "settings-andvari-extension")
-        }
-        step("allowed") {
-            let allow = settings.switches.matching(NSPredicate(format: "label CONTAINS[c] 'Allow Extension'")).firstMatch
-            require(allow, "the Allow Extension switch")
-            // A tap that lands while the screen is still sliding in changes nothing: look, and try again.
-            for _ in 0..<3 where !isOn(allow) {
-                Thread.sleep(forTimeInterval: 1.5)
-                flip(allow)
-                _ = waitUntil(5) { self.isOn(allow) }
-            }
-            XCTAssertTrue(isOn(allow), "the extension did not turn on")
-            dumpTree(settings, as: "settings-andvari-extension-on")
-            SystemState.extensionEnabled = true
-        }
+        enableSafariExtension()
     }
 
-    /// The extension's popup in Safari: Face ID once it has painted, this site's logins first, and a tap fills.
+    /// The extension's popup in Safari: Face ID once it has painted, this site's logins listed for it, a tap fills,
+    /// and the unlock outlives the popup: opened again at once, it lists without Face ID.
     func test08_SafariExtensionPopupFill() {
-        step("provider-on") {
+        step("provider-and-extension-on") {
             requireAutoFillProvider()
-        }
-        step("extension-on") {
-            XCTAssertTrue(SystemState.extensionEnabled, "the extension was not turned on in Settings (test07)")
+            requireSafariExtension()
         }
         step("page") {
             openInSafari(Fixture.siteOrigin + "/login.html", heading: "Sign in")
         }
+        let row = popupLoginRow(Fixture.siteItem, Fixture.siteUser)
         step("popup-lists-this-sites-login") {
-            let row = popupRow(Fixture.siteItem)
-            let listed = openPopup(until: { row.exists })
-            if !listed {
+            if !openPopup(until: { row.exists }) {
                 XCTFail("the popup listed no login for this site after Face ID. The popup says: \(popupDetails())")
             }
+            XCTAssertTrue(listedForThisSite(row), "\(Fixture.siteItem) is not listed under \"This site\": row \(row.frame), headings \(popupHeading("This site").frame) and \(popupHeading("All logins").frame)")
+            XCTAssertTrue(listedForThisSite(popupLoginRow(Fixture.secondItem, Fixture.secondUser)), "\(Fixture.secondItem) is not listed under \"This site\"")
+            XCTAssertFalse(listedForThisSite(popupLoginRow(Fixture.httpItem, "bob")), "a login for another site is listed under \"This site\"")
         }
         step("fill-from-popup") {
-            popupRow(Fixture.siteItem).tap()
-            Thread.sleep(forTimeInterval: 2)
-            dumpEverything("popup-row-tapped")
+            row.tap()
             // The row opens the login; its Fill button is further down the sheet, and a tap scrolls to it.
             let fill = safari.webViews.buttons.matching(NSPredicate(format: "label == 'Fill' OR label BEGINSWITH 'Fill '")).firstMatch
             require(fill, "the Fill button of the login in the popup", timeout: 8)
             fill.tap()
             let username = webField("Username")
-            let filled = matchFaceUntil(25) { (username.value as? String) == Fixture.siteUser }
-            if !filled {
+            if !matchFaceUntil(25, { (username.value as? String) == Fixture.siteUser }) {
                 XCTFail("the popup did not fill the page, the field holds \(String(describing: username.value)). The popup says: \(popupDetails())")
+            }
+        }
+        step("unlock-outlives-the-popup") {
+            // No face is shown this time: a list that needs Face ID again does not appear.
+            let listed = openPopup(until: { row.exists }, timeout: 12, showFace: false)
+            if !listed {
+                let details = popupDetails()
+                _ = matchFaceUntil(20) { row.exists }
+                XCTFail("opened again within 90 s of the unlock, the popup asked for Face ID again. The popup says: \(details)")
             }
         }
     }
@@ -294,27 +267,24 @@ final class T3SystemIntegrationTests: UITestCase {
             requireAutoFillProvider()
         }
         step("unlock-screen") {
-            launchApp()
+            bringAppForward()
+            if currentScreen() == .vault {
+                app.buttons["vault.lock"].tap()
+            }
             expectScreen(.unlock)
             // The screen asks for a face by itself; the system's sheet only offers Cancel once a face has failed.
-            Thread.sleep(forTimeInterval: 2)
-            Biometrics.noMatch()
-            dismissBiometricPrompt()
-            XCTAssertTrue(waitUntil(8) { self.element("unlock.sign-out").isEnabled }, "the Face ID prompt is still up")
+            let refused = refuseFaceID(until: { self.faceIDCancel == nil && self.element("unlock.sign-out").isEnabled && self.masterPasswordField.isHittable })
+            XCTAssertTrue(refused, "the Face ID prompt is still up")
         }
         step("field-focused") {
             masterPasswordField.tap()
             Thread.sleep(forTimeInterval: 3)
             dumpTree(app, as: "app-field-focused")
-            dumpTree(springboard, as: "app-field-focused-springboard")
         }
         step("passwords-key") {
             let key = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] 'Passwords' OR label CONTAINS[c] 'AutoFill'")).firstMatch
             require(key, "the Passwords key above the keyboard", timeout: 5)
             key.tap()
-            Thread.sleep(forTimeInterval: 2)
-            dumpTree(app, as: "app-after-passwords-key")
-            dumpTree(springboard, as: "app-after-passwords-key-springboard")
             // With two providers on, iOS asks which one's list to open.
             let chooser = app.buttons["andvari"]
             require(chooser, "andvari in the provider chooser", timeout: 8)
@@ -324,7 +294,6 @@ final class T3SystemIntegrationTests: UITestCase {
             let row = { [self] in [app, springboard].map { self.labelled("No Address", in: $0) }.first { $0.exists } }
             let shown = matchFaceUntil(25) { row() != nil }
             dumpTree(app, as: "app-list")
-            dumpTree(springboard, as: "app-list-springboard")
             XCTAssertTrue(shown, "andvari's list of logins did not appear over the app")
             row()?.tap()
         }
@@ -333,159 +302,159 @@ final class T3SystemIntegrationTests: UITestCase {
         }
     }
 
-    /// What the owner checks by hand after a changed password is saved from Safari: the app replaces the login's
-    /// password by itself and lists it; the list is still there after a lock; the login shows its previous
-    /// password; Undo puts one back; Undo all puts the rest back.
-    func test10_ChangedPasswordsSavedListUndoAndHistory() throws {
+    /// What the owner checks by hand: two changed passwords and one new login saved from Safari are applied by the
+    /// app at its next unlock and listed; the list is still there after a lock; a changed login shows its new
+    /// password and the old one under "Previous passwords"; Undo takes one back; Undo all takes back the rest.
+    func test10_SavedListPersistsUndoAndHistory() throws {
         if !systemAtLeast(26, 2) {
             try skip("The save request (SupportsSavePasswordCredentials) needs iOS 26.2; this simulator runs \(systemVersion.major).\(systemVersion.minor).")
         }
-        step("provider-on") {
+        let newUser = "carol\(Int(Date().timeIntervalSince1970) % 100000)"
+        step("provider-on-and-no-saved-list") {
             requireAutoFillProvider()
-        }
-        step("two-changed-passwords-saved-from-safari") {
-            XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.siteUser, password: "Changed-Passw0rd-A", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to save the first changed password to andvari")
-            XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.secondUser, password: "Changed-Passw0rd-B", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to save the second changed password to andvari")
-        }
-        let two = app.staticTexts["Saved 2 logins from AutoFill"]
-        let one = app.staticTexts["Saved 1 login from AutoFill"]
-        try step("both-applied-at-unlock") {
-            launchApp()
+            bringAppForward()
             reachVaultAnyWay()
-            if !waitUntil(15, { two.exists }) {
-                dumpTree(app, as: "no-saved-list")
-                if app.staticTexts[KnownDefect.sharedMatchMessage].exists {
-                    try skip(KnownDefect.noPersonalVault + " Here: iOS offered \"Update Password?\", both captures reached the app, and each waits under \"Logins not saved yet\" with \"\(KnownDefect.sharedMatchMessage)\", because without a confirmed personal vault the login it would replace does not count as the person's own.")
-                }
-                XCTFail("the app did not list two logins saved from AutoFill")
+            dismissSavedList()
+        }
+        step("three-saves-from-safari") {
+            XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.siteUser, password: "Changed-Passw0rd-A", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to update \(Fixture.siteUser)'s password in andvari")
+            XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.secondUser, password: "Changed-Passw0rd-B", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to update \(Fixture.secondUser)'s password in andvari")
+            XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: newUser, password: "New-Passw0rd-C", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to save \(newUser)'s login to andvari")
+        }
+        let three = app.staticTexts["Saved 3 logins from AutoFill"]
+        let two = app.staticTexts["Saved 2 logins from AutoFill"]
+        let anyList = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Saved ' AND label ENDSWITH ' from AutoFill'")).firstMatch
+        step("all-three-applied-at-unlock") {
+            bringAppForward()
+            reachVaultAnyWay()
+            if !waitUntil(15, { three.exists }) {
+                dumpTree(app, as: "not-three-saved")
+                XCTFail("the app did not list three logins saved from AutoFill: \(saveListsSummary())")
             }
+            let changed = app.cells.containing(NSPredicate(format: "label == %@", Fixture.secondUser)).firstMatch
+            XCTAssertTrue(changed.staticTexts["New password for \(Fixture.secondItem). The old one is in its history."].exists, "the row of the changed login does not say what happened")
         }
         step("list-survives-a-lock") {
             app.buttons["vault.lock"].tap()
             expectScreen(.unlock)
             reachVaultAnyWay()
-            XCTAssertTrue(waitUntil(10) { two.exists }, "the saved list was gone after a lock and unlock")
+            XCTAssertTrue(waitUntil(10) { three.exists }, "the saved list was gone after a lock and unlock")
         }
-        step("previous-password-in-the-login") {
-            app.swipeUp()
-            let row = vaultRow(Fixture.secondItem)
-            require(row, "the changed login in the list")
-            row.tap()
-            require(element("detail.username"), "the login's detail")
+        step("new-and-previous-password-in-the-login") {
+            openItem(Fixture.secondItem)
             element("detail.reveal-password").tap()
             XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == "Changed-Passw0rd-B" }, "the login does not hold the saved password")
-            app.swipeUp()
-            XCTAssertTrue(waitUntil(5) { self.app.staticTexts["Previous passwords"].exists }, "the login shows no previous passwords")
-            dumpTree(app, as: "detail-with-history")
+            let previous = app.staticTexts["Previous passwords"]
+            for _ in 0..<3 where !previous.exists { app.swipeUp() }
+            require(previous, "the login's previous passwords", timeout: 5)
+            app.buttons["Show"].firstMatch.tap()
+            XCTAssertTrue(waitUntil(5) { self.app.staticTexts[Fixture.secondPassword].exists }, "the previous password shown is not the seeded one")
             app.navigationBars.buttons.firstMatch.tap()
-            app.swipeDown()
+            // The list keeps its place; the saved logins are at its top.
+            for _ in 0..<4 where !(anyList.exists && anyList.isHittable) { app.swipeDown() }
+            require(anyList, "the saved list", timeout: 10)
         }
         step("undo-one") {
-            let undo = app.buttons.matching(NSPredicate(format: "label == 'Undo'")).firstMatch
-            require(undo, "an Undo button in the saved list")
-            undo.tap()
-            if !waitUntil(10, { one.exists }) {
+            let added = app.cells.containing(NSPredicate(format: "label == %@", newUser)).firstMatch
+            require(added, "the new login's row in the saved list", timeout: 5)
+            added.buttons["Undo"].tap()
+            if !waitUntil(10, { two.exists }) {
                 dumpTree(app, as: "after-undo")
-                XCTFail("after one Undo the list does not read one saved login")
+                XCTFail("after one Undo the list does not read two saved logins: \(saveListsSummary())")
             }
         }
         step("undo-all") {
             let all = app.buttons["Undo all"]
-            if all.exists {
-                all.tap()
-            } else {
-                // With one entry left its own Undo is the whole of it.
-                app.buttons.matching(NSPredicate(format: "label == 'Undo'")).firstMatch.tap()
-            }
-            Thread.sleep(forTimeInterval: 1)
-            // A destructive action may ask once more.
-            let confirm = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Undo' AND identifier == ''"))
-            if confirm.count > 0 && one.exists {
-                confirm.element(boundBy: confirm.count - 1).tap()
-            }
-            if !waitUntil(10, { !one.exists && !two.exists }) {
+            require(all, "Undo all", timeout: 5)
+            all.tap()
+            if !waitUntil(10, { !anyList.exists }) {
                 dumpTree(app, as: "after-undo-all")
-                XCTFail("the saved list is still there after undoing everything")
+                XCTFail("the saved list is still there after Undo all: \(anyList.label)")
             }
         }
-        step("passwords-are-back") {
-            app.swipeUp()
-            vaultRow(Fixture.secondItem).tap()
-            require(element("detail.username"), "the login's detail")
+        step("everything-as-it-was") {
+            openItem(Fixture.secondItem)
             element("detail.reveal-password").tap()
-            XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == Fixture.secondPassword }, "Undo did not put the seeded password back, the login holds \(String(describing: self.element("detail.password").value))")
+            XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == Fixture.secondPassword }, "Undo all did not put the seeded password back, the login holds \(String(describing: self.element("detail.password").value))")
+            app.swipeUp()
+            XCTAssertFalse(app.staticTexts["Previous passwords"].exists, "the undone password is still in the login's history")
+            app.navigationBars.buttons.firstMatch.tap()
+            openItem(Fixture.siteItem)
+            element("detail.reveal-password").tap()
+            XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == Fixture.sitePassword }, "Undo all did not put \(Fixture.siteUser)'s password back")
+            app.navigationBars.buttons.firstMatch.tap()
+            searchVault(newUser)
+            Thread.sleep(forTimeInterval: 2)
+            XCTAssertFalse(vaultRowContaining(newUser).exists, "the login that Undo took back is still in the vault")
+            endSearch()
         }
     }
 
-    /// The popup lists the vault's cards, and its content sits in the middle of the sheet.
-    func test11_PopupListsCardsAndIsCentred() throws {
-        step("provider-on") {
+    /// The popup lists the vault's cards, and the popup sits in the middle of its sheet: its page's root fills the
+    /// sheet's width, and a card's row is centred in it.
+    func test11_PopupListsCardsAndIsCentred() {
+        step("provider-and-extension-on") {
             requireAutoFillProvider()
-        }
-        if !SystemState.extensionEnabled {
-            try skip("The Safari extension was not turned on in Settings in this run (test07), so there is no popup to look at.")
+            requireSafariExtension()
         }
         step("page") {
             openInSafari(Fixture.siteOrigin + "/login.html", heading: "Sign in")
         }
-        var unlocked = false
-        step("popup-unlocked") {
-            let row = popupRow(Fixture.siteItem)
-            unlocked = openPopup(until: { row.exists })
-        }
-        if !unlocked {
-            try skip("The popup did not unlock in this run; test08 is the test that says why. The popup says: \(popupDetails())")
-        }
-        step("cards-listed") {
-            let search = safari.webViews.textFields.firstMatch
-            safari.webViews.firstMatch.swipeUp()
-            let card = popupRow(Fixture.cardItem)
-            if !waitUntil(8, { card.exists }) {
-                dumpTree(safari, as: "popup-no-card")
-                XCTFail("the popup does not list the seeded card")
+        let card = safari.webViews.staticTexts[Fixture.cardItem]
+        step("popup-lists-the-card") {
+            let row = popupLoginRow(Fixture.siteItem, Fixture.siteUser)
+            if !openPopup(until: { row.exists }) {
+                XCTFail("the popup did not unlock. The popup says: \(popupDetails())")
+                return
             }
-            _ = search
+            XCTAssertTrue(popupHeading("Cards").exists, "the popup has no Cards heading")
+            for _ in 0..<3 where !(card.exists && card.isHittable) { popupWebView.swipeUp() }
+            XCTAssertTrue(card.exists, "the popup does not list the seeded card")
+            XCTAssertTrue(safari.webViews.staticTexts["Visa ••1111"].exists, "the card's row does not show its masked number")
         }
         step("centred") {
-            // The popup is the web view that holds the card; its rows span it.
-            let popup = safari.webViews.containing(NSPredicate(format: "label CONTAINS %@", Fixture.cardItem)).firstMatch
-            let content = popup.exists ? popup : safari.webViews.element(boundBy: safari.webViews.count - 1)
-            let row = popupRowBox(Fixture.cardItem)
             let window = safari.windows.firstMatch.frame
+            let sheet = popupWebView.frame
             dumpTree(safari, as: "popup-layout")
-            XCTAssertEqual(content.frame.midX, window.midX, accuracy: 4, "the popup's view is not centred in the sheet: \(content.frame) in \(window)")
-            XCTAssertGreaterThan(row.frame.width, window.width * 0.6, "the test found the row's words, not the row: \(row.frame)")
-            XCTAssertEqual(row.frame.midX, window.midX, accuracy: 6, "the popup's rows are not centred in the sheet: \(row.frame) in \(window)")
+            XCTAssertEqual(sheet.midX, window.midX, accuracy: 3, "the popup's sheet is not centred on the screen: \(sheet) in \(window)")
+            guard let root = popupRoot() else {
+                XCTFail("the popup page's root element was not found")
+                return
+            }
+            XCTAssertEqual(root.frame.midX, sheet.midX, accuracy: 3, "the popup page's root is not centred in its sheet: \(root.frame) in \(sheet)")
+            XCTAssertGreaterThanOrEqual(root.frame.width, sheet.width - 6, "the popup page's root does not fill its sheet: \(root.frame) in \(sheet)")
+            guard let box = popupRowBox(Fixture.cardItem) else {
+                XCTFail("the card's row was not found")
+                return
+            }
+            XCTAssertEqual(box.frame.midX, sheet.midX, accuracy: 3, "the card's row is not centred in the sheet: \(box.frame) in \(sheet)")
         }
     }
 
     /// A login saved for one site, chosen in the popup on another: nothing is filled until a second tap on a
     /// confirmation that names both sites.
-    func test12_PopupCrossSiteFillAsksFirst() throws {
-        step("provider-on") {
+    func test12_PopupCrossSiteFillAsksFirst() {
+        step("provider-and-extension-on") {
             requireAutoFillProvider()
-        }
-        if !SystemState.extensionEnabled {
-            try skip("The Safari extension was not turned on in Settings in this run (test07), so there is no popup to look at.")
+            requireSafariExtension()
         }
         step("other-site") {
             openInSafari(Fixture.otherOrigin + "/login.html", heading: "Sign in")
         }
-        var unlocked = false
-        step("popup-unlocked") {
-            let row = popupRow(Fixture.siteItem)
-            unlocked = openPopup(until: { row.exists })
-        }
-        if !unlocked {
-            try skip("The popup did not unlock in this run; test08 is the test that says why. The popup says: \(popupDetails())")
+        let row = popupLoginRow(Fixture.siteItem, Fixture.siteUser)
+        step("popup-lists-it-for-another-site") {
+            if !openPopup(until: { row.exists }) {
+                XCTFail("the popup did not unlock. The popup says: \(popupDetails())")
+                return
+            }
+            XCTAssertFalse(listedForThisSite(row), "a login for \(Fixture.siteHost) is listed under \"This site\" on \(Fixture.otherHost)")
         }
         let username = webField("Username")
         let warning = safari.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS 'is saved for' AND label CONTAINS %@ AND label CONTAINS %@", Fixture.siteHost, Fixture.otherHost)).firstMatch
         step("confirmation-names-both-sites") {
-            popupRow(Fixture.siteItem).tap()
-            Thread.sleep(forTimeInterval: 1.5)
+            row.tap()
             let fill = safari.webViews.buttons.matching(NSPredicate(format: "label == 'Fill' OR label BEGINSWITH 'Fill '")).firstMatch
-            if !warning.exists && fill.exists && fill.isHittable {
+            if waitUntil(5, { fill.exists && fill.isHittable }) && !warning.exists {
                 fill.tap()
             }
             if !waitUntil(8, { warning.exists }) {

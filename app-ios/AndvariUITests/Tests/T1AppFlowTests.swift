@@ -33,6 +33,27 @@ final class T1AppFlowTests: UITestCase {
             masterPasswordField.typeText("\n")
             expectScreen(.vault, timeout: 60)
             require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
+        }
+        // The account was made on another device (the seeding tool), so this one asks once which vault is personal.
+        step("personal-vault-asked") {
+            require(personalVaultNotice, "the personal-vault notice", timeout: 10)
+            XCTAssertEqual(personalVaultNotice.label, "Confirm your personal vault on this device: Personal.")
+            require(usePersonalVaultButton, "the notice's Use button", timeout: 20)
+            XCTAssertEqual(usePersonalVaultButton.label, "Use Personal")
+        }
+        step("personal-vault-confirmed") {
+            usePersonalVaultButton.tap()
+            XCTAssertTrue(waitUntil(15) { !self.personalVaultNotice.exists }, "the notice stayed after Use")
+        }
+        step("not-asked-again-after-a-lock") {
+            app.buttons["vault.lock"].tap()
+            expectScreen(.unlock)
+            typeUnlock()
+            expectScreen(.vault, timeout: 60)
+            require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
+            XCTAssertFalse(waitUntil(5) { self.personalVaultNotice.exists }, "the device asked again after it had confirmed")
+        }
+        step("every-seeded-item") {
             for name in Fixture.seededNames {
                 // A list only holds the rows near the screen: the last ones come with a scroll.
                 if !vaultRow(name).exists {
@@ -159,17 +180,20 @@ final class T1AppFlowTests: UITestCase {
 
     /// Add a login in the app on a device that signed in to an account made elsewhere (the seeding tool stands for
     /// the other device). It must end up in the list.
-    func test08_AddLoginAfterSigningIn() throws {
+    func test08_AddLoginAfterSigningIn() {
         launchApp()
         step("vault") {
             reachVault()
         }
         step("editor") {
-            app.buttons["vault.new-login"].tap()
+            app.buttons["vault.new-item"].tap()
+            let newLogin = app.buttons["New login"]
+            require(newLogin, "New login in the add menu", timeout: 5)
+            newLogin.tap()
             enter("Added Here", into: app.textFields["Name"], what: "the Name field")
             enter("erin", into: app.textFields["Username"], what: "the Username field")
         }
-        try step("saved") {
+        step("saved") {
             app.buttons["Save"].tap()
             if !waitUntil(15, { self.vaultRow("Added Here").exists }) {
                 // The editor puts its message at the end of the form, under the keyboard.
@@ -180,9 +204,6 @@ final class T1AppFlowTests: UITestCase {
                 dumpTree(app, as: "new-login-not-saved")
                 let said = app.staticTexts.matching(NSPredicate(format: "(label CONTAINS[c] 'vault' AND label != 'Vault') OR label CONTAINS[c] 'wrong' OR label CONTAINS[c] 'try again'")).firstMatch
                 let message = said.exists ? said.label : "nothing the test recognises"
-                if message == KnownDefect.noPersonalVaultMessage {
-                    try skip(KnownDefect.noPersonalVault)
-                }
                 XCTFail("the new login was not saved; the editor says: \(message)")
             }
         }

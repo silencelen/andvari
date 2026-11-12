@@ -61,18 +61,49 @@ extension UITestCase {
             }
             expectScreen(.vault, timeout: 60)
             require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
+            confirmPersonalVaultIfAsked()
         default:
             reachVault()
         }
     }
 
+    /// The Cancel of the system's Face ID sheet, wherever iOS draws it (over SpringBoard, or in the app's window).
+    var faceIDCancel: XCUIElement? {
+        let id = "com.apple.localauthentication.ax.authentication.button.cancel"
+        for application in [springboard, app] {
+            let button = application.buttons.matching(identifier: id).firstMatch
+            if button.exists { return button }
+            let alert = application.alerts.matching(NSPredicate(format: "label == 'Face Not Recognized'")).firstMatch
+            if alert.exists && alert.buttons["Cancel"].exists { return alert.buttons["Cancel"] }
+        }
+        return nil
+    }
+
     /// The system's Face ID sheet, when a face did not match: give up on it.
     func dismissBiometricPrompt() {
-        let cancel = springboard.buttons.matching(identifier: "com.apple.localauthentication.ax.authentication.button.cancel").firstMatch
-        if waitUntil(5, { cancel.exists }) {
-            cancel.tap()
+        var cancel: XCUIElement?
+        if waitUntil(5, { cancel = self.faceIDCancel; return cancel != nil }), let cancel {
+            tapWhereItIs(cancel, in: springboard)
             Thread.sleep(forTimeInterval: 1)
         }
+    }
+
+    /// The prompt an unlock screen raises by itself, given up on: a face that does not match, then Cancel, again until
+    /// [done]. A face shown before the prompt is listening changes nothing, so this keeps trying for a while.
+    @discardableResult
+    func refuseFaceID(until done: () -> Bool, timeout: TimeInterval = 20) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if done() { return true }
+            if let cancel = faceIDCancel {
+                tapWhereItIs(cancel, in: springboard)
+                Thread.sleep(forTimeInterval: 1)
+                continue
+            }
+            Biometrics.noMatch()
+            Thread.sleep(forTimeInterval: 1.5)
+        }
+        return done()
     }
 
     /// Flip a Settings-style switch row: the row's label takes a tap without changing anything, its inner control does.
@@ -133,6 +164,80 @@ extension UITestCase {
             }
         }
         return false
+    }
+
+    /// Settings > Apps > Safari > Extensions > andvari > Allow Extension, as a person turns it on. Each screen on the
+    /// way is a step of [test]'s, with its screenshot. True when the switch is on at the end.
+    @discardableResult
+    func enableSafariExtension() -> Bool {
+        let settings = settingsApp
+        step("settings-apps") {
+            settings.terminate()
+            settings.launch()
+            XCTAssertTrue(scrollToAndTap(labelled("Apps", in: settings), in: settings), "Settings has no Apps row")
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpTree(settings, as: "settings-apps")
+        }
+        step("safari-settings") {
+            let search = settings.searchFields.firstMatch
+            if search.exists {
+                search.tap()
+                search.typeText("Safari")
+                Thread.sleep(forTimeInterval: 1.5)
+            }
+            let row = settings.cells.matching(NSPredicate(format: "label BEGINSWITH 'Safari'")).firstMatch
+            let fallback = labelled("Safari", in: settings)
+            XCTAssertTrue(scrollToAndTap(row.exists ? row : fallback, in: settings, swipes: 12), "Settings > Apps has no Safari row")
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpTree(settings, as: "settings-safari")
+        }
+        step("extensions") {
+            XCTAssertTrue(scrollToAndTap(labelled("Extensions", in: settings), in: settings, swipes: 10), "Safari's settings have no Extensions row")
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpTree(settings, as: "settings-extensions")
+        }
+        step("andvari-extension") {
+            let row = settings.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+            XCTAssertTrue(scrollToAndTap(row, in: settings, swipes: 4), "andvari is not listed under Safari's extensions")
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpTree(settings, as: "settings-andvari-extension")
+        }
+        var on = false
+        step("allowed") {
+            let allow = settings.switches.matching(NSPredicate(format: "label CONTAINS[c] 'Allow Extension'")).firstMatch
+            require(allow, "the Allow Extension switch")
+            // A tap that lands while the screen is still sliding in changes nothing: look, and try again.
+            for _ in 0..<3 where !isOn(allow) {
+                Thread.sleep(forTimeInterval: 1.5)
+                flip(allow)
+                _ = waitUntil(5) { self.isOn(allow) }
+            }
+            on = isOn(allow)
+            XCTAssertTrue(on, "the extension did not turn on")
+            dumpTree(settings, as: "settings-andvari-extension-on")
+        }
+        settings.terminate()
+        SystemState.extensionEnabled = on
+        return on
+    }
+
+    /// The Safari extension turned on, once per run, whichever test needs it first.
+    func requireSafariExtension() {
+        if SystemState.extensionEnabled { return }
+        XCTAssertTrue(enableSafariExtension(), "the Safari extension could not be turned on")
+    }
+
+    /// Dismiss the "Saved … from AutoFill" list if one is up, so a test counts only its own saves.
+    func dismissSavedList() {
+        let header = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Saved ' AND label ENDSWITH ' from AutoFill'")).firstMatch
+        guard header.exists else { return }
+        let done = app.cells.containing(.button, identifier: "Done").buttons["Done"].firstMatch
+        if done.exists {
+            done.tap()
+        } else {
+            app.buttons["Done"].firstMatch.tap()
+        }
+        _ = waitUntil(8) { !header.exists }
     }
 
     /// The provider switch for andvari on the AutoFill screen.
@@ -203,7 +308,8 @@ extension UITestCase {
         openInSafari(Fixture.siteOrigin + "/" + page, heading: heading)
         typeInPage(user, field: webField("Username"), heading: heading)
         typeInPage(password, field: safari.webViews.secureTextFields[passwordLabel], heading: heading)
-        if safari.buttons["Done"].exists { safari.buttons["Done"].tap() }
+        let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
+        if keyboardDone.exists { tapWhereItIs(keyboardDone, in: safari) }
         safari.webViews.buttons[submit].firstMatch.tap()
         // A new login: "Save Password?" with a button per provider. A changed one: "Update Password?", which goes
         // to the provider that holds the login.
@@ -224,10 +330,13 @@ extension UITestCase {
     /// Open andvari's popup on the page Safari shows and look at the phone until [done], answering Safari's
     /// per-site questions on the way. The popup asks for Face ID by itself once it has painted.
     @discardableResult
-    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45) -> Bool {
+    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true) -> Bool {
+        closePopup()
         _ = waitUntil(4) { self.fillOfferButton.exists }
         closeFillOffer()
-        if safari.buttons["Done"].exists { safari.buttons["Done"].tap() }
+        // The keyboard's bar has a Done of its own, and the keyboard hides Safari's toolbar.
+        let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
+        if safari.keyboards.firstMatch.exists && keyboardDone.exists { tapWhereItIs(keyboardDone, in: safari) }
         let menu = safari.buttons["PageFormatMenuButton"]
         if !waitUntil(10, { menu.exists && menu.isHittable }) {
             dumpTree(safari, as: "no-page-menu")
@@ -245,21 +354,22 @@ extension UITestCase {
         let allow = safari.buttons["Allow for One Day"]
         let unlock = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Unlock with'")).firstMatch
         var unlockSeenSince: Date?
-        return matchFaceUntil(timeout) {
+        let check: () -> Bool = {
             // Safari asks, per site, whether the extension may see it; the popup waits behind that.
             if allow.exists && allow.isHittable {
-                allow.tap()
+                self.tapWhereItIs(allow, in: self.safari)
                 return false
             }
             if done() { return true }
+            guard showFace else { return false }
             // The button is the retry after a prompt that was cancelled or missed. It is also on screen for a moment
-            // while the popup's own prompt is still on its way, so it is only used once it has stayed for a while:
-            // a tap on a button that has just gone would fail the test for the wrong reason.
+            // while the popup's own prompt is still on its way, so it is used only once it has stayed for a while,
+            // and tapped where it was: a button that has just gone must not fail the test.
             if unlock.exists && unlock.isHittable {
                 if let since = unlockSeenSince {
-                    if Date().timeIntervalSince(since) > 9 && !done() && unlock.exists && unlock.isHittable {
+                    if Date().timeIntervalSince(since) > 9 && !done() {
                         unlockSeenSince = nil
-                        unlock.tap()
+                        self.tapWhereItIs(unlock, in: self.safari)
                     }
                 } else {
                     unlockSeenSince = Date()
@@ -269,17 +379,56 @@ extension UITestCase {
             }
             return false
         }
+        return showFace ? matchFaceUntil(timeout, check) : waitUntil(timeout, check)
     }
 
-    /// The widest element of the popup that carries [name]: the row itself, not the words in it.
-    func popupRowBox(_ name: String) -> XCUIElement {
-        let matches = safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", name))
-        var widest = matches.firstMatch
-        for index in 0..<min(matches.count, 8) {
-            let candidate = matches.element(boundBy: index)
-            if candidate.frame.width > widest.frame.width { widest = candidate }
+    /// Close the popup's sheet if it is open, with its own Done (the check mark at its top).
+    func closePopup() {
+        guard popupWebView.exists else { return }
+        let top = popupWebView.frame.minY
+        let done = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).allElementsBoundByIndex.first { abs($0.frame.minY - top) < 60 }
+        if let done {
+            tapWhereItIs(done, in: safari)
+        } else {
+            popupWebView.swipeDown(velocity: .fast)
         }
-        return widest
+        _ = waitUntil(5) { !self.popupWebView.exists }
+    }
+
+    /// The popup's web view: Safari labels it with the extension's name.
+    var popupWebView: XCUIElement {
+        safari.webViews.matching(NSPredicate(format: "label == 'andvari'")).firstMatch
+    }
+
+    /// A login's row in the popup: its button reads the name, then the username.
+    func popupLoginRow(_ name: String, _ user: String) -> XCUIElement {
+        safari.webViews.buttons["\(name) \(user)"].firstMatch
+    }
+
+    /// One of the popup's list headings ("This site — …", "All logins", "Cards"), whatever its case on screen.
+    func popupHeading(_ prefix: String) -> XCUIElement {
+        safari.webViews.staticTexts.matching(NSPredicate(format: "label BEGINSWITH[c] %@", prefix)).firstMatch
+    }
+
+    /// Whether [row] is listed under "This site" (below that heading and above "All logins").
+    func listedForThisSite(_ row: XCUIElement) -> Bool {
+        let site = popupHeading("This site")
+        let all = popupHeading("All logins")
+        guard row.exists, site.exists, all.exists else { return false }
+        return row.frame.minY > site.frame.maxY && row.frame.maxY < all.frame.minY
+    }
+
+    /// The box of the popup row that carries [name]: the smallest element around it that spans most of the popup.
+    func popupRowBox(_ name: String) -> XCUIElement? {
+        let width = popupWebView.frame.width
+        let around = safari.webViews.descendants(matching: .other).containing(NSPredicate(format: "label == %@", name)).allElementsBoundByIndex
+        return around.filter { $0.frame.width >= width * 0.6 }.min { $0.frame.height < $1.frame.height }
+    }
+
+    /// The popup page's own root: the largest element in it that carries the extension's name.
+    func popupRoot() -> XCUIElement? {
+        let roots = popupWebView.descendants(matching: .other).matching(NSPredicate(format: "label == 'andvari'")).allElementsBoundByIndex
+        return roots.max { $0.frame.height < $1.frame.height }
     }
 
     /// A row of the popup's lists: its text is the login's or card's name.
