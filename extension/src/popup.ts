@@ -317,6 +317,16 @@ function showConfirmServer(block: ServerBlockWire, storeKept: boolean): void {
   box.hidden = false;
   const notMine = el<HTMLButtonElement>("confirm-server-not-mine");
   const open = el<HTMLButtonElement>("confirm-server-open");
+  if (BUILD_TARGET === "safari") {
+    // The server is the andvari app's, and only the app changes it: nothing to confirm here, no Options, no default.
+    el("confirm-server-h").textContent = "No server yet";
+    el("confirm-server-lead").hidden = true;
+    el("confirm-server-origin").hidden = true;
+    el("confirm-server-body").textContent = appAnswered === "none" ? APP_SERVER_NONE : APP_SERVER_UNKNOWN;
+    open.hidden = true;
+    notMine.hidden = true;
+    return;
+  }
   if (block.kind === "unsettled") {
     el("confirm-server-h").textContent = "andvari couldn’t load its settings";
     el("confirm-server-lead").hidden = true;
@@ -1613,7 +1623,7 @@ async function renderServerOrigin(): Promise<void> {
   // an anti-phishing display.
   const origin = info && typeof info.url === "string" && info.url && !info.block ? info.url : null;
   if (origin === null) {
-    const why = info?.block?.kind === "confirm" ? "No server confirmed yet" : "Server unknown";
+    const why = BUILD_TARGET === "safari" ? "No server yet" : info?.block?.kind === "confirm" ? "No server confirmed yet" : "Server unknown";
     node.textContent = why;
     node.title = why;
     node.setAttribute("role", "note");
@@ -1902,12 +1912,30 @@ if (BUILD_TARGET === "safari") {
 
 /** Safari on iOS: the server comes from the andvari app. */
 const APP_SERVER_NONE = "Choose your server in the andvari app. This extension uses the same one.";
+const APP_SERVER_UNKNOWN = "andvari couldn’t ask the andvari app which server you use. Open the app once, then open this again.";
 
-/** Safari: ask the worker to adopt the app's server before anything shows a server; whether the app has none. */
+/** Safari: what the app said about its server at this open (the worker's ask, else the popup's own). */
+let appAnswered: "set" | "none" | "unavailable" | null = null;
+
+/**
+ * Safari: have the worker adopt the app's server before anything shows a server; whether the app has none. The worker
+ * asks the app itself; when that ask got no answer (on a device it timed out while this page's, a moment later,
+ * resolved), this page asks the app and relays what it said, which the worker adopts the same way.
+ */
 async function adoptAppServer(): Promise<boolean> {
   if (BUILD_TARGET !== "safari") return false;
   const r = await ask({ type: "appServer" });
-  return r?.app === "none";
+  appAnswered = r?.app ?? "unavailable";
+  if (appAnswered === "unavailable") {
+    const own = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], "com.silencelen.andvari"));
+    if (own.answer.kind === "set") {
+      const relayed = await ask({ type: "appServerAnswer", url: own.answer.url, nativeSave: own.nativeSave });
+      appAnswered = relayed?.app ?? "unavailable";
+    } else if (own.answer.kind === "none") {
+      appAnswered = "none";
+    }
+  }
+  return appAnswered === "none";
 }
 
 void adoptAppServer().then((appHasNone) => {
@@ -1915,10 +1943,19 @@ void adoptAppServer().then((appHasNone) => {
   // Probe biometric capability BEFORE the first status render so the bio enroll shortcuts appear on the
   // first paint (not only after an interaction re-renders). The probe is fast and never throws out.
   void probeBioCapable().finally(() => void refresh().finally(() => {
-    if (appHasNone) showMsg("info", APP_SERVER_NONE);
+    if (appHasNone && el("confirm-server").hidden) showMsg("info", APP_SERVER_NONE); // the card says it when it is up
     else void appUnlockOnOpen();
   }));
   void renderUpdate();
+  if (BUILD_TARGET === "safari") {
+    // The Safari build never contacts the server (the andvari app does), so there is no connection to show or test,
+    // and no host grant for it to finish setting up. Its access to web pages is Safari's per-site permission, which the
+    // andvari app explains (Settings › Safari): the all-sites banner would offer a grant the page cannot make here.
+    el("conn").hidden = true;
+    el("conn-status").textContent = "";
+    el("ping").hidden = true;
+    return;
+  }
   // Passive connectivity dot — quiet ping on open, result only in the header dot.
   void ask({ type: "ping" }).then((r) => setConn(r?.ok === true, r?.code === "confirm_server"));
   void detectMissingHostGrant();

@@ -85,10 +85,21 @@ test("the worker adopts the app's server through commitServerUrl, in the Safari 
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
   const fn = bg.slice(bg.indexOf("function syncAppServer"), bg.indexOf("function syncAppServer") + 2600);
   assert.match(fn, /BUILD_TARGET !== "safari"/);
-  assert.match(fn, /appServerToAdopt\(/);
-  assert.match(fn, /await commitServerUrl\(adopt\)/);
+  assert.match(fn, /return await adoptAppAnswer\(asked\.answer, ""\);/, "the worker's own answer is adopted through the one path");
+  const adopt = bg.slice(bg.indexOf("function adoptAppAnswer("), bg.indexOf("async function adoptRelayedAppServer("));
+  assert.match(adopt, /appServerToAdopt\(/);
+  assert.match(adopt, /await commitServerUrl\(adopt\)/);
   // Without a store the app's origin is used for this worker life only, and only after the kept commit refused.
-  assert.match(fn, /r\.code === "storage" && \(await adoptAppServerUnkept\(adopt\)\)/);
+  assert.match(adopt, /r\.code === "storage" && \(await adoptAppServerUnkept\(adopt\)\)/);
+  // One adoption at a time.
+  assert.match(adopt, /const next = appAdoptChain\.then\(run, run\);/);
+  // The popup's relayed answer: Safari only, read with the same parser, after worker start and the retirement, and
+  // adopted through the same path.
+  const relay = bg.slice(bg.indexOf("async function adoptRelayedAppServer("), bg.indexOf("// Safari: the earlier build's own session is retired first"));
+  assert.match(relay, /if \(BUILD_TARGET !== "safari"\) return \{ app: "unavailable" \};/);
+  assert.match(relay, /parseAppServerReply\(\{ ok: true, type: "appServer", url: msg\.url \}\)/);
+  assert.ok(relay.indexOf("await Promise.race([ownSessionRetired") < relay.indexOf("return adoptAppAnswer(answer"));
+  assert.match(bg, /case "appServerAnswer":\s*return adoptRelayedAppServer\(msg\);/);
   // The Details answer never waits on worker start.
   assert.match(bg, /type === "serverDiag"\) \{\s*sendResponse\(senderMaySend\("serverDiag", sender, EXTENSION_BASE\) \? serverDiag\(\) : null\);/);
   assert.match(bg, /case "appServer":\s*return syncAppServer\(\);/);
