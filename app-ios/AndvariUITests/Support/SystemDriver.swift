@@ -244,7 +244,7 @@ extension UITestCase {
         entry.tap()
         let allow = safari.buttons["Allow for One Day"]
         let unlock = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Unlock with'")).firstMatch
-        var lastUnlockTap = Date.distantPast
+        var unlockSeenSince: Date?
         return matchFaceUntil(timeout) {
             // Safari asks, per site, whether the extension may see it; the popup waits behind that.
             if allow.exists && allow.isHittable {
@@ -252,10 +252,20 @@ extension UITestCase {
                 return false
             }
             if done() { return true }
-            // The button is the retry after a prompt that was cancelled or missed.
-            if unlock.exists && unlock.isHittable && Date().timeIntervalSince(lastUnlockTap) > 8 {
-                lastUnlockTap = Date()
-                unlock.tap()
+            // The button is the retry after a prompt that was cancelled or missed. It is also on screen for a moment
+            // while the popup's own prompt is still on its way, so it is only used once it has stayed for a while:
+            // a tap on a button that has just gone would fail the test for the wrong reason.
+            if unlock.exists && unlock.isHittable {
+                if let since = unlockSeenSince {
+                    if Date().timeIntervalSince(since) > 9 && !done() && unlock.exists && unlock.isHittable {
+                        unlockSeenSince = nil
+                        unlock.tap()
+                    }
+                } else {
+                    unlockSeenSince = Date()
+                }
+            } else {
+                unlockSeenSince = nil
             }
             return false
         }
