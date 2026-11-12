@@ -518,7 +518,7 @@ function row(it: MatchItem): HTMLElement {
   const acts = document.createElement("span");
   acts.className = "acts";
   if (it.username) acts.append(actBtn("user", "Copy username", (btn) => void copyUsername(it, btn)));
-  acts.append(actBtn("pass", "Copy password", (btn) => void copyPassword(it, btn)));
+  if (copiesLongLivedSecrets()) acts.append(actBtn("pass", "Copy password", (btn) => void copyPassword(it, btn)));
   r.append(acts);
 
   const open = () => openDetail(it);
@@ -605,10 +605,8 @@ function renderDetail(it: MatchItem): void {
     const { field, value, acts } = detailField("Password");
     value.classList.add("secret");
     value.textContent = "••••••••••";
-    acts.append(
-      actBtn("show", "Reveal password", (btn) => void toggleReveal(it, value, btn)),
-      actBtn("copy", "Copy password", (btn) => void copyPassword(it, btn)),
-    );
+    acts.append(actBtn("show", "Reveal password", (btn) => void toggleReveal(it, value, btn)));
+    if (copiesLongLivedSecrets()) acts.append(actBtn("copy", "Copy password", (btn) => void copyPassword(it, btn)));
     body.append(field);
   }
 
@@ -756,6 +754,18 @@ function flash(btn: HTMLElement): void {
     btn.textContent = btn.dataset["label"] ?? "";
     btn.classList.remove("did");
   }, FLASH_MS);
+}
+
+/**
+ * Whether this popup copies a password, a card number or a security code (round-5 review C4). Not in the Safari build:
+ * a copy from a web page goes to the general pasteboard, which Universal Clipboard carries to the person's other
+ * devices, and nothing clears it (the popup's timer dies with the sheet, and the worker cannot write the clipboard
+ * there). Apple's documentation does not say that the extension's native handler may write the pasteboard (where the
+ * app's own copies are local-only and expire), so there is no safe copy here: those are filled, or copied in the app.
+ * The username, a one-time code (valid for seconds), the expiry and the name on a card are still copied.
+ */
+function copiesLongLivedSecrets(): boolean {
+  return BUILD_TARGET !== "safari";
 }
 
 async function toClipboard(text: string): Promise<boolean> {
@@ -1019,11 +1029,11 @@ function cardRow(it: CardItem): HTMLElement {
       actBtn("fill", `Fill this card into ${cardFill.origin ?? "the page"}`, (btn) => void fillCardRow(it.itemId, btn)),
     );
   }
-  if (it.hasNumber) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
+  if (it.hasNumber && copiesLongLivedSecrets()) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
   if (it.hasExpiry) acts.append(actBtn("exp", "Copy expiry (MM/YY)", (btn) => void copyCardField(it.itemId, "expiry", btn)));
   // Tier 2 §6 copy parity: every surface copies number/expiry/name/CVV.
   if (it.hasName) acts.append(actBtn("name", "Copy name on card", (btn) => void copyCardField(it.itemId, "name", btn)));
-  if (it.hasCvv) acts.append(actBtn("cvv", "Copy security code", (btn) => void copyCardField(it.itemId, "cvv", btn)));
+  if (it.hasCvv && copiesLongLivedSecrets()) acts.append(actBtn("cvv", "Copy security code", (btn) => void copyCardField(it.itemId, "cvv", btn)));
 
   r.append(glyph, body, acts);
   return r;
@@ -1068,11 +1078,12 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
     // "Filled expiry — couldn't fill expiry" is nonsense, so the missed side owns shared labels.
     const missed = cardLabels(r.outcome.missedKinds);
     const landed = cardLabels(r.outcome.filledKinds).filter((l) => !missed.includes(l));
+    const remedy = copiesLongLivedSecrets() ? "Copy instead:" : "Copy what's missing from the andvari app.";
     showMsg(
       "info",
       landed.length > 0
-        ? `Filled ${landed.join(", ")} — couldn't fill ${missed.join(", ")}. Copy instead:`
-        : `Couldn't fill ${missed.join(", ")}. Copy instead:`,
+        ? `Filled ${landed.join(", ")} — couldn't fill ${missed.join(", ")}. ${remedy}`
+        : `Couldn't fill ${missed.join(", ")}. ${remedy}`,
     );
   } else {
     showMsg("err", fillErrorCopy(r?.code));
