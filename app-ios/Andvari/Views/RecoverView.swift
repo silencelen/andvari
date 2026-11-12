@@ -86,8 +86,9 @@ struct RecoverView: View {
             text: $phrase,
             focus: $focus,
             field: .phrase,
+            secret: true,
+            returnKey: .go,
             monospaced: true,
-            submitLabel: .go,
             onSubmit: submit
         )
         Text("Spaces and line breaks in the phrase don't matter.")

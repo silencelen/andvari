@@ -325,6 +325,11 @@ struct InputField<Focus: Hashable>: View {
     private let field: Focus
     private let prompt: String?
     private let secure: Bool
+    /// A secret typed in the open on request (a recovery phrase): hidden until Show, and never corrected or learned by
+    /// the keyboard ([SecretTextField]).
+    private let secret: Bool
+    private let returnKey: UIReturnKeyType
+    @State private var shown = false
     private let monospaced: Bool
     private let contentType: UITextContentType?
     private let keyboard: UIKeyboardType
@@ -339,6 +344,8 @@ struct InputField<Focus: Hashable>: View {
         field: Focus,
         prompt: String? = nil,
         secure: Bool = false,
+        secret: Bool = false,
+        returnKey: UIReturnKeyType = .default,
         monospaced: Bool = false,
         contentType: UITextContentType? = nil,
         keyboard: UIKeyboardType = .default,
@@ -352,6 +359,8 @@ struct InputField<Focus: Hashable>: View {
         self.field = field
         self.prompt = prompt
         self.secure = secure
+        self.secret = secret
+        self.returnKey = returnKey
         self.monospaced = monospaced
         self.contentType = contentType
         self.keyboard = keyboard
@@ -363,6 +372,50 @@ struct InputField<Focus: Hashable>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             FieldLabel(text: label)
+            if secret {
+                secretEntry
+            } else {
+                plainEntry
+            }
+        }
+    }
+
+    private var secretEntry: some View {
+        HStack(spacing: 8) {
+            SecretTextField(
+                text: $text,
+                placeholder: prompt ?? "",
+                secure: !shown,
+                monospaced: monospaced,
+                keyboard: keyboard == .default ? .asciiCapable : keyboard,
+                contentType: contentType,
+                returnKey: returnKey,
+                focused: focus.wrappedValue == field,
+                onFocusChange: { on in
+                    if on {
+                        focus.wrappedValue = field
+                    } else if focus.wrappedValue == field {
+                        focus.wrappedValue = nil
+                    }
+                },
+                onSubmit: { onSubmit() }
+            )
+            .frame(minHeight: 24)
+            .accessibilityLabel(label)
+            Button {
+                shown.toggle()
+            } label: {
+                Image(systemName: shown ? "eye.slash" : "eye")
+                    .frame(minWidth: 32, minHeight: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(shown ? "Hide" : "Show")
+        }
+        .fieldBox(focused: focus.wrappedValue == field)
+    }
+
+    private var plainEntry: some View {
+        Group {
             entry
                 .font(monospaced ? Font.body.monospaced() : Font.body)
                 .foregroundStyle(Palette.ink)

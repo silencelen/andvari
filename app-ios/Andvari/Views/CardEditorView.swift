@@ -40,7 +40,6 @@ struct CardEditorView: View {
 
                 Section("Card") {
                     secretField("Card number", text: $draft.number, shown: $showNumber)
-                        .keyboardType(.numberPad)
                     if let warning = model.cardNumberWarning(draft.number) {
                         Text(warning)
                             .font(.footnote)
@@ -55,7 +54,6 @@ struct CardEditorView: View {
                     }
                     .font(.body.monospaced())
                     secretField("Security code", text: $draft.securityCode, shown: $showCode)
-                        .keyboardType(.numberPad)
                     TextField("Cardholder name", text: $draft.cardholder)
                         .textContentType(.name)
                         .autocorrectionDisabled()
@@ -66,9 +64,9 @@ struct CardEditorView: View {
                 .listRowBackground(Palette.raised)
 
                 Section("Notes") {
-                    TextEditor(text: $draft.notes)
+                    SecretTextEditor(text: $draft.notes)
                         .frame(minHeight: 96)
-                        .scrollContentBackground(.hidden)
+                        .accessibilityLabel("Notes")
                 }
                 .listRowBackground(Palette.raised)
 
@@ -131,16 +129,10 @@ struct CardEditorView: View {
 
     private func secretField(_ label: String, text: Binding<String>, shown: Binding<Bool>) -> some View {
         HStack(spacing: 8) {
-            Group {
-                if shown.wrappedValue {
-                    TextField(label, text: text)
-                } else {
-                    SecureField(label, text: text)
-                }
-            }
-            .font(.body.monospaced())
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
+            // Hidden or shown, never corrected or learned by the keyboard (SecretFields.swift).
+            SecretTextField(text: text, placeholder: label, secure: !shown.wrappedValue, keyboard: .numberPad)
+                .frame(minHeight: 24)
+                .accessibilityLabel(label)
             Button {
                 shown.wrappedValue.toggle()
             } label: {

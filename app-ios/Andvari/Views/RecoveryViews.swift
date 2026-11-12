@@ -39,9 +39,10 @@ struct RecoveryRevealView: View {
                     text: $typed,
                     focus: $focus,
                     field: .typed,
+                    secret: true,
+                    returnKey: .done,
                     monospaced: true,
                     keyboard: .asciiCapable,
-                    submitLabel: .done,
                     onSubmit: confirm
                 )
                 if let message {
