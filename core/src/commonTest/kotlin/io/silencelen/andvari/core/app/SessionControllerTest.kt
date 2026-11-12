@@ -835,32 +835,92 @@ open class SessionControllerTest {
     }
 
     @Test
-    fun aListedSaveWhoseLoginNeverReachedTheVaultIsAddedAgainOnceAndADeletedOneIsNot() = test {
+    fun aSavedLoginDeletedOnAnotherDeviceIsNeverWrittenAgain() = test {
         unlockedWithAPersonalVault()
         controller.lock()
-        capture("kept", "https://shop.example/", "me", "pw-1")
-        capture("gone", "https://other.example/", "me", "pw-2")
+        capture("elsewhere", "https://shop.example/", "me", "pw-1")
+        capture("here", "https://other.example/", "me", "pw-2")
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.size == 2 }
         val cache = namespaces.caches.getValue("$homeKey/${reg.userId}")
-        val lost = controller.state.items.single { it.name == "shop.example" }.itemId
-        val deleted = controller.state.items.single { it.name == "other.example" }.itemId
-        // One login is removed on purpose; the other's write is lost before it reached anything (no row, nothing queued).
-        assertEquals(ActionResult.Ok, controller.deleteItem(deleted))
+        val remote = controller.state.items.single { it.name == "shop.example" }.itemId
+        val local = controller.state.items.single { it.name == "other.example" }.itemId
+        assertEquals(ActionResult.Ok, controller.deleteItem(local))
         controller.lock()
-        cache.pending().filter { it.itemId == lost }.forEach { cache.dequeue(it.mutationId) }
-        cache.deleteItem(lost)
-        controller.unlock(PASSWORD)
-        settle { controller.state.items.any { it.name == "shop.example" } }
-        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name }, "the lost login is back, once; the deleted one is not")
-        assertEquals(listOf("kept"), controller.state.appliedSaves.map { it.id }, "and it is still listed, with its undo")
-        assertEquals("pw-1", controller.revealSecret(controller.state.items.single { it.name == "shop.example" }.itemId, SecretField.PASSWORD))
-        // Nothing is added twice by the next unlock.
+        // What a sync leaves of a login deleted on another device, or from the web's trash: no row, nothing queued.
+        cache.pending().filter { it.itemId == remote }.forEach { cache.dequeue(it.mutationId) }
+        cache.deleteItem(remote)
+        repeat(2) {
+            controller.unlock(PASSWORD)
+            settle { appliedLog.bytes == null } // the queue's sync has run: the records are gone
+            controller.onForeground() // and again, as on every return to the app
+            delay(100)
+            assertEquals(listOf("Example"), controller.state.items.map { it.name }, "neither login comes back")
+            assertTrue(controller.state.appliedSaves.isEmpty(), "and neither is listed: there is nothing left to undo")
+            controller.lock()
+        }
+        assertNull(appliedLog.bytes)
+        assertTrue(cache.pending().none { it.itemId == remote }, "nothing was queued for it either")
+    }
+
+    /** A record as the importer stores it, sealed to the account. */
+    private fun Rig.storedSaveRecord(id: String, site: String, itemId: String, password: String, intent: Boolean) {
+        val record = """{"id":"$id","site":"$site","username":"me","itemId":"$itemId","replacedName":null,"password":"$password","keptOld":false,"appliedAtMs":${clocks.wall},"intent":$intent}"""
+        val sealedRecord = Bytes.toB64(crypto.sealTo(enrolled.account.identityPub, record.encodeToByteArray()))
+        appliedLog.write("""["$sealedRecord"]""".encodeToByteArray())
+    }
+
+    @Test
+    fun aSaveCutShortBeforeItsWriteIsJudgedAgainFromTheQueueAndWrittenOnce() = test {
+        unlockedWithAPersonalVault()
         controller.lock()
+        capture("a", "https://shop.example/", "me", "pw-1")
+        // The lock fell between storing the intent and writing: the entry is still queued, and the vault has no such login.
+        storedSaveRecord("a", "https://shop.example/", "00000000-0000-4000-8000-0000000000aa", "pw-1", intent = true)
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.isNotEmpty() }
-        assertEquals(2, controller.state.items.size)
-        assertEquals(ActionResult.Ok, controller.undoAppliedSave("kept"))
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name }, "written once")
+        assertEquals(listOf("a"), controller.state.appliedSaves.map { it.id })
+        assertTrue(queue.map.isEmpty())
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave("a"))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+    }
+
+    @Test
+    fun aSaveCutShortAfterItsWriteIsListedWithItsUndoAndNotWrittenTwice() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("a", "https://shop.example/", "me", "pw-1")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        val written = controller.state.items.single { it.name == "shop.example" }.itemId
+        controller.lock()
+        // The lock fell between the write and the bookkeeping: the entry is still queued and the record is still an intent.
+        capture("a", "https://shop.example/", "me", "pw-1")
+        storedSaveRecord("a", "https://shop.example/", written, "pw-1", intent = true)
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
+        assertTrue(queue.map.isEmpty(), "the entry it came from is gone")
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave("a"), "nothing was written that the list does not show")
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+    }
+
+    @Test
+    fun anIntentWithNothingBehindItIsDroppedAndWritesNothing() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        // No queue entry and no login: a restored container, or an undo whose bookkeeping a lock cut short.
+        storedSaveRecord("a", "https://shop.example/", "00000000-0000-4000-8000-0000000000aa", "pw-1", intent = true)
+        controller.unlock(PASSWORD)
+        settle { appliedLog.bytes == null }
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        // The same for a finished record whose login is no longer there.
+        controller.lock()
+        storedSaveRecord("b", "https://shop.example/", "00000000-0000-4000-8000-0000000000bb", "pw-1", intent = false)
+        controller.unlock(PASSWORD)
+        settle { appliedLog.bytes == null }
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
     }
 
