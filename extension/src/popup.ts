@@ -772,8 +772,8 @@ async function scheduleClipboardClear(): Promise<void> {
   clipClearTimer = window.setTimeout(() => void navigator.clipboard.writeText("").catch(() => {}), Math.max(1, s) * 1000);
 }
 
-async function fillItem(itemId: string, confirmedOtherSite = false): Promise<void> {
-  const r = await ask({ type: "fillFromPopup", itemId, confirmedOtherSite });
+async function fillItem(itemId: string, confirmedOtherSite?: string): Promise<void> {
+  const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId } : { type: "fillFromPopup", itemId, confirmedOtherSite });
   if (r?.needsConfirm) {
     confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);
     return;
@@ -812,7 +812,7 @@ function confirmOtherSite(itemId: string, savedFor: string, page: string): void 
   cancel.addEventListener("click", () => box.remove());
   fill.addEventListener("click", () => {
     box.remove();
-    void fillItem(itemId, true);
+    void fillItem(itemId, page); // the confirmation is for this page, and the worker holds it to that
   });
   box.append(text, fill, cancel);
   el("msg").insertAdjacentElement("afterend", box);
@@ -1866,7 +1866,8 @@ async function appUnlockOnOpen(): Promise<void> {
   appUnlockOffered = true;
   const s = await ask({ type: "status" });
   const info = await ask({ type: "serverInfo" });
-  if (!s || s.unlocked || !info || info.block) return;
+  // A page asked for this popup (not a tap on the toolbar item): Face ID waits for the button.
+  if (!s || s.unlocked || s.pageSummoned === true || !info || info.block) return;
   // The popup is painted before the prompt is asked for: two animation frames put the unlock view on screen, and
   // 400 ms more lets Safari finish presenting the sheet (its presentation animation is about a third of a second).
   // A system sheet raised while Safari is still presenting ours is the surest way to have ours dropped.

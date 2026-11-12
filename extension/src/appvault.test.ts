@@ -128,8 +128,15 @@ test("a page frame gets a secret only through the popup's grant, never a code, a
   assert.match(lane, /const page = await activePageHost\(\);/);
   // A login saved for another site is not granted to the active page until the person confirmed it.
   const fill = bg.slice(bg.indexOf("async function fillFromPopup("), bg.indexOf("async function topOrigin("));
-  const confirm = fill.indexOf("if (APP_VAULT !== null && !confirmedOtherSite) {");
-  assert.ok(confirm > 0 && confirm < fill.indexOf("grants.set(tab.id"), "asked before any grant is minted");
+  const confirm = fill.indexOf("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);");
+  assert.ok(confirm > 0 && confirm < fill.indexOf("grants.set(tab.id"), "asked before any grant is minted, and held to the page it was given for");
+  // A popup a page asked for does not raise Face ID by itself.
+  for (const fn of ["openPopupForSearch", "openPopupForCards", "openPopupForSave"]) {
+    const body = bg.slice(bg.indexOf(`async function ${fn}(`), bg.indexOf(`async function ${fn}(`) + 300);
+    assert.ok(body.includes("pageSummonedPopupAt = Date.now();"), fn);
+  }
+  const popup = readFileSync(new URL("./popup.ts", import.meta.url), "utf8");
+  assert.ok(popup.includes("s.pageSummoned === true"));
   assert.match(fill, /needsConfirm: \{ savedFor, page: page \?\? top \}/);
 });
 

@@ -2410,7 +2410,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "revealCardField":
       return revealCardField(msg, sender);
     case "fillFromPopup":
-      return fillFromPopup(msg.itemId, sender, msg.confirmedOtherSite === true);
+      return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null);
     case "capturedCredential":
       return capturedCredential(msg, sender);
     case "captureCard":
@@ -3828,6 +3828,7 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
         waitingGrants: 0,
         wrongVault: 0,
         rememberedEmail: null,
+        pageSummoned: Date.now() - pageSummonedPopupAt < PAGE_SUMMON_WINDOW_MS,
       } satisfies Res<"status">;
     case "appUnlock": {
       const r = await vault.open();
@@ -4047,7 +4048,7 @@ function asFillOutcome(v: unknown): FillOutcome | null {
  *  Cut M (v2 #14): `ok` used to mean sendMessage DELIVERY, so the popup closed over a fill
  *  that wrote nothing — now the content script answers its real FillOutcome and ok is true
  *  only when something actually landed in a field. */
-async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender, confirmedOtherSite = false): Promise<Res<"fillFromPopup">> {
+async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender, confirmedOtherSite: string | null = null): Promise<Res<"fillFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
   // Safari: the open list of the app's vault stands in for the session's items; the secret is fetched at the reveal.
   const unlockedNow = APP_VAULT !== null ? APP_VAULT.unlocked : session !== null;
@@ -4064,10 +4065,12 @@ async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSende
   if (top === null) return { ok: false, code: "not_allowed", error: "this page cannot be filled" };
   // Safari: this popup is the only fill surface and lists the whole vault, so a login saved for another site is
   // filled here only after the person confirmed it, with both hosts named (a look-alike domain is the case).
-  if (APP_VAULT !== null && !confirmedOtherSite) {
+  if (APP_VAULT !== null) {
     const page = normalizeHost(top);
     const uris = APP_VAULT.item(itemId)?.uris ?? [];
-    if (page === null || !matchLogins(uris, { webHost: page, packageName: "" }, pslResolve)) {
+    // The confirmation names the page it was given for: it holds only while the active tab is still on that host.
+    const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);
+    if (!confirmed && (page === null || !matchLogins(uris, { webHost: page, packageName: "" }, pslResolve))) {
       const savedFor = uris.map((u) => normalizeHost(u)).find((h): h is string => h !== null) ?? "another site";
       return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: { savedFor, page: page ?? top } };
     }
@@ -4320,6 +4323,7 @@ async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<
  *  PRIMARY path, not a fallback. Resolution is the only signal either engine gives — claim nothing
  *  more from it. */
 async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForCards">> {
+  pageSummonedPopupAt = Date.now();
   const tabId = sender.tab?.id;
   if (tabId === undefined || sender.tab?.active !== true) return { opened: false }; // [S9] pages only, and only the active one
   // Review #6: frame-0 only, matching the offer gate's strict [S1]. Unreachable today (the chip
@@ -4353,6 +4357,7 @@ async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<
  *  computes its offers against the ACTIVE tab and would see itself — the [C4] pin's ban covers
  *  this function too, its span deliberately swallows us). */
 async function openPopupForSave(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForSave">> {
+  pageSummonedPopupAt = Date.now();
   const tabId = sender.tab?.id;
   if (tabId === undefined || sender.tab?.active !== true) return { opened: false }; // pages only, and only the active one
   const pending = tabs.get(tabId)?.pending;
@@ -4377,7 +4382,13 @@ async function openPopupForSave(sender: chrome.runtime.MessageSender): Promise<R
  *  nothing, honest `opened`); FORBIDDEN, as for the chip: opening popup.html as a tab or window.
  *  Frame 0 only, because the popup fills the top frame only — opening it from a sub-frame's pick
  *  would offer to fill a different form than the one the user clicked in. */
+/** When a page-side message last asked for the popup to be opened. The Safari popup then raises no Face ID prompt by
+ *  itself (the button does): a page must not be able to put the system's prompt in front of the person. */
+let pageSummonedPopupAt = 0;
+const PAGE_SUMMON_WINDOW_MS = 10_000;
+
 async function openPopupForSearch(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForSearch">> {
+  pageSummonedPopupAt = Date.now();
   const tabId = sender.tab?.id;
   if (tabId === undefined || sender.tab?.active !== true || sender.frameId !== 0) return { opened: false };
   const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -4775,7 +4786,8 @@ async function resolvePendingSave(
   }
 
   // Safari on iOS: this extension has no session to save with. The capture is sealed to the app's account and queued
-  // for the app, which shows it before writing anything (appsave.ts).
+  // for the app, which saves it at its next unlock under its own rules (a new login, or a newer password for the
+  // personal-vault login it matches) and lists what it saved, with undo (appsave.ts; core SaveImporter).
   if (savesThroughApp(BUILD_TARGET)) return saveThroughApp(tabId, st, pending);
 
   // Pending survives a locked failure so unlock → save can still land it. The surface maps the
