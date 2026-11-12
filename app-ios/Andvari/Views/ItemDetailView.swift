@@ -21,6 +21,12 @@ struct ItemDetailView: View {
     /// Bumped whenever the item is read again: the previous-password rows start over, hidden, so nothing shown stays on
     /// screen under a list that may have changed underneath it.
     @State private var generation = 0
+    @State private var historyOpen = false
+    @State private var historyLoading = false
+    @State private var historyMessage: String?
+    @State private var confirmRestore: ItemVersionView?
+    /// Passwords of earlier versions the person chose to show, by revision; dropped when the history closes.
+    @State private var shownVersions: [Int64: String] = [:]
 
     init(itemId: String) {
         self.itemId = itemId
@@ -72,6 +78,126 @@ struct ItemDetailView: View {
             notes = nil
             cardNumber = nil
             cardCode = nil
+            closeHistory()
+        }
+        .confirmationDialog("Restore this version?", isPresented: restoreAsked, titleVisibility: .visible, presenting: confirmRestore) { version in
+            Button("Restore") {
+                restoreVersion(version)
+            }
+        } message: { version in
+            Text("The item's current version will be replaced by the one from \(day(version.archivedAtMs)). The replaced version stays in the history.")
+        }
+    }
+
+    // MARK: - Version history
+
+    private var restoreAsked: Binding<Bool> {
+        Binding(get: { confirmRestore != nil }, set: { if !$0 { confirmRestore = nil } })
+    }
+
+    @ViewBuilder
+    private func historySection(_ detail: ItemDetail) -> some View {
+        Section {
+            if !historyOpen {
+                Button("Show earlier versions") {
+                    openHistory()
+                }
+            } else if let history = model.state.history, history.itemId == itemId {
+                if history.versions.isEmpty {
+                    Text("No earlier versions yet. The history starts with the next change.")
+                        .foregroundStyle(Palette.inkDim)
+                }
+                ForEach(history.versions, id: \.rev) { version in
+                    versionRow(version, canRestore: history.canRestore)
+                }
+                Button("Hide earlier versions") {
+                    closeHistory()
+                }
+            } else if historyLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+            }
+            if let historyMessage {
+                Text(historyMessage)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.danger)
+            }
+        } header: {
+            Text("Version history")
+        } footer: {
+            Text("The server keeps up to the last 10 saves of each item.")
+        }
+        .listRowBackground(Palette.raised)
+    }
+
+    private func versionRow(_ version: ItemVersionView, canRestore: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(day(version.archivedAtMs, time: true))
+                .font(.subheadline)
+                .foregroundStyle(Palette.inkDim)
+            Text([version.name, version.detail].compactMap { $0 }.joined(separator: " · "))
+                .foregroundStyle(Palette.ink)
+            if version.hasPassword {
+                // Not selectable: a revealed secret is copied only through the expiring clipboard.
+                Text(shownVersions[version.rev] ?? "••••••••")
+                    .font(.body.monospaced())
+                    .foregroundStyle(Palette.ink)
+            }
+            HStack(spacing: 16) {
+                if version.hasPassword {
+                    Button(shownVersions[version.rev] == nil ? "Show" : "Hide") {
+                        if shownVersions[version.rev] == nil {
+                            shownVersions[version.rev] = model.historyPassword(itemId, version.rev)
+                        } else {
+                            shownVersions[version.rev] = nil
+                        }
+                    }
+                }
+                if canRestore {
+                    Button("Restore") {
+                        confirmRestore = version
+                    }
+                    .disabled(model.state.busy)
+                }
+            }
+            .font(.subheadline)
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func day(_ ms: Int64, time: Bool = false) -> String {
+        Date(timeIntervalSince1970: TimeInterval(ms) / 1000).formatted(date: .abbreviated, time: time ? .shortened : .omitted)
+    }
+
+    private func openHistory() {
+        historyOpen = true
+        historyLoading = true
+        historyMessage = nil
+        Task {
+            let outcome = await model.openItemHistory(itemId)
+            historyLoading = false
+            if outcome != .ok {
+                historyOpen = false
+                historyMessage = outcome.message
+            }
+        }
+    }
+
+    private func closeHistory() {
+        historyOpen = false
+        shownVersions = [:]
+        model.closeItemHistory()
+    }
+
+    private func restoreVersion(_ version: ItemVersionView) {
+        historyMessage = nil
+        shownVersions = [:]
+        Task {
+            let outcome = await model.restoreItemVersion(itemId, version.rev)
+            if outcome != .ok {
+                historyMessage = outcome.message
+            }
         }
     }
 
@@ -127,6 +253,7 @@ struct ItemDetailView: View {
             }
             .listRowBackground(Palette.raised)
         }
+        historySection(detail)
         Section {
             Text("Updated \(updated(detail))")
                 .font(.footnote)

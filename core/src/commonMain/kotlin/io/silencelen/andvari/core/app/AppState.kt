@@ -64,6 +64,8 @@ data class AppState(
     val recoverVerified: Boolean,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
     val trash: List<TrashItemView>?,
+    /** One item's earlier versions while they are open ([SessionController.openItemHistory]); null otherwise. */
+    val history: ItemHistoryView?,
     /** VAULT: the personal vault is not confirmed on this device; what the person has to decide. Null when it is. */
     val personalVault: PersonalVaultView?,
     /** VAULT: captured logins that could not be saved by themselves; each says why and can be saved or discarded. */
@@ -101,7 +103,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, recoverVerified = false, trash = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, recoverVerified = false, trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -227,6 +229,23 @@ data class TrashItemView(
     val canRestore: Boolean,
     /** Delete forever removes it and its history now; false in a vault this account only reads. */
     val canPurge: Boolean,
+)
+
+/** One item's earlier versions (the server keeps the last 10), newest first. Secrets are read through [SessionController.historyPassword]. */
+data class ItemHistoryView(
+    val itemId: String,
+    val versions: List<ItemVersionView>,
+    /** False in a vault this account only reads. */
+    val canRestore: Boolean,
+)
+
+data class ItemVersionView(
+    val rev: Long,
+    val archivedAtMs: Long,
+    val name: String,
+    /** A login's username or a card's brand and last four. */
+    val detail: String?,
+    val hasPassword: Boolean,
 )
 
 /** A secure note being added or edited, as typed. Not a data class: no toString of the text. */

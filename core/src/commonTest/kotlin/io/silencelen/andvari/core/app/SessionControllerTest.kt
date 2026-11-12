@@ -759,6 +759,42 @@ open class SessionControllerTest {
         assertIs<ActionResult.Failed>(controller.restoreFromTrash(restorable))
     }
 
+    @Test
+    fun anItemsHistoryShowsEarlierVersionsAndRestoresOne() = test {
+        unlockedWithAPersonalVault()
+        versionsAnswer(
+            mapOf(
+                ITEM_ID to listOf(
+                    archived(ITEM_ID, 9, item.copy(login = item.login!!.copy(password = "hunter1")), 3_000),
+                    archived(ITEM_ID, 8, item.copy(name = "Example (old)", login = item.login!!.copy(password = null)), 2_000),
+                ),
+            ),
+        )
+        assertNull(controller.historyPassword(ITEM_ID, 9), "nothing before the history is open")
+        assertEquals(ActionResult.Ok, controller.openItemHistory(ITEM_ID))
+        val history = assertNotNull(controller.state.history)
+        assertEquals(ITEM_ID, history.itemId)
+        assertEquals(listOf(9L, 8L), history.versions.map { it.rev })
+        assertEquals(listOf(true, false), history.versions.map { it.hasPassword })
+        assertEquals("Example (old)", history.versions[1].name)
+        assertEquals("fam", history.versions[0].detail)
+        assertTrue(history.canRestore)
+        assertFalse(controller.state.toString().contains("hunter1"), "no secret is in the state")
+        assertEquals("hunter1", controller.historyPassword(ITEM_ID, 9))
+        assertNull(controller.historyPassword(ITEM_ID, 8))
+        // Restore puts that version back over the item.
+        assertEquals(ActionResult.Ok, controller.restoreItemVersion(ITEM_ID, 9))
+        assertEquals("hunter1", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals(1, controller.state.items.count { it.itemId == ITEM_ID }, "the same item, not a copy")
+        assertEquals(ActionResult.Failed(ItemCopy.HISTORY_GONE), controller.restoreItemVersion(ITEM_ID, 77))
+        // A lock forgets the versions.
+        controller.lock()
+        assertNull(controller.state.history)
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertNull(controller.historyPassword(ITEM_ID, 9))
+        assertEquals(ActionResult.Failed(ItemCopy.HISTORY_GONE), controller.restoreItemVersion(ITEM_ID, 9))
+    }
+
     // ---- the personal vault ----
 
     /** The members of the personal vault as the server reports them: this account alone. */
