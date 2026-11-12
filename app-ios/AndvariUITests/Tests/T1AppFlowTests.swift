@@ -168,6 +168,11 @@ final class T1AppFlowTests: UITestCase {
         step("saved") {
             app.buttons["Save"].tap()
             if !waitUntil(15, { self.vaultRow("Added Here").exists }) {
+                // The editor puts its message at the end of the form, under the keyboard.
+                app.swipeUp()
+                app.swipeUp()
+                Thread.sleep(forTimeInterval: 1)
+                shot("editor-message")
                 dumpTree(app, as: "new-login-not-saved")
                 let said = app.staticTexts.matching(NSPredicate(format: "(label CONTAINS[c] 'vault' AND label != 'Vault') OR label CONTAINS[c] 'wrong' OR label CONTAINS[c] 'try again'")).firstMatch
                 XCTFail("the new login was not saved; the editor says: \(said.exists ? said.label : "nothing the test recognises")")

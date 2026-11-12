@@ -278,9 +278,11 @@ final class T3SystemIntegrationTests: UITestCase {
         step("allowed") {
             let allow = settings.switches.matching(NSPredicate(format: "label CONTAINS[c] 'Allow Extension'")).firstMatch
             require(allow, "the Allow Extension switch")
-            if !isOn(allow) {
-                flip(allow)
+            // A tap that lands while the screen is still sliding in changes nothing: look, and try again.
+            for _ in 0..<3 where !isOn(allow) {
                 Thread.sleep(forTimeInterval: 1.5)
+                flip(allow)
+                _ = waitUntil(5) { self.isOn(allow) }
             }
             XCTAssertTrue(isOn(allow), "the extension did not turn on")
             dumpTree(settings, as: "settings-andvari-extension-on")
