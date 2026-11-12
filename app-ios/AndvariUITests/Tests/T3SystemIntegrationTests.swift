@@ -455,10 +455,10 @@ final class T3SystemIntegrationTests: UITestCase {
         let warning = safari.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS 'is saved for' AND label CONTAINS %@ AND label CONTAINS %@", Fixture.siteHost, Fixture.otherHost)).firstMatch
         step("confirmation-names-both-sites") {
             row.tap()
+            // The row opens the login; its Fill button is further down the sheet, and a tap scrolls to it.
             let fill = safari.webViews.buttons.matching(NSPredicate(format: "label == 'Fill' OR label BEGINSWITH 'Fill '")).firstMatch
-            if waitUntil(5, { fill.exists && fill.isHittable }) && !warning.exists {
-                fill.tap()
-            }
+            require(fill, "the Fill button of the login in the popup", timeout: 8)
+            fill.tap()
             if !waitUntil(8, { warning.exists }) {
                 dumpTree(safari, as: "no-cross-site-confirmation")
                 XCTFail("no confirmation naming \(Fixture.siteHost) and \(Fixture.otherHost) appeared")

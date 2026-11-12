@@ -76,6 +76,8 @@ extension UITestCase {
     }
 
     func typeUnlock() {
+        require(masterPasswordField, "the master password field")
+        clearField(masterPasswordField)
         enter(Fixture.password + "\n", into: masterPasswordField, what: "the master password field")
     }
 

@@ -49,10 +49,29 @@ extension UITestCase {
     func reachVaultAnyWay() {
         switch waitForScreen() {
         case .unlock:
-            // The prompt comes up by itself when Face ID is on; give the button a moment to show which it is.
+            // The prompt comes up by itself when Face ID is on, once each time the screen opens; give the button a
+            // moment to show which it is.
             Thread.sleep(forTimeInterval: 1)
-            if element("unlock.biometric").exists {
-                if !matchFaceUntil(20, { self.currentScreen() == .vault }) {
+            let faceButton = element("unlock.biometric")
+            if faceButton.exists {
+                // While a prompt is up the screen is busy and the button is disabled. A button that stays enabled
+                // means the screen's own offer was used up (an earlier test, an app already open): ask again.
+                var enabledSince: Date?
+                let unlocked = matchFaceUntil(25) {
+                    if self.currentScreen() == .vault { return true }
+                    if faceButton.exists && faceButton.isEnabled && self.faceIDCancel == nil {
+                        if let since = enabledSince, Date().timeIntervalSince(since) > 3 {
+                            enabledSince = nil
+                            self.tapWhereItIs(faceButton, in: self.app)
+                        } else if enabledSince == nil {
+                            enabledSince = Date()
+                        }
+                    } else {
+                        enabledSince = nil
+                    }
+                    return false
+                }
+                if !unlocked {
                     dismissBiometricPrompt()
                     typeUnlock()
                 }
