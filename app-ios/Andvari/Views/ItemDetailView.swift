@@ -92,6 +92,20 @@ struct ItemDetailView: View {
             }
             .listRowBackground(Palette.raised)
         }
+        if detail.previousPasswords > 0 {
+            Section {
+                ForEach(Array(model.passwordHistory(itemId).enumerated()), id: \.offset) { index, retired in
+                    PreviousPasswordRow(itemId: itemId, index: index, retired: retired) { value in
+                        copy(value, as: "previous-\(index)")
+                    }
+                }
+            } header: {
+                Text("Previous passwords")
+            } footer: {
+                Text("Kept when a password was replaced. Newest first.")
+            }
+            .listRowBackground(Palette.raised)
+        }
         Section {
             Text("Updated \(updated(detail))")
                 .font(.footnote)
@@ -358,5 +372,40 @@ struct CountdownRing: View {
 
     private var fraction: CGFloat {
         period > 0 ? CGFloat(remaining) / CGFloat(period) : 0
+    }
+}
+
+/// One earlier password of a login: when it was retired, shown only on request, and copied like the current one.
+private struct PreviousPasswordRow: View {
+    @EnvironmentObject private var model: AppModel
+    let itemId: String
+    let index: Int
+    let retired: Date
+    let copy: (String) -> Void
+    @State private var shown: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Replaced \(retired.formatted(date: .abbreviated, time: .shortened))")
+                .font(.subheadline)
+                .foregroundStyle(Palette.inkDim)
+            Text(shown ?? "••••••••")
+                .font(.body.monospaced())
+                .foregroundStyle(Palette.ink)
+                .textSelection(.enabled)
+            HStack(spacing: 16) {
+                Button(shown == nil ? "Show" : "Hide") {
+                    shown = shown == nil ? model.previousPassword(itemId, index) : nil
+                }
+                Button("Copy") {
+                    if let value = model.previousPassword(itemId, index) {
+                        copy(value)
+                    }
+                }
+            }
+            .font(.subheadline)
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 2)
     }
 }

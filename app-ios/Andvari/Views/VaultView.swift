@@ -10,6 +10,7 @@ struct VaultView: View {
     @State private var showNewLogin = false
     @State private var syncMessage: String?
     @State private var copies = 0
+    @State private var undoAllFailure: String?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -62,10 +63,29 @@ struct VaultView: View {
                     ForEach(model.state.appliedSaves, id: \.id) { applied in
                         AppliedSaveRow(applied: applied)
                     }
-                    Button("Done") {
-                        model.dismissAppliedSaves()
+                    HStack {
+                        Button("Done") {
+                            model.dismissAppliedSaves()
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        if model.state.appliedSaves.count > 1 {
+                            Button("Undo all", role: .destructive) {
+                                Task {
+                                    let outcome = await model.undoAllAppliedSaves()
+                                    undoAllFailure = outcome == .ok ? nil : (outcome.message ?? "Nothing was undone.")
+                                }
+                            }
+                            .font(.subheadline)
+                        }
                     }
-                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.borderless)
+                    .disabled(model.state.busy)
+                    if let undoAllFailure {
+                        Text(undoAllFailure)
+                            .font(.footnote)
+                            .foregroundStyle(Palette.danger)
+                    }
                 } header: {
                     SectionTitle(model.state.appliedSaves.count == 1 ? "Saved 1 login from AutoFill" : "Saved \(model.state.appliedSaves.count) logins from AutoFill")
                 }
@@ -341,6 +361,9 @@ private struct PendingSaveRow: View {
                     .font(.footnote)
                     .foregroundStyle(Palette.inkDim)
             }
+            Text(pending.detail)
+                .font(.footnote)
+                .foregroundStyle(Palette.inkFaint)
             if let shown {
                 Text(shown)
                     .font(.footnote.monospaced())
