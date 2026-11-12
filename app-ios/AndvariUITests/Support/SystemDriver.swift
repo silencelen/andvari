@@ -338,8 +338,6 @@ extension UITestCase {
     func hasKeyboardFocus(_ element: XCUIElement) -> Bool {
         element.exists && ((element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false)
     }
-        field.typeText(text)
-    }
 
     /// Submit a login on the test site and answer iOS's offer to save it with andvari. False when no offer came.
     func submitLoginAndSaveToAndvari(page: String, heading: String, user: String, password: String, passwordLabel: String, submit: String) -> Bool {
