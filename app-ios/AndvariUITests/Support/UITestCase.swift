@@ -176,6 +176,14 @@ class UITestCase: XCTestCase {
 
     // MARK: - Typing
 
+    /// Empty a field that already holds text (an AutoFill fill, an earlier try), so what is typed next is all it holds.
+    func clearField(_ field: XCUIElement) {
+        guard let value = field.value as? String, !value.isEmpty, value != field.placeholderValue else { return }
+        field.tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count + 2))
+    }
+
     func enter(_ text: String, into field: XCUIElement, what: String, file: StaticString = #filePath, line: UInt = #line) {
         require(field, what, file: file, line: line)
         // On a slow runner the field exists before it can be touched (a sheet still arriving, the cover still leaving).

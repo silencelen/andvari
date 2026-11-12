@@ -34,12 +34,16 @@ final class T1AppFlowTests: UITestCase {
             expectScreen(.vault, timeout: 60)
             require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
         }
-        // The account was made on another device (the seeding tool), so this one asks once which vault is personal.
+        // The account was made on another device (the seeding tool, which designated its personal vault), so this one
+        // asks once before it uses it. Which sentence it opens with depends on whether the device had read the account's
+        // record when it decided: a device's first sign-in decides before (see app-ios/uitest/README.md).
         step("personal-vault-asked") {
             require(personalVaultNotice, "the personal-vault notice", timeout: 10)
-            XCTAssertEqual(personalVaultNotice.label, "Confirm your personal vault on this device: Personal.")
+            let titles = ["Confirm your personal vault on this device: Personal.", "The server says your personal vault is Personal."]
+            XCTAssertTrue(titles.contains(personalVaultNotice.label), "the notice reads: \(personalVaultNotice.label)")
             require(usePersonalVaultButton, "the notice's Use button", timeout: 20)
             XCTAssertEqual(usePersonalVaultButton.label, "Use Personal")
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Keep '")).count, 0, "a vault to keep is offered where there is only one")
         }
         step("personal-vault-confirmed") {
             usePersonalVaultButton.tap()
