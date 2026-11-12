@@ -98,10 +98,7 @@ final class T3SystemIntegrationTests: UITestCase {
         }
         step("andvari-chosen") {
             // With two providers on, iOS asks which one's list to open.
-            let chooser = safari.buttons["andvari"]
-            require(chooser, "andvari in the provider chooser", timeout: 8)
-            chooser.tap()
-            Thread.sleep(forTimeInterval: 1.5)
+            chooseAndvariProvider(in: safari)
             dumpEverything("after-choosing-andvari")
         }
         step("list-after-face-id") {
@@ -288,9 +285,7 @@ final class T3SystemIntegrationTests: UITestCase {
             require(key, "the Passwords key above the keyboard", timeout: 5)
             key.tap()
             // With two providers on, iOS asks which one's list to open.
-            let chooser = app.buttons["andvari"]
-            require(chooser, "andvari in the provider chooser", timeout: 8)
-            chooser.tap()
+            chooseAndvariProvider(in: app)
         }
         step("list-after-face-id") {
             let row = { [self] in [app, springboard].map { self.labelled("No Address", in: $0) }.first { $0.exists } }

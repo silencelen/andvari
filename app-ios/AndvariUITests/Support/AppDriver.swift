@@ -58,6 +58,21 @@ extension UITestCase {
             // A process iOS ended in the background starts again.
             app.launch()
         }
+        dismissLeftoverSystemSheets()
+    }
+
+    /// iOS asks which provider's list to open when two are on: choose andvari, and make sure the choice took. A tap
+    /// while the chooser is still sliding in is lost, so it is tried again.
+    func chooseAndvariProvider(in application: XCUIApplication) {
+        let chooser = application.buttons["andvari"]
+        require(chooser, "andvari in the provider chooser", timeout: 8)
+        for _ in 0..<3 {
+            Thread.sleep(forTimeInterval: 0.8)
+            tapWhereItIs(chooser, in: application)
+            if waitUntil(4, { !chooser.exists }) { return }
+        }
+        dumpTree(application, as: "provider-chooser-stayed")
+        XCTFail("the provider chooser did not take the choice of andvari")
     }
 
     /// Choose the job's server and pass the Trust Gate.
