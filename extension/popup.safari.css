@@ -20,3 +20,42 @@ body {
   padding-right: env(safe-area-inset-right, 0px);
   overflow-x: hidden;
 }
+
+/*
+ * The sheet has detents: pulled up, it is nearly as tall as the screen. The desktop popup caps its list at 400 px
+ * (a desktop popup may not exceed 600), which left the list short and the bottom bar floating mid-sheet. Here the page
+ * is a full-height column: the header and the notices keep their height, the open view takes all the rest and scrolls
+ * inside itself, and the bottom bar stays at the bottom at every detent. Nothing else scrolls.
+ */
+html {
+  height: 100%;
+}
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: -webkit-fill-available;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+body > * {
+  flex: 0 0 auto;
+}
+body > .unlocked:not([hidden]),
+body > .detail:not([hidden]),
+body > .locked:not([hidden]) {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+body > .unlocked:not([hidden]) {
+  /* A column of its own: the search row stays put and only the list (.vault-scroll) scrolls. */
+  overflow-y: hidden;
+}
+body > .pop-foot {
+  margin-top: auto;
+}
