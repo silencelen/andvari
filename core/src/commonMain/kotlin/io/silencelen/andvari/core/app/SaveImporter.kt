@@ -201,7 +201,8 @@ internal class SaveImporter(
             // An entry already listed keeps its reason; one that was mid-apply when this sync began is judged again,
             // and so is one that only waited for a personal vault, once there is one.
             val was = before[id]
-            val reason = was?.reason?.takeUnless { it == HouseholdCopy.NO_PERSONAL_VAULT && live.account.personalVaultId.isNotEmpty() }
+            val waitedForVault = was?.reason == HouseholdCopy.NO_PERSONAL_VAULT || was?.reason == PERSONAL_UNCONFIRMED
+            val reason = was?.reason?.takeUnless { waitedForVault && live.account.personalStatus == Account.PersonalStatus.CONFIRMED }
             pending[id] = Pending(login, personalTarget(vault, login, live.account), reason)
         }
         if (apply) applyLocked(live, stillLive)
@@ -217,6 +218,9 @@ internal class SaveImporter(
         val target = p.target
         return when {
             UriMatch.normalizeHost(captured.site) == null -> NOT_A_SITE
+            // While the personal-vault question is open (in any of its states) nothing is written by itself: the
+            // vault this device would use may not be the one the person, or their other devices, mean.
+            account.personalStatus != Account.PersonalStatus.CONFIRMED -> PERSONAL_UNCONFIRMED
             captured.capturedAtMs > now + CLOCK_SKEW_MS -> FROM_THE_FUTURE
             target == null && vault.any { it.vaultId != account.personalVaultId && sameSite(it, captured) } -> SHARED_MATCH
             target == null && schemeOf(captured.site) == Scheme.UNKNOWN && vault.any { sameSite(it, captured) } -> SCHEME_UNKNOWN
@@ -270,7 +274,7 @@ internal class SaveImporter(
      * removed on purpose (here or on another device) and is left alone; its record is dropped from the list.
      */
     private suspend fun repairLocked(live: VaultSession.Unlocked, stillLive: () -> Boolean) {
-        if (live.account.personalVaultId.isEmpty()) return
+        if (live.account.personalStatus != Account.PersonalStatus.CONFIRMED) return
         var changed = false
         for ((id, record) in applied.toList()) {
             if (!stillLive()) return
@@ -347,7 +351,9 @@ internal class SaveImporter(
             publish(pendingViews(), appliedViews(), false)
             return@withLock ImportResult.Failed(TARGET_CHANGED)
         }
-        if (now == null && live.account.personalVaultId.isEmpty()) return@withLock ImportResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        if (now == null && live.account.personalVaultId.isEmpty()) {
+            return@withLock ImportResult.Failed(if (live.account.personalStatus != Account.PersonalStatus.CONFIRMED) PERSONAL_UNCONFIRMED else HouseholdCopy.NO_PERSONAL_VAULT)
+        }
         if (UriMatch.normalizeHost(p.login.site) == null) return@withLock ImportResult.Failed(NOT_A_SITE)
         val record = write(live, id, p)
         if (!stillLive()) return@withLock ImportResult.Gone
@@ -507,6 +513,7 @@ internal class SaveImporter(
         const val CLOCK_SKEW_MS = 2 * 60 * 1000L
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+        const val PERSONAL_UNCONFIRMED = "Confirm your personal vault above first. This is saved once you have."
         const val SHARED_MATCH = "A login outside your personal vault already uses this username here. Save this one as your own, or discard it."
         const val SCHEME_UNKNOWN = "This was captured for the domain only, so andvari can't tell which of your logins it belongs to. Check it, then save or discard."
         const val OLDER_THAN_LOGIN = "This was captured before your login was last changed. Save it only if it is the newer password."

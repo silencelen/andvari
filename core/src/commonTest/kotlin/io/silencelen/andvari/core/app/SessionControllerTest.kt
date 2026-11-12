@@ -544,6 +544,43 @@ open class SessionControllerTest {
         assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability())
     }
 
+    // ---- cards ----
+
+    @Test
+    fun aCardIsAddedNormalizedShownMaskedEditedAndItsSecretsReadOnRequest() = test {
+        unlockedWithAPersonalVault()
+        fun input(name: String = "Everyday", number: String = "4242 4242 4242 4242", month: String = "7", year: String = "31", code: String = "123") =
+            CardInput(name, " F AM ", number, month, year, code, " SW1A 1AA ", "", false)
+        assertIs<ActionResult.Failed>(controller.saveCard(null, input(name = " ")))
+        assertIs<ActionResult.Failed>(controller.saveCard(null, input(month = "13")), "an expiry that cannot be read is refused, never guessed")
+        assertIs<ActionResult.Failed>(controller.saveCard(ITEM_ID, input()), "a login is not edited as a card")
+        assertEquals(ActionResult.Ok, controller.saveCard(null, input()))
+        val row = controller.state.items.single { it.name == "Everyday" }
+        assertEquals("card", row.type)
+        val detail = assertNotNull(controller.itemDetail(row.itemId))
+        val card = assertNotNull(detail.card)
+        assertTrue(card.summary.endsWith("4242") && !card.summary.contains("42424242"), card.summary)
+        assertEquals("F AM", card.cardholder)
+        assertEquals("07/2031", card.expiry)
+        assertEquals("SW1A 1AA", card.postalCode)
+        assertTrue(card.hasNumber && card.hasCode && detail.editable)
+        assertEquals("4242424242424242", controller.revealSecret(row.itemId, SecretField.CARD_NUMBER), "digits only")
+        assertEquals("123", controller.revealSecret(row.itemId, SecretField.CARD_CODE))
+        assertNull(controller.revealSecret(ITEM_ID, SecretField.CARD_NUMBER), "a login has no card number")
+        assertNull(assertNotNull(controller.itemDetail(ITEM_ID)).card)
+        // An edit keeps the item and changes the fields; a whole expiry typed into the month is split.
+        assertEquals(ActionResult.Ok, controller.saveCard(row.itemId, input(name = "Travel", number = "5555555555554444", month = "08/32", year = "", code = "")))
+        val edited = assertNotNull(controller.itemDetail(row.itemId))
+        assertEquals("Travel", edited.name)
+        assertEquals("08/2032", edited.card?.expiry)
+        assertFalse(assertNotNull(edited.card).hasCode)
+        assertEquals(2, controller.state.items.size, "edited, not duplicated")
+        // A card is not a login: it is not offered to the system's AutoFill, and it is in the extensions' snapshot.
+        assertTrue(controller.credentialIdentities().none { it.itemId == row.itemId })
+        assertEquals(ActionResult.Ok, controller.deleteItem(row.itemId))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+    }
+
     // ---- the personal vault ----
 
     /** The members of the personal vault as the server reports them: this account alone. */
@@ -571,6 +608,8 @@ open class SessionControllerTest {
         assertEquals(PersonalVaultState.PROPOSED, notice.state)
         assertTrue(notice.title.startsWith("The server says your personal vault is"), notice.title)
         assertNull(notice.keepLabel, "the account designates no other vault to keep")
+        assertNull(notice.keepDetail)
+        assertTrue(assertNotNull(notice.servedDetail).contains("1 item · last changed 1970-01-01 · id ending ${reg.personalVault.vaultId.takeLast(6)}"), "what tells this vault from another of the same name: ${notice.servedDetail}")
         assertTrue(assertNotNull(notice.servedDetail).contains("Other 1 (writer)"), "who else can read it is named before it can be used: ${notice.servedDetail}")
         assertNotNull(notice.useServedLabel)
 
@@ -579,7 +618,7 @@ open class SessionControllerTest {
         capture("a", "https://shop.example/login", "me", "pw")
         controller.unlock(PASSWORD)
         settle { controller.state.pendingSaves.singleOrNull()?.reason != null && controller.state.personalVault?.useServedLabel != null }
-        assertEquals("Choose a vault for this item.", controller.state.pendingSaves.single().reason)
+        assertEquals(SaveImporter.PERSONAL_UNCONFIRMED, controller.state.pendingSaves.single().reason)
         assertIs<ActionResult.Failed>(controller.saveLogin(null, LoginInput("New", "me", "pw", listOf("https://new.example"), "", "", false)))
 
         // The person confirms; the notice goes, a new login has a home, and what waited is saved with no further tap.
@@ -592,6 +631,37 @@ open class SessionControllerTest {
         // The confirmation is remembered on the device: the next unlock does not ask again.
         controller.lock()
         controller.unlock(PASSWORD)
+        assertNull(controller.state.personalVault)
+    }
+
+    @Test
+    fun whenTheAccountsRecordAndTheServerNameTheSameVaultTheNoticeSaysSoAndOffersNoFalseChoice() = test {
+        // The account's own record names the vault (this device confirmed it once), and then the device forgets: the
+        // state of a long-established account on a newly signed-in device. One vault, no conflict, one question.
+        seedSession()
+        membersAnswer()
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.personalVault?.useServedLabel != null }
+        assertEquals(ActionResult.Ok, controller.usePersonalVaultServed())
+        controller.lock()
+        namespaces.devices.getValue("$homeKey/${reg.userId}").apply {
+            set("personal.wrap", null)
+            set("personal.last", null)
+        }
+        namespaces.caches.getValue("$homeKey/${reg.userId}").apply {
+            setClientState("personal.wrap", null) // the cache mirrors the device's memory
+            setClientState("personal.last", null)
+        }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.personalVault?.useServedLabel != null }
+        val notice = assertNotNull(controller.state.personalVault)
+        assertEquals(PersonalVaultState.PROPOSED, notice.state)
+        assertTrue(notice.title.startsWith("Confirm your personal vault on this device"), notice.title)
+        assertTrue(notice.body.contains("name the same vault (id ending ${reg.personalVault.vaultId.takeLast(6)})"), notice.body)
+        assertNull(notice.keepLabel, "nothing to keep instead: it is the same vault")
+        assertTrue(notice.otherChoices.none { it.vaultId == reg.personalVault.vaultId }, "and it is not offered again as another vault")
+        assertEquals(ActionResult.Ok, controller.usePersonalVaultServed())
         assertNull(controller.state.personalVault)
     }
 
@@ -633,6 +703,39 @@ open class SessionControllerTest {
         controller.cancelPersonalVaultProposal()
         assertNull(controller.state.personalVault?.proposal)
         assertEquals(PersonalVaultState.PROPOSED, controller.state.personalVault?.state, "cancelled: nothing was chosen")
+    }
+
+    @Test
+    fun whileThePersonalVaultQuestionIsOpenNothingIsSavedByItselfEvenWhereTheDeviceHasAVaultToUse() = test {
+        // The device remembers a personal vault, but the server sent no record this time (WITHHELD): the device keeps
+        // using its own for what the person does by hand, and build 103 also auto-saved into it. A save the person
+        // did not make by hand now waits until the question is settled.
+        seedSession()
+        val key = "$homeKey/${reg.userId}"
+        val seeded = namespaces.caches.getValue(key)
+        namespaces.caches[key] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
+            override val durable = true
+        }
+        namespaces.devices.getOrPut(key) { io.silencelen.andvari.core.client.MemoryDeviceState() }
+            .set("personal.wrap", json.encodeToString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), assertNotNull(reg.personalWrap)))
+        store.origin(homeKey).saveAccountKeys(reg.userId, cached.copy(personalWrap = null))
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { queue.key != null }
+        assertEquals(PersonalVaultState.WITHHELD, controller.state.personalVault?.state)
+        controller.lock()
+        capture("new", "https://shop.example/", "me", "pw")
+        capture("change", "https://login.example.com/x", "fam", "hunter3")
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.size == 2 && controller.state.pendingSaves.all { it.reason != null } }
+        assertEquals(setOf(SaveImporter.PERSONAL_UNCONFIRMED), controller.state.pendingSaves.map { it.reason }.toSet())
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        assertEquals(listOf("Example"), controller.state.items.map { it.name }, "nothing was written")
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        // By hand it still works, into the vault this device has: that is the person's own decision.
+        assertEquals(ActionResult.Ok, controller.confirmPendingSave("new"))
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
     }
 
     @Test
@@ -944,7 +1047,7 @@ open class SessionControllerTest {
         controller.unlock(PASSWORD)
         settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
         val row = controller.state.pendingSaves.single()
-        assertEquals("Choose a vault for this item.", row.reason)
+        assertEquals(SaveImporter.PERSONAL_UNCONFIRMED, row.reason)
         assertEquals("s3cret-pw", controller.pendingSavePassword("a"))
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
         assertIs<ActionResult.Failed>(controller.confirmPendingSave("a"))

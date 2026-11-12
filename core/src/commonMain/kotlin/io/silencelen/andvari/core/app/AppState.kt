@@ -172,10 +172,41 @@ data class ItemDetail(
     val editable: Boolean,
     /** How many earlier passwords the login keeps in its history (an automatic save adds the one it replaced). */
     val previousPasswords: Int,
+    /** A payment card's fields; null for any other kind of item. */
+    val card: CardDetail?,
+)
+
+/**
+ * A payment card as its detail shows it. The number and the security code are not here: they are read on request
+ * ([SecretField.CARD_NUMBER], [SecretField.CARD_CODE]), like a password.
+ */
+data class CardDetail(
+    /** "Visa ••4242": the brand and the last four digits. */
+    val summary: String,
+    val cardholder: String?,
+    /** "07/2031", or whichever half the card has. */
+    val expiry: String?,
+    val postalCode: String?,
+    val hasNumber: Boolean,
+    val hasCode: Boolean,
+)
+
+/** The fields of a card being added or edited, as typed. Not a data class: no toString of the number. */
+class CardInput(
+    val name: String,
+    val cardholder: String,
+    val number: String,
+    /** The month, or a whole expiry ("07/31") when [expYear] is blank. */
+    val expMonth: String,
+    val expYear: String,
+    val securityCode: String,
+    val postalCode: String,
+    val notes: String,
+    val favorite: Boolean,
 )
 
 /** A secret field of an item, read only on an explicit reveal or copy. */
-enum class SecretField { PASSWORD, NOTES, TOTP_SECRET }
+enum class SecretField { PASSWORD, NOTES, TOTP_SECRET, CARD_NUMBER, CARD_CODE }
 
 /** A one-time code and how long it stays valid. */
 data class OneTimeCode(val code: String, val secondsRemaining: Int, val periodSeconds: Int)
