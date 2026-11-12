@@ -238,7 +238,10 @@ test("when the worker's ask of the app got no answer, the popup asks the app and
   const page = await loadPopup(answer, { native: { ok: true, type: "appServer", url: "https://home.example", nativeSave: true } });
   await page.settle(300);
   assert.deepEqual(page.errors, []);
-  assert.deepEqual({ ...(adopted as object) }, { type: "appServerAnswer", url: "https://home.example", nativeSave: true });
+  const relayed = { ...(adopted as { askedAt?: unknown }) };
+  assert.equal(typeof relayed.askedAt, "number", "stamped with when the popup asked");
+  delete relayed.askedAt;
+  assert.deepEqual(relayed, { type: "appServerAnswer", url: "https://home.example", nativeSave: true });
   assert.ok(page.sent.indexOf("appServerAnswer") < page.sent.indexOf("serverInfo"), "relayed before anything shows a server");
   assert.equal(page.byId("confirm-server").hidden, true, "the server is in effect: no \"no server\" card");
   page.dispose();

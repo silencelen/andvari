@@ -1368,12 +1368,13 @@ function syncAppServer(): Promise<Res<"appServer">> {
       // the retirement must lock and revoke under the old one.
       await Promise.race([ownSessionRetired, delay(APP_SERVER_START_WAIT_MS)]);
       appServerDiag.native = "asking";
+      const askedAt = Date.now();
       const asked = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP));
       appServerDiag.native = asked.call;
       if (asked.call === "resolved") systemSavesPasswords = asked.nativeSave;
       appServerDiag.nativeError = asked.error;
       appServerDiag.app = asked.answer.kind;
-      return await adoptAppAnswer(asked.answer, "");
+      return await adoptAppAnswer(asked.answer, "", askedAt);
     } catch (e) {
       appServerDiag.adopt = `failed: ${String(e).slice(0, 200)}`;
       return { app: "unavailable" };
@@ -1386,13 +1387,22 @@ function syncAppServer(): Promise<Res<"appServer">> {
 
 /** One adoption at a time: the worker's own ask and an answer the popup relays can arrive together. */
 let appAdoptChain: Promise<unknown> = Promise.resolve();
+/** When the newest answer handled so far was asked for (round-5 review L8): an answer asked for earlier is stale. */
+let newestAppAnswerAt = 0;
 
 /**
  * Adopt what the app answered, when it names a server other than the one in effect (commitServerUrl: the trusted store,
- * then the origin-clean switch). [via] is added to the Details' account of it ("" for the worker's own ask).
+ * then the origin-clean switch). [via] is added to the Details' account of it ("" for the worker's own ask). [askedAt]
+ * is when that answer was asked for: answers are handled one at a time, and one asked for before the newest already
+ * handled is dropped, so a slow ask cannot move the extension back to what the app said earlier.
  */
-function adoptAppAnswer(answer: AppServerAnswer, via: string): Promise<Res<"appServer">> {
+function adoptAppAnswer(answer: AppServerAnswer, via: string, askedAt: number): Promise<Res<"appServer">> {
   const run = async (): Promise<Res<"appServer">> => {
+    if (!(askedAt >= newestAppAnswerAt)) {
+      appServerDiag.adopt = `an older answer was dropped${via}`;
+      return { app: dialBlock === null && !noServerChosen() ? "set" : "unavailable" };
+    }
+    newestAppAnswerAt = askedAt;
     const adopt = appServerToAdopt(answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
     if (adopt === null) {
       if (answer.kind === "set") appServerDiag.adopt = `already in effect${via}`;
@@ -1432,7 +1442,8 @@ async function adoptRelayedAppServer(msg: Extract<Req, { type: "appServerAnswer"
   if (!started) return { app: "unavailable" };
   await Promise.race([ownSessionRetired, delay(APP_SERVER_START_WAIT_MS)]);
   if (typeof msg.nativeSave === "boolean") systemSavesPasswords = msg.nativeSave;
-  return adoptAppAnswer(answer, " (the popup's answer)");
+  const askedAt = typeof msg.askedAt === "number" && Number.isFinite(msg.askedAt) ? msg.askedAt : 0;
+  return adoptAppAnswer(answer, " (the popup's answer)", askedAt);
 }
 
 // Safari: the earlier build's own session is retired first (ownSessionRetired), under the origin it was made at. A

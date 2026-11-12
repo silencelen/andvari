@@ -85,20 +85,25 @@ test("the worker adopts the app's server through commitServerUrl, in the Safari 
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
   const fn = bg.slice(bg.indexOf("function syncAppServer"), bg.indexOf("function syncAppServer") + 2600);
   assert.match(fn, /BUILD_TARGET !== "safari"/);
-  assert.match(fn, /return await adoptAppAnswer\(asked\.answer, ""\);/, "the worker's own answer is adopted through the one path");
+  assert.match(fn, /return await adoptAppAnswer\(asked\.answer, "", askedAt\);/, "the worker's own answer is adopted through the one path");
   const adopt = bg.slice(bg.indexOf("function adoptAppAnswer("), bg.indexOf("async function adoptRelayedAppServer("));
   assert.match(adopt, /appServerToAdopt\(/);
   assert.match(adopt, /await commitServerUrl\(adopt\)/);
   // Without a store the app's origin is used for this worker life only, and only after the kept commit refused.
   assert.match(adopt, /r\.code === "storage" && \(await adoptAppServerUnkept\(adopt\)\)/);
-  // One adoption at a time.
+  // One adoption at a time, and in order: an answer asked for before the newest one handled is dropped (round-5 L8).
   assert.match(adopt, /const next = appAdoptChain\.then\(run, run\);/);
+  assert.ok(adopt.indexOf("if (!(askedAt >= newestAppAnswerAt)) {") < adopt.indexOf("appServerToAdopt("), "checked before anything is adopted");
+  assert.match(adopt, /newestAppAnswerAt = askedAt;/);
+  assert.match(fn, /const askedAt = Date\.now\(\);\s*const asked = await askAppServerDetailed/, "the worker stamps its ask before sending it");
   // The popup's relayed answer: Safari only, read with the same parser, after worker start and the retirement, and
   // adopted through the same path.
   const relay = bg.slice(bg.indexOf("async function adoptRelayedAppServer("), bg.indexOf("// Safari: the earlier build's own session is retired first"));
   assert.match(relay, /if \(BUILD_TARGET !== "safari"\) return \{ app: "unavailable" \};/);
   assert.match(relay, /parseAppServerReply\(\{ ok: true, type: "appServer", url: msg\.url \}\)/);
   assert.ok(relay.indexOf("await Promise.race([ownSessionRetired") < relay.indexOf("return adoptAppAnswer(answer"));
+  assert.match(relay, /return adoptAppAnswer\(answer, " \(the popup's answer\)", askedAt\);/);
+  assert.match(relay, /typeof msg\.askedAt === "number" && Number\.isFinite\(msg\.askedAt\) \? msg\.askedAt : 0/, "an unstamped answer counts as the oldest");
   assert.match(bg, /case "appServerAnswer":\s*return adoptRelayedAppServer\(msg\);/);
   // The Details answer never waits on worker start.
   assert.match(bg, /type === "serverDiag"\) \{\s*sendResponse\(senderMaySend\("serverDiag", sender, EXTENSION_BASE\) \? serverDiag\(\) : null\);/);

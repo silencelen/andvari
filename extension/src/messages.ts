@@ -343,7 +343,7 @@ export type Req =
   | { type: "appServer" }
   /** Popup ONLY, Safari build: what the app answered the popup's own native ask (its server, or null for none), relayed
    *  when the worker's ask got no answer. Adopted exactly as the worker's own answer is. */
-  | { type: "appServerAnswer"; url: string | null; nativeSave?: boolean }
+  | { type: "appServerAnswer"; url: string | null; nativeSave?: boolean; askedAt: number }
   /** Popup ONLY, Safari build: why no server is in effect, for the popup's Details. Answered at once, before the
    *  worker's start settles, and carries no secret: stages, kinds and an origin. */
   | { type: "serverDiag" }
