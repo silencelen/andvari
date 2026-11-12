@@ -94,6 +94,25 @@ test("the Safari popup fills the sheet: no fixed pixel width on its root, centre
   assert.match(body, /margin-right:\s*auto/);
   assert.match(body, /padding-left:\s*env\(safe-area-inset-left/);
   assert.match(body, /padding-right:\s*env\(safe-area-inset-right/);
+  // Full height: a flex column as tall as the sheet at every detent, the open view growing and scrolling inside
+  // itself (no 400 px cap), and the bottom bar pinned to the bottom.
+  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map((m) => ({ selector: m[1]!.replace(/\s+/g, " ").trim(), body: m[2]! }));
+  const all = (selector: string): string => rules.filter((r) => r.selector.split(",").map((x) => x.trim()).includes(selector)).map((r) => r.body).join(";");
+  assert.match(all("body"), /display:\s*flex/);
+  assert.match(all("body"), /flex-direction:\s*column/);
+  assert.match(all("body"), /height:\s*100dvh/);
+  assert.match(all("body"), /height:\s*-webkit-fill-available/);
+  assert.match(all("body"), /overflow:\s*hidden/, "the page itself does not scroll");
+  assert.match(all("body"), /padding-bottom:\s*env\(safe-area-inset-bottom/);
+  assert.match(all("body > .unlocked:not([hidden])"), /flex:\s*1 1 auto/);
+  assert.match(all("body > .unlocked:not([hidden])"), /max-height:\s*none/, "the desktop popup's 400 px cap is lifted");
+  assert.match(all("body > .pop-foot"), /margin-top:\s*auto/);
+  // The markup this relies on: the open view, the footer and the header are direct children of body, and the list
+  // scrolls inside the open view.
+  const html = file("popup.html");
+  assert.match(html, /\n    <section id="unlocked" class="unlocked" hidden>/);
+  assert.match(html, /\n    <footer class="pop-foot">/);
+  assert.match(file("popup.css"), /\.vault-scroll \{ flex: 1 1 auto; overflow-y: auto; min-height: 0; \}/);
   // Linked after popup.css so it wins, with a viewport, and only when the target is Safari.
   const build = file("build.mjs");
   assert.match(build, /if \(target === "safari"\) \{[\s\S]*?width=device-width, initial-scale=1, viewport-fit=cover[\s\S]*?popup\.safari\.css[\s\S]*?\} else \{\s*cpSync\("popup\.html", "dist\/popup\.html"\);/);
