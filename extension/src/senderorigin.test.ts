@@ -74,20 +74,25 @@ test("an origin the engine set is believed, the opaque one included: the URL is 
   assert.deepEqual(derivedPageOrigin({ origin: 42, url: "https://bank.example/", frameId: 0 }), { origin: null, source: "origin" });
 });
 
-test("with no origin at all, the top frame's origin comes from its own URL, then the tab's", () => {
-  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/checkout?x=1#y", frameId: 0, tab: { url: "https://elsewhere.example/" } }), { origin: "https://shop.example", source: "url" });
-  assert.deepEqual(derivedPageOrigin({ frameId: 0, tab: { url: "https://shop.example:8443/pay" } }), { origin: "https://shop.example:8443", source: "tab" });
+test("with no origin at all, the top frame's origin comes from its own URL, and never from the tab's", () => {
+  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/checkout?x=1#y", frameId: 0 }), { origin: "https://shop.example", source: "url" });
   assert.deepEqual(derivedPageOrigin({ url: "http://localhost:8080/login", frameId: 0 }), { origin: "http://localhost:8080", source: "url" });
+  // C3: the tab's URL is what the sender is checked against (and may already name the next document): never a source.
+  const withTab = { frameId: 0, tab: { url: "https://shop.example/pay" } } as Parameters<typeof derivedPageOrigin>[0];
+  assert.deepEqual(derivedPageOrigin(withTab), { origin: null, source: "none" });
+  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/", frameId: 0, tab: { url: "https://next.example/" } } as Parameters<typeof derivedPageOrigin>[0]), { origin: "https://shop.example", source: "url" }, "the frame's own document, whatever the tab says now");
+  const src = readFileSync(new URL("./senderorigin.ts", import.meta.url), "utf-8");
+  const fn = src.slice(src.indexOf("export function derivedPageOrigin("));
+  assert.ok(!fn.includes("tab"), "the derivation does not read the tab at all");
 });
 
 test("a sub-frame, an unknown frame, or a page that is not a web page gets no origin from a URL", () => {
-  assert.deepEqual(derivedPageOrigin({ url: "https://js.psp.example/field", frameId: 3, tab: { url: "https://shop.example/" } }), { origin: null, source: "none" });
-  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/", tab: { url: "https://shop.example/" } }), { origin: null, source: "none" }, "frameId undefined is not the top frame here");
+  assert.deepEqual(derivedPageOrigin({ url: "https://js.psp.example/field", frameId: 3 }), { origin: null, source: "none" });
+  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/" }), { origin: null, source: "none" }, "frameId undefined is not the top frame here");
   for (const url of ["about:blank", "about:srcdoc", "blob:https://shop.example/1-2", "data:text/html,x", "safari-web-extension://x/popup.html", "not a url"]) {
-    assert.deepEqual(derivedPageOrigin({ url, frameId: 0, tab: { url: "https://shop.example/" } }), { origin: null, source: "none" }, url);
+    assert.deepEqual(derivedPageOrigin({ url, frameId: 0 }), { origin: null, source: "none" }, url);
   }
   assert.deepEqual(derivedPageOrigin({ frameId: 0 }), { origin: null, source: "none" });
-  assert.deepEqual(derivedPageOrigin({ frameId: 0, tab: {} }), { origin: null, source: "none" });
   assert.equal(webOriginOfUrl("ftp://shop.example/"), null);
   assert.equal(webOriginOfUrl(undefined), null);
 });
