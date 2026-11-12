@@ -319,6 +319,41 @@ final class AppModel: ObservableObject {
         await run { try await $0.saveNote(itemId: itemId, input: input, vaultId: vaultId) }
     }
 
+    // MARK: - Shared vaults
+
+    func openSharing() async -> Outcome {
+        await run { try await $0.openSharing() }
+    }
+
+    func closeSharing() {
+        controller.closeSharing()
+    }
+
+    func createSharedVault(_ name: String) async -> Outcome {
+        await run { try await $0.createSharedVault(name: name) }
+    }
+
+    func renameSharedVault(_ vaultId: String, name: String) async -> Outcome {
+        await run { try await $0.renameSharedVault(vaultId: vaultId, name: name) }
+    }
+
+    /// The core names it saveVaultItemsToPersonal: Kotlin/Native exports a name that starts with "copy" as doCopy….
+    func copySharedVaultToPersonal(_ vaultId: String) async -> Outcome {
+        await run { try await $0.saveVaultItemsToPersonal(vaultId: vaultId) }
+    }
+
+    func deleteSharedVault(_ vaultId: String, typedName: String) async -> Outcome {
+        await run { try await $0.deleteSharedVault(vaultId: vaultId, typedName: typedName) }
+    }
+
+    func restoreDeletedVault(_ vaultId: String) async -> Outcome {
+        await run { try await $0.restoreDeletedVault(vaultId: vaultId) }
+    }
+
+    func leaveSharedVault(_ vaultId: String) async -> Outcome {
+        await run { try await $0.leaveSharedVault(vaultId: vaultId) }
+    }
+
     // MARK: - Two-step sign-in
 
     func loadTwoStep() async -> Outcome {

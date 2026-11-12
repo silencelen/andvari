@@ -7,6 +7,7 @@ import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
+import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
@@ -1064,6 +1065,202 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- shared vaults: create, rename, delete and restore, leave (spec 03 §10, §11) ----
+
+    /** The restorable deleted vaults as last listed, by vault: their deleteIds stay here, never in the state. */
+    private var deletedVaults: Map<String, DeletedVaultInfo> = emptyMap()
+
+    /** The vault whose items are being copied into the personal vault, while that runs: its deletion waits for it. */
+    private var copyingVault: String? = null
+
+    private fun sharingVaults(live: VaultSession.Unlocked): List<SharingVaultView> {
+        val items = live.engine.items()
+        return runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList()).map { v ->
+            val own = items.filter { it.vaultId == v.vaultId }
+            val personal = v.type == "personal"
+            SharingVaultView(
+                vaultId = v.vaultId, name = v.name, personal = personal, role = if (personal) null else (v.role ?: "reader"),
+                ownershipConfirmed = !personal && v.role == "owner" && runCatching { live.engine.ownsVault(v.vaultId) }.getOrDefault(false),
+                itemCount = own.size, attachmentCount = own.sumOf { it.doc.attachments.size },
+            )
+        }
+    }
+
+    private fun removedVaults(live: VaultSession.Unlocked): List<RemovedVaultView> =
+        // A vault this account can still restore is listed once, under Recently deleted, not again here.
+        runCatching { live.engine.heldVaultInfos() }.getOrDefault(emptyList()).filter { it.vaultId !in deletedVaults }.map { h ->
+            val day = LifecycleNoticeCopy::englishDay
+            val line = when {
+                h.reason == "deleted" && h.verified -> "Deleted by its owner. Kept sealed until ${day(h.purgeAt ?: h.expungeAt)}."
+                h.reason == "left" -> "You left. Kept until ${day(h.expungeAt)}."
+                h.verified -> "Your access was removed. Kept until ${day(h.expungeAt)}."
+                else -> "The server says your access was removed, but this couldn't be verified. Kept until ${day(h.expungeAt)}."
+            }
+            RemovedVaultView(h.vaultId, h.name, line, warning = !h.verified && h.reason != "left")
+        }
+
+    private fun sharingView(live: VaultSession.Unlocked, copied: String? = state.sharing?.copied): SharingView = SharingView(
+        vaults = sharingVaults(live),
+        deleted = deletedVaults.values.sortedByDescending { it.deletedAt }.map { DeletedVaultView(it.vaultId, it.name, it.deletedAt, it.purgeAt) },
+        removed = removedVaults(live),
+        copying = state.sharing?.copying,
+        copied = copied,
+    )
+
+    /** The vault list after a change: the items and the sharing screen both follow. */
+    private fun publishSharing(live: VaultSession.Unlocked, notice: String? = null) {
+        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), sharing = it.sharing?.let { sharingView(live) }, notice = notice ?: it.notice) }
+        writeFillSnapshot()
+    }
+
+    /** Open the shared vaults screen ([AppState.sharing]): the vaults held, and the deleted ones this account can restore. */
+    @Throws(CancellationException::class)
+    suspend fun openSharing(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        update { it.copy(sharing = sharingView(live, copied = null)) }
+        busy()
+        val listed = try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.listDeleted() }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            // The vaults held are shown whatever happens; what is restorable needs the server.
+            return@action failure(t, HouseholdCopy::forError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        deletedVaults = listed.associateBy { it.vaultId }
+        update { it.copy(busy = false, sharing = sharingView(live)) }
+        ActionResult.Ok
+    }
+
+    fun closeSharing() {
+        deletedVaults = emptyMap()
+        update { it.copy(sharing = null) }
+    }
+
+    /** Create a shared vault this account owns. Nobody else is in it until a member is added. */
+    @Throws(CancellationException::class)
+    suspend fun createSharedVault(name: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return@action ActionResult.Failed(SharingCopy.NAME_REQUIRED)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.createSharedVault(trimmed) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        publishSharing(live, notice = "“$trimmed” is ready. It is shared with nobody until you add someone.")
+        ActionResult.Ok
+    }
+
+    /** Rename a shared vault this account owns. The name is encrypted and syncs to every member. */
+    @Throws(CancellationException::class)
+    suspend fun renameSharedVault(vaultId: String, name: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return@action ActionResult.Failed(SharingCopy.NAME_REQUIRED)
+        if (!ownedShared(live, vaultId)) return@action ActionResult.Failed(SharingCopy.OWNER_ONLY)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.renameVault(vaultId, trimmed) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        publishSharing(live)
+        ActionResult.Ok
+    }
+
+    /** Whether [vaultId] is a shared vault the server says this account owns. */
+    private fun ownedShared(live: VaultSession.Unlocked, vaultId: String): Boolean =
+        runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList()).any { it.vaultId == vaultId && it.type == "shared" && it.role == "owner" }
+
+    /**
+     * Copy every item of [vaultId] into the personal vault before it is deleted (copies only: nothing in [vaultId]
+     * changes). Retrying after a failure converges instead of duplicating.
+     */
+    // Not "copy…": Kotlin/Native exports a name that starts with "copy" as doCopy… (Objective-C's method families).
+    @Throws(CancellationException::class)
+    suspend fun saveVaultItemsToPersonal(vaultId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (copyingVault != null) return@action ActionResult.NotDone(null) // one copy at a time
+        if (live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        val engine = live.engine
+        val inVault = engine.items().filter { it.vaultId == vaultId }
+        val bytes = inVault.sumOf { i -> i.doc.attachments.sumOf { it.size } }
+        copyingVault = vaultId
+        busy()
+        update { it.copy(sharing = it.sharing?.copy(copying = CopyProgressView(vaultId, 0, inVault.size), copied = null)) }
+        try {
+            val copied = runBounded(BoundedOps.rescueCopyMs(bytes, inVault.size)) {
+                engine.copyAllToPersonal(vaultId) { done, total -> update { it.copy(sharing = it.sharing?.copy(copying = CopyProgressView(vaultId, done, total))) } }
+            }
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            update { it.copy(sharing = it.sharing?.copy(copying = null)) }
+            publishSharing(live)
+            update {
+                it.copy(sharing = it.sharing?.copy(copied = "Copied $copied ${if (copied == 1) "item" else "items"} to your personal vault. Deleting the shared vault won't remove those copies."))
+            }
+            ActionResult.Ok
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            update { it.copy(sharing = it.sharing?.copy(copying = null)) }
+            failure(t, HouseholdCopy::forError)
+        } finally {
+            if (copyingVault == vaultId) copyingVault = null
+        }
+    }
+
+    /**
+     * Delete a shared vault this account owns, once [typedName] is its name: it leaves everyone's andvari now, and the
+     * server keeps it for 7 days, during which Recently deleted brings it back. Refused while its items are being copied
+     * into the personal vault.
+     */
+    @Throws(CancellationException::class)
+    suspend fun deleteSharedVault(vaultId: String, typedName: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (copyingVault != null) return@action ActionResult.Failed(SharingCopy.COPY_RUNNING)
+        val vault = runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList()).firstOrNull { it.vaultId == vaultId }
+            ?: return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
+        if (vault.type != "shared" || vault.role != "owner") return@action ActionResult.Failed(SharingCopy.OWNER_ONLY)
+        if (typedName != vault.name) return@action ActionResult.Failed(SharingCopy.TYPE_THE_NAME)
+        busy()
+        val purgeAt = runBounded(BoundedOps.FLAT_MS) { live.engine.deleteSharedVault(vaultId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        // What is restorable now includes this vault: the list is read again, best effort.
+        runCatching { runBounded(BoundedOps.FLAT_MS) { live.engine.listDeleted() } }.onFailure { if (it is CancellationException) throw it }
+            .getOrNull()?.let { listed -> deletedVaults = listed.associateBy { it.vaultId } }
+        publishSharing(
+            live,
+            notice = "“${vault.name}” is deleted. Members lost access now. You can restore it until ${LifecycleNoticeCopy.englishDay(purgeAt)} from Recently deleted.",
+        )
+        ActionResult.Ok
+    }
+
+    /** Bring a deleted shared vault back, for every member, with everything that was in it. */
+    @Throws(CancellationException::class)
+    suspend fun restoreDeletedVault(vaultId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val deleted = deletedVaults[vaultId] ?: return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.restoreSharedVault(vaultId, deleted.deleteId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        deletedVaults = deletedVaults - vaultId
+        publishSharing(live, notice = "“${deleted.name}” is back, for every member.")
+        ActionResult.Ok
+    }
+
+    /**
+     * Leave a shared vault this account is a member of: access ends on all of its devices, unsynced edits there are
+     * discarded, and only the owner can add it back. An owner cannot leave: it transfers or deletes the vault instead.
+     */
+    @Throws(CancellationException::class)
+    suspend fun leaveSharedVault(vaultId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val vault = runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList()).firstOrNull { it.vaultId == vaultId }
+            ?: return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
+        if (vault.type != "shared") return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
+        if (vault.role == "owner") return@action ActionResult.Failed(SharingCopy.OWNER_CANNOT_LEAVE)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.leaveSharedVault(vaultId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        publishSharing(live, notice = "You left “${vault.name}”.")
+        ActionResult.Ok
+    }
+
     // ---- two-step sign-in (spec 03 §2: a TOTP factor the server checks at sign-in) ----
 
     /** The key being set up, held only while the two-step screen is open; it never enters the state. */
@@ -1838,6 +2035,7 @@ open class SessionController(
         historyRead = null
         moveGestures.clear()
         twoStepPending = null
+        deletedVaults = emptyMap()
     }
 
     private fun lock(reason: String?) {
@@ -1913,7 +2111,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), twoStep = null, trash = null, history = null,
+        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
     )
 
     private companion object {
@@ -1994,4 +2192,14 @@ internal object ItemCopy {
     const val MOVE_DENIED = "You don't have permission to add items to that vault, so nothing was moved."
     const val MOVE_CHANGED = "This item changed while it was being moved. Review it and try again."
     const val MOVE_RETRY = "That didn't finish. Try again: it won't make a duplicate."
+}
+
+/** What the shared vaults screen says when it refuses. */
+internal object SharingCopy {
+    const val NAME_REQUIRED = "Give the vault a name."
+    const val OWNER_ONLY = "Only the vault's owner can do that."
+    const val VAULT_GONE = "That vault is no longer here."
+    const val TYPE_THE_NAME = "Type the vault's name exactly to delete it."
+    const val COPY_RUNNING = "Wait for the copy into your personal vault to finish first."
+    const val OWNER_CANNOT_LEAVE = "You own this vault, so you can't leave it: make someone else the owner, or delete it."
 }

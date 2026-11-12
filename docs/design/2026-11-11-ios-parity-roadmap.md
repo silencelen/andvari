@@ -49,7 +49,7 @@ The owner's direction: the iOS app reaches function parity with the Android app 
 
 | Capability | Android | iOS today | Core | Size | iOS constraint |
 |---|---|---|---|---|---|
-| Shared vaults: create, rename, delete, restore, leave | `SharingScreen` owner and member panels | None (items in shared vaults are listed and can be filled; nothing can be managed) | Yes | L | None |
+| Shared vaults: create, rename, delete, restore, leave | `SharingScreen` owner and member panels | Done: Settings › Shared vaults lists the vaults held; an owner creates, renames, copies a vault's items to the personal vault and deletes it (typing its name), restores it from Recently deleted within 7 days; a member leaves; Recently removed lists sealed copies kept after a lost access. Create is web parity (Android has none) | Yes (`SyncEngine`: the controller calls it directly; Android's view model is unchanged) | Done | None |
 | Members: invite, verify by code or QR, roles, remove | `VerifyMemberDialog`, invitations, signed grants | None | Yes | L | Camera access and a usage string for QR verification |
 | Ownership transfer: offer, accept, cancel | `TransferControl`, `IncomingTransferCards` | None | Yes | M | None |
 | Household contacts and identity pins | `HouseholdScreen` | None | Yes | M | Camera for QR |

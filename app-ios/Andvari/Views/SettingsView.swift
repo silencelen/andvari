@@ -84,6 +84,11 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
+                        SharedVaultsView()
+                    } label: {
+                        Label("Shared vaults", systemImage: "person.2")
+                    }
+                    NavigationLink {
                         TrashView()
                     } label: {
                         Label("Trash", systemImage: "trash")
