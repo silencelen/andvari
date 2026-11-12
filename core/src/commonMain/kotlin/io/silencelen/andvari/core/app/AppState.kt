@@ -204,6 +204,14 @@ data class CardDetail(
     val expYear: String?,
 )
 
+/** A secure note being added or edited, as typed. Not a data class: no toString of the text. */
+class NoteInput(
+    val name: String,
+    /** The note itself. */
+    val text: String,
+    val favorite: Boolean,
+)
+
 /** The fields of a card being added or edited, as typed. Not a data class: no toString of the number. */
 class CardInput(
     val name: String,

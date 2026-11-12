@@ -9,6 +9,7 @@ struct VaultView: View {
     @State private var showSettings = false
     @State private var showNewLogin = false
     @State private var showNewCard = false
+    @State private var showNewNote = false
     @State private var syncMessage: String?
     @State private var copies = 0
     @State private var undoAllFailure: String?
@@ -51,6 +52,12 @@ struct VaultView: View {
         }
         .sheet(isPresented: $showNewLogin) {
             LoginEditorView(itemId: nil)
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
+        }
+        .sheet(isPresented: $showNewNote) {
+            NoteEditorView(itemId: nil)
                 .environmentObject(model)
                 .tint(Palette.goldText)
                 .privacyShield()
@@ -256,6 +263,11 @@ struct VaultView: View {
                     showNewCard = true
                 } label: {
                     Label("New card", systemImage: "creditcard")
+                }
+                Button {
+                    showNewNote = true
+                } label: {
+                    Label("New note", systemImage: "note.text")
                 }
             } label: {
                 Image(systemName: "plus")

@@ -36,7 +36,7 @@ The owner's direction: the iOS app reaches function parity with the Android app 
 | Capability | Android | iOS today | Core | Size | iOS constraint |
 |---|---|---|---|---|---|
 | Create and edit cards | Full editor (number, expiry, CVC, holder, postal code) | Full since 2026-11-11 (pulled forward): add, edit, delete, in the personal vault | Yes | Done | |
-| Create and edit secure notes | Full | None | Yes | S | None |
+| Create and edit secure notes | Full | Done: add (to the personal vault), edit, delete; the text is read on request like a password and never offered to AutoFill | Yes (`saveNote`) | Done | None |
 | Choose the vault for a new item; move or copy an item between vaults | Vault picker in the editor; `MoveCopyControl` | None (personal vault only) | Yes (`moveOrCopyItem` logic partly in the view model) | M | None |
 | Trash: restore and purge deleted items | `TrashScreen` | None (delete only) | Yes | S | None |
 | Item history: view and restore earlier versions | Version list in the editor | Password history only | Yes (`itemVersions`, `versionDocForRestore`) | M | None |
