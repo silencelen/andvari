@@ -192,25 +192,19 @@ struct LoginEditorView: View {
 
     private var notesSection: some View {
         Section("Notes") {
-            TextEditor(text: $draft.notes)
+            SecretTextEditor(text: $draft.notes)
                 .frame(minHeight: 96)
-                .scrollContentBackground(.hidden)
+                .accessibilityLabel("Notes")
         }
         .listRowBackground(Palette.raised)
     }
 
     private func secretField(_ label: String, text: Binding<String>, shown: Binding<Bool>) -> some View {
         HStack(spacing: 8) {
-            Group {
-                if shown.wrappedValue {
-                    TextField(label, text: text)
-                } else {
-                    SecureField(label, text: text)
-                }
-            }
-            .font(.body.monospaced())
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
+            // Hidden or shown, never corrected or learned by the keyboard (SecretFields.swift).
+            SecretTextField(text: text, placeholder: label, secure: !shown.wrappedValue)
+                .frame(minHeight: 24)
+                .accessibilityLabel(label)
             Button {
                 shown.wrappedValue.toggle()
             } label: {

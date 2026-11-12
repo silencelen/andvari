@@ -20,7 +20,6 @@ struct NoteEditorView: View {
     @State private var saving = false
     @State private var confirmDelete = false
     @State private var message: String?
-    @FocusState private var textFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -32,12 +31,8 @@ struct NoteEditorView: View {
                 .listRowBackground(Palette.raised)
 
                 Section("Note") {
-                    TextEditor(text: $draft.text)
+                    SecretTextEditor(text: $draft.text)
                         .frame(minHeight: 220)
-                        .scrollContentBackground(.hidden)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.sentences)
-                        .focused($textFocused)
                         .accessibilityLabel("Note")
                 }
                 .listRowBackground(Palette.raised)
