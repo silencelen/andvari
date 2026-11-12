@@ -22,6 +22,12 @@ enum class AppScreen {
     /** A stored session is locked: the master password, or Face ID when [AppState.quickUnlock] allows it. */
     UNLOCK,
 
+    /**
+     * Forgot the master password: the email and the recovery phrase, then (once [AppState.recoverVerified]) a new
+     * master password.
+     */
+    RECOVER,
+
     /** The shown-once recovery phrase ([SessionController.recoveryPhrase]), typed back to confirm it was saved. */
     RECOVERY_REVEAL,
 
@@ -53,6 +59,8 @@ data class AppState(
     val totpRequired: Boolean,
     /** UNLOCK (and WELCOME after a sign-out): the account the stored session belongs to. */
     val accountEmail: String?,
+    /** RECOVER: the email and phrase were verified; the screen now asks for the new master password. */
+    val recoverVerified: Boolean,
     /** VAULT: the personal vault is not confirmed on this device; what the person has to decide. Null when it is. */
     val personalVault: PersonalVaultView?,
     /** VAULT: captured logins that could not be saved by themselves; each says why and can be saved or discarded. */
@@ -90,7 +98,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, recoverVerified = false, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -108,6 +116,8 @@ data class PolicyView(
     val recoveryFingerprintShort: String,
     /** "invite-only", "closed" or "landing" (spec 03 §2.1). */
     val signupMode: String,
+    /** How long a copied secret may stay on the clipboard, already clamped (1 to 300 seconds). */
+    val clipboardClearSeconds: Int,
 )
 
 /** What the Trust Gate shows for an address (design 2026-07-15 §4.3): the raw origin, never a display name. */

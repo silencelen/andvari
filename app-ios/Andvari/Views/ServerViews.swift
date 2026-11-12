@@ -56,10 +56,9 @@ struct ChooseServerView: View {
         }
     }
 
-    /// Keeps the server already chosen: choosing it again changes nothing and lands back.
+    /// Keeps the server already chosen and goes back to the screen this one was opened from.
     private func cancel() {
-        guard let current = model.state.server else { return }
-        _ = model.chooseServer(current)
+        model.cancelChangeServer()
     }
 }
 

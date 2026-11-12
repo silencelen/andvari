@@ -17,6 +17,7 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.session.BiometricHost
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.session.FakeClocks
 import io.silencelen.andvari.core.client.session.FakeNamespaces
 import io.silencelen.andvari.core.client.session.FakeQuickKeys
@@ -27,10 +28,14 @@ import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.StoredSession
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.KdfParams
+import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.silencelen.andvari.core.model.RecoveryCommitRequest
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.WireItem
@@ -1279,5 +1284,216 @@ open class SessionControllerTest {
         assertEquals(AppScreen.VAULT, controller.state.screen, "the vault opens without waiting on the confirm")
         assertNull(controller.recoveryPhrase(), "shown once")
         withTimeout(10_000) { confirmed.await() } // the enroll path's confirm still reaches the server
+    }
+
+    // ---- change server, identity code, clipboard policy ----
+
+    @Test
+    fun changingServerCanBeCancelledBackToWhereItCameFrom() = test {
+        seedSession()
+        controller.startAndLand()
+        assertEquals(AppScreen.UNLOCK, controller.state.screen)
+        controller.changeServer()
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+        controller.cancelChangeServer()
+        assertEquals(AppScreen.UNLOCK, controller.state.screen)
+        assertEquals(HOME, controller.state.server)
+    }
+
+    @Test
+    fun withNoServerChosenThereIsNothingToCancelTo() = test(origin = null) {
+        controller.startAndLand()
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+        controller.cancelChangeServer()
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+    }
+
+    @Test
+    fun theIdentityCodeIsThisDevicesKeyAndOnlyWhileUnlocked() = test {
+        seedSession()
+        controller.startAndLand()
+        assertNull(controller.identityCode())
+        assertNull(controller.identityCodeFull())
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(enrolled.account.identityFingerprintShort(), controller.identityCode())
+        assertEquals(enrolled.account.identityFingerprintFull(), controller.identityCodeFull())
+        controller.lock()
+        assertNull(controller.identityCode())
+    }
+
+    @Test
+    fun theClipboardLifetimeIsTheServersClamped() = test {
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(clipboardClearSeconds = 86_400)), HttpStatusCode.OK, headers) }
+        controller.startAndLand()
+        settle { controller.state.policy != null }
+        assertEquals(300, controller.state.policy?.clipboardClearSeconds)
+    }
+
+    @Test
+    fun aZeroClipboardLifetimeStillClears() = test {
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(clipboardClearSeconds = 0)), HttpStatusCode.OK, headers) }
+        controller.startAndLand()
+        settle { controller.state.policy != null }
+        assertEquals(1, controller.state.policy?.clipboardClearSeconds)
+    }
+
+    // ---- forgot the master password ----
+
+    private val phrase get() = MemberRecovery.displayForm(enrolled.recoverySecret)
+    private val serverPolicy = ClientPolicy()
+
+    /** A server that verifies [EMAIL] with the enrolled phrase and takes a commit; what it was sent lands in [commits]. */
+    private fun Rig.recoveryServer(commits: MutableList<RecoveryCommitRequest>) {
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), serverPolicy), HttpStatusCode.OK, headers) }
+        val piece = reg.memberRecovery!!
+        routes["/recovery/self/verify"] = { request ->
+            val body = (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()
+            if (body.contains(MemberRecovery.deriveAuthKey(crypto, enrolled.recoverySecret)) && body.contains(EMAIL)) {
+                respond(json.encodeToString(RecoveryVerifyResponse.serializer(), RecoveryVerifyResponse(reg.userId, "ticket-1", piece.recoveryWrappedUvk, reg.encryptedIdentitySeed, reg.identityPub)), HttpStatusCode.OK, headers)
+            } else {
+                respond("""{"error":"unauthorized","message":"no"}""", HttpStatusCode.Unauthorized, headers)
+            }
+        }
+        routes["/recovery/self/commit"] = { request ->
+            commits += json.decodeFromString(RecoveryCommitRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            respond("{}", HttpStatusCode.OK, headers)
+        }
+    }
+
+    @Test
+    fun recoveryResetsThePasswordOverTheSameKeysAndEndsThisDevicesSession() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        seedSession()
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(AppScreen.RECOVER, controller.state.screen)
+        assertFalse(controller.state.recoverVerified)
+        assertEquals(ActionResult.Ok, controller.recoverVerify(" $EMAIL ", phrase.chunked(4).joinToString(" ")))
+        assertTrue(controller.state.recoverVerified)
+        assertEquals(ActionResult.Failed(RecoverCopy.WEAK_PASSWORD), controller.recoverCommit("short"))
+        assertTrue(commits.isEmpty())
+        val fresh = "a brand new master password 77!"
+        assertEquals(ActionResult.Ok, controller.recoverCommit(fresh))
+        val sent = commits.single()
+        assertEquals("ticket-1", sent.recoveryTicket)
+        assertEquals(serverPolicy.kdfParams, sent.newKdfParams, "the server policy's parameters, not a default")
+        // The same UVK under the new password: the commit's wrap opens the account the enrolment made.
+        val keys = cached.copy(kdfSalt = sent.newKdfSalt, kdfParams = sent.newKdfParams, wrappedUvk = sent.newWrappedUvk)
+        assertEquals(enrolled.account.identityFingerprintFull(), Account.unlock(reg.userId, fresh, keys, crypto).identityFingerprintFull())
+        // Every session of the account is revoked server-side: this device forgets its own.
+        assertNull(store.load())
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+        assertEquals(RecoverCopy.DONE, controller.state.notice)
+        assertFalse(controller.state.recoverVerified)
+        assertNull(snapshots.read(), "nothing shared with the extensions outlives the session")
+    }
+
+    @Test
+    fun aRefusedPhraseSaysOneThingWhicheverPartWasWrong() = test {
+        recoveryServer(mutableListOf())
+        controller.startAndLand()
+        controller.openRecover()
+        val wrong = MemberRecovery.displayForm(crypto.randomBytes(32))
+        val refusal = ActionResult.Failed("We couldn't verify that email and recovery phrase.")
+        assertEquals(refusal, controller.recoverVerify(EMAIL, wrong))
+        assertEquals(refusal, controller.recoverVerify("other@example.com", phrase))
+        assertFalse(controller.state.recoverVerified)
+        assertEquals(ActionResult.Failed(RecoverCopy.NOT_A_PHRASE), controller.recoverVerify(EMAIL, "not a phrase !!"))
+        assertEquals(ActionResult.Failed(RecoverCopy.EXPIRED), controller.recoverCommit("a brand new master password 77!"))
+    }
+
+    @Test
+    fun cancellingRecoveryForgetsWhatWasVerified() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        seedSession()
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        controller.cancelRecover()
+        assertEquals(AppScreen.UNLOCK, controller.state.screen)
+        assertEquals(ActionResult.NotDone(null), controller.recoverCommit("a brand new master password 77!"))
+        controller.openRecover()
+        assertFalse(controller.state.recoverVerified, "a fresh entry starts at the first step")
+        assertEquals(ActionResult.Failed(RecoverCopy.EXPIRED), controller.recoverCommit("a brand new master password 77!"))
+        assertTrue(commits.isEmpty())
+        assertNotNull(store.load(), "nothing was reset, so nothing is forgotten")
+    }
+
+    @Test
+    fun theNewPasswordStepDoesNotOutliveIdleOrTheBackground() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        clocks.mono += RecoverCopy.IDLE_MS - 1
+        controller.tick()
+        assertEquals(AppScreen.RECOVER, controller.state.screen)
+        clocks.mono += 1
+        controller.tick()
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+        assertEquals(RecoverCopy.TIMEOUT, controller.state.notice)
+
+        controller.openRecover()
+        controller.onBackground()
+        assertEquals(AppScreen.RECOVER, controller.state.screen, "the first step holds nothing, so it stays")
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        controller.onBackground()
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+        assertEquals(ActionResult.NotDone(null), controller.recoverCommit("a brand new master password 77!"))
+        assertTrue(commits.isEmpty())
+    }
+
+    @Test
+    fun aFailedCommitKeepsTheVerifiedStepForARetry() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        routes["/recovery/self/commit"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Failed(HouseholdCopy.UNREACHABLE), controller.recoverCommit("a brand new master password 77!"))
+        assertTrue(controller.state.recoverVerified)
+        recoveryServer(commits)
+        assertEquals(ActionResult.Ok, controller.recoverCommit("a brand new master password 77!"))
+        assertEquals(1, commits.size)
+    }
+
+    @Test
+    fun aSubstitutedIdentityKeyStopsTheResetBeforeAnythingIsSent() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        val piece = reg.memberRecovery!!
+        val other = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+        routes["/recovery/self/verify"] = {
+            respond(json.encodeToString(RecoveryVerifyResponse.serializer(), RecoveryVerifyResponse(reg.userId, "ticket-1", piece.recoveryWrappedUvk, reg.encryptedIdentitySeed, Bytes.toB64(other.publicKey))), HttpStatusCode.OK, headers)
+        }
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        assertEquals(ActionResult.Failed(HouseholdCopy.IDENTITY_MISMATCH), controller.recoverCommit("a brand new master password 77!"))
+        assertTrue(commits.isEmpty())
+    }
+
+    @Test
+    fun aServerOfferingWeakenedKeyDerivationCannotTakeTheReset() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(kdfParams = KdfParams(ops = 1, memBytes = 8192))), HttpStatusCode.OK, headers) }
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        assertEquals(ActionResult.Failed(HouseholdCopy.WEAK_KDF_ACTION), controller.recoverCommit("a brand new master password 77!"))
+        assertTrue(commits.isEmpty())
+    }
+
+    @Test
+    fun recoveryOpensOnlyFromTheSignedOutScreens() = test {
+        unlocked()
+        controller.openRecover()
+        assertEquals(AppScreen.VAULT, controller.state.screen)
+        assertEquals(ActionResult.NotDone(null), controller.recoverVerify(EMAIL, phrase))
     }
 }
