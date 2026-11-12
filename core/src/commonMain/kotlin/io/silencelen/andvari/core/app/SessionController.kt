@@ -1,5 +1,6 @@
 package io.silencelen.andvari.core.app
 
+import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemDoc
@@ -150,6 +151,17 @@ open class SessionController(
 
     /** H08: a lock on leaving the foreground that waited for a running action. */
     private var backgroundLockPending = false
+
+    /** The personal-vault question, as Android asks it ([PersonalVaultFlow]). */
+    private val personal = PersonalVaultFlow(
+        publish = { view -> update { it.copy(personalVault = view) } },
+        changed = {
+            // A personal vault is in force now: the list, the snapshot, and what only waited for one.
+            update { it.copy(items = summaries(it.query)) }
+            writeFillSnapshot()
+            refreshSaveQueue()
+        },
+    )
 
     /** The extensions' save queue: what was captured, what was saved by itself, and its undo ([SaveImporter]). */
     private val saves = SaveImporter(
@@ -602,6 +614,7 @@ open class SessionController(
         busy()
         val outcome = live.engine.remove(itemId)
         if (session.get() !== live) return@action ActionResult.NotDone(null)
+        runCatching { saves.itemDeleted(live, itemId) }
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
         ActionResult.Ok
@@ -621,6 +634,7 @@ open class SessionController(
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         update { it.copy(busy = false, items = summaries(it.query), notice = SYNCED) }
         writeFillSnapshot()
+        refreshPersonalVault() // a sync can change what the server says the personal vault is
         ActionResult.Ok
     }
 
@@ -886,6 +900,63 @@ open class SessionController(
         refreshPolicyIfStale()
         writeFillSnapshot()
         refreshSaveQueue()
+        refreshPersonalVault()
+    }
+
+    // ---- the personal vault ----
+
+    /** Show the personal-vault notice as it stands, then look up what it needs from the server. */
+    private fun refreshPersonalVault() {
+        val live = session.get() ?: return
+        runCatching { personal.render(live) }
+        if (live.account.personalStatus == Account.PersonalStatus.CONFIRMED) return
+        scope.launch {
+            runCatching { personal.load(live) }.onFailure { if (it is CancellationException) throw it }
+        }
+    }
+
+    /** Look up again who else holds the vault the server names ([PersonalVaultView.lookupFailed]). */
+    @Throws(CancellationException::class)
+    suspend fun retryPersonalVaultDetails(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        personal.load(live)
+        ActionResult.Ok
+    }
+
+    /** "Use <the vault the server names>" ([PersonalVaultView.useServedLabel]); offered only after its co-holders loaded. */
+    fun usePersonalVaultServed(): ActionResult = guarded({ ActionResult.Failed(HouseholdCopy.forError(it)) }) {
+        val live = session.get() ?: return@guarded ActionResult.NotDone(null)
+        if (personal.useServed(live)) ActionResult.Ok else ActionResult.NotDone(null)
+    }
+
+    /**
+     * Propose a personal vault: [vaultId] from [PersonalVaultView.choices] or [PersonalVaultView.otherChoices], or
+     * null for "Keep" ([PersonalVaultView.keepLabel]). Raises the confirmation ([PersonalVaultView.proposal]); nothing
+     * is written.
+     */
+    @Throws(CancellationException::class)
+    suspend fun proposePersonalVault(vaultId: String?): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val raised = personal.propose(live, vaultId)
+        idle()
+        if (raised) ActionResult.Ok else ActionResult.NotDone(null)
+    }
+
+    /** Dismiss the confirmation without choosing. */
+    fun cancelPersonalVaultProposal() {
+        val live = session.get() ?: return
+        runCatching { personal.cancel(live) }
+    }
+
+    /** Confirm the raised proposal; [password] is the master password where [PersonalProposalView.needsPassword]. */
+    @Throws(CancellationException::class)
+    suspend fun confirmPersonalVault(password: String?): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val done = personal.confirm(live, password)
+        idle()
+        if (done) ActionResult.Ok else ActionResult.NotDone(null)
     }
 
     /**
@@ -1107,6 +1178,7 @@ open class SessionController(
     private fun lock(reason: String?) {
         session.lock()
         saves.locked()
+        personal.reset()
         zeroSecrets()
         backgroundLockPending = false
         val stored = store.load()
@@ -1158,6 +1230,7 @@ open class SessionController(
                 syncNow(live.engine)
                 if (session.get() === live) update { it.copy(syncing = false, items = summaries(it.query)) } else update { it.copy(syncing = false) }
                 writeFillSnapshot()
+                refreshPersonalVault()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 if (t is UpgradeRequiredException) {
@@ -1175,7 +1248,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        pendingSaves = emptyList(), appliedSaves = emptyList(),
+        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(),
     )
 
     private companion object {

@@ -53,6 +53,8 @@ data class AppState(
     val totpRequired: Boolean,
     /** UNLOCK (and WELCOME after a sign-out): the account the stored session belongs to. */
     val accountEmail: String?,
+    /** VAULT: the personal vault is not confirmed on this device; what the person has to decide. Null when it is. */
+    val personalVault: PersonalVaultView?,
     /** VAULT: captured logins that could not be saved by themselves; each says why and can be saved or discarded. */
     val pendingSaves: List<PendingSaveView>,
     /** VAULT: captured logins this unlock saved by itself, until dismissed; each can be undone ([AppliedSaveView]). */
@@ -88,7 +90,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -296,4 +298,6 @@ data class AppliedSaveView(
     val plainHttp: Boolean,
     /** When it was saved (unix milliseconds). The list survives a lock until it is dismissed. */
     val appliedAtMs: Long,
+    /** The name of the vault the login is in now; null when the vault does not hold it (the row then says so). */
+    val vault: String?,
 )

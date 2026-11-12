@@ -63,6 +63,9 @@ open class SessionControllerTest {
         const val PASSWORD = "correct horse battery staple 42!"
         const val EMAIL = "u@example.com"
         const val HOME = "https://home.example"
+
+        /** What a vault with no row in the cache is called in a list of saves. */
+        const val PERSONAL = "a vault this device cannot name"
         const val DAY = 86_400_000L
         const val MINUTE = 60_000L
         const val DEVICE = "00000000-0000-4000-8000-000000000001"
@@ -541,6 +544,218 @@ open class SessionControllerTest {
         assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability())
     }
 
+    // ---- the personal vault ----
+
+    /** The members of the personal vault as the server reports them: this account alone. */
+    private fun Rig.membersAnswer(vararg others: String) {
+        val me = io.silencelen.andvari.core.model.VaultMemberSummary(reg.userId, EMAIL, "u", "owner", reg.identityPub, 1)
+        val rest = others.map { io.silencelen.andvari.core.model.VaultMemberSummary("00000000-0000-4000-8000-0000000000b$it", "$it@example.com", "Other $it", "writer", reg.identityPub, 1) }
+        routes["/members"] = { respond(json.encodeToString(kotlinx.serialization.builtins.ListSerializer(io.silencelen.andvari.core.model.VaultMemberSummary.serializer()), listOf(me) + rest), HttpStatusCode.OK, headers) }
+    }
+
+    @Test
+    fun aDeviceThatNeverConfirmedItsPersonalVaultAsksOnceAndThenSavesWhatWasWaiting() = test {
+        // This account was created elsewhere: the server names a personal vault, and nothing on this device vouches for it.
+        seedSession()
+        val key = "$homeKey/${reg.userId}"
+        val seeded = namespaces.caches.getValue(key)
+        namespaces.caches[key] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
+            override val durable = true
+        }
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        membersAnswer("1")
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { queue.key != null && controller.state.personalVault?.servedDetail != null }
+        val notice = assertNotNull(controller.state.personalVault)
+        assertEquals(PersonalVaultState.PROPOSED, notice.state)
+        assertTrue(notice.title.startsWith("The server says your personal vault is"), notice.title)
+        assertNull(notice.keepLabel, "the account designates no other vault to keep")
+        assertTrue(assertNotNull(notice.servedDetail).contains("Other 1 (writer)"), "who else can read it is named before it can be used: ${notice.servedDetail}")
+        assertNotNull(notice.useServedLabel)
+
+        // A capture made meanwhile has nowhere to go, and says so.
+        controller.lock()
+        capture("a", "https://shop.example/login", "me", "pw")
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.singleOrNull()?.reason != null && controller.state.personalVault?.useServedLabel != null }
+        assertEquals("Choose a vault for this item.", controller.state.pendingSaves.single().reason)
+        assertIs<ActionResult.Failed>(controller.saveLogin(null, LoginInput("New", "me", "pw", listOf("https://new.example"), "", "", false)))
+
+        // The person confirms; the notice goes, a new login has a home, and what waited is saved with no further tap.
+        assertEquals(ActionResult.Ok, controller.usePersonalVaultServed())
+        assertNull(controller.state.personalVault)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf("a"), controller.state.appliedSaves.map { it.id })
+        assertTrue(controller.state.pendingSaves.isEmpty())
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("New", "me", "pw", listOf("https://new.example"), "", "", false)))
+        // The confirmation is remembered on the device: the next unlock does not ask again.
+        controller.lock()
+        controller.unlock(PASSWORD)
+        assertNull(controller.state.personalVault)
+    }
+
+    @Test
+    fun usingTheServedPersonalVaultIsNotOfferedUntilItsCoHoldersWereLoaded() = test {
+        unlocked() // the members lookup is unreachable in this rig
+        settle { controller.state.personalVault?.lookupFailed == true }
+        val notice = assertNotNull(controller.state.personalVault)
+        assertEquals(PersonalVaultState.PROPOSED, notice.state)
+        assertNull(notice.useServedLabel)
+        assertNull(notice.servedDetail)
+        assertEquals(ActionResult.NotDone(null), controller.usePersonalVaultServed(), "the core refuses, whatever a UI shows")
+        assertNotNull(controller.state.personalVault?.error)
+        // Once the server answers, a retry loads them and the offer appears.
+        membersAnswer()
+        assertEquals(ActionResult.Ok, controller.retryPersonalVaultDetails())
+        assertFalse(assertNotNull(controller.state.personalVault).lookupFailed)
+        assertTrue(assertNotNull(controller.state.personalVault?.servedDetail).contains("nobody else"))
+        assertEquals(ActionResult.Ok, controller.usePersonalVaultServed())
+        assertNull(controller.state.personalVault)
+    }
+
+    @Test
+    fun choosingAnotherVaultInsteadTakesTheConfirmationAndTheMasterPassword() = test {
+        seedSession()
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertVault(io.silencelen.andvari.core.model.WireVault(reg.personalVault.vaultId, "personal", 1, reg.personalVault.metaBlob, 1))
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        membersAnswer("1")
+        assertEquals(ActionResult.Ok, controller.retryPersonalVaultDetails())
+        val other = assertNotNull(controller.state.personalVault).otherChoices
+        assertEquals(1, other.size, "every vault of this account's own may be chosen instead")
+        assertEquals(ActionResult.Ok, controller.proposePersonalVault(other.single().vaultId))
+        val proposal = assertNotNull(controller.state.personalVault?.proposal)
+        assertTrue(proposal.needsPassword, "it replaces the record the server holds")
+        assertTrue(assertNotNull(proposal.warning).contains("Other 1"), "the confirmation names everyone who can read the vault")
+        assertEquals(ActionResult.NotDone(null), controller.confirmPersonalVault(null))
+        assertEquals("Enter your master password to confirm.", controller.state.personalVault?.error)
+        controller.cancelPersonalVaultProposal()
+        assertNull(controller.state.personalVault?.proposal)
+        assertEquals(PersonalVaultState.PROPOSED, controller.state.personalVault?.state, "cancelled: nothing was chosen")
+    }
+
+    @Test
+    fun aLockTakesThePersonalVaultNoticeAway() = test {
+        unlocked()
+        settle { controller.state.personalVault != null }
+        controller.lock()
+        assertNull(controller.state.personalVault)
+    }
+
+    /**
+     * A server that keeps what is pushed and serves it back, as the real one does: an online save is applied, and the
+     * reconcile pull returns the row. The rig's default is an unreachable server.
+     */
+    private fun Rig.onlineServer() {
+        val rows = mutableListOf<WireItem>()
+        var rev = 10L
+        val real = System_now()
+        // (The key fetch stays unreachable: the fixture's account keys are below the KDF floor a server may send.)
+        routes["/account/state"] = { respond("""{"sealedState":null,"seq":0}""", HttpStatusCode.OK, headers) }
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            val results = body.mutations.map { m ->
+                rev++
+                rows.removeAll { it.itemId == m.itemId }
+                val up = m.item
+                rows += WireItem(m.itemId, m.vaultId, rev, real, real, deleted = up == null, conflict = false, formatVersion = up?.formatVersion ?: 1, attachmentIds = up?.attachmentIds.orEmpty(), blob = up?.blob)
+                io.silencelen.andvari.core.model.MutationResult(m.mutationId, "applied", newItemRev = rev)
+            }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(rev, results)), HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = { request ->
+            val since = request.url.parameters["since"]?.toLongOrNull() ?: 0L
+            val resp = io.silencelen.andvari.core.model.SyncResponse(rev, false, emptyList(), emptyList(), rows.filter { it.rev > since }, emptyList())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), resp), HttpStatusCode.OK, headers)
+        }
+    }
+
+    private fun System_now(): Long = kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
+
+    @Test
+    fun anAutoSavedLoginIsInTheVaultListOnTheSqliteCacheTheAppUses() = test {
+        seedSession()
+        val key = "$homeKey/${reg.userId}"
+        val sqlite = io.silencelen.andvari.core.client.sqliteVaultCache(":memory:", reg.userId).apply { upsertItem(sealed, null) }
+        namespaces.caches[key] = object : io.silencelen.andvari.core.client.VaultCache by sqlite {
+            override fun close() {} // one in-memory database for the whole test, across locks
+        }
+        namespaces.devices.getOrPut(key) { io.silencelen.andvari.core.client.MemoryDeviceState() }
+            .set("personal.wrap", json.encodeToString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), assertNotNull(reg.personalWrap)))
+        onlineServer()
+        clocks.wall = System_now()
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { queue.key != null }
+        controller.lock()
+        assertEquals(SaveQueued.QUEUED, capture("a", "https://shop.example/login", "me", "s3cret-pw"))
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name }, "still there after the next unlock")
+    }
+
+    @Test
+    fun anAutoSavedLoginIsInTheVaultListItsSearchAndTheSnapshotAndStaysThere() = test {
+        unlockedWithAPersonalVault()
+        onlineServer()
+        clocks.wall = System_now() // the device's clock and the server's agree, as on a phone
+        controller.lock()
+        assertEquals(SaveQueued.QUEUED, capture("a", "shop.example", "me", "s3cret-pw")) // the system's save names a domain
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name }, "in the list the vault screen shows")
+        controller.setQuery("shop")
+        assertEquals(listOf("shop.example"), controller.state.items.map { it.name }, "found by the search")
+        controller.setQuery("")
+        val added = controller.state.items.single { it.name == "shop.example" }
+        assertEquals("s3cret-pw", controller.revealSecret(added.itemId, SecretField.PASSWORD))
+        assertEquals(reg.personalVault.vaultId, controller.itemDetail(added.itemId)?.vaultId, "in the personal vault")
+        assertNotNull(controller.state.appliedSaves.single().vault, "and the list of saves says which vault it is in")
+        assertTrue(added.itemId in assertNotNull(FillSnapshot.decode(assertNotNull(snapshots.bytes))).items.map { it.itemId }, "in the AutoFill snapshot")
+        assertTrue(controller.credentialIdentities().any { it.itemId == added.itemId && it.host == "shop.example" }, "suggested to the system")
+        // It is still there after a sync and after the next unlock.
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(2, controller.state.items.size)
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
+    }
+
+    @Test
+    fun aListedSaveWhoseLoginNeverReachedTheVaultIsAddedAgainOnceAndADeletedOneIsNot() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("kept", "https://shop.example/", "me", "pw-1")
+        capture("gone", "https://other.example/", "me", "pw-2")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 2 }
+        val cache = namespaces.caches.getValue("$homeKey/${reg.userId}")
+        val lost = controller.state.items.single { it.name == "shop.example" }.itemId
+        val deleted = controller.state.items.single { it.name == "other.example" }.itemId
+        // One login is removed on purpose; the other's write is lost before it reached anything (no row, nothing queued).
+        assertEquals(ActionResult.Ok, controller.deleteItem(deleted))
+        controller.lock()
+        cache.pending().filter { it.itemId == lost }.forEach { cache.dequeue(it.mutationId) }
+        cache.deleteItem(lost)
+        controller.unlock(PASSWORD)
+        settle { controller.state.items.any { it.name == "shop.example" } }
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name }, "the lost login is back, once; the deleted one is not")
+        assertEquals(listOf("kept"), controller.state.appliedSaves.map { it.id }, "and it is still listed, with its undo")
+        assertEquals("pw-1", controller.revealSecret(controller.state.items.single { it.name == "shop.example" }.itemId, SecretField.PASSWORD))
+        // Nothing is added twice by the next unlock.
+        controller.lock()
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(2, controller.state.items.size)
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave("kept"))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+    }
+
     // ---- the extensions' save queue ----
 
     @Test
@@ -556,7 +771,7 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
         settle { controller.state.appliedSaves.isNotEmpty() }
         val applied = controller.state.appliedSaves.single()
-        assertEquals(AppliedSaveView("a", "shop.example", "me", null, false, clocks.wall), applied)
+        assertEquals(AppliedSaveView("a", "shop.example", "me", null, false, clocks.wall, PERSONAL), applied)
         assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
         assertTrue(queue.map.isEmpty())
         // The record of it is kept sealed, in app-private storage, and survives a lock: the list is there after the next unlock.
@@ -582,7 +797,7 @@ open class SessionControllerTest {
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.isNotEmpty() }
-        assertEquals(listOf(AppliedSaveView("new", "login.example.com", "fam", "Example", false, clocks.wall)), controller.state.appliedSaves)
+        assertEquals(listOf(AppliedSaveView("new", "login.example.com", "fam", "Example", false, clocks.wall, PERSONAL)), controller.state.appliedSaves)
         assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertEquals(1, controller.state.items.size, "updated, not duplicated")
         assertTrue(controller.state.pendingSaves.isEmpty())

@@ -169,6 +169,7 @@ internal class SaveImporter(
         val published = queue.publication()
         if (published == null || !published.contentEquals(publication)) queue.publish(publication)
         loadApplied(live)
+        if (apply) repairLocked(live, stillLive)
 
         val now = clocks.wallMs()
         val vault = logins(live)
@@ -197,11 +198,16 @@ internal class SaveImporter(
                 queue.remove(id)
                 continue
             }
-            // An entry already listed keeps its reason; one that was mid-apply when this sync began is judged again.
+            // An entry already listed keeps its reason; one that was mid-apply when this sync began is judged again,
+            // and so is one that only waited for a personal vault, once there is one.
             val was = before[id]
-            pending[id] = Pending(login, personalTarget(vault, login, live.account), was?.reason)
+            val reason = was?.reason?.takeUnless { it == HouseholdCopy.NO_PERSONAL_VAULT && live.account.personalVaultId.isNotEmpty() }
+            pending[id] = Pending(login, personalTarget(vault, login, live.account), reason)
         }
         if (apply) applyLocked(live, stillLive)
+        vaultNames = { itemId ->
+            runCatching { live.engine.item(itemId)?.let { item -> live.engine.vaultInfos().firstOrNull { it.vaultId == item.vaultId }?.name ?: "a vault this device cannot name" } }.getOrNull()
+        }
         if (stillLive()) publish(pendingViews(), appliedViews(), unreadable)
     }
 
@@ -256,6 +262,47 @@ internal class SaveImporter(
         }
     }
 
+    /**
+     * A listed save whose login is not in the vault is put right: reported on a device as "it saves, but the login
+     * is not in the vault and cannot be found". For a login a save ADDED, when the vault has never seen its id (no row,
+     * no tombstone, nothing queued) and holds no login with these credentials, the login is added again from the
+     * sealed record, under a new id, and the record follows it. A login the vault did see and no longer shows was
+     * removed on purpose (here or on another device) and is left alone; its record is dropped from the list.
+     */
+    private suspend fun repairLocked(live: VaultSession.Unlocked, stillLive: () -> Boolean) {
+        if (live.account.personalVaultId.isEmpty()) return
+        var changed = false
+        for ((id, record) in applied.toList()) {
+            if (!stillLive()) return
+            if (live.engine.item(record.itemId) != null) continue
+            val known = live.engine.envelopes().any { it.itemId == record.itemId } || record.itemId in live.engine.pendingSyncItemIds()
+            if (record.replacedName != null || known) {
+                applied.remove(id)
+                changed = true
+                continue
+            }
+            val host = UriMatch.normalizeHost(record.site) ?: continue
+            val captured = CapturedLogin(origin = "", userId = "", site = record.site, username = record.username, password = record.password, capturedAtMs = record.appliedAtMs, source = "repair")
+            if (logins(live).any { sameLogin(it, captured) && it.doc.login?.password == record.password }) {
+                applied.remove(id) // the login is there under another id: nothing to add, nothing left to undo by this record
+                changed = true
+                continue
+            }
+            try {
+                applied[id] = write(live, id, Pending(captured, null)).copy(appliedAtMs = record.appliedAtMs)
+                changed = true
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Throwable) {
+                // Not now (offline on a cache that cannot queue): the next unlock tries again.
+            }
+        }
+        if (changed && stillLive()) {
+            storeApplied(live)
+            wrote()
+        }
+    }
+
     /** Write one capture to the vault: the target's new password, or a new login under an id minted here. */
     private suspend fun write(live: VaultSession.Unlocked, id: String, p: Pending): AppliedRecord {
         val captured = p.login
@@ -268,6 +315,8 @@ internal class SaveImporter(
             // The id is minted here, so the undo names exactly the login this save added.
             val itemId = Bytes.uuidV4FromBytes(crypto().randomBytes(16))
             lastOutcome = live.engine.saveWithUploads(null, doc, emptyList(), null, null, itemId)
+            // Never "saved" on the save's word alone: the login must be in the vault the list is drawn from.
+            check(live.engine.item(itemId) != null) { "the vault did not keep the new login" }
             return AppliedRecord(id, captured.site, captured.username, itemId, null, captured.password, false, now)
         }
         val login = target.doc.login.orEmpty()
@@ -370,6 +419,18 @@ internal class SaveImporter(
         return ImportResult.Done(outcome == SaveOutcome.QUEUED)
     }
 
+    /**
+     * The person deleted [itemId] in this app: a save that added it has nothing left to undo, and must never add it
+     * again as a login that "went missing".
+     */
+    fun itemDeleted(live: VaultSession.Unlocked, itemId: String) {
+        val ids = applied.filterValues { it.itemId == itemId }.keys
+        if (ids.isEmpty()) return
+        ids.forEach(applied::remove)
+        storeApplied(live)
+        publish(pendingViews(), appliedViews(), false)
+    }
+
     /** The list has been read: it goes, in memory and in storage, and with it the undo from here. */
     fun dismiss() {
         applied.clear()
@@ -385,6 +446,7 @@ internal class SaveImporter(
         applied.clear()
         appliedLoaded = false
         replacedThisUnlock.clear()
+        vaultNames = { null }
     }
 
     /** The account is going (sign-out, a server switch, a forbidding policy): the key, the queue and the list go. */
@@ -431,8 +493,11 @@ internal class SaveImporter(
         PendingSaveView(id, hostOf(p.login.site), p.login.username, p.target?.doc?.name, schemeOf(p.login.site) == Scheme.HTTP, p.reason, "$via, $address.")
     }
 
+    /** The vault each listed save's login is in now, by name (set whenever the list is published while unlocked). */
+    private var vaultNames: (itemId: String) -> String? = { null }
+
     private fun appliedViews(): List<AppliedSaveView> = applied.values.map {
-        AppliedSaveView(it.id, hostOf(it.site), it.username, it.replacedName, schemeOf(it.site) == Scheme.HTTP, it.appliedAtMs)
+        AppliedSaveView(it.id, hostOf(it.site), it.username, it.replacedName, schemeOf(it.site) == Scheme.HTTP, it.appliedAtMs, vaultNames(it.itemId))
     }
 
     companion object {
