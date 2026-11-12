@@ -40,6 +40,7 @@ import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.WireItem
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -1763,12 +1764,68 @@ open class SessionControllerTest {
 
         controller.openRecover()
         controller.onBackground()
-        assertEquals(AppScreen.RECOVER, controller.state.screen, "the first step holds nothing, so it stays")
+        assertEquals(AppScreen.WELCOME, controller.state.screen, "the first step does not survive the background either")
+        controller.openRecover()
         assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
         controller.onBackground()
         assertEquals(AppScreen.WELCOME, controller.state.screen)
         assertEquals(ActionResult.NotDone(null), controller.recoverCommit("a brand new master password 77!"))
         assertTrue(commits.isEmpty())
+    }
+
+    @Test
+    fun aVerifyInFlightWhenTheAppLeavesTheForegroundLandsNowhere() = test {
+        recoveryServer(mutableListOf())
+        val asked = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val verify = routes.getValue("/recovery/self/verify")
+        routes["/recovery/self/verify"] = { request ->
+            asked.complete(Unit)
+            release.await()
+            verify(request)
+        }
+        controller.startAndLand()
+        controller.openRecover()
+        kotlinx.coroutines.coroutineScope {
+            val result = async { controller.recoverVerify(EMAIL, phrase) }
+            withTimeout(10_000) { asked.await() }
+            controller.onBackground()
+            assertEquals(AppScreen.WELCOME, controller.state.screen)
+            release.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), result.await())
+        }
+        assertFalse(controller.state.recoverVerified, "the answer of a verify the person left is not kept")
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+    }
+
+    @Test
+    fun aResetThatLandsAfterTheAppLeftTheForegroundSaysItIsDone() = test {
+        val commits = mutableListOf<RecoveryCommitRequest>()
+        recoveryServer(commits)
+        val committing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val commit = routes.getValue("/recovery/self/commit")
+        routes["/recovery/self/commit"] = { request ->
+            committing.complete(Unit)
+            release.await()
+            commit(request)
+        }
+        seedSession()
+        controller.startAndLand()
+        controller.openRecover()
+        assertEquals(ActionResult.Ok, controller.recoverVerify(EMAIL, phrase))
+        kotlinx.coroutines.coroutineScope {
+            val result = async { controller.recoverCommit("a brand new master password 77!") }
+            withTimeout(10_000) { committing.await() }
+            controller.onBackground()
+            assertEquals(RecoverCopy.TIMEOUT, controller.state.notice)
+            release.complete(Unit)
+            result.await()
+        }
+        assertEquals(1, commits.size, "the server took the reset")
+        assertEquals(RecoverCopy.DONE, controller.state.notice, "so the person is told it is done, not that it timed out")
+        assertNull(store.load(), "and this device's session, revoked by the reset, is gone")
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
     }
 
     @Test
