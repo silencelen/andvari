@@ -55,8 +55,9 @@ class IosSeamsTest {
     fun theServerOriginIsSharedThroughTheAppGroupSuiteOnly() {
         assertEquals(IOS_APP_GROUP, IosStorageConfig().sharedSuite, "the app shares through its App Group by default")
         val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val own = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
         try {
-            val seams = IosSeams(IosStorageConfig(null, "io.silencelen.andvari.test", null, suite))
+            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, suite))
             seams.serverShare.publish("https://home.example")
             // What SafariWebExtensionHandler reads: the same suite and key, through a fresh instance.
             assertEquals("https://home.example", NSUserDefaults(suiteName = suite).stringForKey(IOS_APP_SERVER_KEY))
@@ -64,13 +65,15 @@ class IosSeamsTest {
             assertNull(NSUserDefaults(suiteName = suite).stringForKey(IOS_APP_SERVER_KEY), "no server: the extension is told there is none")
         } finally {
             NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+            NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
         }
     }
 
     @Test
-    fun theShippingLayoutSharesStateButNeverTheTokens() {
+    fun theShippingLayoutKeepsTheAppsStatePrivateAndNeverSharesTheTokens() {
         val config = IosStorageConfig()
-        assertEquals(IOS_APP_GROUP, config.defaultsSuite)
+        assertNull(config.defaultsSuite, "the app's own state is in its private defaults")
+        assertEquals(IOS_APP_GROUP, config.sharedSuite, "a copy is published to the group")
         assertEquals(IOS_APP_GROUP, config.keychainAccessGroup, "the quick-unlock blob and key are readable by the AutoFill extension")
         // The extensions' persistence has no secret store behind it: a session never loads there.
         assertNull(NoSecrets.read("session.tokens"))
@@ -78,46 +81,74 @@ class IosSeamsTest {
     }
 
     @Test
-    fun anOlderLayoutMovesToTheSharedSuiteOnce() {
-        val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
-        val standard = NSUserDefaults.standardUserDefaults
+    fun aChangedGroupValueDoesNotChangeWhereTheAppConnects() {
+        val own = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val group = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
         try {
-            standard.setObject("https://home.example", forKey = "baseUrl")
-            standard.setObject("12345", forKey = "ns.0123456789abcdef.policyFetchedAt")
-            standard.setObject("keep", forKey = "somethingElse")
-            val seams = IosSeams(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null))
+            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group))
+            seams.store.moveOrigin("https://home.example")
+            seams.store.origin("0123456789abcdef").cacheAllowed = false
+            val shared = NSUserDefaults(suiteName = group)
+            assertEquals("https://home.example", shared.stringForKey("baseUrl"), "published for the extensions")
+            // A compromised extension rewrites the group's copy: another server, a relaxed policy.
+            shared.setObject("https://evil.example", forKey = "baseUrl")
+            shared.setObject("""{"baseUrl":"https://evil.example","userId":"u2","email":"x@evil.example"}""", forKey = "session")
+            shared.setObject("true", forKey = "ns.0123456789abcdef.cacheAllowed")
             assertEquals("https://home.example", seams.store.baseUrl)
-            assertEquals(12345L, seams.store.origin("0123456789abcdef").policyFetchedAt)
-            assertNull(standard.stringForKey("baseUrl"), "moved, not copied")
-            assertEquals("keep", standard.stringForKey("somethingElse"))
-            // A second start moves nothing: a value that reappears in the old place is not adopted.
-            standard.setObject("https://other.example", forKey = "baseUrl")
-            assertEquals("https://home.example", IosSeams(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null)).store.baseUrl)
+            assertNull(seams.store.storedIdentity(), "nobody is signed in, whatever the copy says")
+            assertFalse(seams.store.origin("0123456789abcdef").cacheAllowed)
+            // And after a relaunch.
+            val relaunched = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group))
+            assertEquals("https://home.example", relaunched.store.baseUrl)
+            assertNull(relaunched.store.storedIdentity())
         } finally {
-            for (k in listOf("baseUrl", "ns.0123456789abcdef.policyFetchedAt", "somethingElse")) standard.removeObjectForKey(k)
-            NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+            NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
+            NSUserDefaults(suiteName = group).removePersistentDomainForName(group)
         }
     }
 
     @Test
-    fun aMoveCutShortIsFinishedByTheNextStart() {
-        val suite = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
-        val standard = NSUserDefaults.standardUserDefaults
+    fun anUpdateAdoptsTheGroupStateOnceAndNeverAgain() {
+        val own = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val group = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
         try {
-            // An earlier start copied one key and died: the rest is still only in the old place.
-            UserDefaultsPrefs(suite).putString("ns.0123456789abcdef.cacheAllowed", "false")
-            standard.setObject("https://home.example", forKey = "baseUrl")
-            standard.setObject("true", forKey = "ns.0123456789abcdef.cacheAllowed")
-            standard.setObject("777", forKey = "ns.0123456789abcdef.policyFetchedAt")
-            standard.setObject("""{"baseUrl":"https://home.example","userId":"u1","email":"u@example.com"}""", forKey = "session")
-            val seams = IosSeams(IosStorageConfig(suite, "io.silencelen.andvari.test", null, null))
+            // What an earlier build left in the group (it kept the app's state there).
+            val shared = NSUserDefaults(suiteName = group)
+            shared.setObject("https://home.example", forKey = "baseUrl")
+            shared.setObject("""{"baseUrl":"https://home.example","userId":"u1","email":"u@example.com"}""", forKey = "session")
+            shared.setObject("777", forKey = "ns.0123456789abcdef.policyFetchedAt")
+            shared.setObject("not ours", forKey = "somethingElse")
+            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group))
             assertEquals("https://home.example", seams.store.baseUrl)
-            assertEquals("u1", seams.store.storedIdentity()?.userId, "the session's identity is read without any token")
+            assertEquals("u1", seams.store.storedIdentity()?.userId)
             assertEquals(777L, seams.store.origin("0123456789abcdef").policyFetchedAt)
-            assertFalse(seams.store.origin("0123456789abcdef").cacheAllowed, "a value already moved is not overwritten by the old one")
+            assertNull(NSUserDefaults(suiteName = own).stringForKey("somethingElse"), "only the app's own keys")
+            assertEquals("https://home.example", shared.stringForKey("baseUrl"), "the extensions' copy stays")
+            // A later change to the group is never adopted, at this start or the next.
+            shared.setObject("https://evil.example", forKey = "baseUrl")
+            assertEquals("https://home.example", IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group)).store.baseUrl)
         } finally {
-            for (k in listOf("baseUrl", "session", "ns.0123456789abcdef.cacheAllowed", "ns.0123456789abcdef.policyFetchedAt")) standard.removeObjectForKey(k)
-            NSUserDefaults(suiteName = suite).removePersistentDomainForName(suite)
+            NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
+            NSUserDefaults(suiteName = group).removePersistentDomainForName(group)
+        }
+    }
+
+    @Test
+    fun theExtensionsReadThePublishedCopy() {
+        val own = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val group = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val dir = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
+        try {
+            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), "$dir/autofill-snapshot.json", "$dir/saves")
+            seams.store.moveOrigin("https://home.example")
+            // The extension's store is the group's copy: it sees the server the app published.
+            assertEquals("https://home.example", PrefsSessionPersistence(UserDefaultsPrefs(group), NoSecrets).baseUrl)
+            val fill = IosAutofill(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), "$dir/autofill-snapshot.json", "$dir/saves")
+            assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), fill.availability(), "nobody signed in: nothing to fill")
+        } finally {
+            NSFileManager.defaultManager.removeItemAtPath(dir, error = null)
+            NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
+            NSUserDefaults(suiteName = group).removePersistentDomainForName(group)
         }
     }
 

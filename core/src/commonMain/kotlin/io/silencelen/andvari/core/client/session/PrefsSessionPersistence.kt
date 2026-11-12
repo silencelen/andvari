@@ -25,6 +25,31 @@ interface SecretStore {
     fun write(name: String, value: String?): Boolean
 }
 
+/**
+ * Preferences one process owns, with a copy published for other processes that is never read back (iOS: the app's
+ * private defaults, published to the App Group for its extensions). Every read comes from [own], so nothing another
+ * process writes to [shared] changes what this one acts on: not the server it connects to, not who it is signed in as,
+ * not its identity pins. Every write goes to [own] and, for each key [publish] admits, to [shared] as well.
+ */
+class PublishingPrefs(
+    private val own: KeyValuePrefs,
+    private val shared: KeyValuePrefs,
+    private val publish: (String) -> Boolean = { it !in PREFS_PROCESS_LOCAL_KEYS },
+) : KeyValuePrefs {
+    override fun getString(key: String): String? = own.getString(key)
+
+    override fun putString(key: String, value: String?) {
+        own.putString(key, value)
+        if (publish(key)) shared.putString(key, value)
+    }
+}
+
+/**
+ * Keys each process keeps for itself and never publishes: the high-water clock is advanced by every process that
+ * checks freshness, so each keeps its own (a published one would let another process move this one's clock).
+ */
+val PREFS_PROCESS_LOCAL_KEYS: Set<String> = setOf("highWaterWallMs")
+
 /** [KeyValuePrefs] in memory (tests, and a host that persists nothing). */
 class InMemoryPrefs : KeyValuePrefs {
     private val lock = SynchronizedObject()
@@ -232,7 +257,7 @@ class PrefsSessionPersistence(
         const val SESSION = "session"
         const val TOKENS = "session.tokens"
         const val MUST_CHANGE = "mustChangePassword"
-        const val HIGH_WATER = "highWaterWallMs"
+        const val HIGH_WATER = "highWaterWallMs" // in PREFS_PROCESS_LOCAL_KEYS
         const val LAST_SYNC = "lastSyncAt"
     }
 }
