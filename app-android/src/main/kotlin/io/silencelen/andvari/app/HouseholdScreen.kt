@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AccountStateSync
 import io.silencelen.andvari.core.client.PersonalChoiceInfo
+import io.silencelen.andvari.core.client.PersonalVaultCopy
 import io.silencelen.andvari.core.client.PersonalVaultProposal
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.crypto.Fingerprint
@@ -246,6 +247,8 @@ fun PersonalVaultCard(vm: AndvariViewModel) {
                                 RadioButton(selected = choice == v.vaultId, onClick = null)
                                 Column(Modifier.padding(start = 8.dp)) {
                                     Text(v.name)
+                                    // Two vaults of one name are told apart by what is in them and the end of their id.
+                                    Text(vm.vaultFacts(v.vaultId), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text(personalChoiceDetail(vm.personalChoiceInfo(v.vaultId)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
@@ -342,16 +345,27 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
             runCatching { vm.describePersonalChange() }.onSuccess { details = it; lookupFailed = false }.onFailure { lookupFailed = true }
         }
         val newName = details?.servedName ?: vm.vaultDisplayName(change.servedVaultId)
-        val designated = change.currentVaultId.takeIf { it.isNotEmpty() }?.let { details?.currentName ?: vm.vaultDisplayName(it) }
+        // The account's record and the server's may name the SAME vault: then there is no conflict to describe, only a
+        // device that has not been asked yet (A9 review LOW-4). "Personal, but the server sent Personal" read as a
+        // choice between two vaults of one name.
+        val same = change.currentVaultId == change.servedVaultId
+        val designated = change.currentVaultId.takeIf { it.isNotEmpty() && !same }?.let { details?.currentName ?: vm.vaultDisplayName(it) }
         Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Column(Modifier.padding(12.dp)) {
                 Text(
-                    if (designated == null) "The server says your personal vault is $newName." else "Your account's personal vault is $designated, but the server sent $newName.",
+                    when {
+                        same -> PersonalVaultCopy.sameVaultTitle(newName)
+                        designated == null -> "The server says your personal vault is $newName."
+                        else -> "Your account's personal vault is $designated, but the server sent $newName."
+                    },
                     color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall,
                 )
                 Text(
-                    if (designated == null) "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items need a vault picked by hand."
-                    else "Another of your devices chose $designated, or the server sent an older record. This device uses no personal vault until you decide.",
+                    when {
+                        same -> PersonalVaultCopy.sameVaultBody(change.servedVaultId) + " Until you confirm, new items need a vault picked by hand."
+                        designated == null -> "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items need a vault picked by hand."
+                        else -> "${PersonalVaultCopy.DIFFERENT_VAULTS} Another of your devices chose $designated, or the server sent an older record. This device uses no personal vault until you decide."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (designated != null) {
@@ -365,12 +379,14 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
                             busy = false
                         }
                     }) { Text("Keep $designated") }
+                    Text("The vault your account's record points to: ${vm.vaultFacts(change.currentVaultId)}.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 val d = details
                 if (d != null) {
                     val holders = if (d.servedCoHolders.isEmpty()) "nobody else" else d.servedCoHolders.joinToString(", ") { "${it.displayName} (${it.role})" }
                     val origin = if (d.servedOrigin == PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER) "received by transfer" else "created by this account"
                     Text("$newName, as reported by the server: $origin · also held by $holders.", style = MaterialTheme.typography.bodySmall)
+                    Text("The vault the server sent: ${vm.vaultFacts(change.servedVaultId)}.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(onClick = {
                         err = runCatching { vm.acceptPersonalChange() }.exceptionOrNull()?.let { "Couldn't confirm. Try again." }
                         onChanged()
@@ -401,7 +417,7 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
         Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Column(Modifier.padding(12.dp)) {
                 Text("Your personal vault was changed from $oldName to $newName.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
-                Text("Another of your devices changed it, or the server sent an older record. This device still uses $oldName until you decide.", style = MaterialTheme.typography.bodySmall)
+                Text("${PersonalVaultCopy.DIFFERENT_VAULTS} Another of your devices changed it, or the server sent an older record. This device still uses $oldName until you decide.", style = MaterialTheme.typography.bodySmall)
                 OutlinedButton(enabled = !busy, onClick = {
                     scope.launch {
                         busy = true
@@ -412,11 +428,13 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
                         busy = false
                     }
                 }) { Text("Keep $oldName") }
+                Text("The vault this device uses now: ${vm.vaultFacts(change.currentVaultId)}.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val d = details
                 if (d != null) {
                     val holders = if (d.servedCoHolders.isEmpty()) "nobody else" else d.servedCoHolders.joinToString(", ") { "${it.displayName} (${it.role})" }
                     val origin = if (d.servedOrigin == PersonalChoiceInfo.Origin.RECEIVED_BY_TRANSFER) "received by transfer" else "created by this account"
                     Text("$newName, as reported by the server: $origin · also held by $holders.", style = MaterialTheme.typography.bodySmall)
+                    Text("The vault the server sent: ${vm.vaultFacts(change.servedVaultId)}.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(onClick = {
                         err = runCatching { vm.acceptPersonalChange() }.exceptionOrNull()?.let { "Couldn't switch. Try again." }
                         onChanged()
@@ -455,7 +473,8 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
                                     .onFailure { err = "Couldn't check who else holds that vault. Try again when you're connected." }
                                 busy = false
                             }
-                        }) { Text("${c.name ?: "(unnamed)"} · ${c.itemCount} items") }
+                        }) { Text("${c.name ?: "(unnamed)"} · id ending ${PersonalVaultCopy.idTail(c.vaultId)}") }
+                        Text(vm.vaultFacts(c.vaultId), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(personalChoiceDetail(vm.personalChoiceInfo(c.vaultId)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
