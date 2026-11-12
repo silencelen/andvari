@@ -905,10 +905,10 @@ open class SessionController(
                 fillSnapshots.delete()
                 return
             }
-            // Only what this app shows: the login items its engine opened, and the vault and grant rows of the vaults
-            // they live in. The engine's trust state (held vaults, held key tags) stays in the app; a row it refused or
+            // Only what this app shows: the login and card items its engine opened, and the vault and grant rows of the
+            // vaults they live in. The engine's trust state (held vaults, held key tags) stays in the app; a row it refused or
             // set aside is not in the snapshot, so the extension cannot open what the app would not.
-            val shown = live.engine.items().filter { it.doc.type == "login" }
+            val shown = live.engine.items().filter { it.doc.type == "login" || it.doc.type == "card" }
             val ids = shown.mapTo(HashSet()) { it.itemId }
             val vaultIds = shown.mapTo(HashSet()) { it.vaultId }
             val snap = FillSnapshot(

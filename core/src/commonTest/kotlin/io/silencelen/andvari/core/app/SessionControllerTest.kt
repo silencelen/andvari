@@ -464,6 +464,39 @@ open class SessionControllerTest {
     }
 
     @Test
+    fun aCardIsListedMaskedAndReleasedOneFieldAtATime() = test {
+        seedSession()
+        val cardId = "00000000-0000-4000-8000-0000000000ca"
+        val card = ItemDoc(type = "card", name = "Everyday", card = io.silencelen.andvari.core.client.CardData(cardholderName = "F AM", number = "4242424242424242", expMonth = "07", expYear = "2031", securityCode = "123"))
+        val upload = enrolled.account.encryptItem(reg.personalVault.vaultId, cardId, card)
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertItem(WireItem(cardId, reg.personalVault.vaultId, 1, 1_000, 2_000, false, false, upload.formatVersion, emptyList(), upload.blob), null)
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        controller.enableQuickUnlock(null)
+        val text = assertNotNull(snapshots.bytes).decodeToString()
+        for (secret in listOf("4242424242424242", "Everyday", "F AM")) assertFalse(text.contains(secret), "at rest: $secret")
+        val fill = autofill()
+        assertTrue(fill.cards().isEmpty(), "nothing before the prompt")
+        quickKeys.next = { QuickRecover.Ok(enrolled.account.uvkCopyForPlatformWrap()) }
+        assertEquals(FillUnlock.Unlocked, fill.unlock(BiometricHost.None))
+        val listed = fill.cards().single()
+        assertEquals("Everyday", listed.name)
+        assertTrue(listed.subtitle.endsWith("4242") && !listed.subtitle.contains("42424242"), listed.subtitle)
+        assertTrue(listed.hasNumber && listed.hasExpiry && listed.hasCvv && listed.hasName)
+        assertEquals("4242424242424242", fill.cardField(cardId, "number"))
+        assertEquals("07", fill.cardField(cardId, "expMonth"))
+        assertEquals("123", fill.cardField(cardId, "cvv"))
+        assertNull(fill.cardField(cardId, "postal"), "a field the card does not have")
+        assertNull(fill.cardField(cardId, "everything"))
+        assertNull(fill.cardField(ITEM_ID, "number"), "a login is not a card")
+        assertNull(fill.credential(cardId), "a card is not a login")
+        assertEquals(listOf(ITEM_ID), fill.logins(emptyList()).map { it.itemId }, "cards are not listed among the logins")
+        assertEquals(listOf(ITEM_ID), controller.credentialIdentities().map { it.itemId }, "nor suggested to the system")
+        fill.close()
+        assertNull(fill.cardField(cardId, "number"))
+    }
+
+    @Test
     fun theSnapshotHoldsNoPlaintextAndNoToken() = test {
         unlocked()
         val text = assertNotNull(snapshots.bytes).decodeToString()

@@ -1,6 +1,7 @@
 package io.silencelen.andvari.core.app
 
 import io.silencelen.andvari.core.client.Account
+import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.OriginCanon
@@ -52,6 +53,17 @@ data class FillLogin(
     val hasTotp: Boolean,
     /** Its web addresses (not secret: addresses, not credentials), for a caller that applies its own site rule. */
     val uris: List<String>,
+)
+
+/** A payment card as a list shows it: its name and a masked line ("Visa ••4242"). No number, date or code. */
+data class FillCard(
+    val itemId: String,
+    val name: String,
+    val subtitle: String,
+    val hasNumber: Boolean,
+    val hasExpiry: Boolean,
+    val hasCvv: Boolean,
+    val hasName: Boolean,
 )
 
 /** The one item a fill completes with. */
@@ -202,6 +214,36 @@ class AutofillVault(
     fun credential(itemId: String): FillCredential? {
         val login = open?.engine?.item(itemId)?.doc?.login ?: return null
         return FillCredential(login.username.orEmpty(), login.password.orEmpty())
+    }
+
+    /** The payment cards, by name. Empty while locked. Nothing secret: [cardField] releases one field at a time. */
+    fun cards(): List<FillCard> {
+        val live = open ?: return emptyList()
+        return live.engine.items().filter { it.doc.type == "card" && it.doc.card != null }.map { item ->
+            val card = item.doc.card!!
+            FillCard(
+                itemId = item.itemId, name = item.doc.name, subtitle = CardDisplay.subtitle(item.doc),
+                hasNumber = !card.number.isNullOrEmpty(), hasExpiry = !card.expMonth.isNullOrEmpty() && !card.expYear.isNullOrEmpty(),
+                hasCvv = !card.securityCode.isNullOrEmpty(), hasName = !card.cardholderName.isNullOrEmpty(),
+            )
+        }.sortedBy { it.name.lowercase() }
+    }
+
+    /**
+     * One stored field of the card [itemId], as stored: "number", "expMonth", "expYear", "cvv", "name" or "postal".
+     * Null while locked, for another kind of item, for a field the card does not have, and for any other name.
+     */
+    fun cardField(itemId: String, field: String): String? {
+        val card = open?.engine?.item(itemId)?.doc?.takeIf { it.type == "card" }?.card ?: return null
+        return when (field) {
+            "number" -> card.number
+            "expMonth" -> card.expMonth
+            "expYear" -> card.expYear
+            "cvv" -> card.securityCode
+            "name" -> card.cardholderName
+            "postal" -> card.postalCode
+            else -> null
+        }?.ifEmpty { null }
     }
 
     /** The current one-time code of [itemId]; null while locked or when it has none. */
