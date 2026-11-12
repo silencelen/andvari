@@ -317,6 +317,9 @@ internal fun sweepLegacyQuickUnlock(service: String, sharedGroup: String): Boole
             null,
         )
         if (enrolled == errSecSuccess) return@runCatching true
+        // Only a definite "nothing there" lets the sweep run. Any other answer (the Keychain locked, an entitlement
+        // problem) says nothing about what is enrolled, so nothing is deleted and the move is tried again later.
+        if (enrolled != errSecItemNotFound) return@runCatching false
         val blobs = SecItemDelete(owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service)))
         val keys = SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID to kSecAttrTokenIDSecureEnclave))
         listOf(blobs, keys).all { it == errSecSuccess || it == errSecItemNotFound }
