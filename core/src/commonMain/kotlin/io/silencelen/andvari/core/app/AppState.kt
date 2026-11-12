@@ -220,7 +220,7 @@ data class VaultNoticeView(
     val warning: Boolean,
 )
 
-/** A vault an item can be put in ([SessionController.newItemVaults], [SessionController.moveTargets]). */
+/** A vault an item can be put in ([SessionController.vaultsForNewItems], [SessionController.moveTargets]). */
 data class VaultChoiceView(
     val vaultId: String,
     val name: String,

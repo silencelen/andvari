@@ -327,7 +327,9 @@ final class AppModel: ObservableObject {
 
     /// Where a new item may go: the personal vault first, then the shared vaults this account can write.
     func newItemVaults() -> [VaultChoiceView] {
-        controller.newItemVaults()
+        // Kotlin/Native exports a name that starts with "new" as doNew… (Objective-C's method families), so the core
+        // calls it vaultsForNewItems.
+        controller.vaultsForNewItems()
     }
 
     /// The vaults an item can be moved or copied to.

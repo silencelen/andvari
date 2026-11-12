@@ -806,7 +806,7 @@ open class SessionController(
     }
 
     /**
-     * Add a login ([itemId] null) or save an edit of one. A new login goes to [vaultId] when named (one of [newItemVaults]),
+     * Add a login ([itemId] null) or save an edit of one. A new login goes to [vaultId] when named (one of [vaultsForNewItems]),
      * else to the personal vault; an edit stays in its vault whatever [vaultId] says.
      */
     @Throws(CancellationException::class)
@@ -1096,7 +1096,7 @@ open class SessionController(
      * Where a new item may go: the personal vault first (the default the editors start on), then the shared vaults this
      * account can write. A shared vault is only ever the person's own choice: nothing here or in a save picks one.
      */
-    fun newItemVaults(): List<VaultChoiceView> = guarded({ emptyList() }) {
+    fun vaultsForNewItems(): List<VaultChoiceView> = guarded({ emptyList() }) {
         session.get()?.let { live -> writableVaults(live).map(::choiceOf) }.orEmpty()
     }
 
