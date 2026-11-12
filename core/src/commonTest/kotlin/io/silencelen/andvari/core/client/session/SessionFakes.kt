@@ -123,7 +123,10 @@ internal class FakeNamespaces : NamespaceStorage {
         return caches.getOrPut("$originKey/$userId") { InMemoryVaultCache() }
     }
 
-    override fun deviceState(originKey: String, userId: String): DeviceState = MemoryDeviceState()
+    /** The device state of each namespace, kept so a test can fill one in advance (the personal vault this device confirmed). */
+    val devices = mutableMapOf<String, MemoryDeviceState>()
+
+    override fun deviceState(originKey: String, userId: String): DeviceState = devices.getOrPut("$originKey/$userId") { MemoryDeviceState() }
 
     /** Caches a test filled in advance, by "originKey/userId"; any other namespace opens empty. */
     val caches = mutableMapOf<String, VaultCache>()

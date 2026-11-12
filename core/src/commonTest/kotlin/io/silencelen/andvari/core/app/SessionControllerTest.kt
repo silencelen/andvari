@@ -111,6 +111,7 @@ open class SessionControllerTest {
         val shared = mutableListOf<String?>()
         val snapshots = InMemoryFillSnapshots()
         val queue = InMemorySaveQueue()
+        val appliedLog = InMemoryFillSnapshots()
 
         /** Route answers by path suffix; a test swaps them. The account keys are offline by default (cached keys open). */
         val routes = mutableMapOf<String, suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData>(
@@ -135,7 +136,7 @@ open class SessionControllerTest {
             override val deviceName = "test device"
         }
 
-        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue)
+        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog)
 
         /** What an extension does with a captured login: seal it to the published key and queue it. */
         fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, id, site, username, password, clocks.wall, "safari")
@@ -157,6 +158,25 @@ open class SessionControllerTest {
             store.save(StoredSession(HOME, reg.userId, EMAIL, "a1", "r1"))
             store.origin(homeKey).saveAccountKeys(reg.userId, cached)
             namespaces.caches["$homeKey/${reg.userId}"] = InMemoryVaultCache().apply { upsertItem(sealed, null) }
+        }
+
+        /**
+         * [unlocked], on a device that has confirmed its personal vault (the wrap it remembers) and whose cache
+         * survives the process, as the app's does: an offline save is honestly queued, and a new login has a home.
+         */
+        suspend fun unlockedWithAPersonalVault() {
+            seedSession()
+            val key = "$homeKey/${reg.userId}"
+            val seeded = namespaces.caches.getValue(key)
+            namespaces.caches[key] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
+                override val durable = true
+            }
+            namespaces.devices.getOrPut(key) { io.silencelen.andvari.core.client.MemoryDeviceState() }
+                .set("personal.wrap", json.encodeToString(io.silencelen.andvari.core.model.PersonalWrap.serializer(), assertNotNull(reg.personalWrap)))
+            routes["/sync/push"] = { throw IOException("unreachable") }
+            controller.startAndLand()
+            assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+            settle { queue.key != null } // the unlocked app has published the key the extensions seal to
         }
 
         suspend fun unlocked() {
@@ -491,104 +511,207 @@ open class SessionControllerTest {
     // ---- the extensions' save queue ----
 
     @Test
-    fun aCapturedLoginIsSealedQueuedShownAndSavedOnlyOnConfirm() = test {
+    fun aCapturedLoginIsSealedQueuedAndSavedAtUnlockWithNoSecondTap() = test {
         assertEquals(SaveQueued.NO_ACCOUNT, capture("a", "https://shop.example/login", "me", "s3cret-pw"), "nobody is signed in: no key to seal to")
-        unlocked()
-        routes["/sync/push"] = { throw IOException("unreachable") }
+        unlockedWithAPersonalVault()
         controller.onBackground() // the extension runs while the app is locked
         assertEquals(SaveQueued.QUEUED, capture("a", "https://shop.example/login", "me", "s3cret-pw"))
         val kept = queue.map.getValue("a").decodeToString()
         for (secret in listOf("s3cret-pw", "shop.example", "\"me\"")) assertFalse(kept.contains(secret), "at rest: $secret")
-        assertTrue(controller.state.pendingSaves.isEmpty(), "a locked app shows nothing")
+        assertTrue(controller.state.pendingSaves.isEmpty() && controller.state.appliedSaves.isEmpty(), "a locked app shows nothing")
 
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
-        // The app tries to save it by itself. This rig's vault has no personal vault to put a new login in (as
-        // [aSaveIsValidatedAndAFailedOneIsSaidNotThrown]), so the capture stays, and says why.
-        settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
-        assertEquals(PendingSaveView("a", "shop.example", "me", null, false, "Choose a vault for this item."), controller.state.pendingSaves.single())
-        assertEquals("s3cret-pw", controller.pendingSavePassword("a"))
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        val applied = controller.state.appliedSaves.single()
+        assertEquals(AppliedSaveView("a", "shop.example", "me", null, false, clocks.wall), applied)
+        assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
+        assertTrue(queue.map.isEmpty())
+        // The record of it is kept sealed, in app-private storage, and survives a lock: the list is there after the next unlock.
+        val log = assertNotNull(appliedLog.bytes).decodeToString()
+        for (secret in listOf("s3cret-pw", "shop.example")) assertFalse(log.contains(secret), "the applied list at rest: $secret")
+        controller.lock()
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf(applied), controller.state.appliedSaves)
+        // Undo, a lock later, removes exactly the login it added.
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave("a"))
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
         assertTrue(controller.state.appliedSaves.isEmpty())
-
-        // This rig's vault cannot take a new login offline (as [aSaveIsValidatedAndAFailedOneIsSaidNotThrown]): the
-        // failure is a sentence, and the capture stays queued for the next try.
-        assertIs<ActionResult.Failed>(controller.confirmPendingSave("a"))
-        assertEquals(listOf("a"), controller.state.pendingSaves.map { it.id })
-        assertEquals(setOf("a"), queue.map.keys)
-        assertFalse(controller.state.busy)
+        assertNull(appliedLog.bytes)
     }
 
     @Test
-    fun aCaptureForAKnownLoginOffersItsNewPasswordAndAnIdenticalOneIsDropped() = test {
-        seedSession()
-        // A cache that survives the process, as the app's is: an offline save is honestly queued.
-        val seeded = namespaces.caches.getValue("$homeKey/${reg.userId}")
-        namespaces.caches["$homeKey/${reg.userId}"] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
-            override val durable = true
-        }
-        routes["/sync/push"] = { throw IOException("unreachable") }
-        controller.startAndLand()
-        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+    fun aNewPasswordReplacesThePersonalLoginKeepsTheOldOneAndCanBeUndone() = test {
+        unlockedWithAPersonalVault()
         controller.lock()
-        capture("same", "login.example.com", "fam", "hunter2") // already in the vault
+        capture("same", "https://login.example.com/x", "fam", "hunter2") // already in the vault
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
         controller.unlock(PASSWORD)
-        // The person agreed to the save where it was captured: the app applies it by itself and says what it did.
         settle { controller.state.appliedSaves.isNotEmpty() }
-        assertEquals(listOf(AppliedSaveView("new", "login.example.com", "fam", "Example", false)), controller.state.appliedSaves)
+        assertEquals(listOf(AppliedSaveView("new", "login.example.com", "fam", "Example", false, clocks.wall)), controller.state.appliedSaves)
         assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertEquals(1, controller.state.items.size, "updated, not duplicated")
         assertTrue(controller.state.pendingSaves.isEmpty())
         assertTrue(queue.map.isEmpty(), "the identical capture was dropped, the applied one left the queue")
         assertEquals(1, controller.itemDetail(ITEM_ID)?.previousPasswords, "the password it replaced is kept in the login's history")
-        // Undo puts the login back as it was.
+        assertEquals(listOf(clocks.wall), controller.passwordHistory(ITEM_ID), "when it was retired, newest first")
+        assertEquals("hunter2", controller.previousPassword(ITEM_ID, 0), "read one at a time, on request")
+        assertNull(controller.previousPassword(ITEM_ID, 1))
         assertEquals(ActionResult.Ok, controller.undoAppliedSave("new"))
         assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
-        assertEquals(0, controller.itemDetail(ITEM_ID)?.previousPasswords)
+        assertEquals(0, controller.itemDetail(ITEM_ID)?.previousPasswords, "the history entry is taken out again")
         assertTrue(controller.state.appliedSaves.isEmpty())
     }
 
     @Test
-    fun aPlainHttpCaptureIsNeverTheHttpsLoginAndSaysSo() = test {
-        unlocked()
+    fun anotherSchemeOrPortIsAnotherLoginNeverAReplacement() = test {
+        unlockedWithAPersonalVault()
         controller.lock()
         capture("h", "http://login.example.com/reset", "fam", "from-cleartext")
+        capture("p", "https://login.example.com:8443/", "fam", "other-port")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 2 }
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "the https login on the default port is untouched")
+        assertEquals(setOf(null), controller.state.appliedSaves.map { it.replaced }.toSet(), "both were added as logins of their own")
+        assertEquals(listOf(true, false), controller.state.appliedSaves.sortedBy { it.id }.map { it.plainHttp })
+        assertEquals(3, controller.state.items.size)
+    }
+
+    @Test
+    fun aCaptureWithNoSchemeIsNotAppliedOverALoginByItself() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("d", "login.example.com", "fam", "hunter3") // the system named only the domain
         controller.unlock(PASSWORD)
         settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
-        assertEquals(listOf(PendingSaveView("h", "login.example.com", "fam", null, true, "Choose a vault for this item.")), controller.state.pendingSaves, "a new login, not a replacement of the https one")
-        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "the https login is untouched")
+        val row = controller.state.pendingSaves.single()
+        assertEquals(SaveImporter.SCHEME_UNKNOWN, row.reason)
+        assertEquals("Example", row.replaces)
+        assertTrue(row.detail.contains("domain only"), row.detail)
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        // The person decides: a Save by hand writes what the row named.
+        assertEquals(ActionResult.Ok, controller.confirmPendingSave("d"))
+        assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertTrue(controller.state.pendingSaves.isEmpty())
+        assertEquals(listOf("d"), controller.state.appliedSaves.map { it.id }, "a save by hand is listed and can be undone too")
+    }
+
+    @Test
+    fun aStaleOrFutureCaptureDoesNotRollAPasswordBack() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("early", "https://login.example.com/x", "fam", "an-older-password")
+        clocks.wall += DAY
+        clocks.mono += DAY
+        // The login is changed after that capture was made.
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        controller.dismissAppliedSaves()
+        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "the-current-one", listOf("https://login.example.com/x"), "", "", false)))
+        controller.lock()
+        clocks.wall -= DAY / 2 // a replayed entry: captured before the login's last change
+        capture("replayed", "https://login.example.com/x", "fam", "an-older-password")
+        clocks.wall += DAY / 2 + 10 * MINUTE
+        capture("future", "https://login.example.com/y", "fam", "from-the-future")
+        clocks.wall -= 10 * MINUTE
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.isNotEmpty() && controller.state.pendingSaves.all { it.reason != null } }
+        assertEquals("the-current-one", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals(mapOf("future" to SaveImporter.FROM_THE_FUTURE), controller.state.pendingSaves.associate { it.id to it.reason }, "the older capture for the same login was dropped for the newer one, which is refused")
+    }
+
+    @Test
+    fun theNewestCaptureOfALoginWinsWhateverItsId() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("z-first", "https://login.example.com/x", "fam", "first-attempt")
+        clocks.wall += MINUTE
+        capture("a-second", "https://login.example.com/x", "fam", "corrected")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertEquals(listOf("a-second"), controller.state.appliedSaves.map { it.id })
+        assertEquals("corrected", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertTrue(queue.map.isEmpty() && controller.state.pendingSaves.isEmpty(), "the older capture is dropped, not offered")
+        // A further change to the same login in this unlock is not applied by itself.
+        clocks.wall += MINUTE
+        capture("third", "https://login.example.com/x", "fam", "yet-another")
+        controller.onForeground()
+        settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
+        assertEquals(SaveImporter.ALREADY_REPLACED, controller.state.pendingSaves.single().reason)
+        assertEquals("corrected", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+    }
+
+    @Test
+    fun atMostFiveAreSavedByThemselvesAndAllCanBeUndoneAtOnce() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        repeat(7) { capture("e$it", "https://shop$it.example/", "me", "pw$it") }
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size + controller.state.pendingSaves.count { it.reason != null } == 7 }
+        assertEquals(SaveImporter.MAX_AUTO_PER_RUN, controller.state.appliedSaves.size)
+        assertEquals(listOf(SaveImporter.TOO_MANY, SaveImporter.TOO_MANY), controller.state.pendingSaves.map { it.reason })
+        assertEquals(6, controller.state.items.size)
+        // The rest are saved by hand, one at a time.
+        assertEquals(ActionResult.Ok, controller.confirmPendingSave(controller.state.pendingSaves.first().id))
+        assertEquals(7, controller.state.items.size)
+        // Undo all takes back every one of them, and leaves the login that was there before.
+        assertEquals(ActionResult.Ok, controller.undoAllAppliedSaves())
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        assertEquals(1, controller.state.pendingSaves.size, "what was never saved is still listed")
     }
 
     @Test
     fun anUndoNeverOverwritesALaterChange() = test {
-        seedSession()
-        val seeded = namespaces.caches.getValue("$homeKey/${reg.userId}")
-        namespaces.caches["$homeKey/${reg.userId}"] = object : io.silencelen.andvari.core.client.VaultCache by seeded {
-            override val durable = true
-        }
-        routes["/sync/push"] = { throw IOException("unreachable") }
-        controller.startAndLand()
-        controller.unlock(PASSWORD)
+        unlockedWithAPersonalVault()
         controller.lock()
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
+        capture("added", "https://shop.example/", "me", "pw")
         controller.unlock(PASSWORD)
-        settle { controller.state.appliedSaves.isNotEmpty() }
-        // The person changes the login again before reaching for Undo.
+        settle { controller.state.appliedSaves.size == 2 }
+        // The person changes both again before reaching for Undo.
         assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "edited-since", listOf("https://login.example.com/x"), "", "", false)))
+        val added = controller.state.items.single { it.name == "shop.example" }.itemId
+        assertEquals(ActionResult.Ok, controller.saveLogin(added, LoginInput("shop.example", "me", "edited-too", listOf("https://shop.example"), "", "", false)))
         assertIs<ActionResult.Failed>(controller.undoAppliedSave("new"))
+        assertIs<ActionResult.Failed>(controller.undoAppliedSave("added"))
+        assertIs<ActionResult.Failed>(controller.undoAllAppliedSaves())
         assertEquals("edited-since", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals("edited-too", controller.revealSecret(added, SecretField.PASSWORD), "a login changed since it was added is not deleted")
         assertFalse(controller.state.busy)
         controller.dismissAppliedSaves()
         assertTrue(controller.state.appliedSaves.isEmpty())
+        assertNull(appliedLog.bytes)
         assertEquals(ActionResult.NotDone(null), controller.undoAppliedSave("new"), "dismissed: nothing left to undo from here")
-        // A lock forgets what was applied; the saved login stays.
+    }
+
+    @Test
+    fun aCaptureThatCannotBeSavedStaysListedWithItsReason() = test {
+        // This rig's vault has no personal vault confirmed on the device, so a new login has nowhere to go.
+        unlocked()
+        settle { queue.key != null }
         controller.lock()
-        assertTrue(controller.state.appliedSaves.isEmpty())
+        capture("a", "https://shop.example/login", "me", "s3cret-pw")
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.singleOrNull()?.reason != null }
+        val row = controller.state.pendingSaves.single()
+        assertEquals("Choose a vault for this item.", row.reason)
+        assertEquals("s3cret-pw", controller.pendingSavePassword("a"))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        assertIs<ActionResult.Failed>(controller.confirmPendingSave("a"))
+        assertEquals(setOf("a"), queue.map.keys, "a failed save keeps the capture")
+        assertFalse(controller.state.busy)
+        controller.discardPendingSave("a")
+        assertTrue(controller.state.pendingSaves.isEmpty())
+        assertTrue(queue.map.isEmpty())
+        assertEquals(1, controller.state.items.size)
     }
 
     @Test
     fun anOldCaptureAndAForeignKeyAreDealtWithAtUnlock() = test {
         unlocked()
+        settle { queue.key != null }
         controller.lock()
         capture("old", "shop.example", "me", "pw")
         clocks.wall += SaveQueue.MAX_AGE_MS
@@ -600,27 +723,17 @@ open class SessionControllerTest {
         routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy()), HttpStatusCode.OK, headers) }
         controller.startAndLand()
         controller.unlock(PASSWORD)
+        settle { queue.map.isEmpty() && controller.state.notice != null }
         assertTrue(controller.state.pendingSaves.isEmpty(), "the stale capture and the unreadable one are gone")
-        assertTrue(queue.map.isEmpty())
         assertEquals("Some logins captured for saving could not be read and were removed. Sign in on that site again to capture them.", controller.state.notice)
         assertEquals(enrolled.account.identityPub.toList(), io.silencelen.andvari.core.crypto.Bytes.fromB64(assertNotNull(SaveQueue.decodePublication(queue.key)).identityPub).toList(), "the key is this account's again")
     }
 
     @Test
-    fun aDiscardedSaveWritesNothing() = test {
-        unlocked()
-        controller.lock()
-        capture("a", "shop.example", "me", "pw")
-        controller.unlock(PASSWORD)
-        controller.discardPendingSave("a")
-        assertTrue(controller.state.pendingSaves.isEmpty())
-        assertTrue(queue.map.isEmpty())
-        assertEquals(1, controller.state.items.size)
-    }
-
-    @Test
     fun theQueueIsBoundedAndRefusesWhatItCannotKeep() = test {
         unlocked()
+        settle { queue.key != null }
+        controller.lock()
         assertEquals(SaveQueued.REFUSED, capture("a", "shop.example", "me", ""), "no password, nothing to save")
         assertEquals(SaveQueued.REFUSED, capture("a", "shop.example", "me", "x".repeat(SaveQueue.MAX_FIELD_CHARS + 1)))
         assertEquals(SaveQueued.REFUSED, capture("a", "shop.example", "u".repeat(SaveQueue.MAX_FIELD_CHARS + 1), "pw"))
@@ -635,6 +748,7 @@ open class SessionControllerTest {
     @Test
     fun aTamperedForeignOrOversizedEntryIsRemovedNotShown() = test {
         unlocked()
+        settle { queue.key != null }
         controller.lock()
         capture("good", "shop.example", "me", "pw")
         val good = queue.map.getValue("good")
@@ -644,7 +758,7 @@ open class SessionControllerTest {
         queue.map["tampered"] = json.encodeToString(QueuedSave.serializer(), entry.copy(sealed = io.silencelen.andvari.core.crypto.Bytes.toB64(sealed))).encodeToByteArray()
         // Another account's entry, and one relabelled as this account's (its inside still names the other).
         val other = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
-        val inside = json.encodeToString(CapturedLogin.serializer(), CapturedLogin(origin = HOME, userId = "someone-else", site = "shop.example", username = "me", password = "pw", capturedAtMs = 1, source = "safari"))
+        val inside = json.encodeToString(CapturedLogin.serializer(), CapturedLogin(origin = HOME, userId = "someone-else", site = "shop.example", username = "me", password = "pw", capturedAtMs = clocks.wall, source = "safari"))
         val forOther = io.silencelen.andvari.core.crypto.Bytes.toB64(crypto.sealTo(other.publicKey, inside.encodeToByteArray()))
         queue.map["foreign"] = json.encodeToString(QueuedSave.serializer(), QueuedSave(origin = HOME, userId = "someone-else", sealed = forOther)).encodeToByteArray()
         val relabelled = io.silencelen.andvari.core.crypto.Bytes.toB64(crypto.sealTo(enrolled.account.identityPub, inside.encodeToByteArray()))
@@ -654,19 +768,26 @@ open class SessionControllerTest {
         queue.map["huge"] = ByteArray(SaveQueue.MAX_ENTRY_BYTES + 1) { 'a'.code.toByte() }
 
         controller.unlock(PASSWORD)
+        settle { queue.map.keys == setOf("good") && controller.state.pendingSaves.isNotEmpty() }
         assertEquals(listOf("good"), controller.state.pendingSaves.map { it.id })
-        assertEquals(setOf("good"), queue.map.keys, "everything else is removed")
     }
 
     @Test
-    fun signOutAServerSwitchAndAForbiddingPolicyEmptyTheQueue() = test {
-        unlocked()
-        assertNotNull(queue.key, "the unlocked app publishes the key")
-        assertEquals(SaveQueued.QUEUED, capture("a", "shop.example", "me", "pw"))
+    fun signOutEmptiesTheQueueTheKeyAndTheAppliedList() = test {
+        unlockedWithAPersonalVault()
+        settle { queue.key != null }
+        controller.lock()
+        capture("a", "https://shop.example/", "me", "pw")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.isNotEmpty() }
+        assertNotNull(appliedLog.bytes)
+        assertEquals(SaveQueued.QUEUED, capture("b", "https://other.example/", "me", "pw"))
         controller.signOut()
         assertNull(queue.key)
         assertTrue(queue.map.isEmpty())
-        assertEquals(SaveQueued.NO_ACCOUNT, capture("b", "shop.example", "me", "pw"))
+        assertNull(appliedLog.bytes, "the list of what was saved goes with the account")
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        assertEquals(SaveQueued.NO_ACCOUNT, capture("c", "shop.example", "me", "pw"))
     }
 
     @Test
@@ -676,14 +797,15 @@ open class SessionControllerTest {
         routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(offlineCacheAllowed = false)), HttpStatusCode.OK, headers) }
         controller.startAndLand()
         controller.unlock(PASSWORD)
+        settle { queue.map.isEmpty() }
         assertNull(queue.key)
-        assertTrue(queue.map.isEmpty())
         assertTrue(controller.state.pendingSaves.isEmpty())
     }
 
     @Test
     fun aServerSwitchEmptiesTheQueue() = test {
         unlocked()
+        settle { queue.key != null }
         capture("a", "shop.example", "me", "pw")
         controller.lock()
         assertNotNull(queue.key, "a lock keeps the key: the extension captures while the app is locked")

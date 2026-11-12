@@ -78,7 +78,7 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
     "password": "…",
     "uris": ["https://github.com/login"],
     "totp": "otpauth://totp/…?secret=BASE32&…",   // optional, full otpauth URI
-    "passwordHistory": [ { "password": "…", "retiredAt": 1751700000000 } ]  // ONE writer: the Health differs resolution (below)
+    "passwordHistory": [ { "password": "…", "retiredAt": 1751700000000 } ]  // two writers, both named below
   },
   "attachments": [                       // mirrors attachmentIds; holds the SECRET half
     { "id": "uuid", "name": "scan.pdf", "size": 12345, "fileKey": "base64url(32B)" }
@@ -86,16 +86,22 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
 }
 ```
 
-**`login.passwordHistory` — one writer (amendment 2026-08-18); otherwise reserved.** The
+**`login.passwordHistory` — two writers (amendments 2026-08-18, 2026-11-11); otherwise reserved.** The
 shape above is fixed (so the field could be adopted without a formatVersion bump) and every
 client **preserves it verbatim on rewrite**, entry-level unknown fields included (the
-preservation rules below). Exactly **one path appends entries**: the Health duplicate
+preservation rules below). Exactly **two paths append entries**. The first is the Health duplicate
 checker's differs resolution ("Keep this one", `planKeep` — on web and Android since 0.26.0,
 via the core/web twins) — when the user retires
 duplicate copies, each distinct losing password is appended to the survivor as
-`{password, retiredAt}` so the retired secrets outlive the losers' 30-day Trash window. No
+`{password, retiredAt}` so the retired secrets outlive the losers' 30-day Trash window. The
+second (iOS, 2026-11-11) is the import of a login captured by an AutoFill extension: when it
+replaces the password of an existing personal-vault login, the password it replaces is
+appended as `{password, retiredAt}`, so a replacement the user did not type into an editor
+stays recoverable. That writer keeps each earlier password once and at most 20 entries,
+dropping the oldest. No
 editor, importer, ordinary save path, or conflict materializer on any client writes an
-entry, and no client displays the field. A reader MUST therefore still treat an
+entry. The iOS app shows the field read-only in a login's detail; no other client displays
+it. A reader MUST therefore still treat an
 absent/empty `passwordHistory` as carrying no information — it does **not** mean the
 password was never rotated — and MUST NOT present it to a user as a general retention
 guarantee (entries exist only where that one flow wrote them). The shipped

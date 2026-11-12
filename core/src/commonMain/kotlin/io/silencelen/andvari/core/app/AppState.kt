@@ -282,6 +282,8 @@ data class PendingSaveView(
     val plainHttp: Boolean,
     /** Why it was not saved by itself (offline, no personal vault, a login in a shared vault matches); null while that is still being tried. */
     val reason: String?,
+    /** Where and how it was captured, in a sentence (which extension, and whether the system named an address or only a domain). */
+    val detail: String,
 )
 
 /** A captured login the app saved by itself at unlock. No secret. */
@@ -292,4 +294,6 @@ data class AppliedSaveView(
     /** The login's name when its password was replaced (the old one is in the login's password history); null for a new login. */
     val replaced: String?,
     val plainHttp: Boolean,
+    /** When it was saved (unix milliseconds). The list survives a lock until it is dismissed. */
+    val appliedAtMs: Long,
 )
