@@ -26,15 +26,7 @@ enum Fixture {
     static let siteUser = "alice"
     static let sitePassword = "alice-Passw0rd-site"
     static let httpItem = "UITest Plain HTTP"
-    static let seededNames = ["UITest Site", "UITest Site second", "UITest Plain HTTP", "Example Mail", "No Address", "UITest Note"]
-}
-
-/// Defects of the app that the suite found and that are being fixed elsewhere. A test that meets one is skipped with
-/// this text, so the run says what is waiting; it turns green by itself once the fix is in the build under test.
-enum KnownDefect {
-    static let noPersonalVaultMessage = "Choose a vault for this item."
-    static let sharedMatchMessage = "A login outside your personal vault already uses this username here. Save this one as your own, or discard it."
-    static let noPersonalVault = "Known app defect, being fixed on ios-ui: on a device that signed in to an account made elsewhere the personal vault is only a proposal the iOS app cannot confirm, so a new login is refused with \"Choose a vault for this item.\" Remove this skip's cause by merging the personal-vault confirmation; the test then runs to its end."
+    static let seededNames = ["UITest Site", "UITest Site second", "UITest Plain HTTP", "Example Mail", "No Address", "UITest Note", "UITest Card"]
 }
 
 /// A test is a list of named steps. Every step ends with a screenshot, kept in the result bundle and written as
@@ -143,12 +135,35 @@ class UITestCase: XCTestCase {
         }
     }
 
+    /// Tap where [element] is now, without failing the test if it went away in the meantime (a retry button that
+    /// the thing it retries has just replaced). The tap lands on the app's own coordinates.
+    func tapWhereItIs(_ element: XCUIElement, in application: XCUIApplication) {
+        guard element.exists else { return }
+        let frame = element.frame
+        guard !frame.isEmpty else { return }
+        application.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+    }
+
     /// iOS asks things of its own over the app: to save the password just typed, and to allow Face ID.
     func answerSystemAlerts() {
         let notNow = springboard.buttons["Not Now"]
         if notNow.exists {
-            notNow.tap()
+            tapWhereItIs(notNow, in: springboard)
             return
+        }
+        // iOS's own offer to keep the master password just typed ("Save Password?", the Passwords app's) is drawn
+        // in the app's window, over the screen the test wants next.
+        if app.state == .runningForeground {
+            let inApp = app.alerts.buttons["Not Now"].firstMatch
+            let loose = app.buttons.matching(NSPredicate(format: "label == 'Not Now'")).firstMatch
+            if inApp.exists {
+                tapWhereItIs(inApp, in: app)
+                return
+            }
+            if loose.exists && app.staticTexts["Save Password?"].exists {
+                tapWhereItIs(loose, in: app)
+                return
+            }
         }
         let alert = springboard.alerts.firstMatch
         if alert.exists {

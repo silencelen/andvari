@@ -45,8 +45,19 @@ extension UITestCase {
         }
     }
 
+    /// A new app process. Its first screen is never the unlocked vault.
     func launchApp() {
         app.launch()
+    }
+
+    /// The app in front again, in the process it has: what a person does from the app switcher. It comes back
+    /// locked, because the vault locks whenever the app leaves the screen.
+    func bringAppForward() {
+        app.activate()
+        if !waitUntil(15, { self.app.state == .runningForeground }) {
+            // A process iOS ended in the background starts again.
+            app.launch()
+        }
     }
 
     /// Choose the job's server and pass the Trust Gate.
@@ -83,6 +94,77 @@ extension UITestCase {
         }
         expectScreen(.vault, timeout: 60)
         require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
+        confirmPersonalVaultIfAsked()
+    }
+
+    /// Open an item's detail from the vault list, scrolling the list to its row.
+    func openItem(_ name: String) {
+        let row = vaultRow(name)
+        for _ in 0..<3 where !(row.exists && row.isHittable) { app.swipeDown() }
+        for _ in 0..<5 where !(row.exists && row.isHittable) { app.swipeUp() }
+        require(row, "the row of \(name)")
+        row.tap()
+        require(element("detail.username"), "the detail of \(name)")
+    }
+
+    /// Search the vault list for [text]; the rows that stay are the matches.
+    func searchVault(_ text: String) {
+        let search = app.searchFields.firstMatch
+        if !search.exists { app.swipeDown() }
+        enter(text, into: search, what: "the search field")
+    }
+
+    /// Leave the search, whichever way this iOS offers it.
+    func endSearch() {
+        let cancel = app.buttons["Cancel"].firstMatch
+        let clear = app.searchFields.firstMatch.buttons.firstMatch
+        if cancel.exists && cancel.isHittable {
+            cancel.tap()
+        } else if clear.exists && clear.isHittable {
+            clear.tap()
+        }
+        let keyboardDone = app.keyboards.buttons.matching(NSPredicate(format: "label == 'search' OR label == 'Search' OR label == 'done' OR label == 'Done'")).firstMatch
+        if app.keyboards.firstMatch.exists && keyboardDone.exists { keyboardDone.tap() }
+    }
+
+    /// A vault row whose text (name, then username) contains [text].
+    func vaultRowContaining(_ text: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'vault.item.' AND label CONTAINS %@", text)).firstMatch
+    }
+
+    /// The "Saved … from AutoFill" list and every "Logins not saved yet" row with its reason, for a failure message.
+    func saveListsSummary() -> String {
+        var parts: [String] = []
+        let applied = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Saved ' AND label ENDSWITH ' from AutoFill'")).firstMatch
+        parts.append(applied.exists ? applied.label : "no saved list")
+        for cell in app.cells.containing(.button, identifier: "pending.save").allElementsBoundByIndex.prefix(5) {
+            parts.append("not saved: " + cell.staticTexts.allElementsBoundByIndex.map(\.label).joined(separator: " / "))
+        }
+        return parts.joined(separator: "; ")
+    }
+
+    // MARK: - The personal vault
+
+    /// The notice a device shows until it has confirmed the account's personal vault. The seeding tool enrolled the
+    /// account elsewhere, so this simulator is always such a device after it signs in.
+    var personalVaultNotice: XCUIElement {
+        app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Confirm your personal vault on this device' OR label BEGINSWITH 'The server says your personal vault is'")).firstMatch
+    }
+
+    /// Its one answer: "Use Personal", offered once the app has looked up who else holds the vault.
+    var usePersonalVaultButton: XCUIElement {
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Use '")).firstMatch
+    }
+
+    /// Confirm the personal vault when the device asks, as a person would: new items have nowhere to go until then.
+    func confirmPersonalVaultIfAsked() {
+        guard waitUntil(4, { self.personalVaultNotice.exists }) else { return }
+        require(usePersonalVaultButton, "the notice's Use button", timeout: 20)
+        usePersonalVaultButton.tap()
+        if !waitUntil(15, { !self.personalVaultNotice.exists }) {
+            dumpTree(app, as: "personal-vault-still-asked")
+            XCTFail("the personal-vault notice stayed after Use")
+        }
     }
 
     func openSettings() {
