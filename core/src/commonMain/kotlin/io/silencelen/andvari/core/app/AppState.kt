@@ -209,6 +209,14 @@ data class CardDetail(
     val expYear: String?,
 )
 
+/** A vault an item can be put in ([SessionController.newItemVaults], [SessionController.moveTargets]). */
+data class VaultChoiceView(
+    val vaultId: String,
+    val name: String,
+    /** The account's personal vault; any other is shared, and everyone in it sees what is put there. */
+    val personal: Boolean,
+)
+
 /** What the trash screen says above the list. */
 const val TRASH_EXPLANATION: String =
     "Deleted items are kept for 30 days, then removed automatically. " + HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS + " \"Delete forever\" removes one now."

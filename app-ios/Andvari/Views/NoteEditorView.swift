@@ -19,11 +19,16 @@ struct NoteEditorView: View {
     @State private var unreadable = false
     @State private var saving = false
     @State private var confirmDelete = false
+    @State private var vaultChoices: [VaultChoiceView] = []
+    @State private var vaultId: String?
     @State private var message: String?
 
     var body: some View {
         NavigationStack {
             Form {
+                if itemId == nil {
+                    VaultPickerSection(choices: vaultChoices, selection: $vaultId)
+                }
                 Section {
                     TextField("Name", text: $draft.name)
                     Toggle("Favorite", isOn: $draft.favorite)
@@ -97,7 +102,11 @@ struct NoteEditorView: View {
     private func load() {
         guard !loaded else { return }
         loaded = true
-        guard let itemId else { return }
+        guard let itemId else {
+            vaultChoices = model.newItemVaults()
+            vaultId = VaultPickerSection.initialSelection(vaultChoices)
+            return
+        }
         guard let detail = model.itemDetail(itemId), detail.type == "note" else {
             unreadable = true
             message = "This note is no longer available."
@@ -124,7 +133,7 @@ struct NoteEditorView: View {
         let input = NoteInput(name: draft.name.trimmed, text: draft.text, favorite: draft.favorite)
         saving = true
         Task {
-            let outcome = await model.saveNote(itemId: itemId, input: input)
+            let outcome = await model.saveNote(itemId: itemId, input: input, vaultId: itemId == nil ? vaultId : nil)
             saving = false
             if outcome == .ok {
                 dismiss()

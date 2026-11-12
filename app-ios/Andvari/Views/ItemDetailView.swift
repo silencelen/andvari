@@ -18,6 +18,9 @@ struct ItemDetailView: View {
     @State private var copies = 0
     @State private var editing = false
     @State private var gone = false
+    @State private var moving = false
+    /// The vaults this item can be moved or copied to, read with the item.
+    @State private var moveTargets: [VaultChoiceView] = []
     /// Bumped whenever the item is read again: the previous-password rows start over, hidden, so nothing shown stays on
     /// screen under a list that may have changed underneath it.
     @State private var generation = 0
@@ -51,6 +54,12 @@ struct ItemDetailView: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented: $moving) {
+            MoveCopySheet(itemId: itemId, targets: moveTargets)
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
         }
         .sheet(isPresented: $editing, onDismiss: { editorClosed() }) {
             Group {
@@ -253,6 +262,14 @@ struct ItemDetailView: View {
             }
             .listRowBackground(Palette.raised)
         }
+        if !moveTargets.isEmpty {
+            Section {
+                Button("Move or copy to another vault…") {
+                    moving = true
+                }
+            }
+            .listRowBackground(Palette.raised)
+        }
         historySection(detail)
         Section {
             Text("Updated \(updated(detail))")
@@ -437,6 +454,7 @@ struct ItemDetailView: View {
         generation += 1
         if let next = model.itemDetail(itemId) {
             detail = next
+            moveTargets = next.editable ? model.moveTargets(itemId) : []
         } else if detail != nil {
             // The item is gone: deleted here, or by a sync. Leave once the editor, if open, has closed.
             detail = nil

@@ -8,6 +8,10 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.HouseholdCopy
+import io.silencelen.andvari.core.client.VaultInfo
+import io.silencelen.andvari.core.client.MoveGesture
+import io.silencelen.andvari.core.client.ItemChangedException
+import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.KdfReKeyCore
@@ -800,16 +804,19 @@ open class SessionController(
         OneTimeCode(Totp.code(crypto, config, nowSeconds), (period - (nowSeconds % period)).toInt(), period)
     }
 
-    /** Add a login ([itemId] null) to the personal vault, or save an edit of one. */
+    /**
+     * Add a login ([itemId] null) or save an edit of one. A new login goes to [vaultId] when named (one of [newItemVaults]),
+     * else to the personal vault; an edit stays in its vault whatever [vaultId] says.
+     */
     @Throws(CancellationException::class)
-    suspend fun saveLogin(itemId: String?, input: LoginInput): ActionResult = action {
+    suspend fun saveLogin(itemId: String?, input: LoginInput, vaultId: String? = null): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         if (input.name.isBlank()) return@action ActionResult.Failed(NAME_REQUIRED)
         val totp = if (input.totp.isBlank()) "" else Totp.normalize(input.totp)
         if (totp.isNotEmpty() && runCatching { Totp.parseUri(totp) }.isFailure) return@action ActionResult.Failed(TOTP_INVALID)
         val existing = itemId?.let { live.engine.item(it) ?: return@action ActionResult.Failed(ITEM_GONE) }
         // A9 review LOW-2: a new item never goes to a guessed vault.
-        if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        if (existing == null) newHomeRefusal(live, vaultId)?.let { return@action it }
         // A copy of the existing document, never a rebuild: favorites, the password history, attachments and fields
         // this client does not know survive the edit (spec 02 §3).
         val base = existing?.doc ?: ItemDoc(type = "login", name = "")
@@ -827,7 +834,7 @@ open class SessionController(
         busy()
         // INV-EDIT: an edit is sealed under the vault its item lives in; a new login goes to the personal vault.
         // Alone with respect to the save queue: an automatic save never writes over this edit from an older read.
-        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId) }
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId ?: vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
@@ -841,7 +848,7 @@ open class SessionController(
      * number. An expiry that cannot be read is refused, never guessed.
      */
     @Throws(CancellationException::class)
-    suspend fun saveCard(itemId: String?, input: CardInput): ActionResult = action {
+    suspend fun saveCard(itemId: String?, input: CardInput, vaultId: String? = null): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         if (input.name.isBlank()) return@action ActionResult.Failed(CARD_NAME_REQUIRED)
         val combined = if (input.expMonth.isNotBlank() && CardNormalize.padMonth(input.expMonth) == null && input.expYear.isBlank()) CardNormalize.parseExpiry(input.expMonth) else null
@@ -854,7 +861,7 @@ open class SessionController(
         // its length, so editing an odd card's name never fails on a number the person did not touch.
         val digits = CardNormalize.digitsOnly(input.number)
         if (digits.length > CARD_NUMBER_MAX_DIGITS && digits != existing?.doc?.card?.number) return@action ActionResult.Failed(CARD_NUMBER_TOO_LONG)
-        if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        if (existing == null) newHomeRefusal(live, vaultId)?.let { return@action it }
         // A copy of the existing document and of its card, never a rebuild: fields this client does not know survive.
         val base = existing?.doc ?: ItemDoc(type = "card", name = "", card = CardData())
         val doc = base.copy(
@@ -872,7 +879,7 @@ open class SessionController(
             ),
         )
         busy()
-        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId) }
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId ?: vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
@@ -898,17 +905,17 @@ open class SessionController(
      * [revealSecret] with [SecretField.NOTES], never carried in the state.
      */
     @Throws(CancellationException::class)
-    suspend fun saveNote(itemId: String?, input: NoteInput): ActionResult = action {
+    suspend fun saveNote(itemId: String?, input: NoteInput, vaultId: String? = null): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         if (input.name.isBlank()) return@action ActionResult.Failed(NOTE_NAME_REQUIRED)
         val existing = itemId?.let { live.engine.item(it) ?: return@action ActionResult.Failed(ITEM_GONE) }
         if (existing != null && existing.doc.type != "note") return@action ActionResult.Failed(ITEM_GONE)
-        if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        if (existing == null) newHomeRefusal(live, vaultId)?.let { return@action it }
         // A copy of the existing document, never a rebuild: attachments and fields this client does not know survive.
         val base = existing?.doc ?: ItemDoc(type = "note", name = "")
         val doc = base.copy(name = input.name.trim(), notes = input.text.ifBlank { null }, favorite = input.favorite)
         busy()
-        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId) }
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId ?: vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
@@ -1053,6 +1060,96 @@ open class SessionController(
             historyRead = itemId to fresh
             update { it.copy(history = historyView(live, itemId, fresh)) }
         }
+        ActionResult.Ok
+    }
+
+    // ---- vaults: where a new item goes, and moving or copying one (design §8, F18/F19) ----
+
+    /**
+     * The vaults this account can put an item in: its personal vault first, then the shared vaults it owns or writes, by
+     * name, each one it holds the key of. The rule Android's editor and its move/copy control use.
+     */
+    private fun writableVaults(live: VaultSession.Unlocked): List<VaultInfo> =
+        runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList())
+            .filter { (it.type == "personal" || it.role == "owner" || it.role == "writer") && live.account.canSealUnder(it.vaultId) }
+
+    private fun choiceOf(v: VaultInfo) = VaultChoiceView(v.vaultId, v.name, personal = v.type == "personal")
+
+    /**
+     * Where a new item may go: the personal vault first (the default the editors start on), then the shared vaults this
+     * account can write. A shared vault is only ever the person's own choice: nothing here or in a save picks one.
+     */
+    fun newItemVaults(): List<VaultChoiceView> = guarded({ emptyList() }) {
+        session.get()?.let { live -> writableVaults(live).map(::choiceOf) }.orEmpty()
+    }
+
+    /** Why a new item cannot go to [vaultId] (null: the personal vault), or null when it can. */
+    private fun newHomeRefusal(live: VaultSession.Unlocked, vaultId: String?): ActionResult? = when {
+        vaultId != null -> if (writableVaults(live).any { it.vaultId == vaultId }) null else ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE)
+        // A9 review LOW-2: a new item never goes to a guessed vault.
+        live.account.personalVaultId.isEmpty() -> ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        else -> null
+    }
+
+    /** The vaults [itemId] can be moved or copied to: the writable ones but its own; none if this account cannot write its vault. */
+    fun moveTargets(itemId: String): List<VaultChoiceView> = guarded({ emptyList() }) {
+        val live = session.get() ?: return@guarded emptyList()
+        val item = live.engine.item(itemId) ?: return@guarded emptyList()
+        if (!canWrite(live, item.vaultId)) return@guarded emptyList()
+        writableVaults(live).filter { it.vaultId != item.vaultId }.map(::choiceOf)
+    }
+
+    /**
+     * A move or copy that did not finish, by item, target and kind: kept while the item is unchanged so that Try again
+     * replays the same ids (the server's dedup then converges, never duplicates). It names new attachment keys, so it
+     * goes with the session.
+     */
+    private val moveGestures = HashMap<String, MoveGesture>()
+
+    /**
+     * Move (copy, then delete the original) or copy [itemId] into [targetVaultId], one of [moveTargets]. Attachments are
+     * copied too. A target that refuses the copy, or an item that changed meanwhile, stops it with the original
+     * untouched.
+     */
+    @Throws(CancellationException::class)
+    suspend fun moveOrCopyItem(itemId: String, targetVaultId: String, move: Boolean): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val current = live.engine.item(itemId) ?: return@action ActionResult.Failed(ITEM_GONE)
+        if (!canWrite(live, current.vaultId)) return@action ActionResult.Failed(ItemCopy.READ_ONLY)
+        if (targetVaultId == current.vaultId || writableVaults(live).none { it.vaultId == targetVaultId }) {
+            return@action ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE)
+        }
+        val key = "$itemId|$targetVaultId|$move"
+        val memo = moveGestures[key]
+        val gesture = if (memo != null && memo.sourceRev == current.rev) memo else live.engine.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[key] = it }
+        busy()
+        try {
+            // Audit H10: the gesture re-uploads the item's attachments, so its bound scales with their bytes.
+            saves.exclusive { runBounded(BoundedOps.attachmentMs(current.doc.attachments.sumOf { it.size })) { live.engine.runGesture(gesture) } }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action when {
+                t is CopyDeniedException -> {
+                    moveGestures.remove(key)
+                    idleFailed(ItemCopy.MOVE_DENIED)
+                }
+                t is ItemChangedException -> {
+                    moveGestures.remove(key)
+                    idleFailed(ItemCopy.MOVE_CHANGED)
+                }
+                t is ApiException && t.status == 403 -> {
+                    moveGestures.remove(key)
+                    failure(t, HouseholdCopy::forError)
+                }
+                // Anything else is transient: the gesture is kept, so Try again replays the same ids.
+                else -> idleFailed(ItemCopy.MOVE_RETRY)
+            }
+        }
+        moveGestures.remove(key)
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        val target = vaultName(live, targetVaultId) ?: "the other vault"
+        update { it.copy(busy = false, items = summaries(it.query), notice = if (move) "Moved to “$target”." else "Copied to “$target”.") }
+        writeFillSnapshot()
         ActionResult.Ok
     }
 
@@ -1637,6 +1734,7 @@ open class SessionController(
         personal.reset()
         trashRead = emptyMap()
         historyRead = null
+        moveGestures.clear()
     }
 
     private fun lock(reason: String?) {
@@ -1787,4 +1885,8 @@ internal object ItemCopy {
     const val READ_ONLY = "You can only view this vault, so this can't be changed here."
     const val HISTORY_GONE = "That version is no longer listed. Open the history again."
     const val VERSION_RESTORED = "Restored that version. The one it replaced is in the history."
+    const val VAULT_NOT_WRITABLE = "You can't add items to that vault."
+    const val MOVE_DENIED = "You don't have permission to add items to that vault, so nothing was moved."
+    const val MOVE_CHANGED = "This item changed while it was being moved. Review it and try again."
+    const val MOVE_RETRY = "That didn't finish. Try again: it won't make a duplicate."
 }
