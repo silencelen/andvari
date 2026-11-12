@@ -266,6 +266,10 @@ final class AppModel: ObservableObject {
         await run { try await $0.saveLogin(itemId: itemId, input: input) }
     }
 
+    func saveCard(itemId: String?, input: CardInput) async -> Outcome {
+        await run { try await $0.saveCard(itemId: itemId, input: input) }
+    }
+
     func deleteItem(_ itemId: String) async -> Outcome {
         await run { try await $0.deleteItem(itemId: itemId) }
     }

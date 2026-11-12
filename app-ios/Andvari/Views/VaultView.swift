@@ -8,6 +8,7 @@ struct VaultView: View {
     @State private var path: [String] = []
     @State private var showSettings = false
     @State private var showNewLogin = false
+    @State private var showNewCard = false
     @State private var syncMessage: String?
     @State private var copies = 0
     @State private var undoAllFailure: String?
@@ -38,6 +39,12 @@ struct VaultView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
+        }
+        .sheet(isPresented: $showNewCard) {
+            CardEditorView(itemId: nil)
                 .environmentObject(model)
                 .tint(Palette.goldText)
                 .privacyShield()
@@ -136,6 +143,8 @@ struct VaultView: View {
             }
         }
         .listStyle(.insetGrouped)
+        // Room under the last row: the search field floats over the bottom of the list.
+        .contentMargins(.bottom, 72, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .background(Palette.background)
         .overlay {
@@ -237,12 +246,21 @@ struct VaultView: View {
                 Image(systemName: "lock")
             }
             .accessibilityLabel("Lock")
-            Button {
-                showNewLogin = true
+            Menu {
+                Button {
+                    showNewLogin = true
+                } label: {
+                    Label("New login", systemImage: "key")
+                }
+                Button {
+                    showNewCard = true
+                } label: {
+                    Label("New card", systemImage: "creditcard")
+                }
             } label: {
                 Image(systemName: "plus")
             }
-            .accessibilityLabel("New login")
+            .accessibilityLabel("New item")
         }
     }
 
@@ -376,7 +394,8 @@ private struct PendingSaveRow: View {
                     .foregroundStyle(Palette.ink)
                     .textSelection(.enabled)
             }
-            if let failure {
+            // Said once: a Save that fails for the reason already shown adds nothing.
+            if let failure, failure != pending.reason {
                 Text(failure)
                     .font(.footnote)
                     .foregroundStyle(Palette.danger)
@@ -488,6 +507,11 @@ private struct PersonalVaultNotice: View {
     @ViewBuilder
     private var choices: some View {
         if let keep = notice.keepLabel {
+            if let detail = notice.keepDetail {
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkDim)
+            }
             Button(keep) {
                 Task { _ = await model.proposePersonalVault(nil) }
             }
