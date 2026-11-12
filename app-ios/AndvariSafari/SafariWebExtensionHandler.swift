@@ -1,4 +1,5 @@
 import AndvariCore
+import AuthenticationServices
 import Foundation
 import SafariServices
 
@@ -24,13 +25,28 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             // NSNull reaches the extension as null: the app has no server yet.
             // nativeSave: on iOS 26.2 and later the system offers to save passwords to andvari itself (the AutoFill
             // extension's save request), so the web extension then shows no save prompt of its own.
-            // Only while andvari is the enabled AutoFill provider (the app publishes that): otherwise the system
-            // never calls it, and the extension's own prompt must stay.
-            var nativeSave = false
-            if #available(iOS 26.2, *) {
-                nativeSave = UserDefaults(suiteName: Self.appGroup)?.bool(forKey: Self.providerEnabledKey) == true
+            // Only while andvari is the enabled AutoFill provider: otherwise the system never calls it, and the
+            // extension's own prompt must stay. Asked of the system now, at every answer (the person changes it in
+            // Settings without opening the app); the app's last published value is the fallback if it does not answer.
+            var answer: [String: Any] = ["ok": true, "type": "appServer", "url": origin.map { $0 as Any } ?? NSNull(), "nativeSave": false]
+            guard #available(iOS 26.2, *) else {
+                reply(answer, to: context)
+                return
             }
-            reply(["ok": true, "type": "appServer", "url": origin.map { $0 as Any } ?? NSNull(), "nativeSave": nativeSave], to: context)
+            let published = UserDefaults(suiteName: Self.appGroup)?.bool(forKey: Self.providerEnabledKey) == true
+            let lock = NSLock()
+            var answered = false
+            let finish: (Bool) -> Void = { enabled in
+                lock.lock()
+                let first = !answered
+                answered = true
+                lock.unlock()
+                guard first else { return }
+                answer["nativeSave"] = enabled
+                self.reply(answer, to: context)
+            }
+            ASCredentialIdentityStore.shared.getState { finish($0.isEnabled) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { finish(published) }
         case "saveKey":
             // The account a captured login may be sealed to, as the app published it (public material), or null.
             let key = Self.savesDirectory().flatMap { try? String(contentsOf: $0.appendingPathComponent("key.json"), encoding: .utf8) }
@@ -254,6 +270,14 @@ enum AppVaultSession {
             defer {
                 // A vault this call opened itself is not kept: its ticket was never handed out.
                 if ownUnlock { wipe() }
+            }
+            // The gates are asked again at every release, not only at the unlock: a sign-out, a server switch, a policy
+            // that now forbids the cache, Face ID turned off or a removed snapshot ends this vault at once, though its
+            // ticket and its 90 seconds have not run out.
+            if let open = live(), let blocked = open.availability() as? FillAvailability.OpenApp {
+                wipe()
+                done(["ok": true, "type": "vaultSecret", "state": "openApp", "message": blocked.message])
+                return
             }
             guard let vault = live(), let login = vault.logins(hosts: []).first(where: { $0.itemId == itemId }),
                   !ownUnlock || login.name == name

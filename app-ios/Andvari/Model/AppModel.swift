@@ -244,6 +244,16 @@ final class AppModel: ObservableObject {
     }
 
     /// One secret, for an explicit reveal or copy. Callers keep it only as long as it is on screen.
+    /// When each earlier password of a login was retired, newest first.
+    func passwordHistory(_ itemId: String) -> [Date] {
+        controller.passwordHistory(itemId: itemId).map { Date(timeIntervalSince1970: TimeInterval(truncating: $0) / 1000) }
+    }
+
+    /// One earlier password, by its place in `passwordHistory`.
+    func previousPassword(_ itemId: String, _ index: Int) -> String? {
+        controller.previousPassword(itemId: itemId, index: Int32(index))
+    }
+
     func revealSecret(_ itemId: String, _ field: SecretField) -> String? {
         controller.revealSecret(itemId: itemId, field: field)
     }
@@ -278,6 +288,10 @@ final class AppModel: ObservableObject {
     /// Take back one login the app saved by itself at unlock.
     func undoAppliedSave(_ id: String) async -> Outcome {
         await run { try await $0.undoAppliedSave(id: id) }
+    }
+
+    func undoAllAppliedSaves() async -> Outcome {
+        await run { try await $0.undoAllAppliedSaves() }
     }
 
     func dismissAppliedSaves() {
