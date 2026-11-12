@@ -386,7 +386,7 @@ export type Req =
    *  whatever tab is ACTIVE, which need not be the sender's): user explicitly picked an item to
    *  fill into the active tab → SW mints a one-shot grant for (tabId,itemId) and forwards
    *  {type:"fillItem"} to that tab's top frame. */
-  | { type: "fillFromPopup"; itemId: string; /** Safari: the person confirmed filling a login saved for another site. */ confirmedOtherSite?: boolean }
+  | { type: "fillFromPopup"; itemId: string; /** Safari: the person confirmed filling a login saved for another site, on THIS page host (the worker requires the active tab to still be on it). */ confirmedOtherSite?: string }
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
    *  for a copy — the value goes straight to the popup's clipboard write, never into a page
    *  or the popup DOM. Cards are deliberately not uri-bound, so there is no host gate; the
@@ -524,6 +524,9 @@ export type Res<T extends Req["type"]> = T extends "status"
        *  shows the PIN field on the locked screen); `enrolled` + `offerDismissed` drive the unlocked
        *  Settings toggle + the one-time offer card; `attemptsRemaining` for the "N tries left" copy. */
       quickUnlock: { enrolled: boolean; armed: boolean; attemptsRemaining: number; offerDismissed: boolean; kind: "pin" | "biometric" | null };
+      /** Safari: a page-side message asked for this popup to be opened moments ago. The popup then waits for a tap
+       *  before it raises Face ID. Absent elsewhere. */
+      pageSummoned?: boolean;
       /** 0.16.3: a TOTP-gated sign-in awaiting the code (SW-memory only, so a reopened popup — the
        *  common case, since copying a code from an authenticator app closes it — re-renders the code
        *  field). Outranks the armed-PIN view. Null when there's no live challenge (or the SW evicted). */
