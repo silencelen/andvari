@@ -52,7 +52,28 @@ class UITestCase: XCTestCase {
     override func tearDown() {
         // Whatever is on screen when the test ends, pass or fail.
         shot("end")
+        dismissLeftoverSystemSheets()
         super.tearDown()
+    }
+
+    /// A provider chooser or a provider's list that a failed test left open covers the next test's screen, and a
+    /// tap meant for the screen under it lands on the sheet. Close them; this never fails a test.
+    func dismissLeftoverSystemSheets() {
+        for application in [app, XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")] where application.state == .runningForeground {
+            let chooser = application.buttons["andvari"]
+            let cancel = application.buttons.matching(NSPredicate(format: "label == 'Cancel'")).firstMatch
+            if chooser.exists && application.buttons["Passwords"].exists && cancel.exists {
+                tapWhereItIs(cancel, in: application)
+                Thread.sleep(forTimeInterval: 1)
+            }
+            if application.staticTexts["AutoFill Password"].exists || application.navigationBars["andvari"].exists {
+                let close = application.buttons.matching(NSPredicate(format: "label IN {'Close', 'Cancel'}")).firstMatch
+                if close.exists {
+                    tapWhereItIs(close, in: application)
+                    Thread.sleep(forTimeInterval: 1)
+                }
+            }
+        }
     }
 
     // MARK: - Steps and screenshots
