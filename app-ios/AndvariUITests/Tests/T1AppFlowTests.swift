@@ -172,7 +172,7 @@ final class T1AppFlowTests: UITestCase {
             openSettings()
         }
         step("signed-out") {
-            element("settings.sign-out").tap()
+            settingsControl("settings.sign-out", "Sign out in Settings").tap()
             confirmSignOut()
             XCTAssertEqual(element("welcome.server").value as? String, Fixture.serverOrigin)
         }

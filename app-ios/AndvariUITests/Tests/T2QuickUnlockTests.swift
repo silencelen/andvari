@@ -26,7 +26,7 @@ final class T2QuickUnlockTests: UITestCase {
             XCTAssertTrue(isOn(quickUnlockSwitch), "Face ID did not turn on: \(quickUnlockMessage())")
         }
         step("locked-offers-face-id") {
-            element("settings.lock").tap()
+            settingsControl("settings.lock", "Lock now in Settings").tap()
             expectScreen(.unlock)
             require(element("unlock.biometric"), "the Unlock with Face ID button")
         }
@@ -100,7 +100,7 @@ final class T2QuickUnlockTests: UITestCase {
             XCTAssertTrue(waitUntil(5) { !self.isOn(self.quickUnlockSwitch) }, "the switch stayed on")
         }
         step("no-offer-when-locked") {
-            element("settings.lock").tap()
+            settingsControl("settings.lock", "Lock now in Settings").tap()
             expectScreen(.unlock)
             XCTAssertFalse(element("unlock.biometric").exists, "Face ID is still offered after it was turned off")
         }
