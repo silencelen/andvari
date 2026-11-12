@@ -12,6 +12,8 @@ struct ItemDetailView: View {
     @State private var detail: ItemDetail?
     @State private var password: String?
     @State private var notes: String?
+    @State private var cardNumber: String?
+    @State private var cardCode: String?
     @State private var copied: String?
     @State private var copies = 0
     @State private var editing = false
@@ -42,10 +44,16 @@ struct ItemDetailView: View {
             }
         }
         .sheet(isPresented: $editing, onDismiss: { editorClosed() }) {
-            LoginEditorView(itemId: itemId)
-                .environmentObject(model)
-                .tint(Palette.goldText)
-                .privacyShield()
+            Group {
+                if detail?.card != nil {
+                    CardEditorView(itemId: itemId)
+                } else {
+                    LoginEditorView(itemId: itemId)
+                }
+            }
+            .environmentObject(model)
+            .tint(Palette.goldText)
+            .privacyShield()
         }
         .sensoryFeedback(.success, trigger: copies)
         .onAppear {
@@ -57,6 +65,8 @@ struct ItemDetailView: View {
         .onDisappear {
             password = nil
             notes = nil
+            cardNumber = nil
+            cardCode = nil
         }
     }
 
@@ -69,6 +79,12 @@ struct ItemDetailView: View {
         if detail.username != nil || detail.hasPassword {
             Section {
                 credentials(detail)
+            }
+            .listRowBackground(Palette.raised)
+        }
+        if let card = detail.card {
+            Section {
+                cardFields(card)
             }
             .listRowBackground(Palette.raised)
         }
@@ -157,6 +173,59 @@ struct ItemDetailView: View {
                 CopyButton(label: "Copy password", copied: copied == "password") {
                     copySecret(.password, as: "password")
                 }
+            }
+        }
+    }
+
+    /// A card: the number and the security code are shown only on request and copied like a password; the rest is
+    /// shown plainly and can be copied.
+    @ViewBuilder
+    private func cardFields(_ card: CardDetail) -> some View {
+        if card.hasNumber {
+            secretRow("Card number", shown: cardNumber, placeholder: card.summary, name: "card-number", secret: .cardNumber) {
+                cardNumber = cardNumber == nil ? model.revealSecret(itemId, .cardNumber) : nil
+            }
+        }
+        if let expiry = card.expiry {
+            plainRow("Expires", expiry, name: "expiry")
+        }
+        if card.hasCode {
+            secretRow("Security code", shown: cardCode, placeholder: "•••", name: "card-code", secret: .cardCode) {
+                cardCode = cardCode == nil ? model.revealSecret(itemId, .cardCode) : nil
+            }
+        }
+        if let holder = card.cardholder {
+            plainRow("Cardholder", holder, name: "cardholder")
+        }
+        if let postal = card.postalCode {
+            plainRow("Postal code", postal, name: "postal")
+        }
+    }
+
+    private func plainRow(_ label: String, _ value: String, name: String) -> some View {
+        HStack(spacing: 8) {
+            field(label, value)
+            Spacer(minLength: 8)
+            CopyButton(label: "Copy \(label.lowercased())", copied: copied == name) {
+                copy(value, as: name)
+            }
+        }
+    }
+
+    private func secretRow(_ label: String, shown: String?, placeholder: String, name: String, secret: SecretField, toggle: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            field(label, shown ?? placeholder, hidden: shown == nil)
+            Spacer(minLength: 8)
+            Button {
+                toggle()
+            } label: {
+                Image(systemName: shown == nil ? "eye" : "eye.slash")
+                    .frame(minWidth: 32, minHeight: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(shown == nil ? "Show \(label.lowercased())" : "Hide \(label.lowercased())")
+            CopyButton(label: "Copy \(label.lowercased())", copied: copied == name) {
+                copySecret(secret, as: name)
             }
         }
     }
