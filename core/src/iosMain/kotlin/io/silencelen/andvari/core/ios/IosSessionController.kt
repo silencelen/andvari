@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.darwin.Darwin
 import io.silencelen.andvari.core.app.AutofillVault
 import io.silencelen.andvari.core.app.FillAvailability
+import io.silencelen.andvari.core.app.FillCard
 import io.silencelen.andvari.core.app.FillCredential
 import io.silencelen.andvari.core.app.FillLogin
 import io.silencelen.andvari.core.app.FillSnapshotStore
@@ -196,6 +197,12 @@ class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: S
     fun matches(itemId: String, identifiers: List<String>): Boolean = vault.matches(itemId, identifiers)
 
     fun credential(itemId: String): FillCredential? = vault.credential(itemId)
+
+    /** The payment cards (names and masked lines only); empty while locked. The Safari extension lists them. */
+    fun cards(): List<FillCard> = vault.cards()
+
+    /** One stored field of one card ("number", "expMonth", "expYear", "cvv", "name", "postal"), or null. */
+    fun cardField(itemId: String, field: String): String? = vault.cardField(itemId, field)
 
     fun oneTimeCode(itemId: String): String? = vault.oneTimeCode(itemId)
 
