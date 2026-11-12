@@ -306,16 +306,33 @@ final class AppModel: ObservableObject {
         controller.oneTimeCode(itemId: itemId)
     }
 
-    func saveLogin(itemId: String?, input: LoginInput) async -> Outcome {
-        await run { try await $0.saveLogin(itemId: itemId, input: input) }
+    /// [vaultId]: where a new item goes (nil: the personal vault); an edit stays in its vault.
+    func saveLogin(itemId: String?, input: LoginInput, vaultId: String? = nil) async -> Outcome {
+        await run { try await $0.saveLogin(itemId: itemId, input: input, vaultId: vaultId) }
     }
 
-    func saveCard(itemId: String?, input: CardInput) async -> Outcome {
-        await run { try await $0.saveCard(itemId: itemId, input: input) }
+    func saveCard(itemId: String?, input: CardInput, vaultId: String? = nil) async -> Outcome {
+        await run { try await $0.saveCard(itemId: itemId, input: input, vaultId: vaultId) }
     }
 
-    func saveNote(itemId: String?, input: NoteInput) async -> Outcome {
-        await run { try await $0.saveNote(itemId: itemId, input: input) }
+    func saveNote(itemId: String?, input: NoteInput, vaultId: String? = nil) async -> Outcome {
+        await run { try await $0.saveNote(itemId: itemId, input: input, vaultId: vaultId) }
+    }
+
+    // MARK: - Vaults
+
+    /// Where a new item may go: the personal vault first, then the shared vaults this account can write.
+    func newItemVaults() -> [VaultChoiceView] {
+        controller.newItemVaults()
+    }
+
+    /// The vaults an item can be moved or copied to.
+    func moveTargets(_ itemId: String) -> [VaultChoiceView] {
+        controller.moveTargets(itemId: itemId)
+    }
+
+    func moveOrCopyItem(_ itemId: String, to vaultId: String, move: Bool) async -> Outcome {
+        await run { try await $0.moveOrCopyItem(itemId: itemId, targetVaultId: vaultId, move: move) }
     }
 
     // MARK: - Trash and history

@@ -27,11 +27,16 @@ struct CardEditorView: View {
     @State private var showNumber = false
     @State private var showCode = false
     @State private var confirmDelete = false
+    @State private var vaultChoices: [VaultChoiceView] = []
+    @State private var vaultId: String?
     @State private var message: String?
 
     var body: some View {
         NavigationStack {
             Form {
+                if itemId == nil {
+                    VaultPickerSection(choices: vaultChoices, selection: $vaultId)
+                }
                 Section {
                     TextField("Name", text: $draft.name)
                     Toggle("Favorite", isOn: $draft.favorite)
@@ -147,7 +152,11 @@ struct CardEditorView: View {
     private func load() {
         guard !loaded else { return }
         loaded = true
-        guard let itemId else { return }
+        guard let itemId else {
+            vaultChoices = model.newItemVaults()
+            vaultId = VaultPickerSection.initialSelection(vaultChoices)
+            return
+        }
         guard let detail = model.itemDetail(itemId), let card = detail.card else {
             unreadable = true
             message = "This card is no longer available."
@@ -194,7 +203,7 @@ struct CardEditorView: View {
         )
         saving = true
         Task {
-            let outcome = await model.saveCard(itemId: itemId, input: input)
+            let outcome = await model.saveCard(itemId: itemId, input: input, vaultId: itemId == nil ? vaultId : nil)
             saving = false
             if outcome == .ok {
                 dismiss()

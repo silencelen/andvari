@@ -39,6 +39,7 @@ import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.RegisterRequest
 import io.silencelen.andvari.core.model.SessionResponse
 import io.silencelen.andvari.core.model.WireItem
+import io.silencelen.andvari.core.model.WireVault
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -682,6 +683,32 @@ open class SessionControllerTest {
         assertEquals("Lease 2027", saved.name)
         assertEquals(listOf("a1"), saved.attachments.map { it.id }, "the attachment stays")
         assertEquals("sig", saved.dupeAck)
+    }
+
+    // ---- vaults: where a new item goes, moving and copying ----
+
+    @Test
+    fun aNewItemGoesOnlyToAVaultThisAccountCanWriteAndAnEditStaysWhereItIs() = test {
+        unlockedWithAPersonalVault()
+        // The personal vault's row, as a sync delivers it (the rig's cache starts with items only).
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertVault(WireVault(reg.personalVault.vaultId, "personal", 1, reg.personalVault.metaBlob, 1_000))
+        val vaults = controller.newItemVaults()
+        assertEquals(listOf(reg.personalVault.vaultId), vaults.map { it.vaultId })
+        assertTrue(vaults.single().personal, "the personal vault, first, is the default")
+        val elsewhere = "00000000-0000-4000-8000-0000000000e9"
+        assertEquals(ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE), controller.saveLogin(null, LoginInput("New", "me", "pw", listOf("https://new.example"), "", "", false), elsewhere))
+        assertEquals(ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE), controller.saveNote(null, NoteInput("Note", "text", false), elsewhere))
+        assertTrue(controller.state.items.none { it.name == "New" || it.name == "Note" }, "nothing went anywhere")
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Note", "text", false), reg.personalVault.vaultId))
+        assertEquals(reg.personalVault.vaultId, controller.itemDetail(controller.state.items.single { it.name == "Note" }.itemId)?.vaultId)
+        // An edit never changes vault, whatever it names.
+        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "hunter2", listOf("https://login.example.com/x"), "", "", false), elsewhere))
+        assertEquals(reg.personalVault.vaultId, controller.itemDetail(ITEM_ID)?.vaultId)
+        // With no other vault there is nowhere to move or copy to, and nothing is attempted.
+        assertTrue(controller.moveTargets(ITEM_ID).isEmpty())
+        assertEquals(ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE), controller.moveOrCopyItem(ITEM_ID, reg.personalVault.vaultId, move = false), "not into its own vault")
+        assertEquals(ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE), controller.moveOrCopyItem(ITEM_ID, elsewhere, move = true), "not into a vault this account cannot write")
+        assertEquals(1, controller.state.items.count { it.itemId == ITEM_ID })
     }
 
     // ---- trash and history ----
