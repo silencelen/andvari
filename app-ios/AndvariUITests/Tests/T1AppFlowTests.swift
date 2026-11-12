@@ -152,4 +152,26 @@ final class T1AppFlowTests: UITestCase {
             expectScreen(.welcome)
         }
     }
+
+    /// Add a login in the app on a device that signed in to an account made elsewhere (the seeding tool stands for
+    /// the other device). It must end up in the list.
+    func test08_AddLoginAfterSigningIn() {
+        launchApp()
+        step("vault") {
+            reachVault()
+        }
+        step("editor") {
+            app.buttons["vault.new-login"].tap()
+            enter("Added Here", into: app.textFields["Name"], what: "the Name field")
+            enter("erin", into: app.textFields["Username"], what: "the Username field")
+        }
+        step("saved") {
+            app.buttons["Save"].tap()
+            if !waitUntil(15, { self.vaultRow("Added Here").exists }) {
+                dumpTree(app, as: "new-login-not-saved")
+                let said = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'vault' OR label CONTAINS[c] 'wrong' OR label CONTAINS[c] 'try again'")).firstMatch
+                XCTFail("the new login was not saved; the editor says: \(said.exists ? said.label : "nothing the test recognises")")
+            }
+        }
+    }
 }

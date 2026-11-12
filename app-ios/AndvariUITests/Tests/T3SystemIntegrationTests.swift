@@ -59,6 +59,10 @@ final class T3SystemIntegrationTests: UITestCase {
             dumpEverything("fill-tapped")
         }
         step("filled") {
+            // A first-run tip of Safari's can take the first tap; the offer is then still there.
+            if fillOfferButton.exists && fillOfferButton.isHittable {
+                fillOfferButton.tap()
+            }
             XCTAssertTrue(matchFaceUntil(25) { (username.value as? String) == Fixture.siteUser }, "the username was not filled, it holds \(String(describing: username.value))")
             let password = safari.webViews.secureTextFields["Password"]
             XCTAssertFalse(((password.value as? String) ?? "").isEmpty, "the password was not filled")
@@ -224,9 +228,15 @@ final class T3SystemIntegrationTests: UITestCase {
             reachVaultAnyWay()
             let saved = containing("from AutoFill", in: app)
             let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", user)).firstMatch
-            let arrived = waitUntil(15) { saved.exists && row.exists }
+            let arrived = waitUntil(15) { row.exists }
             dumpTree(app, as: "after-save-in-app")
-            XCTAssertTrue(arrived, "the saved login did not arrive in the app (list header shown: \(saved.exists), its username shown: \(row.exists))")
+            XCTAssertTrue(arrived, "the saved login did not reach the app")
+            // The design saves a new login by itself and lists it under "Saved … from AutoFill". When the app holds it
+            // back instead, the row says why; that sentence is the failure.
+            if !saved.exists {
+                let reason = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'vault' OR label CONTAINS[c] 'offline' OR label CONTAINS[c] 'changed'")).firstMatch
+                XCTFail("the login reached the app but was not saved by itself; it is listed under \"Logins not saved yet\" with: \(reason.exists ? reason.label : "no reason shown")")
+            }
         }
     }
 
@@ -345,16 +355,25 @@ final class T3SystemIntegrationTests: UITestCase {
             entry.tap()
             Thread.sleep(forTimeInterval: 3)
             dumpEverything("popup-opening")
-            // The first use asks whether the extension may see this site.
-            for title in ["Always Allow", "Always Allow on Every Website", "Allow for One Day"] where labelled(title, in: safari).exists {
-                labelled(title, in: safari).tap()
-                Thread.sleep(forTimeInterval: 1.5)
-                break
-            }
         }
         step("popup-lists-this-site") {
             let site = containing("This site", in: safari)
-            let listed = matchFaceUntil(30) { site.exists }
+            let allow = safari.buttons["Allow for One Day"]
+            let unlock = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Unlock with'")).firstMatch
+            var tappedUnlock = false
+            let listed = matchFaceUntil(40) {
+                // Safari asks, per site, whether the extension may see it; the popup waits behind that.
+                if allow.exists && allow.isHittable {
+                    self.shot("extension-asks-for-a-site")
+                    allow.tap()
+                    return false
+                }
+                if !site.exists && !tappedUnlock && unlock.exists && unlock.isHittable {
+                    tappedUnlock = true
+                    unlock.tap()
+                }
+                return site.exists
+            }
             dumpEverything("popup")
             XCTAssertTrue(listed, "the popup did not list this site's logins after Face ID")
         }
@@ -403,10 +422,10 @@ final class T3SystemIntegrationTests: UITestCase {
             Thread.sleep(forTimeInterval: 2)
             dumpTree(app, as: "app-after-passwords-key")
             dumpTree(springboard, as: "app-after-passwords-key-springboard")
-            let chooser = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
-            if chooser.exists && chooser.isHittable {
-                chooser.tap()
-            }
+            // With two providers on, iOS asks which one's list to open.
+            let chooser = app.buttons["andvari"]
+            require(chooser, "andvari in the provider chooser", timeout: 8)
+            chooser.tap()
         }
         step("list-after-face-id") {
             let row = { [self] in [app, springboard].map { self.labelled("No Address", in: $0) }.first { $0.exists } }
