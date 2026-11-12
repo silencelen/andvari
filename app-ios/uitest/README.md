@@ -36,8 +36,14 @@ summary carries the reason.
 
 ## What the simulator can and cannot show
 
-Measured on the iOS 26.5 simulator of the `macos-26` runner. The run id that each line was last seen in is
-in the commit that changed this table.
+Measured on the iOS 26.5 simulator of the `macos-26` runner, last in run 43137187027. Two things in that
+table are the app's, not the simulator's: adding or auto-saving a login fails on a device that signed in to
+an account made elsewhere, because the personal vault is only a proposal there and the iOS app has no place
+to confirm it.
+
+The Safari tests are the least steady. A Safari that has just started sometimes drops the address it was
+opened with, and its first-run tips cover what the tests tap; the helpers work around both, and a run can
+still lose one test to it. Run again before reading a single Safari failure as a regression.
 
 | Checklist item | In the simulator | Test |
 |---|---|---|
@@ -52,7 +58,7 @@ in the commit that changed this table.
 | A plain-http page gets only the login saved as http | Skipped: Safari offers nothing from a provider on a plain-http page, so the rule is not observable | `T3…test05` |
 | The system's save offer (iOS 26.2+) and the login arriving in the app | The offer works and names andvari; the capture reaches the app. It is not saved by itself for an account that signed in: same "Choose a vault" refusal. | `T3…test06` |
 | Turn the Safari web extension on in Settings | Works | `T3…test07` |
-| Extension popup: Face ID, list, fill | See the latest run | `T3…test08` |
+| Extension popup: Face ID, list, fill | Fails. The popup opens from Safari's page menu after Safari asks to let the extension see `127.0.0.1` and the site; Face ID runs; the popup then shows its headings with no logins and "Session locked — unlock to continue." Not yet known whether that is the simulator or the extension. | `T3…test08` |
 | Fill a field in an app with no website (andvari's own unlock field) | Works: the list opens with every login and the chosen password is put in the field | `T3…test09` |
 
 ### The quick-unlock key
