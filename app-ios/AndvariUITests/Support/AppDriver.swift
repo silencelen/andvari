@@ -186,13 +186,22 @@ extension UITestCase {
 
     func openSettings() {
         settingsButton.tap()
-        require(element("settings.sign-out"), "the settings sheet")
+        // Its Done is always at the top; the sheet is longer than the screen, and a list only holds the rows near it.
+        require(element("settings.done"), "the settings sheet")
+    }
+
+    /// A control further down the settings sheet, scrolled to.
+    func settingsControl(_ identifier: String, _ what: String) -> XCUIElement {
+        let control = element(identifier)
+        for _ in 0..<6 where !(control.exists && control.isHittable) { app.swipeUp() }
+        require(control, what)
+        return control
     }
 
     /// Sign out from the vault through Settings.
     func signOutFromVault() {
         openSettings()
-        element("settings.sign-out").tap()
+        settingsControl("settings.sign-out", "Sign out in Settings").tap()
         confirmSignOut()
     }
 
