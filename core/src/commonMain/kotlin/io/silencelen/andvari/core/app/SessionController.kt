@@ -247,8 +247,9 @@ open class SessionController(
 
     /** The app left the foreground: the vault locks (a suspended app cannot run the idle timer). */
     fun onBackground() {
-        // The new-password step holds the raw recovery secret: it does not survive a trip to the background.
-        if (state.screen == AppScreen.RECOVER && state.recoverVerified) recoverTimedOut()
+        // Recovery does not survive a trip to the background, at either step: the second holds the raw recovery secret,
+        // the first a typed phrase (and maybe a verify in flight, which the fence then stops).
+        if (state.screen == AppScreen.RECOVER) recoverTimedOut()
         if (session.get() == null) return
         // H08: never close the engine under a running action; the lock lands when it ends.
         if (state.busy) {
@@ -465,7 +466,18 @@ open class SessionController(
                 coordinator.purgeRevoked(originKey, stored.userId)
                 dropFillSnapshot() // the extensions' copy goes with the session
             }
-            if (cancelled) return@action ActionResult.NotDone(null)
+            if (cancelled) {
+                // The wizard was left (the app went to the background) while the reset was on its way, and it landed:
+                // say that, not that it timed out. A wizard opened again since keeps its screen.
+                update {
+                    it.copy(
+                        busy = false, screen = if (it.screen == AppScreen.RECOVER) it.screen else landingScreen(), lockReason = null,
+                        accountEmail = store.load()?.email, mustChangePassword = store.mustChangePassword, notice = RecoverCopy.DONE,
+                    )
+                }
+                refreshQuick()
+                return@action ActionResult.NotDone(null)
+            }
             update {
                 it.copy(
                     busy = false, screen = landingScreen(), recoverVerified = false, lockReason = null, accountEmail = store.load()?.email,
