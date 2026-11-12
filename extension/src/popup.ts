@@ -1927,9 +1927,10 @@ async function adoptAppServer(): Promise<boolean> {
   const r = await ask({ type: "appServer" });
   appAnswered = r?.app ?? "unavailable";
   if (appAnswered === "unavailable") {
+    const askedAt = Date.now();
     const own = await askAppServerDetailed(nativeSender(globalThis as Parameters<typeof nativeSender>[0], "com.silencelen.andvari"));
     if (own.answer.kind === "set") {
-      const relayed = await ask({ type: "appServerAnswer", url: own.answer.url, nativeSave: own.nativeSave });
+      const relayed = await ask({ type: "appServerAnswer", url: own.answer.url, nativeSave: own.nativeSave, askedAt });
       appAnswered = relayed?.app ?? "unavailable";
     } else if (own.answer.kind === "none") {
       appAnswered = "none";
