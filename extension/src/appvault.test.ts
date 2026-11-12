@@ -131,9 +131,16 @@ test("a page frame gets a secret only through the popup's grant, never a code, a
   const confirm = fill.indexOf("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);");
   assert.ok(confirm > 0 && confirm < fill.indexOf("grants.set(tab.id"), "asked before any grant is minted, and held to the page it was given for");
   // A popup a page asked for does not raise Face ID by itself.
+  // It is marked only once the sender passed every check (the active tab of the focused window, the right frame), and
+  // before the popup is asked for: an invalid sender cannot mark it, a valid one always has.
   for (const fn of ["openPopupForSearch", "openPopupForCards", "openPopupForSave"]) {
-    const body = bg.slice(bg.indexOf(`async function ${fn}(`), bg.indexOf(`async function ${fn}(`) + 300);
-    assert.ok(body.includes("pageSummonedPopupAt = Date.now();"), fn);
+    const start = bg.indexOf(`async function ${fn}(`);
+    const body = bg.slice(start, bg.indexOf("\n}\n", start));
+    const mark = body.indexOf("pageSummonedPopupAt = Date.now();");
+    assert.ok(mark > 0, fn);
+    assert.equal(body.indexOf("pageSummonedPopupAt = Date.now();", mark + 1), -1, `${fn}: marked once`);
+    assert.ok(mark > body.lastIndexOf("return { opened: false };", body.indexOf("const fn =")), `${fn}: after the last refusal before the call`);
+    assert.ok(mark < body.indexOf("await fn.call(chrome.action)"), `${fn}: before the popup is asked for`);
   }
   const popup = readFileSync(new URL("./popup.ts", import.meta.url), "utf8");
   assert.ok(popup.includes("s.pageSummoned === true"));

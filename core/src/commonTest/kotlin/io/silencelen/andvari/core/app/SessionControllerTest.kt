@@ -94,6 +94,7 @@ open class SessionControllerTest {
 
         val item = ItemDoc(type = "login", name = "Example", login = LoginData(username = "fam", password = "hunter2", uris = listOf("https://login.example.com/x", "androidapp://com.foo.app"), totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"))
         const val ITEM_ID = "00000000-0000-4000-8000-0000000000c1"
+        const val CARD_ID = "00000000-0000-4000-8000-0000000000c2"
 
         /** The item sealed under the personal vault's key, as a cache holds it. */
         val sealed: WireItem by lazy {
@@ -584,6 +585,52 @@ open class SessionControllerTest {
         assertTrue(controller.credentialIdentities().none { it.itemId == row.itemId })
         assertEquals(ActionResult.Ok, controller.deleteItem(row.itemId))
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
+    }
+
+    @Test
+    fun aCardWithAYearAndNoMonthGoesBackToTheEditorAsItIsAndSavesAgain() = test {
+        unlockedWithAPersonalVault()
+        assertEquals(ActionResult.Ok, controller.saveCard(null, CardInput("Year only", "", "4242424242424242", "", "31", "", "", "", false)))
+        val itemId = controller.state.items.single { it.name == "Year only" }.itemId
+        val card = assertNotNull(controller.itemDetail(itemId)?.card)
+        assertNull(card.expMonth)
+        assertEquals("2031", card.expYear, "each half as stored, never re-split from the label")
+        // What an editor loads from the detail saves again unchanged.
+        assertEquals(ActionResult.Ok, controller.saveCard(itemId, CardInput("Year only", "", "4242424242424242", card.expMonth.orEmpty(), card.expYear.orEmpty(), "", "", "", false)))
+        assertEquals("2031", controller.itemDetail(itemId)?.card?.expYear)
+        assertNull(controller.itemDetail(ITEM_ID)?.card)
+    }
+
+    @Test
+    fun aCardNumberHasAtMostNineteenDigitsAndAnUnusualOneIsOnlyWarnedAbout() = test {
+        unlockedWithAPersonalVault()
+        val long = "4".repeat(20)
+        val tooLong = assertNotNull(controller.cardNumberWarning(long))
+        assertEquals(ActionResult.Failed(tooLong), controller.saveCard(null, CardInput("Long", "", long, "", "", "", "", "", false)))
+        assertTrue(controller.state.items.none { it.name == "Long" })
+        // A number that fails the usual check is warned about and still saved.
+        val odd = "4242 4242 4242 4241"
+        val warning = assertNotNull(controller.cardNumberWarning(odd))
+        assertTrue(warning != tooLong)
+        assertEquals(ActionResult.Ok, controller.saveCard(null, CardInput("Odd", "", odd, "", "", "", "", "", false)))
+        assertNull(controller.cardNumberWarning("4242 4242 4242 4242"))
+        assertNull(controller.cardNumberWarning("4242"), "a partial number while typing is not warned about")
+        assertEquals(ActionResult.Ok, controller.saveCard(null, CardInput("Last four", "", "4242", "", "", "", "", "", false)), "and a short one is saved")
+    }
+
+    @Test
+    fun aStoredNumberLongerThanTheBoundDoesNotStopAnEditOfTheRestOfTheCard() = test {
+        unlockedWithAPersonalVault()
+        // A card another client stored with a longer number than any real card has.
+        val long = "1".repeat(24)
+        val upload = enrolled.account.encryptItem(reg.personalVault.vaultId, CARD_ID, ItemDoc(type = "card", name = "Imported", card = io.silencelen.andvari.core.client.CardData(number = long)))
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertItem(WireItem(CARD_ID, reg.personalVault.vaultId, 1, 1_000, 2_000, false, false, upload.formatVersion, emptyList(), upload.blob), null)
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(ActionResult.Ok, controller.saveCard(CARD_ID, CardInput("Renamed", "", long, "", "", "", "", "", false)))
+        assertEquals("Renamed", controller.itemDetail(CARD_ID)?.name)
+        assertEquals(long, controller.revealSecret(CARD_ID, SecretField.CARD_NUMBER))
+        assertIs<ActionResult.Failed>(controller.saveCard(CARD_ID, CardInput("Renamed", "", long + "1", "", "", "", "", "", false)), "but a new number is held to it")
     }
 
     // ---- the personal vault ----
