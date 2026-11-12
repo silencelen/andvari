@@ -1109,12 +1109,13 @@ atLoad("runtime.onMessage", () => chrome.runtime.onMessage.addListener((msg: Req
 }));
 
 /** Safari: how often each source gave a page's origin, and the last message that needed one (the popup's Details). */
-const pageOriginSeen: Record<OriginSource, number> = { origin: 0, url: 0, tab: 0, none: 0 };
+const pageOriginSeen: Record<OriginSource, number> = { origin: 0, url: 0, none: 0 };
 let pageOriginLast: string | null = null;
 
 /**
- * Safari (L8): a tab sender with no browser-set `origin` gets its top frame's origin from the browser-set URL
- * (senderorigin.ts, derivedPageOrigin, has the rules). Every handler then makes its usual checks of `sender.origin`.
+ * Safari (L8): a tab sender with no browser-set `origin` gets its top frame's origin from that frame's own browser-set
+ * URL, never the tab's (senderorigin.ts, derivedPageOrigin, has the rules). Every handler then makes its usual checks
+ * of `sender.origin`.
  * Other builds, and the extension's own pages (no tab), are passed through untouched.
  */
 function withPageOrigin(sender: chrome.runtime.MessageSender): chrome.runtime.MessageSender {
@@ -1330,7 +1331,7 @@ function serverDiag(): ServerDiag {
   return {
     stage: startStage, migration: startMigration, block: dialBlock?.kind ?? null, store: trustedStoreOk, url: serverUrl, ...appServerDiag,
     vaultOpen: APP_VAULT?.diag.open ?? null, vaultSecret: APP_VAULT?.diag.secret ?? null,
-    pageOrigin: pageOriginLast === null ? null : `last from ${pageOriginLast} (origin ${pageOriginSeen.origin}, frame url ${pageOriginSeen.url}, tab url ${pageOriginSeen.tab}, none ${pageOriginSeen.none})`,
+    pageOrigin: pageOriginLast === null ? null : `last from ${pageOriginLast} (origin ${pageOriginSeen.origin}, frame url ${pageOriginSeen.url}, none ${pageOriginSeen.none})`,
   };
 }
 

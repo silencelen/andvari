@@ -780,6 +780,6 @@ export type ServerDiag = {
    *  it still held the vault and knew the ticket); null before either. */
   vaultOpen: string | null;
   vaultSecret: string | null;
-  /** Safari: where pages' origins came from — the browser's `origin`, the frame's URL, the tab's URL, or none (L8). */
+  /** Safari: where pages' origins came from — the browser's `origin`, the frame's own URL, or none (L8). */
   pageOrigin: string | null;
 };
