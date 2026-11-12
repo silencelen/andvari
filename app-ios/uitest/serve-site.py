@@ -11,10 +11,15 @@ import http.server
 import ssl
 import sys
 import threading
+import time
 import urllib.parse
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    # A connection that says nothing for this long is closed, so connections a browser opens ahead of time and then
+    # abandons do not pile up, and a stalled TLS handshake ends with a line in the log instead of hanging.
+    timeout = 20
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
@@ -37,16 +42,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
 
+class Server(http.server.ThreadingHTTPServer):
+    """One line per failed connection (a TLS alert, a reset, a timeout) instead of a traceback."""
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        sys.stderr.write("%s - - [%s] connection failed (%s:%d): %s: %s\n" % (
+            client_address[0], time.strftime("%d/%b/%Y %H:%M:%S"), self.name, self.server_address[1],
+            type(error).__name__, error))
+
+
 def main():
     directory, https_port, http_port, cert, key = sys.argv[1:6]
     handler = functools.partial(Handler, directory=directory)
-    secure = http.server.ThreadingHTTPServer(("127.0.0.1", int(https_port)), handler)
+    secure = Server(("127.0.0.1", int(https_port)), handler)
+    secure.name = "https"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
+
+    def server_name(sock, name, ctx):
+        # Which name each TLS connection asked for: a name the certificate does not carry explains a rejection.
+        sys.stderr.write("tls connection for %s at %s\n" % (name, time.strftime("%d/%b/%Y %H:%M:%S")))
+
+    context.sni_callback = server_name
     # The handshake happens on the connection's own thread, at its first read: a client that connects and
     # says nothing must not hold up the accept loop.
     secure.socket = context.wrap_socket(secure.socket, server_side=True, do_handshake_on_connect=False)
-    plain = http.server.ThreadingHTTPServer(("127.0.0.1", int(http_port)), handler)
+    plain = Server(("127.0.0.1", int(http_port)), handler)
+    plain.name = "http"
     threading.Thread(target=plain.serve_forever, daemon=True).start()
     secure.serve_forever()
 
