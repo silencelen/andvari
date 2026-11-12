@@ -81,9 +81,9 @@ jobs:
 
       - name: Archive without signing
         run: |
-          set -uo pipefail
           brew install xcodegen
           (cd app-ios && xcodegen generate)
+          set +e
           xcodebuild -project app-ios/Andvari.xcodeproj -scheme Andvari -configuration Release \
             -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/app.xcarchive" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
