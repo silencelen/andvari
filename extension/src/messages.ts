@@ -116,7 +116,14 @@ export interface CardFillFields {
 /** Why an in-page card fill wrote NOTHING (parity with FillFailCode; the copy lives in the
  *  surface). `no_form` = the granted frame had no live card form; `not_allowed` = a redemption
  *  origin/frame/top-origin check refused. */
-export type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable";
+export type CardFillFailCode =
+  | "locked"
+  | "not_allowed"
+  | "no_form"
+  | "no_fields"
+  | "unreachable"
+  | "no_focus" //    no card field was focused in the page: the fill does not guess which form is meant (round-5 C1)
+  | "not_visible"; // a field of the focused form cannot be seen (hidden, transparent, tiny, off the page, covered)
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind

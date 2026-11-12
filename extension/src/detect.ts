@@ -413,8 +413,119 @@ function isInputField(f: Field): f is InputField {
 }
 
 /** offsetParent is null for position:fixed elements even when visible — hence the rects check. */
-function isVisible(el: HTMLElement): boolean {
+function isRendered(el: HTMLElement): boolean {
   return el.offsetParent !== null || el.getClientRects().length > 0;
+}
+
+/**
+ * A field the page renders but the person cannot see is not one this extension fills (round-5 review C1: a skimmer
+ * injects an invisible card form into a checkout whose real fields are in the payment provider's frame). Collected
+ * only if rendered and [visibilityOf] passes its page-time rules; the fill checks again, on screen ([probeVisibility]).
+ * Shared by login and card detection on every target.
+ */
+function isVisible(el: HTMLElement): boolean {
+  return isRendered(el) && visibilityOf(probeVisibility(el, { onScreen: false, hitTest: false }), proxiedControl(el)) === "ok";
+}
+
+/**
+ * A control pages routinely draw through a proxy: a select under a custom dropdown, a radio under a styled label. Its
+ * own box may be transparent, tiny or covered by the proxy while it is the one the page reads, so only the rules a
+ * proxy cannot excuse apply to it (not hidden, not off the page, on screen when asked). A text field gets every rule:
+ * a card number, a security code or a password goes only into a field the person can see.
+ */
+export function proxiedControl(el: Element): boolean {
+  return el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && el.type === "radio");
+}
+
+/** What decides whether a field is one a person can see. Gathered from the DOM by [probeVisibility]. */
+export interface VisibilityFacts {
+  /** The field's computed display, visibility and opacity, then each ancestor's (across shadow hosts), innermost first. */
+  chain: ReadonlyArray<{ display: string; visibility: string; opacity: string }>;
+  /** The field's box, in viewport coordinates. */
+  rect: { left: number; top: number; width: number; height: number };
+  /** The page's scroll offsets and scrollable extent. */
+  page: { scrollX: number; scrollY: number; width: number; height: number };
+  /** The viewport, when the field must be on screen now (the field a fill is anchored to); null otherwise. */
+  viewport: { width: number; height: number } | null;
+  /** What the page hit-tests at the field's centre: the field itself (or its label), something else, or not
+   *  tested (null: the centre is off screen, or the caller did not ask). */
+  hit: "self" | "other" | null;
+}
+
+/** Why a field is not visible, or "ok". */
+export type VisibilityVerdict = "ok" | "hidden" | "transparent" | "tiny" | "offpage" | "offscreen" | "covered";
+
+/** The smallest box, in CSS pixels, a field a person can use is drawn in. */
+export const MIN_FIELD_PX = 8;
+/** Below this combined opacity a field cannot be read. */
+export const MIN_OPACITY = 0.1;
+
+/**
+ * PURE: the visibility rules, over facts the DOM gave ([probeVisibility]). Fails closed on anything unreadable.
+ * [proxied]: a control a page draws through a proxy ([proxiedControl]) is not held to the opacity, size and hit rules.
+ */
+export function visibilityOf(f: VisibilityFacts, proxied = false): VisibilityVerdict {
+  if (f.chain.length === 0) return "hidden";
+  if (f.chain.some((s) => s.display === "none")) return "hidden";
+  const own = f.chain[0]!;
+  if (own.visibility === "hidden" || own.visibility === "collapse") return "hidden";
+  let opacity = 1;
+  for (const s of f.chain) {
+    const o = Number.parseFloat(s.opacity);
+    opacity *= Number.isFinite(o) ? Math.min(1, Math.max(0, o)) : 0; // an unreadable value is no proof of visibility
+  }
+  if (!proxied && opacity < MIN_OPACITY) return "transparent";
+  const { left, top, width, height } = f.rect;
+  if (!proxied && !(width >= MIN_FIELD_PX && height >= MIN_FIELD_PX)) return "tiny";
+  const x = left + f.page.scrollX;
+  const y = top + f.page.scrollY;
+  if (x + width <= 0 || y + height <= 0 || x >= f.page.width || y >= f.page.height) return "offpage";
+  if (f.viewport !== null) {
+    const cx = left + width / 2;
+    const cy = top + height / 2;
+    if (cx < 0 || cy < 0 || cx >= f.viewport.width || cy >= f.viewport.height) return "offscreen";
+  }
+  if (!proxied && f.hit === "other") return "covered";
+  return "ok";
+}
+
+/** How far up the tree [probeVisibility] reads styles: enough for any real form, bounded for a hostile one. */
+const MAX_STYLE_DEPTH = 64;
+
+/**
+ * The [VisibilityFacts] for [el], from the live DOM. [onScreen]: the field must be on screen now. [hitTest]: hit-test its
+ * centre when that is on screen (elementFromPoint, at the field's own root, so a field in a shadow root is not taken
+ * for its host); a hit on the field, inside it, or on one of its labels counts as the field.
+ */
+export function probeVisibility(el: HTMLElement, opts: { onScreen: boolean; hitTest: boolean }): VisibilityFacts {
+  const chain: { display: string; visibility: string; opacity: string }[] = [];
+  let node: Element | null = el;
+  for (let depth = 0; node !== null && depth < MAX_STYLE_DEPTH; depth++) {
+    const cs = getComputedStyle(node);
+    chain.push({ display: cs.display, visibility: cs.visibility, opacity: cs.opacity });
+    const root = node.getRootNode();
+    node = node.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+  }
+  const r = el.getBoundingClientRect();
+  const doc = el.ownerDocument;
+  const view = doc.defaultView;
+  const scrollX = view?.scrollX ?? 0;
+  const scrollY = view?.scrollY ?? 0;
+  const vw = view?.innerWidth ?? 0;
+  const vh = view?.innerHeight ?? 0;
+  const de = doc.documentElement;
+  const page = { scrollX, scrollY, width: Math.max(de?.scrollWidth ?? 0, vw), height: Math.max(de?.scrollHeight ?? 0, vh) };
+  let hit: "self" | "other" | null = null;
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  if (opts.hitTest && cx >= 0 && cy >= 0 && cx < vw && cy < vh) {
+    const root = el.getRootNode() as Document | ShadowRoot;
+    const at = typeof root.elementFromPoint === "function" ? root.elementFromPoint(cx, cy) : doc.elementFromPoint(cx, cy);
+    const labels = el instanceof HTMLInputElement || el instanceof HTMLSelectElement ? [...(el.labels ?? [])] : [];
+    const own = at !== null && (at === el || el.contains(at) || labels.some((l) => l === at || l.contains(at)));
+    hit = own ? "self" : "other";
+  }
+  return { chain, rect: { left: r.left, top: r.top, width: r.width, height: r.height }, page, viewport: opts.onScreen ? { width: vw, height: vh } : null, hit };
 }
 
 /** [U6] per-sweep-generation label cache: extraction costs textContent walks and a form-sized

@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   bioUnlockErrorCopy,
   CARD_COPY_FAILED,
+  cardFillErrorCopy,
   CLIPBOARD_FAILED,
   enrollBioErrorCopy,
   enrollErrorCopy,
@@ -226,3 +227,11 @@ test("lock notice: verbatim web format.ts rounding (AM3 — minutes at ≥ 60 s)
   assert.equal(lockNoticeCopy(1), "Locked after 1 second of inactivity."); // singular
   assert.equal(lockNoticeCopy(0), "Locked after 1 second of inactivity."); // clamp ≥ 1 s
 });
+
+test("a card fill that wrote nothing says why: no focused field, or a field that cannot be seen (round-5 C1)", () => {
+  assert.equal(cardFillErrorCopy("no_focus"), "Tap the card number field on the page first, then fill again.");
+  assert.match(cardFillErrorCopy("not_visible"), /can't be seen on the page, so nothing was filled/);
+  assert.equal(cardFillErrorCopy("locked"), fillErrorCopy("locked"), "the rest as for a login fill");
+  assert.equal(cardFillErrorCopy(undefined), fillErrorCopy(undefined));
+});
+

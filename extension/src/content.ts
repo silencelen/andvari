@@ -22,7 +22,7 @@ import {
 import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
+import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, probeVisibility, proxiedControl, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
@@ -375,15 +375,39 @@ function cardTargetOf(el: FillableControl): CardTargetMeta {
   return { tag: "input", type: el.type, maxLength: el.maxLength === -1 ? null : el.maxLength, placeholder: el.placeholder === "" ? null : el.placeholder, options: null };
 }
 
-/** [U12] grant-redemption targeting: a FRESH scan (the SPA may have swapped subtrees since the
- *  popup click), then the FIRST form (document order) whose CURRENT kind-signature equals the
- *  grant's — kinds drift only when the form structurally changed, and filling a changed form is
- *  "wrong beats nothing"; NO index fallback, no match → the caller answers no_form.
- *  Identical-sig twins go document-order-first (a reorder among identical-sig forms is a
- *  harmless retarget — accepted + documented). */
-function cardFormBySig(sig: string): CardForm | null {
+/**
+ * The card field the person last focused in this frame (round-5 review C1). A fill goes only into the form that holds
+ * it: never into "the first form with the grant's signature", which a skimmer's invisible twin of the real form could
+ * be. Focusing a field (the chip shows on it) is how a person says which form they mean.
+ */
+let cardFocus: FillableControl | null = null;
+
+function noteCardFocus(t: EventTarget | null): void {
+  if (!(t instanceof HTMLInputElement || t instanceof HTMLSelectElement)) return;
+  if (cardFormForInput(t) !== null) cardFocus = t;
+}
+
+/** [U12] a FRESH scan (the SPA may have swapped subtrees since the popup click): the card form holding [anchor] now. */
+function cardFormHolding(anchor: FillableControl): CardForm | null {
   const forms = scanScopes().flatMap((s) => findCardForms(s));
-  return forms.find((f) => f.fields.map((x) => x.kind).join(",") === sig) ?? null;
+  return forms.find((f) => f.fields.some((x) => x.input === anchor)) ?? null;
+}
+
+function cardSigOf(form: CardForm): string {
+  return form.fields.map((x) => x.kind).join(",");
+}
+
+/**
+ * Whether any field of [form] is one the person cannot see (detect.ts [visibilityOf]): hidden, transparent, too small,
+ * off the page, or covered at its centre. The field the fill is anchored to must also be on screen. One such field
+ * refuses the whole fill: a card number is never written where the person cannot see it.
+ */
+function cardFormNotVisible(form: CardForm, anchor: FillableControl): boolean {
+  return form.fields.some((f) => {
+    if (!f.input.isConnected) return true;
+    const facts = probeVisibility(f.input, { onScreen: f.input === anchor, hitTest: true });
+    return visibilityOf(facts, proxiedControl(f.input)) !== "ok";
+  });
 }
 
 /** Drive cardfill.ts per field ref (§4/§5), CVV LAST (some checkouts validate CVV against the
@@ -516,12 +540,22 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
  *  [U12]/[A3]: `sig` is the grant's kind-signature — a non-string (a mid-update mixed-version
  *  SW) refuses rather than guesses, same fail-closed law as the SW side. */
 async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillOutcome> {
-  const form = typeof sig === "string" ? cardFormBySig(sig) : null;
-  if (!form) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "no_form" };
+  const nothing = (code: CardFillOutcome["code"]): CardFillOutcome => ({ filled: "nothing", filledKinds: [], missedKinds: [], code });
+  if (typeof sig !== "string") return nothing("no_form");
+  // C1: only the form holding the field the person focused, and only if every field of it can be seen.
+  const anchor = cardFocus !== null && cardFocus.isConnected ? cardFocus : null;
+  if (anchor === null) return nothing("no_focus");
+  const form = cardFormHolding(anchor);
+  if (!form || cardSigOf(form) !== sig) return nothing("no_form");
+  if (cardFormNotVisible(form, anchor)) return nothing("not_visible");
   const r = await safeSend({ type: "revealCardForFill", itemId });
-  if (!r) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "unreachable" };
-  if (!r.ok || !r.fields) return { filled: "nothing", filledKinds: [], missedKinds: [], code: "not_allowed" };
-  return applyCardFill(form, r.fields);
+  if (!r) return nothing("unreachable");
+  if (!r.ok || !r.fields) return nothing("not_allowed");
+  // The page had a round trip to change things: look again before anything is written.
+  const now = cardFormHolding(anchor);
+  if (!now || cardSigOf(now) !== sig) return nothing("no_form");
+  if (cardFormNotVisible(now, anchor)) return nothing("not_visible");
+  return applyCardFill(now, r.fields);
 }
 
 // ---- G2 save-card capture (design 2026-07-23 §G2 [X2-A3]) ----
@@ -1119,6 +1153,7 @@ function init(): void {
     (e) => {
       if (!e.isTrusted) return;
       const t = e.composedPath()[0] ?? null;
+      noteCardFocus(t);
       maybeOpen(t);
       void maybeCardChip(t);
     },
