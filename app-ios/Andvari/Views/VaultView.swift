@@ -58,6 +58,12 @@ struct VaultView: View {
                 }
                 .listRowBackground(Palette.raised)
             }
+            if let notice = model.state.personalVault {
+                Section {
+                    PersonalVaultNotice(notice: notice)
+                }
+                .listRowBackground(Palette.raised)
+            }
             if !model.state.appliedSaves.isEmpty {
                 Section {
                     ForEach(model.state.appliedSaves, id: \.id) { applied in
@@ -419,6 +425,15 @@ private struct AppliedSaveRow: View {
                 Text(applied.replaced.map { "New password for \($0). The old one is in its history." } ?? "Added as a new login")
                     .font(.footnote)
                     .foregroundStyle(Palette.inkFaint)
+                if let vault = applied.vault {
+                    Text("In \(vault)")
+                        .font(.footnote)
+                        .foregroundStyle(Palette.inkFaint)
+                } else {
+                    Text("This login is not in your vault any more.")
+                        .font(.footnote)
+                        .foregroundStyle(Palette.danger)
+                }
                 if let failure {
                     Text(failure)
                         .font(.footnote)
@@ -437,5 +452,129 @@ private struct AppliedSaveRow: View {
             .disabled(model.state.busy)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// The personal-vault question (the core's sentences, as Android asks them): shown until this device has confirmed
+/// which vault new items go to. Every choice goes through a confirmation that names the vault and who else holds it.
+private struct PersonalVaultNotice: View {
+    @EnvironmentObject private var model: AppModel
+    let notice: PersonalVaultView
+    @State private var password = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(notice.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.danger)
+            Text(notice.body)
+                .font(.subheadline)
+                .foregroundStyle(Palette.ink)
+            if let proposal = notice.proposal {
+                confirmation(proposal)
+            } else {
+                choices
+            }
+            if let error = notice.error {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.danger)
+            }
+        }
+        .padding(.vertical, 4)
+        .buttonStyle(.borderless)
+    }
+
+    @ViewBuilder
+    private var choices: some View {
+        if let keep = notice.keepLabel {
+            Button(keep) {
+                Task { _ = await model.proposePersonalVault(nil) }
+            }
+            .font(.subheadline.weight(.semibold))
+            .disabled(model.state.busy)
+        }
+        if let detail = notice.servedDetail {
+            Text(detail)
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+        }
+        if let use = notice.useServedLabel {
+            Button(use) {
+                _ = model.usePersonalVaultServed()
+            }
+            .font(.subheadline.weight(.semibold))
+            .disabled(model.state.busy)
+        } else if notice.lookupFailed {
+            Text("Couldn't check who else holds it, so using it isn't offered yet.")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+            Button("Try again") {
+                Task { _ = await model.retryPersonalVaultDetails() }
+            }
+            .font(.subheadline)
+        }
+        ForEach(notice.choices, id: \.vaultId) { choice in
+            option(choice)
+        }
+        if !notice.otherChoices.isEmpty {
+            Text("To use another vault instead, choose it here (it asks for your master password).")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+            ForEach(notice.otherChoices, id: \.vaultId) { choice in
+                option(choice)
+            }
+        }
+    }
+
+    private func option(_ choice: PersonalChoiceView) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button(choice.label) {
+                Task { _ = await model.proposePersonalVault(choice.vaultId) }
+            }
+            .font(.subheadline.weight(.semibold))
+            .disabled(model.state.busy)
+            if !choice.detail.isEmpty {
+                Text(choice.detail)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkFaint)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func confirmation(_ proposal: PersonalProposalView) -> some View {
+        Text(proposal.title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Palette.ink)
+        ForEach(proposal.lines, id: \.self) { line in
+            Text(line)
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+        }
+        if let warning = proposal.warning {
+            Text(warning)
+                .font(.footnote)
+                .foregroundStyle(Palette.danger)
+        }
+        if proposal.needsPassword {
+            SecureField("Master password (required)", text: $password)
+                .textContentType(.password)
+                .font(.subheadline)
+        }
+        HStack(spacing: 16) {
+            Button(proposal.confirmLabel) {
+                let typed = password
+                password = ""
+                Task { _ = await model.confirmPersonalVault(password: proposal.needsPassword ? typed : nil) }
+            }
+            .font(.subheadline.weight(.semibold))
+            .disabled(model.state.busy || (proposal.needsPassword && password.isEmpty))
+            Button("Cancel") {
+                password = ""
+                model.cancelPersonalVaultProposal()
+            }
+            .font(.subheadline)
+        }
     }
 }

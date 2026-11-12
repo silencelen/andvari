@@ -270,6 +270,30 @@ final class AppModel: ObservableObject {
         await run { try await $0.deleteItem(itemId: itemId) }
     }
 
+    // MARK: - Personal vault
+
+    func retryPersonalVaultDetails() async -> Outcome {
+        await run { try await $0.retryPersonalVaultDetails() }
+    }
+
+    /// "Use <the vault the server names>": offered only after who else holds it was loaded.
+    func usePersonalVaultServed() -> Outcome {
+        Outcome(controller.usePersonalVaultServed())
+    }
+
+    /// Propose a vault from the notice's choices, or with nil the one to keep; raises the confirmation.
+    func proposePersonalVault(_ vaultId: String?) async -> Outcome {
+        await run { try await $0.proposePersonalVault(vaultId: vaultId) }
+    }
+
+    func cancelPersonalVaultProposal() {
+        controller.cancelPersonalVaultProposal()
+    }
+
+    func confirmPersonalVault(password: String?) async -> Outcome {
+        await run { try await $0.confirmPersonalVault(password: password) }
+    }
+
     // MARK: - Logins captured by the extensions
 
     /// The captured password, for the person to check before saving it.
