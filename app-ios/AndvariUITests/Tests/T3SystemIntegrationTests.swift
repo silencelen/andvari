@@ -314,6 +314,7 @@ final class T3SystemIntegrationTests: UITestCase {
             dismissSavedList()
         }
         step("three-saves-from-safari") {
+            SystemState.queueLog.removeAll()
             XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.siteUser, password: "Changed-Passw0rd-A", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to update \(Fixture.siteUser)'s password in andvari")
             XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.secondUser, password: "Changed-Passw0rd-B", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to update \(Fixture.secondUser)'s password in andvari")
             XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: newUser, password: "New-Passw0rd-C", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to save \(newUser)'s login to andvari")
@@ -326,7 +327,7 @@ final class T3SystemIntegrationTests: UITestCase {
             reachVaultAnyWay()
             if !waitUntil(15, { three.exists }) {
                 dumpTree(app, as: "not-three-saved")
-                XCTFail("the app did not list three logins saved from AutoFill: \(saveListsSummary())")
+                XCTFail("the app did not list three logins saved from AutoFill: \(saveListsSummary()). The save queue: \(SystemState.queueLog.suffix(3).joined(separator: "; "))")
             }
             let changed = app.cells.containing(NSPredicate(format: "label == %@", Fixture.secondUser)).firstMatch
             XCTAssertTrue(changed.staticTexts["New password for \(Fixture.secondItem). The old one is in its history."].exists, "the row of the changed login does not say what happened")

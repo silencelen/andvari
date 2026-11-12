@@ -358,7 +358,29 @@ extension UITestCase {
         shot("save-offer")
         if save.exists { save.tap() } else { update.tap() }
         Thread.sleep(forTimeInterval: 4)
+        // What the extension left in the App Group's save queue, for a reader of a failure about lost saves.
+        let files = saveQueueFiles()
+        SystemState.queueLog.append("after \(user): \(files.joined(separator: ", "))")
+        XCTContext.runActivity(named: "save queue after \(user): \(files.joined(separator: ", "))") { _ in }
         return true
+    }
+
+    /// The entry files of the App Group's save queue (`saves/q-<id>.json`), read from the simulator's disk: the runner
+    /// is a simulator process and the containers are plain directories there. Diagnostics only; nothing is changed.
+    func saveQueueFiles() -> [String] {
+        let fm = FileManager.default
+        // The runner's home is <device>/data/Containers/Data/Application/<id>; the groups are in …/Containers/Shared/AppGroup.
+        let containers = URL(fileURLWithPath: NSHomeDirectory()).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let groups = containers.appendingPathComponent("Shared/AppGroup", isDirectory: true)
+        guard let dirs = try? fm.contentsOfDirectory(at: groups, includingPropertiesForKeys: nil) else { return ["(no App Group directory at \(groups.path))"] }
+        for dir in dirs {
+            let meta = NSDictionary(contentsOf: dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist"))
+            guard (meta?["MCMMetadataIdentifier"] as? String) == "group.com.silencelen.andvari" else { continue }
+            let saves = dir.appendingPathComponent("saves", isDirectory: true)
+            let names = (try? fm.contentsOfDirectory(atPath: saves.path)) ?? []
+            return names.filter { $0.hasPrefix("q-") }.sorted()
+        }
+        return ["(the App Group's container was not found)"]
     }
 
     // MARK: - The Safari extension's popup
@@ -602,6 +624,8 @@ extension UITestCase {
 
 /// What earlier tests of this run already set up.
 enum SystemState {
+    /// The save queue's files after each capture in this run (saveQueueFiles).
+    static var queueLog: [String] = []
     static var providerEnabled = false
     static var extensionEnabled = false
 }
