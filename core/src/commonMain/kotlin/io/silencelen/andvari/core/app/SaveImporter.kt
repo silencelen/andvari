@@ -94,6 +94,11 @@ internal class SaveImporter(
         /** A replace put the old password in the history (false: there was none to keep). */
         val keptOld: Boolean,
         val appliedAtMs: Long,
+        /**
+         * Stored BEFORE the vault is written, and cleared once the write is known to have happened. A record that is
+         * still an intent at the next unlock is settled by looking at the vault ([settleLocked]); it is never listed.
+         */
+        val intent: Boolean = false,
     )
 
     // ---- what a capture is ----
@@ -169,7 +174,7 @@ internal class SaveImporter(
         val published = queue.publication()
         if (published == null || !published.contentEquals(publication)) queue.publish(publication)
         loadApplied(live)
-        if (apply) repairLocked(live, stillLive)
+        settleLocked(live)
 
         val now = clocks.wallMs()
         val vault = logins(live)
@@ -192,7 +197,7 @@ internal class SaveImporter(
         val before = HashMap(pending)
         pending.clear()
         for ((id, login) in opened) {
-            val superseded = login.capturedAtMs < (newest[key(login)] ?: 0L) || applied.values.any { it.site == login.site && it.username == login.username && it.appliedAtMs >= login.capturedAtMs }
+            val superseded = login.capturedAtMs < (newest[key(login)] ?: 0L) || applied.values.any { !it.intent && it.site == login.site && it.username == login.username && it.appliedAtMs >= login.capturedAtMs }
             val already = vault.any { sameLogin(it, login) && it.doc.login?.password == login.password }
             if (superseded || already) {
                 queue.remove(id)
@@ -252,84 +257,89 @@ internal class SaveImporter(
                 p.reason = HouseholdCopy.forError(t)
                 continue
             }
-            if (!stillLive()) return
-            queue.remove(id)
-            pending.remove(id)
-            applied[id] = record
+            if (!stillLive()) return // the stored intent is settled at the next unlock
+            finish(live, id, record)
             appliedThisRun++
             wroteAny = true
             if (record.replacedName != null) replacedThisUnlock += record.itemId
         }
-        if (wroteAny) {
-            storeApplied(live)
-            wrote()
-        }
+        if (wroteAny) wrote()
+    }
+
+    /** The write happened: the entry leaves the queue and the record is listed. */
+    private fun finish(live: VaultSession.Unlocked, id: String, record: AppliedRecord) {
+        queue.remove(id)
+        pending.remove(id)
+        applied[id] = record.copy(intent = false)
+        storeApplied(live)
     }
 
     /**
-     * A listed save whose login is not in the vault is put right: reported on a device as "it saves, but the login
-     * is not in the vault and cannot be found". For a login a save ADDED, when the vault has never seen its id (no row,
-     * no tombstone, nothing queued) and holds no login with these credentials, the login is added again from the
-     * sealed record, under a new id, and the record follows it. A login the vault did see and no longer shows was
-     * removed on purpose (here or on another device) and is left alone; its record is dropped from the list.
+     * Bring the stored list in line with the vault. Nothing is ever written to the vault from a record: a login this
+     * device no longer shows was removed (here, on another device, or from the web's trash), and the cache keeps no
+     * trace of a removed login, so "missing" can never be told from "deleted" and is always taken as deleted.
+     *  - A record whose login is gone is dropped: there is nothing left to undo.
+     *  - An intent (stored before a write that a lock or a crash cut short) becomes a listed record when the vault
+     *    shows the write happened, and its queue entry goes. Otherwise it is dropped and the entry, still in the
+     *    queue, is judged again like any other.
      */
-    private suspend fun repairLocked(live: VaultSession.Unlocked, stillLive: () -> Boolean) {
-        if (live.account.personalStatus != Account.PersonalStatus.CONFIRMED) return
+    private fun settleLocked(live: VaultSession.Unlocked) {
         var changed = false
         for ((id, record) in applied.toList()) {
-            if (!stillLive()) return
-            if (live.engine.item(record.itemId) != null) continue
-            val known = live.engine.envelopes().any { it.itemId == record.itemId } || record.itemId in live.engine.pendingSyncItemIds()
-            if (record.replacedName != null || known) {
-                applied.remove(id)
-                changed = true
-                continue
-            }
-            val host = UriMatch.normalizeHost(record.site) ?: continue
-            val captured = CapturedLogin(origin = "", userId = "", site = record.site, username = record.username, password = record.password, capturedAtMs = record.appliedAtMs, source = "repair")
-            if (logins(live).any { sameLogin(it, captured) && it.doc.login?.password == record.password }) {
-                applied.remove(id) // the login is there under another id: nothing to add, nothing left to undo by this record
-                changed = true
-                continue
-            }
-            try {
-                applied[id] = write(live, id, Pending(captured, null)).copy(appliedAtMs = record.appliedAtMs)
-                changed = true
-            } catch (c: CancellationException) {
-                throw c
-            } catch (_: Throwable) {
-                // Not now (offline on a cache that cannot queue): the next unlock tries again.
+            val item = live.engine.item(record.itemId)
+            when {
+                record.intent && item != null && (record.replacedName == null || item.doc.login?.password == record.password) -> {
+                    queue.remove(id)
+                    applied[id] = record.copy(intent = false)
+                    changed = true
+                }
+                record.intent || item == null -> {
+                    applied.remove(id)
+                    changed = true
+                }
             }
         }
-        if (changed && stillLive()) {
-            storeApplied(live)
-            wrote()
-        }
+        if (changed) storeApplied(live)
     }
 
-    /** Write one capture to the vault: the target's new password, or a new login under an id minted here. */
+    /**
+     * Write one capture to the vault: the target's new password, or a new login under an id minted here. The record
+     * is stored as an intent first, so a lock between the write and the bookkeeping cannot leave a write nothing lists.
+     * A write that fails takes its intent with it.
+     */
     private suspend fun write(live: VaultSession.Unlocked, id: String, p: Pending): AppliedRecord {
         val captured = p.login
         val host = UriMatch.normalizeHost(captured.site) ?: error("not a site")
         val now = clocks.wallMs()
         val target = p.target
-        if (target == null) {
-            val address = (if (schemeOf(captured.site) == Scheme.HTTP) "http://" else "https://") + host + (portOf(captured.site)?.let { ":$it" } ?: "")
-            val doc = ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
-            // The id is minted here, so the undo names exactly the login this save added.
-            val itemId = Bytes.uuidV4FromBytes(crypto().randomBytes(16))
-            lastOutcome = live.engine.saveWithUploads(null, doc, emptyList(), null, null, itemId)
-            // Never "saved" on the save's word alone: the login must be in the vault the list is drawn from.
-            check(live.engine.item(itemId) != null) { "the vault did not keep the new login" }
-            return AppliedRecord(id, captured.site, captured.username, itemId, null, captured.password, false, now)
+        val old = target?.doc?.login.orEmpty().password.orEmpty()
+        val keep = target != null && old.isNotEmpty() && old != captured.password
+        // The id of a new login is minted here, so the undo names exactly the login this save added.
+        val itemId = target?.itemId ?: Bytes.uuidV4FromBytes(crypto().randomBytes(16))
+        val record = AppliedRecord(id, captured.site, captured.username, itemId, target?.doc?.name, captured.password, keep, now, intent = true)
+        applied[id] = record
+        storeApplied(live)
+        try {
+            if (target == null) {
+                val address = (if (schemeOf(captured.site) == Scheme.HTTP) "http://" else "https://") + host + (portOf(captured.site)?.let { ":$it" } ?: "")
+                val doc = ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
+                lastOutcome = live.engine.saveWithUploads(null, doc, emptyList(), null, null, itemId)
+                // Never "saved" on the save's word alone: the login must be in the vault the list is drawn from.
+                check(live.engine.item(itemId) != null) { "the vault did not keep the new login" }
+            } else {
+                val login = target.doc.login.orEmpty()
+                // The history keeps each earlier password once, newest last, and no more than HISTORY_MAX of them.
+                val history = if (keep) (login.passwordHistory.filter { it.password != old } + PasswordHistoryEntry(old, now)).takeLast(HISTORY_MAX) else login.passwordHistory
+                lastOutcome = live.engine.save(target.itemId, target.doc.copy(login = login.copy(password = captured.password, passwordHistory = history)), target.vaultId)
+            }
+        } catch (c: CancellationException) {
+            throw c // the intent stays stored: the next unlock looks at the vault and settles it
+        } catch (t: Throwable) {
+            applied.remove(id)
+            storeApplied(live)
+            throw t
         }
-        val login = target.doc.login.orEmpty()
-        val old = login.password.orEmpty()
-        val keep = old.isNotEmpty() && old != captured.password
-        // The history keeps each earlier password once, newest last, and no more than HISTORY_MAX of them.
-        val history = if (keep) (login.passwordHistory.filter { it.password != old } + PasswordHistoryEntry(old, now)).takeLast(HISTORY_MAX) else login.passwordHistory
-        lastOutcome = live.engine.save(target.itemId, target.doc.copy(login = login.copy(password = captured.password, passwordHistory = history)), target.vaultId)
-        return AppliedRecord(id, captured.site, captured.username, target.itemId, target.doc.name, captured.password, keep, now)
+        return record
     }
 
     // ---- by hand ----
@@ -357,10 +367,7 @@ internal class SaveImporter(
         if (UriMatch.normalizeHost(p.login.site) == null) return@withLock ImportResult.Failed(NOT_A_SITE)
         val record = write(live, id, p)
         if (!stillLive()) return@withLock ImportResult.Gone
-        queue.remove(id)
-        pending.remove(id)
-        applied[id] = record
-        storeApplied(live)
+        finish(live, id, record)
         wrote()
         publish(pendingViews(), appliedViews(), false)
         ImportResult.Done(queuedOffline = lastOutcome == SaveOutcome.QUEUED)
@@ -502,7 +509,7 @@ internal class SaveImporter(
     /** The vault each listed save's login is in now, by name (set whenever the list is published while unlocked). */
     private var vaultNames: (itemId: String) -> String? = { null }
 
-    private fun appliedViews(): List<AppliedSaveView> = applied.values.map {
+    private fun appliedViews(): List<AppliedSaveView> = applied.values.filterNot { it.intent }.map {
         AppliedSaveView(it.id, hostOf(it.site), it.username, it.replacedName, schemeOf(it.site) == Scheme.HTTP, it.appliedAtMs, vaultNames(it.itemId))
     }
 
