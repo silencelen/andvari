@@ -261,6 +261,17 @@ extension UITestCase {
         }
     }
 
+    /// The widest element of the popup that carries [name]: the row itself, not the words in it.
+    func popupRowBox(_ name: String) -> XCUIElement {
+        let matches = safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", name))
+        var widest = matches.firstMatch
+        for index in 0..<min(matches.count, 8) {
+            let candidate = matches.element(boundBy: index)
+            if candidate.frame.width > widest.frame.width { widest = candidate }
+        }
+        return widest
+    }
+
     /// A row of the popup's lists: its text is the login's or card's name.
     func popupRow(_ name: String) -> XCUIElement {
         safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
