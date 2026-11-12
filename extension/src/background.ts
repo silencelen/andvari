@@ -57,7 +57,7 @@ import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
-import { captureBinding, requestHost } from "./senderorigin";
+import { captureBinding, derivedPageOrigin, requestHost, type OriginSource } from "./senderorigin";
 import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
@@ -1098,11 +1098,30 @@ atLoad("runtime.onMessage", () => chrome.runtime.onMessage.addListener((msg: Req
     sendResponse(senderMaySend("serverDiag", sender, EXTENSION_BASE) ? serverDiag() : null);
     return false;
   }
-  handle(msg, sender)
+  handle(msg, withPageOrigin(sender))
     .then(sendResponse)
     .catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
   return true; // keep the channel open for the async response
 }));
+
+/** Safari: how often each source gave a page's origin, and the last message that needed one (the popup's Details). */
+const pageOriginSeen: Record<OriginSource, number> = { origin: 0, url: 0, tab: 0, none: 0 };
+let pageOriginLast: string | null = null;
+
+/**
+ * Safari (L8): a tab sender with no browser-set `origin` gets its top frame's origin from the browser-set URL
+ * (senderorigin.ts, derivedPageOrigin, has the rules). Every handler then makes its usual checks of `sender.origin`.
+ * Other builds, and the extension's own pages (no tab), are passed through untouched.
+ */
+function withPageOrigin(sender: chrome.runtime.MessageSender): chrome.runtime.MessageSender {
+  if (BUILD_TARGET !== "safari" || sender.tab === undefined) return sender;
+  const d = derivedPageOrigin(sender);
+  pageOriginSeen[d.source]++;
+  pageOriginLast = d.source;
+  if (d.source === "origin" || d.origin === null) return sender;
+  // A copy of the fields the handlers read, named one by one: an engine's sender may keep them as getters.
+  return { id: sender.id, tab: sender.tab, frameId: sender.frameId, url: sender.url, origin: d.origin };
+}
 
 atLoad("alarms.onAlarm", () => chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "autolock") void doLock("idle");
@@ -1301,6 +1320,7 @@ function serverDiag(): ServerDiag {
   return {
     stage: startStage, migration: startMigration, block: dialBlock?.kind ?? null, store: trustedStoreOk, url: serverUrl, ...appServerDiag,
     vaultOpen: APP_VAULT?.diag.open ?? null, vaultSecret: APP_VAULT?.diag.secret ?? null,
+    pageOrigin: pageOriginLast === null ? null : `last from ${pageOriginLast} (origin ${pageOriginSeen.origin}, frame url ${pageOriginSeen.url}, tab url ${pageOriginSeen.tab}, none ${pageOriginSeen.none})`,
   };
 }
 
@@ -4368,7 +4388,6 @@ async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<
  *  PRIMARY path, not a fallback. Resolution is the only signal either engine gives — claim nothing
  *  more from it. */
 async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForCards">> {
-  pageSummonedPopupAt = Date.now();
   const tabId = sender.tab?.id;
   if (tabId === undefined || sender.tab?.active !== true) return { opened: false }; // [S9] pages only, and only the active one
   // Review #6: frame-0 only, matching the offer gate's strict [S1]. Unreachable today (the chip
@@ -4378,6 +4397,8 @@ async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<
   // …and that active tab must be the FOCUSED window's — the exact tab openPopup would land on.
   const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (current?.id === undefined || current.id !== tabId) return { opened: false };
+  // Marked only for a request that passed every check above: a hidden tab or a sub-frame cannot mark it.
+  pageSummonedPopupAt = Date.now();
   const fn = (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup;
   if (typeof fn !== "function") return { opened: false }; // absent → honest false
   try {
@@ -4402,7 +4423,6 @@ async function openPopupForCards(sender: chrome.runtime.MessageSender): Promise<
  *  computes its offers against the ACTIVE tab and would see itself — the [C4] pin's ban covers
  *  this function too, its span deliberately swallows us). */
 async function openPopupForSave(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForSave">> {
-  pageSummonedPopupAt = Date.now();
   const tabId = sender.tab?.id;
   if (tabId === undefined || sender.tab?.active !== true) return { opened: false }; // pages only, and only the active one
   const pending = tabs.get(tabId)?.pending;
@@ -4410,6 +4430,8 @@ async function openPopupForSave(sender: chrome.runtime.MessageSender): Promise<R
   if (sender.frameId !== pending.frameId && sender.frameId !== 0) return { opened: false };
   const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (current?.id === undefined || current.id !== tabId) return { opened: false };
+  // Marked only for a request that passed every check above: a hidden tab or a sub-frame cannot mark it.
+  pageSummonedPopupAt = Date.now();
   const fn = (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup;
   if (typeof fn !== "function") return { opened: false }; // absent → honest false
   try {
@@ -4433,11 +4455,12 @@ let pageSummonedPopupAt = 0;
 const PAGE_SUMMON_WINDOW_MS = 10_000;
 
 async function openPopupForSearch(sender: chrome.runtime.MessageSender): Promise<Res<"openPopupForSearch">> {
-  pageSummonedPopupAt = Date.now();
   const tabId = sender.tab?.id;
   if (tabId === undefined || sender.tab?.active !== true || sender.frameId !== 0) return { opened: false };
   const [current] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (current?.id === undefined || current.id !== tabId) return { opened: false };
+  // Marked only for a request that passed every check above: a hidden tab or a sub-frame cannot mark it.
+  pageSummonedPopupAt = Date.now();
   const fn = (chrome.action as unknown as { openPopup?: () => Promise<unknown> }).openPopup;
   if (typeof fn !== "function") return { opened: false }; // absent → honest false
   try {

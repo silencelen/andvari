@@ -1683,6 +1683,7 @@ async function fillServerDetails(body: HTMLElement, serverInfoSilent: boolean): 
       `Adoption: ${d.adopt ?? "–"}`,
       `Handler at unlock: ${d.vaultOpen ?? "–"}`,
       `Handler at last fill or copy: ${d.vaultSecret ?? "–"}`,
+      `Page origin: ${d.pageOrigin ?? "no page has asked yet"}`,
     );
   }
   show();

@@ -9,7 +9,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { captureBinding, originHost, requestHost } from "./senderorigin.ts";
+import { captureBinding, derivedPageOrigin, originHost, requestHost, webOriginOfUrl } from "./senderorigin.ts";
 
 test("a capture is bound to sender.origin — a spoofed page URL cannot name the site", () => {
   // The frame is really evil.example; its content script would have reported https://bank.example/login.
@@ -64,3 +64,39 @@ test("matches and pageInfo match the sender's origin host, not the frame's claim
   assert.ok(p.includes("requestHost(sender.tab !== undefined, sender.origin, msg.host)"), "pageInfo binds to sender.origin");
   assert.ok(!/matchesFor\(msg\.host\)/.test(bg), "no handler matches on a page-supplied host");
 });
+
+// ---- L8: an engine that sets no sender.origin (Safari does not promise one) ----
+
+test("an origin the engine set is believed, the opaque one included: the URL is never consulted then", () => {
+  assert.deepEqual(derivedPageOrigin({ origin: "https://shop.example", url: "https://other.example/", frameId: 0 }), { origin: "https://shop.example", source: "origin" });
+  // A sandboxed frame: opaque origin, real-looking URL. Never credited as the URL's site.
+  assert.deepEqual(derivedPageOrigin({ origin: "null", url: "https://bank.example/upload.html", frameId: 0 }), { origin: "null", source: "origin" });
+  assert.deepEqual(derivedPageOrigin({ origin: 42, url: "https://bank.example/", frameId: 0 }), { origin: null, source: "origin" });
+});
+
+test("with no origin at all, the top frame's origin comes from its own URL, then the tab's", () => {
+  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/checkout?x=1#y", frameId: 0, tab: { url: "https://elsewhere.example/" } }), { origin: "https://shop.example", source: "url" });
+  assert.deepEqual(derivedPageOrigin({ frameId: 0, tab: { url: "https://shop.example:8443/pay" } }), { origin: "https://shop.example:8443", source: "tab" });
+  assert.deepEqual(derivedPageOrigin({ url: "http://localhost:8080/login", frameId: 0 }), { origin: "http://localhost:8080", source: "url" });
+});
+
+test("a sub-frame, an unknown frame, or a page that is not a web page gets no origin from a URL", () => {
+  assert.deepEqual(derivedPageOrigin({ url: "https://js.psp.example/field", frameId: 3, tab: { url: "https://shop.example/" } }), { origin: null, source: "none" });
+  assert.deepEqual(derivedPageOrigin({ url: "https://shop.example/", tab: { url: "https://shop.example/" } }), { origin: null, source: "none" }, "frameId undefined is not the top frame here");
+  for (const url of ["about:blank", "about:srcdoc", "blob:https://shop.example/1-2", "data:text/html,x", "safari-web-extension://x/popup.html", "not a url"]) {
+    assert.deepEqual(derivedPageOrigin({ url, frameId: 0, tab: { url: "https://shop.example/" } }), { origin: null, source: "none" }, url);
+  }
+  assert.deepEqual(derivedPageOrigin({ frameId: 0 }), { origin: null, source: "none" });
+  assert.deepEqual(derivedPageOrigin({ frameId: 0, tab: {} }), { origin: null, source: "none" });
+  assert.equal(webOriginOfUrl("ftp://shop.example/"), null);
+  assert.equal(webOriginOfUrl(undefined), null);
+});
+
+test("the Safari build reads every tab sender through the derivation, at the one message entry point", () => {
+  const entry = bg.slice(bg.indexOf('atLoad("runtime.onMessage"'), bg.indexOf('atLoad("alarms.onAlarm"'));
+  assert.match(entry, /handle\(msg, withPageOrigin\(sender\)\)/);
+  const fn = bg.slice(bg.indexOf("function withPageOrigin("), bg.indexOf("function withPageOrigin(") + 1400);
+  assert.match(fn, /if \(BUILD_TARGET !== "safari" \|\| sender\.tab === undefined\) return sender;/, "other builds and the extension's own pages are untouched");
+  assert.match(fn, /derivedPageOrigin\(sender\)/);
+});
+

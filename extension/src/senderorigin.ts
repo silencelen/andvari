@@ -33,3 +33,43 @@ export function captureBinding(origin: unknown): { host: string; uri: string } |
   if (host === null) return null;
   return { host, uri: capturedSiteUri(origin as string, host) };
 }
+
+/** Where a tab sender's origin was read: the browser's own `origin`, the frame's `url`, the tab's `url`, or nowhere. */
+export type OriginSource = "origin" | "url" | "tab" | "none";
+
+/** The origin of an http(s) URL, or null for any other scheme (about:, blob:, data:, an extension page) or a non-URL. */
+export function webOriginOfUrl(u: unknown): string | null {
+  if (typeof u !== "string") return null;
+  try {
+    const url = new URL(u);
+    return (url.protocol === "https:" || url.protocol === "http:") && url.hostname !== "" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Safari on iOS (L8): Safari does not promise `sender.origin`. When an engine sets none at all, every origin check here
+ * would fail closed and card fill would silently never work there. This reads the TOP frame's origin from the
+ * browser-set URL of the frame, or of the tab when the frame's is absent; every handler then applies its usual checks
+ * to it. Rules, each fail-closed:
+ *  - an engine that sets an origin is believed, the opaque "null" of a sandboxed frame included: its URL is then never
+ *    consulted (root cause E: a sandboxed frame keeps a real URL host);
+ *  - only the top frame (`frameId` exactly 0): a sub-frame's URL fallback could not be told from a sandboxed frame's,
+ *    and the tab's URL is the top document's, not the frame's;
+ *  - only http(s); a frame URL that is present but not a web page is not replaced by the tab's (mid-navigation the
+ *    tab's may already name the next document).
+ * The remaining trade-off: on such an engine, a top document the site itself serves sandboxed (a CSP `sandbox`
+ * response) is taken as its site. It is said in the popup's Details which source was used.
+ */
+export function derivedPageOrigin(sender: { origin?: unknown; url?: unknown; frameId?: unknown; tab?: { url?: unknown } }): { origin: string | null; source: OriginSource } {
+  if (sender.origin !== undefined) return { origin: typeof sender.origin === "string" ? sender.origin : null, source: "origin" };
+  if (sender.frameId !== 0) return { origin: null, source: "none" };
+  if (sender.url !== undefined) {
+    const fromUrl = webOriginOfUrl(sender.url);
+    return fromUrl !== null ? { origin: fromUrl, source: "url" } : { origin: null, source: "none" };
+  }
+  const fromTab = webOriginOfUrl(sender.tab?.url);
+  return fromTab !== null ? { origin: fromTab, source: "tab" } : { origin: null, source: "none" };
+}
+
