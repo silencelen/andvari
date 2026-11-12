@@ -169,7 +169,7 @@ final class T1AppFlowTests: UITestCase {
             app.buttons["Save"].tap()
             if !waitUntil(15, { self.vaultRow("Added Here").exists }) {
                 dumpTree(app, as: "new-login-not-saved")
-                let said = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'vault' OR label CONTAINS[c] 'wrong' OR label CONTAINS[c] 'try again'")).firstMatch
+                let said = app.staticTexts.matching(NSPredicate(format: "(label CONTAINS[c] 'vault' AND label != 'Vault') OR label CONTAINS[c] 'wrong' OR label CONTAINS[c] 'try again'")).firstMatch
                 XCTFail("the new login was not saved; the editor says: \(said.exists ? said.label : "nothing the test recognises")")
             }
         }

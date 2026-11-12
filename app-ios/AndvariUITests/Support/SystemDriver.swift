@@ -166,8 +166,18 @@ extension UITestCase {
     /// Safari's own offer for a field it recognises: a sheet naming the site, the login and the provider.
     var fillOfferButton: XCUIElement { safari.buttons["FillPasswordButton"] }
 
+    /// Safari's first-run tips are popovers that take every tap until they are closed.
+    func closeSafariTips() {
+        let tip = safari.buttons["xmark.circle.fill"]
+        if tip.exists && tip.isHittable {
+            tip.tap()
+            Thread.sleep(forTimeInterval: 1)
+        }
+    }
+
     /// Close Safari's offer sheet, leaving the keyboard and its AutoFill keys.
     func closeFillOffer() {
+        closeSafariTips()
         let close = safari.buttons["xmark"]
         if close.exists {
             close.tap()
@@ -229,11 +239,17 @@ extension UITestCase {
     /// only, with neither a keyboard nor an offer.
     func focus(_ field: XCUIElement, heading: String) {
         field.tap()
-        if waitUntil(4, { self.fieldHasInput }) { return }
+        if waitUntil(4, { self.fieldHasInput }) {
+            Thread.sleep(forTimeInterval: 1.5)
+            closeSafariTips()
+            return
+        }
         safari.webViews.staticTexts[heading].firstMatch.tap()
         Thread.sleep(forTimeInterval: 1)
         field.tap()
         _ = waitUntil(5) { self.fieldHasInput }
+        Thread.sleep(forTimeInterval: 1.5)
+        closeSafariTips()
     }
 
     /// The codes RFC 6238 gives for the seeded secret around now (one step either side).

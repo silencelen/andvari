@@ -54,6 +54,7 @@ final class T3SystemIntegrationTests: UITestCase {
             XCTAssertTrue(text.contains(Fixture.siteHost) && text.contains(Fixture.siteUser) && text.contains("andvari"), "the offer reads: \(text)")
         }
         step("fill-tapped") {
+            closeSafariTips()
             fillOfferButton.tap()
             Thread.sleep(forTimeInterval: 1.5)
             dumpEverything("fill-tapped")
@@ -234,7 +235,7 @@ final class T3SystemIntegrationTests: UITestCase {
             // The design saves a new login by itself and lists it under "Saved … from AutoFill". When the app holds it
             // back instead, the row says why; that sentence is the failure.
             if !saved.exists {
-                let reason = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'vault' OR label CONTAINS[c] 'offline' OR label CONTAINS[c] 'changed'")).firstMatch
+                let reason = app.staticTexts.matching(NSPredicate(format: "(label CONTAINS[c] 'vault' AND label != 'Vault') OR label CONTAINS[c] 'offline' OR label CONTAINS[c] 'changed'")).firstMatch
                 XCTFail("the login reached the app but was not saved by itself; it is listed under \"Logins not saved yet\" with: \(reason.exists ? reason.label : "no reason shown")")
             }
         }
@@ -326,10 +327,12 @@ final class T3SystemIntegrationTests: UITestCase {
         }
         step("page-menu") {
             let menu = safari.buttons["PageFormatMenuButton"]
-            if !waitUntil(10, { menu.exists && menu.isHittable }) {
+            if !waitUntil(5, { menu.exists && menu.isHittable }) {
                 // A keyboard hides the toolbar.
-                safari.webViews.staticTexts["Sign in"].firstMatch.tap()
                 closeFillOffer()
+                if safari.buttons["Done"].exists {
+                    safari.buttons["Done"].tap()
+                }
             }
             if !waitUntil(10, { menu.exists && menu.isHittable }) {
                 dumpTree(safari, as: "no-page-menu")
