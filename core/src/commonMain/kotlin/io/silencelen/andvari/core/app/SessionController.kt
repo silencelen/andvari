@@ -1064,6 +1064,91 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- two-step sign-in (spec 03 §2: a TOTP factor the server checks at sign-in) ----
+
+    /** The key being set up, held only while the two-step screen is open; it never enters the state. */
+    private var twoStepPending: TwoStepSetup? = null
+
+    /** Read whether two-step sign-in is on ([AppState.twoStep]). */
+    @Throws(CancellationException::class)
+    suspend fun loadTwoStep(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val status = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.totpStatus() }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, HouseholdCopy::forTotpError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = twoStepPending != null)) }
+        ActionResult.Ok
+    }
+
+    /**
+     * Start setting up two-step sign-in. The master password is the proof the server asks for (one key derivation,
+     * off the main thread); the new key is held here ([twoStepSetup]) until a code from it confirms it.
+     */
+    @Throws(CancellationException::class)
+    suspend fun beginTwoStep(password: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (password.isEmpty()) return@action ActionResult.NotDone(null)
+        busy()
+        val setup = try {
+            runBounded(BoundedOps.FLAT_MS) { withContext(Dispatchers.Default) { live.api.totpSetupWithPassword(password, live.account) } }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, HouseholdCopy::forTotpError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        twoStepPending = TwoStepSetup(setup.secretBase32, setup.otpauthUri)
+        update { it.copy(busy = false, twoStep = TwoStepView(enrolled = it.twoStep?.enrolled ?: false, settingUp = true)) }
+        ActionResult.Ok
+    }
+
+    /** The key being set up, to show once (as a QR code and as text); null when none is. */
+    fun twoStepSetup(): TwoStepSetup? = twoStepPending
+
+    /** Confirm the key being set up with a code it shows now: two-step sign-in is on from here. */
+    @Throws(CancellationException::class)
+    suspend fun confirmTwoStep(code: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (twoStepPending == null) return@action ActionResult.NotDone(null)
+        busy()
+        val status = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.totpConfirm(code.trim()) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, HouseholdCopy::forTotpError) // the key stays up for another try
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        twoStepPending = null
+        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = false), notice = if (status.enrolled) ItemCopy.TWO_STEP_ON else it.notice) }
+        ActionResult.Ok
+    }
+
+    /** Turn two-step sign-in off, with a current code from the authenticator. */
+    @Throws(CancellationException::class)
+    suspend fun disableTwoStep(code: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val status = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.totpDisable(code.trim()) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, HouseholdCopy::forTotpError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = false), notice = if (!status.enrolled) ItemCopy.TWO_STEP_OFF else it.notice) }
+        ActionResult.Ok
+    }
+
+    /** The two-step screen closed: a key not yet confirmed is forgotten here (the server drops it unconfirmed). */
+    fun closeTwoStep() {
+        twoStepPending = null
+        update { it.copy(twoStep = null) }
+    }
+
     // ---- lifecycle notices (spec 03 §11) ----
 
     /** What the last syncs said about shared vaults, as the vault screen shows it. */
@@ -1752,6 +1837,7 @@ open class SessionController(
         trashRead = emptyMap()
         historyRead = null
         moveGestures.clear()
+        twoStepPending = null
     }
 
     private fun lock(reason: String?) {
@@ -1827,7 +1913,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), trash = null, history = null,
+        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), twoStep = null, trash = null, history = null,
     )
 
     private companion object {
@@ -1903,6 +1989,8 @@ internal object ItemCopy {
     const val HISTORY_GONE = "That version is no longer listed. Open the history again."
     const val VERSION_RESTORED = "Restored that version. The one it replaced is in the history."
     const val VAULT_NOT_WRITABLE = "You can't add items to that vault."
+    const val TWO_STEP_ON = "Two-step sign-in is on: a code from your authenticator is asked for at every sign-in."
+    const val TWO_STEP_OFF = "Two-step sign-in is off."
     const val MOVE_DENIED = "You don't have permission to add items to that vault, so nothing was moved."
     const val MOVE_CHANGED = "This item changed while it was being moved. Review it and try again."
     const val MOVE_RETRY = "That didn't finish. Try again: it won't make a duplicate."

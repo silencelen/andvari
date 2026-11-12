@@ -24,6 +24,11 @@ struct SettingsView: View {
                             .font(.footnote.monospaced())
                             .multilineTextAlignment(.trailing)
                     }
+                    NavigationLink {
+                        TwoStepView()
+                    } label: {
+                        Text("Two-step sign-in")
+                    }
                 }
                 .listRowBackground(Palette.raised)
 
