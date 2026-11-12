@@ -46,3 +46,14 @@ test("the Safari build ships no Options, connector or offscreen page, and its wo
   assert.match(lane, /case "setServerUrl":[\s\S]*?return \{ ok: false, code: "not_allowed" \} satisfies Res<"setServerUrl">;/);
   assert.match(lane, /case "forgetLegacyServer":\s*return \{ ok: false \} satisfies Res<"forgetLegacyServer">;/);
 });
+
+test("the Safari popup copies no password, card number or security code (C4): they are filled, or copied in the app", () => {
+  const popup = read("./popup.ts");
+  assert.match(popup, /function copiesLongLivedSecrets\(\): boolean \{\s*return BUILD_TARGET !== "safari";/);
+  // Every button that copies one of them is behind the rule.
+  for (const line of popup.split("\n").filter((l) => /actBtn\("(pass|copy|num|cvv)", "Copy (password|card number|security code)"/.test(l))) {
+    assert.ok(line.includes("copiesLongLivedSecrets()"), line.trim());
+  }
+  assert.equal((popup.match(/"Copy password"/g) ?? []).length, 2, "the row and the detail, both guarded");
+});
+
