@@ -99,8 +99,12 @@ jobs:
           set -euo pipefail
           APP="$RUNNER_TEMP/app.xcarchive/Products/Applications/Andvari.app"
           # Safari needs the extension's files at the bundle root; a build that nests them still signs and uploads.
-          for f in manifest.json background.js content.js popup.html popup.js options.html kdf-worker.js icons/icon128.png; do
+          for f in manifest.json background.js content.js popup.html popup.js kdf-worker.js icons/icon128.png; do
             test -f "$APP/PlugIns/AndvariSafari.appex/$f" || { echo "missing from Safari appex root: $f"; exit 1; }
+          done
+          # The desktop-only pages are not part of the Safari build (the server is chosen in the app).
+          for f in options.html options.js connector.html connector.js offscreen.html offscreen.js INSTALL.txt; do
+            test ! -e "$APP/PlugIns/AndvariSafari.appex/$f" || { echo "the Safari appex must not ship $f"; exit 1; }
           done
           test -d "$APP/PlugIns/AndvariAutoFill.appex" || { echo "AutoFill extension missing"; exit 1; }
           for b in "$APP" "$APP/PlugIns/AndvariSafari.appex" "$APP/PlugIns/AndvariAutoFill.appex"; do
