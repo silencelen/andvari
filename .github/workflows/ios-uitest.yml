@@ -100,7 +100,7 @@ jobs:
             "simulator-only software quick-unlock key"
 
       - name: Names for the test site
-        run: echo "127.0.0.1 site.andvari-uitest.test plainhttp-uitest.test" | sudo tee -a /etc/hosts
+        run: echo "127.0.0.1 site.andvari-uitest.test other-uitest.test plainhttp-uitest.test" | sudo tee -a /etc/hosts
 
       - name: Start the server, seed the account, serve the test site
         run: |
@@ -146,6 +146,8 @@ jobs:
               TEST_RUNNER_UITEST_SITE_ORIGIN="$UITEST_SITE_ORIGIN" \
               TEST_RUNNER_UITEST_SITE_HOST="$UITEST_SITE_HOST" \
               TEST_RUNNER_UITEST_HTTP_ORIGIN="$UITEST_HTTP_ORIGIN" \
+              TEST_RUNNER_UITEST_OTHER_ORIGIN="$UITEST_OTHER_ORIGIN" \
+              TEST_RUNNER_UITEST_OTHER_HOST="$UITEST_OTHER_HOST" \
             xcodebuild test-without-building -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
               -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
               -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult \

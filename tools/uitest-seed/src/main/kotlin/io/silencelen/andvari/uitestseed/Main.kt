@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.java.Java
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
+import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
@@ -85,6 +86,8 @@ private fun seed(origin: String, token: String, email: String, password: String,
         ItemDoc(type = "login", name = "Example Mail", login = LoginData("carol@example.com", "carol-Passw0rd-mail", listOf("https://mail.example.com"), TOTP)),
         ItemDoc(type = "login", name = "No Address", login = LoginData("dave", "dave-Passw0rd-none")),
         ItemDoc(type = "note", name = "UITest Note", notes = "A note the tests open."),
+        // The industry's test number: it passes the check digit and belongs to no one.
+        ItemDoc(type = "card", name = "UITest Card", card = CardData(cardholderName = "UI Test", number = "4111111111111111", expMonth = "12", expYear = "2031", securityCode = "123")),
     )
     logins.forEach { engine.save(null, it) }
     engine.sync()

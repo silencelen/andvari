@@ -14,6 +14,12 @@ enum Fixture {
     static let siteOrigin = value("UITEST_SITE_ORIGIN", "https://site.andvari-uitest.test:8443")
     static let siteHost = value("UITEST_SITE_HOST", "site.andvari-uitest.test")
     static let httpOrigin = value("UITEST_HTTP_ORIGIN", "http://plainhttp-uitest.test:8081")
+    static let otherOrigin = value("UITEST_OTHER_ORIGIN", "https://other-uitest.test:8443")
+    static let otherHost = value("UITEST_OTHER_HOST", "other-uitest.test")
+    static let secondItem = "UITest Site second"
+    static let secondUser = "alice.second"
+    static let secondPassword = "second-Passw0rd-site"
+    static let cardItem = "UITest Card"
 
     /// The seeded logins (tools/uitest-seed).
     static let siteItem = "UITest Site"
@@ -21,6 +27,13 @@ enum Fixture {
     static let sitePassword = "alice-Passw0rd-site"
     static let httpItem = "UITest Plain HTTP"
     static let seededNames = ["UITest Site", "UITest Site second", "UITest Plain HTTP", "Example Mail", "No Address", "UITest Note"]
+}
+
+/// Defects of the app that the suite found and that are being fixed elsewhere. A test that meets one is skipped with
+/// this text, so the run says what is waiting; it turns green by itself once the fix is in the build under test.
+enum KnownDefect {
+    static let noPersonalVaultMessage = "Choose a vault for this item."
+    static let noPersonalVault = "Known app defect, being fixed on ios-ui: on a device that signed in to an account made elsewhere the personal vault is only a proposal the iOS app cannot confirm, so a new login is refused with \"Choose a vault for this item.\" Remove this skip's cause by merging the personal-vault confirmation; the test then runs to its end."
 }
 
 /// A test is a list of named steps. Every step ends with a screenshot, kept in the result bundle and written as

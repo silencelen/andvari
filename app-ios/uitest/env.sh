@@ -16,6 +16,9 @@ export UITEST_SERVER_ORIGIN="http://127.0.0.1:${UITEST_SERVER_PORT}"
 export UITEST_SITE_HOST="site.andvari-uitest.test"
 export UITEST_SITE_PORT=8443
 export UITEST_SITE_ORIGIN="https://${UITEST_SITE_HOST}:${UITEST_SITE_PORT}"
+# A second https site under another registrable domain, same pages and port, for a fill that crosses sites.
+export UITEST_OTHER_HOST="other-uitest.test"
+export UITEST_OTHER_ORIGIN="https://${UITEST_OTHER_HOST}:${UITEST_SITE_PORT}"
 export UITEST_HTTP_HOST="plainhttp-uitest.test"
 export UITEST_HTTP_PORT=8081
 export UITEST_HTTP_ORIGIN="http://${UITEST_HTTP_HOST}:${UITEST_HTTP_PORT}"

@@ -102,7 +102,6 @@ extension UITestCase {
 
     /// A new app process, unlocked: the system's suggestions are rebuilt from the vault it shows.
     func relaunchAndUnlock() {
-        app.terminate()
         launchApp()
         reachVaultAnyWay()
         // The identity store is written off the main thread.
@@ -143,24 +142,131 @@ extension UITestCase {
 
     // MARK: - Safari
 
-    /// Open [url] in a fresh Safari and wait for the page's heading.
+    /// Open [url] in a fresh Safari and wait for the page's heading. A Safari that has just started sometimes comes
+    /// up on its start page and drops the address it was opened with, so it is started first, and the address is
+    /// typed when opening it did not take; three tries in all before the test is told.
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
-        browser.terminate()
-        XCUIDevice.shared.system.open(URL(string: url)!)
         let shown = { browser.webViews.staticTexts[heading].exists }
-        if waitUntil(20, shown) { return }
-        // A Safari that was not running may come up on its start page and drop the address: type it, as a person would.
-        let address = browser.textFields["TabBarItemTitle"]
-        if address.exists {
-            address.tap()
-            Thread.sleep(forTimeInterval: 1)
-            browser.typeText(url + "\n")
+        browser.terminate()
+        browser.launch()
+        _ = waitUntil(20) { browser.textFields["TabBarItemTitle"].exists || browser.buttons["TabBarItemTitle"].exists || browser.otherElements["TabBarItemTitle"].exists }
+        for attempt in 1...3 {
+            XCUIDevice.shared.system.open(URL(string: url)!)
+            if waitUntil(15, shown) { break }
+            closeSafariTips()
+            let address = browser.textFields["TabBarItemTitle"]
+            if address.exists && address.isHittable {
+                address.tap()
+                Thread.sleep(forTimeInterval: 1)
+                browser.typeText(url + "\n")
+                if waitUntil(20, shown) { break }
+            }
+            if attempt == 3 {
+                dumpTree(browser, as: "safari-no-page")
+                XCTFail("Safari did not show \(url) in three tries")
+            }
         }
-        if !waitUntil(40, shown) {
-            dumpTree(browser, as: "safari-no-page")
-            XCTFail("Safari did not show \(url)")
+        // The page is there; give Safari's own first-run tips a moment to appear, and close them.
+        Thread.sleep(forTimeInterval: 1.5)
+        closeSafariTips()
+    }
+
+    /// Type into a field of the page, closing what Safari offers for it first.
+    func typeInPage(_ text: String, field: XCUIElement, heading: String) {
+        focus(field, heading: heading)
+        closeFillOffer()
+        if !safari.keyboards.firstMatch.exists {
+            field.tap()
+            Thread.sleep(forTimeInterval: 1.5)
+            closeFillOffer()
         }
+        field.typeText(text)
+    }
+
+    /// Submit a login on the test site and answer iOS's offer to save it with andvari. False when no offer came.
+    func submitLoginAndSaveToAndvari(page: String, heading: String, user: String, password: String, passwordLabel: String, submit: String) -> Bool {
+        openInSafari(Fixture.siteOrigin + "/" + page, heading: heading)
+        typeInPage(user, field: webField("Username"), heading: heading)
+        typeInPage(password, field: safari.webViews.secureTextFields[passwordLabel], heading: heading)
+        if safari.buttons["Done"].exists { safari.buttons["Done"].tap() }
+        safari.webViews.buttons[submit].firstMatch.tap()
+        let choice = safari.alerts.buttons["andvari"]
+        if !waitUntil(12, { choice.exists }) {
+            dumpEverything("no-save-offer")
+            return false
+        }
+        shot("save-offer")
+        choice.tap()
+        Thread.sleep(forTimeInterval: 4)
+        return true
+    }
+
+    // MARK: - The Safari extension's popup
+
+    /// Open andvari's popup on the page Safari shows and look at the phone until [done], answering Safari's
+    /// per-site questions on the way. The popup asks for Face ID by itself once it has painted.
+    @discardableResult
+    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45) -> Bool {
+        _ = waitUntil(4) { self.fillOfferButton.exists }
+        closeFillOffer()
+        if safari.buttons["Done"].exists { safari.buttons["Done"].tap() }
+        let menu = safari.buttons["PageFormatMenuButton"]
+        if !waitUntil(10, { menu.exists && menu.isHittable }) {
+            dumpTree(safari, as: "no-page-menu")
+            XCTFail("Safari's page menu button is not reachable")
+            return false
+        }
+        menu.tap()
+        let entry = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+        if !waitUntil(8, { entry.exists && entry.isHittable }) {
+            dumpTree(safari, as: "no-andvari-in-page-menu")
+            XCTFail("andvari is not in Safari's page menu")
+            return false
+        }
+        entry.tap()
+        let allow = safari.buttons["Allow for One Day"]
+        let unlock = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Unlock with'")).firstMatch
+        var lastUnlockTap = Date.distantPast
+        return matchFaceUntil(timeout) {
+            // Safari asks, per site, whether the extension may see it; the popup waits behind that.
+            if allow.exists && allow.isHittable {
+                allow.tap()
+                return false
+            }
+            if done() { return true }
+            // The button is the retry after a prompt that was cancelled or missed.
+            if unlock.exists && unlock.isHittable && Date().timeIntervalSince(lastUnlockTap) > 8 {
+                lastUnlockTap = Date()
+                unlock.tap()
+            }
+            return false
+        }
+    }
+
+    /// A row of the popup's lists: its text is the login's or card's name.
+    func popupRow(_ name: String) -> XCUIElement {
+        safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", name)).firstMatch
+    }
+
+    /// What the popup's Details panel says: the handler's and the worker's own account of the unlock. Nobody can
+    /// attach a debugger to a Safari extension on iOS, in the simulator's CI even less.
+    func popupDetails() -> String {
+        let details = safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label == 'Details'")).firstMatch
+        if details.exists && details.isHittable {
+            details.tap()
+            Thread.sleep(forTimeInterval: 4)
+        }
+        shot("popup-details")
+        dumpTree(safari, as: "popup-details")
+        let wanted = NSPredicate(format: "label CONTAINS 'Handler' OR label CONTAINS 'Worker' OR label CONTAINS 'App ask' OR label CONTAINS 'App answered' OR label CONTAINS 'Block' OR label CONTAINS 'Store opened' OR label CONTAINS 'Adoption' OR label CONTAINS 'Session locked' OR label CONTAINS 'Finish setup' OR label CONTAINS 'Open andvari'")
+        let texts = safari.webViews.staticTexts.matching(wanted)
+        var lines: [String] = []
+        for index in 0..<min(texts.count, 20) {
+            let line = texts.element(boundBy: index).label
+            if !lines.contains(line) { lines.append(line) }
+        }
+        return lines.joined(separator: " | ")
     }
 
     /// Safari's own offer for a field it recognises: a sheet naming the site, the login and the provider.
