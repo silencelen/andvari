@@ -50,6 +50,8 @@ struct ItemDetailView: View {
             Group {
                 if detail?.card != nil {
                     CardEditorView(itemId: itemId)
+                } else if detail?.type == "note" {
+                    NoteEditorView(itemId: itemId)
                 } else {
                     LoginEditorView(itemId: itemId)
                 }
@@ -106,8 +108,8 @@ struct ItemDetailView: View {
             .listRowBackground(Palette.raised)
         }
         if detail.hasNotes {
-            Section("Notes") {
-                notesRow
+            Section(detail.type == "note" ? "Note" : "Notes") {
+                notesRow(isNote: detail.type == "note")
             }
             .listRowBackground(Palette.raised)
         }
@@ -268,7 +270,7 @@ struct ItemDetailView: View {
         }
     }
 
-    private var notesRow: some View {
+    private func notesRow(isNote: Bool) -> some View {
         let toggleTitle = notes == nil ? "Show" : "Hide"
         return VStack(alignment: .leading, spacing: 10) {
             if let notes {
@@ -284,7 +286,7 @@ struct ItemDetailView: View {
                 }
                 .buttonStyle(.borderless)
                 Spacer()
-                CopyButton(label: "Copy notes", copied: copied == "notes") {
+                CopyButton(label: isNote ? "Copy note" : "Copy notes", copied: copied == "notes") {
                     copySecret(.notes, as: "notes")
                 }
             }

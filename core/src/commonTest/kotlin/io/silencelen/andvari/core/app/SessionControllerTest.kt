@@ -95,6 +95,7 @@ open class SessionControllerTest {
         val item = ItemDoc(type = "login", name = "Example", login = LoginData(username = "fam", password = "hunter2", uris = listOf("https://login.example.com/x", "androidapp://com.foo.app"), totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"))
         const val ITEM_ID = "00000000-0000-4000-8000-0000000000c1"
         const val CARD_ID = "00000000-0000-4000-8000-0000000000c2"
+        const val NOTE_ID = "00000000-0000-4000-8000-0000000000c3"
 
         /** The item sealed under the personal vault's key, as a cache holds it. */
         val sealed: WireItem by lazy {
@@ -631,6 +632,55 @@ open class SessionControllerTest {
         assertEquals("Renamed", controller.itemDetail(CARD_ID)?.name)
         assertEquals(long, controller.revealSecret(CARD_ID, SecretField.CARD_NUMBER))
         assertIs<ActionResult.Failed>(controller.saveCard(CARD_ID, CardInput("Renamed", "", long + "1", "", "", "", "", "", false)), "but a new number is held to it")
+    }
+
+    // ---- secure notes ----
+
+    @Test
+    fun aNoteIsAddedToThePersonalVaultEditedAndItsTextReadOnRequest() = test {
+        unlockedWithAPersonalVault()
+        assertEquals(ActionResult.Failed("Give the note a name."), controller.saveNote(null, NoteInput(" ", "text", false)))
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput(" Wi-Fi ", "network: home\npassword: correct horse", true)))
+        val row = controller.state.items.single { it.name == "Wi-Fi" }
+        assertEquals("note", row.type)
+        assertTrue(row.favorite)
+        assertNull(row.username)
+        val detail = assertNotNull(controller.itemDetail(row.itemId))
+        assertEquals(reg.personalVault.vaultId, detail.vaultId, "in the personal vault")
+        assertTrue(detail.hasNotes && detail.editable && detail.card == null && !detail.hasPassword)
+        assertEquals("network: home\npassword: correct horse", controller.revealSecret(row.itemId, SecretField.NOTES), "the text as typed")
+        assertFalse(controller.state.toString().contains("correct horse"), "the text is never in the state")
+        // An edit keeps the item; an emptied note is still a note.
+        assertEquals(ActionResult.Ok, controller.saveNote(row.itemId, NoteInput("Wi-Fi at home", "", false)))
+        val edited = assertNotNull(controller.itemDetail(row.itemId))
+        assertEquals("Wi-Fi at home", edited.name)
+        assertFalse(edited.hasNotes)
+        assertNull(controller.revealSecret(row.itemId, SecretField.NOTES))
+        assertEquals(2, controller.state.items.size, "edited, not duplicated")
+        // A login is not edited as a note, and a note is not filled anywhere.
+        assertIs<ActionResult.Failed>(controller.saveNote(ITEM_ID, NoteInput("Example", "x", false)))
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertTrue(controller.credentialIdentities().none { it.itemId == row.itemId })
+        assertEquals(ActionResult.Ok, controller.deleteItem(row.itemId))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+    }
+
+    @Test
+    fun aNoteEditKeepsWhatThisAppDoesNotShow() = test {
+        unlockedWithAPersonalVault()
+        // A note another client wrote with an attachment reference and a field this client does not know.
+        val doc = ItemDoc(type = "note", name = "Lease", notes = "flat 3", attachments = listOf(io.silencelen.andvari.core.client.AttachmentRef("a1", "lease.pdf", 1024, "k")), dupeAck = "sig")
+        val upload = enrolled.account.encryptItem(reg.personalVault.vaultId, NOTE_ID, doc)
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertItem(WireItem(NOTE_ID, reg.personalVault.vaultId, 1, 1_000, 2_000, false, false, upload.formatVersion, emptyList(), upload.blob), null)
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        onlineServer()
+        assertEquals(ActionResult.Ok, controller.saveNote(NOTE_ID, NoteInput("Lease 2027", "flat 3, renewed", false)))
+        assertEquals(ActionResult.Ok, controller.refresh())
+        val saved = namespaces.caches.getValue("$homeKey/${reg.userId}").getItem(NOTE_ID)!!.doc
+        assertEquals("Lease 2027", saved.name)
+        assertEquals(listOf("a1"), saved.attachments.map { it.id }, "the attachment stays")
+        assertEquals("sig", saved.dupeAck)
     }
 
     // ---- the personal vault ----

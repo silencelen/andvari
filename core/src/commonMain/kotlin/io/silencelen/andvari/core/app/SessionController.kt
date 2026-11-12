@@ -736,7 +736,7 @@ open class SessionController(
             username = doc.login?.username?.ifEmpty { null }, uris = doc.login?.uris.orEmpty(),
             hasPassword = !doc.login?.password.isNullOrEmpty(), hasNotes = !doc.notes.isNullOrEmpty(),
             hasTotp = !doc.login?.totp.isNullOrEmpty(), favorite = doc.favorite, updatedAt = item.updatedAt,
-            editable = (doc.type == "login" || doc.type == "card") && role != "reader" && live.account.canSealUnder(item.vaultId),
+            editable = doc.type in EDITABLE_TYPES && role != "reader" && live.account.canSealUnder(item.vaultId),
             previousPasswords = doc.login?.passwordHistory?.size ?: 0,
             card = doc.card?.takeIf { doc.type == "card" }?.let { c ->
                 CardDetail(
@@ -876,6 +876,29 @@ open class SessionController(
             digits.length >= 12 && !CardNormalize.luhnValid(digits) -> CARD_NUMBER_UNUSUAL
             else -> null
         }
+    }
+
+    /**
+     * Add a secure note ([itemId] null) to the personal vault, or save an edit of one. The text is kept as typed; an
+     * empty note is allowed (the name is what is required). The text is a secret like a password: it is read through
+     * [revealSecret] with [SecretField.NOTES], never carried in the state.
+     */
+    @Throws(CancellationException::class)
+    suspend fun saveNote(itemId: String?, input: NoteInput): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (input.name.isBlank()) return@action ActionResult.Failed(NOTE_NAME_REQUIRED)
+        val existing = itemId?.let { live.engine.item(it) ?: return@action ActionResult.Failed(ITEM_GONE) }
+        if (existing != null && existing.doc.type != "note") return@action ActionResult.Failed(ITEM_GONE)
+        if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
+        // A copy of the existing document, never a rebuild: attachments and fields this client does not know survive.
+        val base = existing?.doc ?: ItemDoc(type = "note", name = "")
+        val doc = base.copy(name = input.name.trim(), notes = input.text.ifBlank { null }, favorite = input.favorite)
+        busy()
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
+        update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
+        writeFillSnapshot()
+        ActionResult.Ok
     }
 
     /** Delete an item (it goes to the server's trash). */
@@ -1573,6 +1596,10 @@ open class SessionController(
         const val QUICK_UNAVAILABLE = "This device has no usable Face ID or Touch ID, or your org doesn't allow it."
         const val QUICK_NOT_ENABLED = "Couldn't turn on quick unlock."
         const val CARD_NAME_REQUIRED = "Give the card a name."
+        const val NOTE_NAME_REQUIRED = "Give the note a name."
+
+        /** The kinds of item this app can edit. */
+        val EDITABLE_TYPES = setOf("login", "card", "note")
         const val CARD_EXPIRY_INVALID = "That expiry date can't be read. Use a month and a year, like 07 and 2031."
         const val CARD_NUMBER_MAX_DIGITS = 19
         const val CARD_NUMBER_TOO_LONG = "A card number has at most 19 digits. Check the number."
