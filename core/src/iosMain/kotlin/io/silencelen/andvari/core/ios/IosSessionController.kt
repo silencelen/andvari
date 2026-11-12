@@ -17,9 +17,11 @@ import io.silencelen.andvari.core.app.SessionController
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.HttpClients
+import io.silencelen.andvari.core.client.session.KeyValuePrefs
 import io.silencelen.andvari.core.client.session.IosClocks
 import io.silencelen.andvari.core.client.session.NamespaceStorage
 import io.silencelen.andvari.core.client.session.PrefsSessionPersistence
+import io.silencelen.andvari.core.client.session.PublishingPrefs
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SecretStore
 import io.silencelen.andvari.core.client.session.SessionPersistence
@@ -38,27 +40,29 @@ const val IOS_APP_GROUP: String = "group.com.silencelen.andvari"
 const val IOS_APP_SERVER_KEY: String = "appServer"
 
 /**
- * Where the iOS app keeps its state (design 2026-11-09). The app and its extensions share an App Group: the
- * non-secret session state (policy mirrors, freshness stamps, identity pins), the quick-unlock blob and its Secure
- * Enclave key, and the AutoFill snapshot live there, so the AutoFill extension can unlock with Face ID under the
- * app's own gates. The session's tokens are never shared: they stay in the app's private Keychain group, whatever
- * this says.
+ * Where the iOS app keeps its state (design 2026-11-09). The app's own state (the server it connects to, who is signed
+ * in, the policy mirrors, freshness stamps and identity pins) is in its PRIVATE defaults, and only there is it read. A
+ * copy is published to the App Group it shares with its extensions, so the AutoFill extension can unlock with Face ID
+ * under the app's own gates; the app never reads that copy back, so an extension that writes to it cannot repoint the
+ * app or re-pin it. The quick-unlock blob and its Secure Enclave key and the AutoFill snapshot are in the group too.
+ * The session's tokens are never shared: they stay in the app's private Keychain group, whatever this says.
  */
 class IosStorageConfig(
-    /** The NSUserDefaults suite for non-secret state; null for the app's standard defaults. */
+    /** The NSUserDefaults suite the app's own state lives in; null for the app's standard (private) defaults. */
     val defaultsSuite: String?,
     /** The Keychain service the session tokens and quick-unlock blobs are stored under. */
     val keychainService: String,
     /** The Keychain access group of the quick-unlock blob and key only; null for the app's default group. */
     val keychainAccessGroup: String?,
     /**
-     * The App Group shared with the extensions; null shares nothing. The server origin ([IOS_APP_SERVER_KEY]) is
-     * written to its suite and the AutoFill snapshot to its container.
+     * The App Group shared with the extensions; null shares nothing. The published copy of the app's state, the server
+     * origin ([IOS_APP_SERVER_KEY]) for the Safari extension, the AutoFill snapshot and the save queue are there. The
+     * extensions read the copy; the app only writes it.
      */
     val sharedSuite: String?,
 ) {
-    /** The shipping layout: everything shareable in [IOS_APP_GROUP]. */
-    constructor() : this(IOS_APP_GROUP, "io.silencelen.andvari", IOS_APP_GROUP, IOS_APP_GROUP)
+    /** The shipping layout: the app's state private, a copy and everything shareable in [IOS_APP_GROUP]. */
+    constructor() : this(null, "io.silencelen.andvari", IOS_APP_GROUP, IOS_APP_GROUP)
 }
 
 /** What the iOS biometric prompt shows: [reason], or the controller's default when null. */
@@ -91,17 +95,24 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     constructor() : this(IosStorageConfig())
 }
 
-/** The platform seams one controller uses. Building them migrates an older layout once ([migrate]). */
+/** The platform seams one controller uses. Building them adopts the state an earlier build kept in the group, once ([adoptGroupState]). */
 internal class IosSeams(
     config: IosStorageConfig,
     snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath),
     savesDir: String? = config.sharedSuite?.let(::groupSavesDir),
 ) {
-    private val prefs = UserDefaultsPrefs(config.defaultsSuite)
+    private val own = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
-        runCatching { migrate(config, prefs) }
+        runCatching { adoptGroupState(config, own) }
     }
+
+    /**
+     * The app's own state, read from its private defaults only; every write is also published to the App Group for the
+     * extensions (except what each process keeps for itself, `PREFS_PROCESS_LOCAL_KEYS`).
+     */
+    private val prefs: KeyValuePrefs =
+        config.sharedSuite?.takeIf { it != config.defaultsSuite }?.let { PublishingPrefs(own, UserDefaultsPrefs(it)) } ?: own
 
     /** Non-secret state in NSUserDefaults; only the session's tokens in the Keychain, in the app's own group. */
     val store: SessionPersistence = PrefsSessionPersistence(prefs, KeychainSecrets(config.keychainService, null))
@@ -116,31 +127,28 @@ internal class IosSeams(
     val appliedSaves: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/applied-saves.json")
 
     private companion object {
-        const val MOVED = "ios.sharedLayout.v1"
+        const val ADOPTED = "ios.privateState.v1"
 
         /**
-         * Once per install: the non-secret state an earlier build kept in the app's standard defaults moves to the
-         * shared suite, and a quick-unlock enrollment made in the app's private Keychain group is removed (its Secure
-         * Enclave key cannot be read from the extension, so Face ID is turned on again, once, in Settings).
+         * Once per install: builds before this one kept the app's state in the App Group itself, where an extension could
+         * rewrite it. That state is copied into the app's private defaults (each key only where the private store has
+         * none, the origin last, since it is what says "a layout is here"), then marked done, and from then on the group
+         * is only written. A start that was cut short copies again; nothing is removed from the group, which the
+         * extensions go on reading.
          */
-        fun migrate(config: IosStorageConfig, prefs: UserDefaultsPrefs) {
-            if (config.defaultsSuite == null || prefs.getString(MOVED) != null) return
-            val old = NSUserDefaults.standardUserDefaults
-            val ours = old.dictionaryRepresentation().mapNotNull { (key, value) ->
+        fun adoptGroupState(config: IosStorageConfig, own: UserDefaultsPrefs) {
+            val group = config.sharedSuite ?: return
+            if (group == config.defaultsSuite || own.getString(ADOPTED) != null) return
+            val shared = NSUserDefaults(suiteName = group)
+            val ours = shared.dictionaryRepresentation().mapNotNull { (key, value) ->
                 val name = key as? String ?: return@mapNotNull null
                 val text = value as? String ?: return@mapNotNull null
                 if (name.startsWith("ns.") || name in GLOBAL_KEYS) name to text else null
             }
-            // Safe to interrupt at any point: each key is copied only where the new place has none, the origin last
-            // (it is what says "a layout is here"), and nothing old is removed before every copy has landed. A start
-            // that was cut short runs the whole move again.
             for ((name, text) in ours.sortedBy { it.first == "baseUrl" }) {
-                if (prefs.getString(name) == null) prefs.putString(name, text)
+                if (own.getString(name) == null) own.putString(name, text)
             }
-            for ((name, _) in ours) old.removeObjectForKey(name)
-            // The marker is set only once the old enrollment is known to be gone; otherwise the next start tries again.
-            if (config.keychainAccessGroup != null && !sweepLegacyQuickUnlock("${config.keychainService}.quickunlock", config.keychainAccessGroup)) return
-            prefs.putString(MOVED, "1")
+            own.putString(ADOPTED, "1")
         }
 
         /** [PrefsSessionPersistence]'s global keys. */
@@ -176,7 +184,8 @@ class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: S
     private val saves: SaveQueueStore = savesDir?.let(::FileSaveQueue) ?: SaveQueueStore.None
 
     private val vault = AutofillVault(
-        PrefsSessionPersistence(UserDefaultsPrefs(config.defaultsSuite), NoSecrets),
+        // The copy of the app's state the app publishes to the group (the extensions have nothing else to read).
+        PrefsSessionPersistence(UserDefaultsPrefs(config.sharedSuite ?: config.defaultsSuite), NoSecrets),
         snapshotPath?.let(::FileFillSnapshots) ?: FillSnapshotStore.None,
         quickUnlockKeys(config),
         IosClocks,

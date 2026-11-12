@@ -152,4 +152,58 @@ class PrefsSessionPersistenceTest {
         assertNull(pins.pinFor("u@example.com", "u1"))
         assertNull(store.origin(OriginCanon.originKey("https://other.example")).identityPins().pinFor("u@example.com", "u1"))
     }
+
+    // ---- the published copy (iOS: the app's private defaults, published to the App Group) ----
+
+    @Test
+    fun whatAnotherProcessWritesToThePublishedCopyNeverChangesWhereThisOneConnects() {
+        val own = InMemoryPrefs()
+        val shared = InMemoryPrefs()
+        val app = PrefsSessionPersistence(PublishingPrefs(own, shared), secrets)
+        app.moveOrigin(home)
+        app.save(session())
+        assertEquals(home, shared.getString("baseUrl"), "published for the extensions")
+        assertTrue(shared.getString("session")!!.contains("u1"), "who is signed in, without the tokens")
+        assertNull(shared.getString("session.tokens"))
+        // A compromised extension rewrites the copy: another server, another account.
+        shared.putString("baseUrl", "https://evil.example")
+        shared.putString("session", """{"baseUrl":"https://evil.example","userId":"u2","email":"x@evil.example"}""")
+        assertEquals(home, app.baseUrl)
+        assertEquals(home, app.load()?.baseUrl, "the tokens still go to the server this process chose")
+        assertEquals("u1", app.load()?.userId)
+        // A relaunch over the same stores reads its own state again.
+        val relaunched = PrefsSessionPersistence(PublishingPrefs(own, shared), secrets)
+        assertEquals(home, relaunched.baseUrl)
+        assertEquals("u1", relaunched.storedIdentity()?.userId)
+        // The next write republishes the true value.
+        relaunched.moveOrigin(home)
+        assertEquals(home, shared.getString("baseUrl"))
+    }
+
+    @Test
+    fun identityPinsAndPolicyMirrorsAreReadFromThisProcessOnly() {
+        val own = InMemoryPrefs()
+        val shared = InMemoryPrefs()
+        val app = PrefsSessionPersistence(PublishingPrefs(own, shared), secrets)
+        app.moveOrigin(home)
+        val origin = app.origin(homeKey)
+        origin.cacheAllowed = false
+        origin.policyFetchedAt = 1234
+        // Another process re-pins and relaxes the policy in the copy.
+        shared.putString("ns.$homeKey.cacheAllowed", "true")
+        shared.putString("ns.$homeKey.policyFetchedAt", "999999")
+        assertFalse(app.origin(homeKey).cacheAllowed)
+        assertEquals(1234, app.origin(homeKey).policyFetchedAt)
+    }
+
+    @Test
+    fun theHighWaterClockIsEachProcessesOwn() {
+        val own = InMemoryPrefs()
+        val shared = InMemoryPrefs()
+        val app = PrefsSessionPersistence(PublishingPrefs(own, shared), secrets)
+        app.highWaterWallMs = 500
+        assertNull(shared.getString("highWaterWallMs"), "never published")
+        shared.putString("highWaterWallMs", "9999999999999")
+        assertEquals(500, app.highWaterWallMs, "another process cannot move this one's clock")
+    }
 }
