@@ -75,7 +75,7 @@ import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./ser
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
 import { appServerToAdopt, askAppServerDetailed, nativeSender } from "./appserver";
 import { queueSaveToApp, savesThroughApp } from "./appsave";
-import { AppVault, vaultFromApp } from "./appvault";
+import { AppVault, vaultFromApp, type AppVaultCardFields, type CardFieldName } from "./appvault";
 
 /**
  * MV3 background service worker — sole custodian of unlocked vault material. Chrome kills an idle
@@ -3858,10 +3858,19 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
       if (sender.tab !== undefined) return { locked: !vault.unlocked, items: [] } satisfies Res<"allItems">;
       return vault.listAnswer(appVaultList(msg.query)) satisfies Res<"allItems">;
     case "cardItems":
-      // The snapshot holds logins only. Answered here, by the vault's own notion of locked: the ordinary handler
-      // answers from the worker's session, which this build never has, and its "locked" sent the popup back to the
-      // unlock screen after every successful unlock.
-      return vault.listAnswer<CardItem>([]) satisfies Res<"cardItems">;
+      // Answered here, by the vault's own notion of locked: the ordinary handler answers from the worker's session,
+      // which this build never has, and its "locked" sent the popup back to the unlock screen after every unlock.
+      // Names and masked lines only; a page frame gets none.
+      if (sender.tab !== undefined) return vault.listAnswer<CardItem>([]) satisfies Res<"cardItems">;
+      return vault.listAnswer<CardItem>(appVaultCards(msg.query)) satisfies Res<"cardItems">;
+    case "revealCardField": {
+      // The popup's copy of ONE field of one card: only that field is asked of the app.
+      if (sender.tab !== undefined) return { ok: false, error: "not allowed from a page" } satisfies Res<"revealCardField">;
+      if (!vault.unlocked) return { ok: false, error: "locked" } satisfies Res<"revealCardField">;
+      const wanted: CardFieldName[] = msg.field === "number" ? ["number"] : msg.field === "expiry" ? ["expMonth", "expYear"] : msg.field === "name" ? ["name"] : ["cvv"];
+      const c = await appVaultCard(msg.itemId, wanted);
+      return (c === null ? { ok: false, error: "unknown item" } : cardFieldValue(c, msg.field)) satisfies Res<"revealCardField">;
+    }
     case "reveal":
       return appVaultReveal(msg, sender);
     case "totp":
@@ -3889,6 +3898,31 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     default:
       return undefined;
   }
+}
+
+function appVaultCards(query: string | undefined): CardItem[] {
+  const q = (query ?? "").trim().toLowerCase();
+  return APP_VAULT!.cards().filter((c) => !q || c.name.toLowerCase().includes(q) || c.subtitle.toLowerCase().includes(q));
+}
+
+/** The named fields of one of the app's cards, in the shape of a stored card; null when nothing was released. */
+async function appVaultCard(itemId: string, fields: readonly CardFieldName[]): Promise<StoredCard | null> {
+  const r = await APP_VAULT!.cardFields(itemId, fields);
+  if (r.state !== "card") return null;
+  const f: AppVaultCardFields = r.fields;
+  return { number: f.number, expMonth: f.expMonth, expYear: f.expYear, securityCode: f.cvv, cardholderName: f.name, postalCode: f.postal };
+}
+
+/** The app's fields a form's declared kinds need: nothing the form did not declare is asked for. */
+function cardFieldsForKinds(kinds: readonly string[]): CardFieldName[] {
+  const k = new Set(kinds);
+  const out: CardFieldName[] = [];
+  if (k.has("cardnumber")) out.push("number");
+  if (k.has("cardexpiry") || k.has("cardexpmonth") || k.has("cardexpyear")) out.push("expMonth", "expYear");
+  if (k.has("cardname")) out.push("name");
+  if (k.has("cardcvv")) out.push("cvv");
+  if (k.has("cardpostal")) out.push("postal");
+  return out;
 }
 
 function appVaultList(query: string | undefined): MatchItem[] {
@@ -4009,7 +4043,15 @@ function revealCardField(
   if (!session) return { ok: false, error: "locked" };
   const c = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "card")?.doc.card;
   if (!c) return { ok: false, error: "unknown item" };
-  switch (msg.field) {
+  return cardFieldValue(c, msg.field);
+}
+
+/** The stored fields of a card that the copy and fill paths read (a session's card document, or the app's answer). */
+type StoredCard = { number?: string | null; expMonth?: string | null; expYear?: string | null; securityCode?: string | null; cardholderName?: string | null; postalCode?: string | null };
+
+/** One copyable field of a card, composed as the popup copies it. */
+function cardFieldValue(c: StoredCard, field: Extract<Req, { type: "revealCardField" }>["field"]): Res<"revealCardField"> {
+  switch (field) {
     case "number": {
       const d = digitsOnly(c.number ?? "");
       return d !== "" ? { ok: true, value: d } : { ok: false, error: "no number on this card" };
@@ -4270,8 +4312,11 @@ function repairPageRecords(tabId: number, now: number): void {
  *  `locked` rides separately as the copy selector, and the surface keeps ONE fixed width in both
  *  states. Everything the chip can do is "open the popup" — the trusted surface it cannot draw. */
 async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<"cardChipOffer">> {
-  const locked = session === null;
+  const locked = APP_VAULT !== null ? !APP_VAULT.unlocked : session === null;
   const no: Res<"cardChipOffer"> = { fillable: false, locked }; // the one refusal shape — never a third state
+  // Safari: no chip on a page that was not served over https (a fact the page already has: presence still carries
+  // no vault state).
+  if (APP_VAULT !== null && !(typeof sender.origin === "string" && sender.origin.startsWith("https://"))) return no;
   const tabId = sender.tab?.id;
   const frameId = sender.frameId;
   if (tabId === undefined || typeof frameId !== "number" || frameId !== 0) return no; // [S1] strict
@@ -4413,11 +4458,12 @@ async function openPopupForSearch(sender: chrome.runtime.MessageSender): Promise
 async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res<"cardFillOffers">> {
   if (sender.tab !== undefined) return { fillable: false, origin: null, crossOriginFormsOnly: false }; // popup-only guard
   const none: Res<"cardFillOffers"> = { fillable: false, origin: null, crossOriginFormsOnly: false };
-  if (!session) return none;
+  if (!(APP_VAULT !== null ? APP_VAULT.unlocked : session !== null)) return none;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return none;
   const top = await topOrigin(tab.id);
   if (top === null) return none;
+  if (APP_VAULT !== null && !top.startsWith("https://")) return none; // Safari: never offered on a plain-http page
   broadcastRescanCardForms(tab.id);
   const eligible = eligibleCardFrames(tab.id, top).length > 0;
   // §6 [U21]: forms exist but NO frame is origin-eligible → the PSP explainer signal. Derived
@@ -4446,14 +4492,18 @@ function asCardFillOutcome(v: unknown): CardFillOutcome | null {
  *  pushes card values at a tab. Refuses tab senders. */
 async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillCardFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
-  if (!session) return { ok: false, code: "locked", error: "locked" };
-  if (!session.items.some((i) => i.itemId === itemId && i.doc.type === "card")) {
+  // Safari: the app's open list stands in for the session's items; the card's fields are fetched at the redemption.
+  if (!(APP_VAULT !== null ? APP_VAULT.unlocked : session !== null)) return { ok: false, code: "locked", error: "locked" };
+  const known = APP_VAULT !== null ? APP_VAULT.card(itemId) !== null : session!.items.some((i) => i.itemId === itemId && i.doc.type === "card");
+  if (!known) {
     return { ok: false, code: "not_allowed", error: "unknown item" };
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return { ok: false, code: "unreachable", error: "no active tab" };
   const top = await topOrigin(tab.id);
   if (top === null) return { ok: false, code: "not_allowed", error: "no top origin" };
+  // Safari: a card is never filled into a page that was not served over https.
+  if (APP_VAULT !== null && !top.startsWith("https://")) return { ok: false, code: "not_allowed", error: "not an https page" };
   // The eligible frame = a recorded card form whose origin equals the current top origin. Prefer
   // the top frame (0) when it qualifies; else the first eligible frame. [T5] fast-path: a
   // registry hit proceeds immediately; only a miss pays the rescan + 250 ms re-read (the offer
@@ -4500,7 +4550,7 @@ async function revealCardForFill(
   msg: Extract<Req, { type: "revealCardForFill" }>,
   sender: chrome.runtime.MessageSender,
 ): Promise<Res<"revealCardForFill">> {
-  if (!session) return { ok: false, error: "locked" };
+  if (!(APP_VAULT !== null ? APP_VAULT.unlocked : session !== null)) return { ok: false, error: "locked" };
   const tabId = sender.tab?.id;
   if (tabId === undefined) return { ok: false, error: "not a page sender" };
   const grant = cardGrants.get(tabId);
@@ -4521,9 +4571,14 @@ async function revealCardForFill(
   const topOk = grant.origin === top;
   if (top === null || !topOk) return { ok: false, error: "top-origin changed" };
 
-  const item = session.items.find((i) => i.itemId === msg.itemId && i.doc.type === "card");
-  const c = item?.doc.card;
+  // Safari: never over plain http, and only the fields this form declared are asked of the app (one card, one form).
+  if (APP_VAULT !== null && !grant.origin.startsWith("https://")) return { ok: false, error: "not an https page" };
+  const c: StoredCard | null | undefined =
+    APP_VAULT !== null ? await appVaultCard(msg.itemId, cardFieldsForKinds(grant.kinds)) : session!.items.find((i) => i.itemId === msg.itemId && i.doc.type === "card")?.doc.card;
   if (!c) return { ok: false, error: "unknown item" }; // consumes nothing
+  // The grant is looked at again: the app may have taken a moment (a second Face ID), and a navigation or a new
+  // grant in between voids this one.
+  if (cardGrants.get(tabId) !== grant || grant.expiresMs <= Date.now()) return { ok: false, error: "no card grant" };
   // Compose ONLY the kinds the CHOSEN form declared ("CVV only if a CVV field was detected").
   // [U15] declared = the GRANT's frozen kinds — never the live registry (Tier 1's live read let
   // a mint→redeem rescan widen egress) and never a frame union (a union could satisfy the [T9]

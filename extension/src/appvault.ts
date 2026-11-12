@@ -23,8 +23,18 @@ export const APP_VAULT_PROMPT_TIMEOUT_MS = 60_000;
 /** A login as the handler lists it. No secret. */
 export type AppVaultItem = { itemId: string; name: string; username: string; uris: string[]; hasTotp: boolean };
 
+/** A payment card as the handler lists it: a name and a masked line ("Visa ••4242"). No number, date or code. */
+export type AppVaultCard = { itemId: string; name: string; subtitle: string; hasNumber: boolean; hasExpiry: boolean; hasCvv: boolean; hasName: boolean };
+
+/** The stored fields of a card that one ask may name. */
+export const CARD_FIELDS = ["number", "expMonth", "expYear", "cvv", "name", "postal"] as const;
+export type CardFieldName = (typeof CARD_FIELDS)[number];
+
+/** The fields one ask released, as stored. Only what was asked for, and only what the card has. */
+export type AppVaultCardFields = Partial<Record<CardFieldName, string>>;
+
 export type AppVaultOpened =
-  | { state: "open"; ticket: string; email: string | null; items: AppVaultItem[] }
+  | { state: "open"; ticket: string; email: string | null; items: AppVaultItem[]; cards: AppVaultCard[] }
   /** Nothing can be opened here now; `message` says what to do in the app. */
   | { state: "openApp"; message: string }
   | { state: "cancelled" }
@@ -57,6 +67,16 @@ function parseItem(v: unknown): AppVaultItem | null {
   return { itemId, name, username, uris, hasTotp: r.hasTotp === true };
 }
 
+function parseCard(v: unknown): AppVaultCard | null {
+  if (typeof v !== "object" || v === null) return null;
+  const r = v as Record<string, unknown>;
+  const itemId = text(r.itemId, 128);
+  const name = text(r.name, 4096);
+  const subtitle = text(r.subtitle, 200);
+  if (itemId === null || itemId === "" || name === null || subtitle === null) return null;
+  return { itemId, name, subtitle, hasNumber: r.hasNumber === true, hasExpiry: r.hasExpiry === true, hasCvv: r.hasCvv === true, hasName: r.hasName === true };
+}
+
 /** Read the handler's `vaultOpen` reply. Anything malformed is "unavailable": it opens nothing. */
 export function parseOpenReply(reply: unknown): AppVaultOpened {
   if (typeof reply !== "object" || reply === null) return { state: "unavailable" };
@@ -73,7 +93,42 @@ export function parseOpenReply(reply: unknown): AppVaultOpened {
     if (item === null) return { state: "unavailable" };
     items.push(item);
   }
-  return { state: "open", ticket: r.ticket, email: text(r.email, 320), items };
+  // Cards are optional in the reply (an app build from before they were listed sends none).
+  const cards: AppVaultCard[] = [];
+  if (r.cards !== undefined) {
+    if (!Array.isArray(r.cards) || r.cards.length > MAX_ITEMS) return { state: "unavailable" };
+    for (const raw of r.cards) {
+      const card = parseCard(raw);
+      if (card === null) return { state: "unavailable" };
+      cards.push(card);
+    }
+  }
+  return { state: "open", ticket: r.ticket, email: text(r.email, 320), items, cards };
+}
+
+export type AppVaultCardSecret =
+  | { state: "card"; fields: AppVaultCardFields }
+  | { state: "openApp"; message: string }
+  | { state: "cancelled" }
+  | { state: "refused" }
+  | { state: "unavailable" };
+
+/** Read the handler's answer to a card ask: only the fields that were asked for are kept, whatever came back. */
+export function parseCardReply(reply: unknown, asked: readonly CardFieldName[]): AppVaultCardSecret {
+  if (typeof reply !== "object" || reply === null) return { state: "unavailable" };
+  const r = reply as Record<string, unknown>;
+  if (r.ok !== true || r.type !== "vaultSecret") return { state: "unavailable" };
+  if (r.state === "cancelled") return { state: "cancelled" };
+  if (r.state === "refused") return { state: "refused" };
+  if (r.state === "openApp") return { state: "openApp", message: text(r.message, 300) ?? OPEN_APP_FALLBACK };
+  if (r.state !== "secret" || typeof r.card !== "object" || r.card === null) return { state: "unavailable" };
+  const fields: AppVaultCardFields = {};
+  for (const name of CARD_FIELDS) {
+    if (!asked.includes(name)) continue;
+    const value = text((r.card as Record<string, unknown>)[name], 256);
+    if (value !== null && value !== "") fields[name] = value;
+  }
+  return { state: "card", fields };
 }
 
 /**
@@ -113,7 +168,7 @@ export function describeDiag(reply: unknown): string | null {
   return out.length > 0 ? out.join(" ") : null;
 }
 
-type NativeSend = (msg: { type: string; ticket?: string; itemId?: string; want?: AppVaultWant; name?: string }) => Promise<unknown>;
+type NativeSend = (msg: { type: string; ticket?: string; itemId?: string; want?: AppVaultWant | "card"; name?: string; fields?: CardFieldName[] }) => Promise<unknown>;
 
 function bounded(p: Promise<unknown>, ms: number): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -130,7 +185,7 @@ function bounded(p: Promise<unknown>, ms: number): Promise<unknown> {
  * Never throws; a native failure reads as "unavailable".
  */
 export class AppVault {
-  private opened: { ticket: string; email: string | null; items: AppVaultItem[]; until: number } | null = null;
+  private opened: { ticket: string; email: string | null; items: AppVaultItem[]; cards: AppVaultCard[]; until: number } | null = null;
   private readonly send: NativeSend;
   private readonly now: () => number;
   /** The handler's own account of its process at the last open and the last secret (Details). */
@@ -141,7 +196,7 @@ export class AppVault {
     this.now = now;
   }
 
-  private live(): { ticket: string; email: string | null; items: AppVaultItem[]; until: number } | null {
+  private live(): { ticket: string; email: string | null; items: AppVaultItem[]; cards: AppVaultCard[]; until: number } | null {
     if (this.opened !== null && this.now() >= this.opened.until) this.close();
     return this.opened;
   }
@@ -185,7 +240,8 @@ export class AppVault {
     }
     if (result.state === "open") {
       const items = [...result.items].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-      this.opened = { ticket: result.ticket, email: result.email, items, until: this.now() + APP_VAULT_LIFETIME_MS };
+      const cards = [...result.cards].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+      this.opened = { ticket: result.ticket, email: result.email, items, cards, until: this.now() + APP_VAULT_LIFETIME_MS };
     }
     return result;
   }
@@ -206,6 +262,37 @@ export class AppVault {
       const result = parseSecretReply(reply, want);
       // The app's gates refuse now (signed out, policy, Face ID off): this vault is over. A cancel, or a handler
       // that had to prompt again, changes nothing here.
+      if (result.state === "openApp") this.close();
+      return result;
+    } catch {
+      return { state: "unavailable" };
+    }
+  }
+
+  /** The payment cards, by name (names and masked lines only). Empty while locked. */
+  cards(): AppVaultCard[] {
+    return this.live()?.cards ?? [];
+  }
+
+  card(itemId: string): AppVaultCard | null {
+    return this.cards().find((c) => c.itemId === itemId) ?? null;
+  }
+
+  /**
+   * The named stored fields of ONE listed card: what a detected form declared, or the one field being copied. Never
+   * the whole card unless every field was asked for.
+   */
+  async cardFields(itemId: string, fields: readonly CardFieldName[]): Promise<AppVaultCardSecret> {
+    const live = this.live();
+    if (live === null) return { state: "cancelled" };
+    const card = live.cards.find((c) => c.itemId === itemId);
+    if (card === undefined) return { state: "refused" };
+    const asked = CARD_FIELDS.filter((f) => fields.includes(f));
+    if (asked.length === 0) return { state: "card", fields: {} };
+    try {
+      const reply = await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want: "card", name: card.name, fields: asked }), APP_VAULT_PROMPT_TIMEOUT_MS);
+      this.diag.secret = describeDiag(reply);
+      const result = parseCardReply(reply, asked);
       if (result.state === "openApp") this.close();
       return result;
     } catch {

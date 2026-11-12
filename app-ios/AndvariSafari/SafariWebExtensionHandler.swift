@@ -60,7 +60,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 ticket: message?["ticket"] as? String,
                 itemId: message?["itemId"] as? String,
                 want: message?["want"] as? String,
-                name: message?["name"] as? String
+                name: message?["name"] as? String,
+                fields: message?["fields"] as? [String] ?? []
             ) { self.reply($0, to: context) }
         case "vaultClose":
             AppVaultSession.close(ticket: message?["ticket"] as? String)
@@ -111,8 +112,9 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 ///
 /// What crosses to the extension, and when:
 /// - `open` answers with the logins' names, usernames and web addresses. No password and no one-time code.
-/// - `secret` answers with ONE thing of one login: its username and password (`want: "login"`) or its current
-///   one-time code (`want: "code"`). Never both.
+/// - `open` also lists the payment cards: a name and a masked line each.
+/// - `secret` answers with ONE thing of one item: a login's username and password (`want: "login"`), its current
+///   one-time code (`want: "code"`), or the named fields of one card (`want: "card"`). Never more than was asked.
 ///
 /// How long an unlock lasts: one Face ID opens the vault for this process for at most `lifetime` seconds, under a
 /// random ticket only the caller of `open` holds. `close` (the popup went away), the deadline, or a new `open` wipes
@@ -224,6 +226,10 @@ enum AppVaultSession {
                 body["items"] = vault.logins(hosts: []).map { login -> [String: Any] in
                     ["itemId": login.itemId, "name": login.name, "username": login.username, "uris": login.uris, "hasTotp": login.hasTotp]
                 }
+                // Cards: the name and a masked line. No number, date or code.
+                body["cards"] = vault.cards().map { card -> [String: Any] in
+                    ["itemId": card.itemId, "name": card.name, "subtitle": card.subtitle, "hasNumber": card.hasNumber, "hasExpiry": card.hasExpiry, "hasCvv": card.hasCvv, "hasName": card.hasName]
+                }
             }
             done(body)
         }
@@ -237,9 +243,12 @@ enum AppVaultSession {
         return "Unlock andvari to use “\(line)”"
     }
 
-    static func secret(ticket asked: String?, itemId: String?, want: String?, name: String?, _ done: @escaping ([String: Any]) -> Void) {
+    /// The card fields a caller may name; anything else is ignored.
+    private static let cardFields: Set<String> = ["number", "expMonth", "expYear", "cvv", "name", "postal"]
+
+    static func secret(ticket asked: String?, itemId: String?, want: String?, name: String?, fields: [String], _ done: @escaping ([String: Any]) -> Void) {
         onMain {
-            guard let itemId, !itemId.isEmpty, want == "login" || want == "code" else {
+            guard let itemId, !itemId.isEmpty, want == "login" || want == "code" || want == "card" else {
                 done(["ok": true, "type": "vaultSecret", "state": "refused"])
                 return
             }
@@ -279,13 +288,29 @@ enum AppVaultSession {
                 done(["ok": true, "type": "vaultSecret", "state": "openApp", "message": blocked.message])
                 return
             }
-            guard let vault = live(), let login = vault.logins(hosts: []).first(where: { $0.itemId == itemId }),
-                  !ownUnlock || login.name == name
-            else {
+            guard let vault = live() else {
                 done(["ok": true, "type": "vaultSecret", "state": "refused"])
                 return
             }
             var body: [String: Any] = ["ok": true, "type": "vaultSecret", "state": "secret"]
+            if want == "card" {
+                // One card, and of it only the fields asked for (the form's own fields, or the one being copied).
+                guard let card = vault.cards().first(where: { $0.itemId == itemId }), !ownUnlock || card.name == name else {
+                    done(["ok": true, "type": "vaultSecret", "state": "refused"])
+                    return
+                }
+                var released: [String: String] = [:]
+                for field in Set(fields).intersection(cardFields) {
+                    if let value = vault.cardField(itemId: itemId, field: field) { released[field] = value }
+                }
+                body["card"] = released
+                done(body)
+                return
+            }
+            guard let login = vault.logins(hosts: []).first(where: { $0.itemId == itemId }), !ownUnlock || login.name == name else {
+                done(["ok": true, "type": "vaultSecret", "state": "refused"])
+                return
+            }
             if want == "code" {
                 guard let code = vault.oneTimeCode(itemId: itemId) else {
                     done(["ok": true, "type": "vaultSecret", "state": "refused"])
