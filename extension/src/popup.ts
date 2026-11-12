@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, cardFillErrorCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -1086,7 +1086,7 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
         : `Couldn't fill ${missed.join(", ")}. ${remedy}`,
     );
   } else {
-    showMsg("err", fillErrorCopy(r?.code));
+    showMsg("err", cardFillErrorCopy(r?.outcome?.code ?? r?.code));
   }
 }
 
