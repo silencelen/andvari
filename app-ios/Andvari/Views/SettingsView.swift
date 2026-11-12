@@ -13,11 +13,12 @@ struct SettingsView: View {
     @State private var showFullCode = false
     /// Whether andvari is the AutoFill provider iOS uses (nil until the system has said).
     @State private var autofillOn: Bool?
+    @AppStorage(Appearance.storageKey) private var appearance = Appearance.system.rawValue
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Account") {
+                Section {
                     LabeledContent("Email", value: model.state.accountEmail ?? "–")
                     LabeledContent("Server") {
                         Text(model.state.server ?? "–")
@@ -29,6 +30,10 @@ struct SettingsView: View {
                     } label: {
                         Text("Two-step sign-in")
                     }
+                } header: {
+                    Text("Account")
+                } footer: {
+                    Text("Sign out to connect to a different server.")
                 }
                 .listRowBackground(Palette.raised)
 
@@ -62,6 +67,7 @@ struct SettingsView: View {
                     }
                     .disabled(model.state.busy || !(quick.available || quick.enrolled))
                     LabeledContent("Auto-lock", value: autoLock)
+                    LabeledContent("Copied secrets clear after", value: clipboardClear)
                 } header: {
                     Text("Security")
                 } footer: {
@@ -111,6 +117,16 @@ struct SettingsView: View {
                         confirmSignOut = true
                     }
                     .disabled(model.state.busy)
+                }
+                .listRowBackground(Palette.raised)
+
+                Section("Appearance") {
+                    Picker("Appearance", selection: $appearance) {
+                        ForEach(Appearance.allCases) { choice in
+                            Text(choice.label).tag(choice.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                 }
                 .listRowBackground(Palette.raised)
 
@@ -179,6 +195,12 @@ struct SettingsView: View {
 
     private var quick: QuickUnlockView {
         model.state.quickUnlock
+    }
+
+    /// The server's clipboard window, already clamped (1–300 s); a copy is local to this device and expires then.
+    private var clipboardClear: String {
+        guard let seconds = model.state.policy?.clipboardClearSeconds, seconds > 0 else { return "–" }
+        return Format.duration(seconds: Int(seconds))
     }
 
     /// The server's idle window, already clamped; the vault also locks whenever the app leaves the screen.
