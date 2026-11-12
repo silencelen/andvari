@@ -198,6 +198,13 @@ struct SignInForm: View {
             }
             PrimaryButton(title: "Sign in", busy: model.state.busy, action: submit)
                 .disabled(!ready || model.state.busy)
+            Button("Forgot your master password?") {
+                model.openRecover()
+            }
+            .font(.footnote)
+            .foregroundStyle(Palette.inkDim)
+            .frame(maxWidth: .infinity)
+            .disabled(model.state.busy)
         }
         .onChange(of: codeRequired) { _, required in
             if required {

@@ -1,14 +1,18 @@
 package io.silencelen.andvari.core.app
 
+import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.CardData
+import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemDoc
+import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.OriginProbeFence
+import io.silencelen.andvari.core.client.Strength
 import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.UpgradeRequiredException
@@ -16,6 +20,10 @@ import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.autofill.CardNormalize
 import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
+import io.silencelen.andvari.core.client.session.BoundedOps
+import io.silencelen.andvari.core.client.session.recoveryLockout
+import io.silencelen.andvari.core.client.session.requireCurrentPolicy
+import io.silencelen.andvari.core.client.session.runBounded
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.CaptureConfirm
 import io.silencelen.andvari.core.client.session.CaptureSetup
@@ -55,6 +63,9 @@ import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.crypto.CryptoException
+import io.silencelen.andvari.core.crypto.CryptoUnavailableException
+import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.ClientPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -215,6 +226,7 @@ open class SessionController(
 
     /** One idle check, and the 5-minute quiet sync while unlocked (spec 03 §6). The ticker calls it every [tickMs]. */
     internal fun tick() {
+        if (state.screen == AppScreen.RECOVER && state.recoverVerified && !state.busy && clocks.monotonicMs() - recoverVerifiedAtMono >= RecoverCopy.IDLE_MS) recoverTimedOut()
         checkIdleLock()
         if (tickMs > 0) {
             sinceSyncMs += tickMs
@@ -233,6 +245,8 @@ open class SessionController(
 
     /** The app left the foreground: the vault locks (a suspended app cannot run the idle timer). */
     fun onBackground() {
+        // The new-password step holds the raw recovery secret: it does not survive a trip to the background.
+        if (state.screen == AppScreen.RECOVER && state.recoverVerified) recoverTimedOut()
         if (session.get() == null) return
         // H08: never close the engine under a running action; the lock lands when it ends.
         if (state.busy) {
@@ -307,6 +321,189 @@ open class SessionController(
     fun changeServer() {
         if (session.get() != null) return // only a signed-out or locked app changes server
         update { it.copy(screen = AppScreen.CHOOSE_SERVER, error = null) }
+    }
+
+    /** Back out of the server field without choosing: the screen the stored state says. Nothing where no server is chosen yet. */
+    fun cancelChangeServer() {
+        if (state.screen != AppScreen.CHOOSE_SERVER || store.baseUrl == null) return
+        update { it.copy(screen = landingScreen(), error = null) }
+    }
+
+    // ---- identity ----
+
+    /**
+     * This account's identity code, for someone else to check against what their screen shows for this person: the
+     * short form (32 hex, grouped by the UI) and the full fingerprint. Derived from the key this device holds, never a
+     * server value. Null while locked.
+     */
+    fun identityCode(): String? = guarded({ null }) { session.get()?.account?.identityFingerprintShort() }
+
+    fun identityCodeFull(): String? = guarded({ null }) { session.get()?.account?.identityFingerprintFull() }
+
+    // ---- forgot the master password (spec 04 member recovery; Android's Recover wizard) ----
+
+    /** §F.7: the parsed recovery secret and the server's verify answer, held only between the two steps. */
+    private var recoverSecret: ByteArray? = null
+    private var recoverVerify: RecoveryVerifyResponse? = null
+    private var recoverEmail: String? = null
+
+    /** Bumped whenever the wizard is opened or left: a step that finishes for an earlier one owns nothing. */
+    private var recoverEpoch = 0
+    private var recoverVerifiedAtMono = 0L
+
+    private fun zeroRecover() {
+        recoverSecret?.fill(0)
+        recoverSecret = null
+        recoverVerify = null
+        recoverEmail = null
+        recoverEpoch++
+    }
+
+    /** Open the wizard from the sign-in or the unlock screen. A fresh entry never inherits an earlier attempt's material. */
+    fun openRecover() {
+        if (state.busy || session.get() != null) return
+        if (state.screen != AppScreen.WELCOME && state.screen != AppScreen.UNLOCK) return
+        zeroRecover()
+        update { it.copy(screen = AppScreen.RECOVER, recoverVerified = false, error = null, notice = null) }
+    }
+
+    /** Leave the wizard (either step): the held material is zeroed, and a step still in flight lands nowhere. */
+    fun cancelRecover() {
+        if (state.screen != AppScreen.RECOVER) return
+        zeroRecover()
+        update { it.copy(screen = landingScreen(), recoverVerified = false, error = null, busy = false) }
+    }
+
+    /** The new-password step sat idle, or the app left the foreground, while the raw recovery secret was held. */
+    private fun recoverTimedOut() {
+        zeroRecover()
+        update { it.copy(screen = landingScreen(), recoverVerified = false, error = null, busy = false, notice = RecoverCopy.TIMEOUT) }
+    }
+
+    /**
+     * Step 1: the email and the recovery phrase. The phrase never leaves the device: a key derived from it proves
+     * possession, and the server's answer is uniform whichever of the two was wrong.
+     */
+    @Throws(CancellationException::class)
+    suspend fun recoverVerify(email: String, phrase: String): ActionResult = action {
+        if (state.screen != AppScreen.RECOVER) return@action ActionResult.NotDone(null)
+        recoveryLockout(store.pendingServer)?.let { return@action ActionResult.Failed(it) }
+        val origin = store.baseUrl ?: return@action ActionResult.NotDone(null)
+        val secret = MemberRecovery.parseSecret(phrase) ?: return@action ActionResult.Failed(RecoverCopy.NOT_A_PHRASE)
+        busy()
+        val mine = recoverEpoch
+        val api = clients.probe(origin)
+        try {
+            val authKey = withContext(Dispatchers.Default) { MemberRecovery.deriveAuthKey(crypto, secret) }
+            // §F.7 cancel fence, after every await: once this wizard is gone, the step zeroes what it holds and stops.
+            if (recoverEpoch != mine) {
+                secret.fill(0)
+                return@action ActionResult.NotDone(null)
+            }
+            val answer = runBounded(BoundedOps.RECOVERY_CALL_MS) { api.recoverySelfVerify(email.trim(), authKey) }
+            if (recoverEpoch != mine) {
+                secret.fill(0)
+                return@action ActionResult.NotDone(null)
+            }
+            recoverSecret?.fill(0) // an earlier attempt's bytes die before the fresh stash
+            recoverSecret = secret
+            recoverVerify = answer
+            recoverEmail = email.trim()
+            recoverVerifiedAtMono = clocks.monotonicMs()
+            update { it.copy(busy = false, recoverVerified = true, error = null) }
+            ActionResult.Ok
+        } catch (t: Throwable) {
+            secret.fill(0) // a refused phrase's bytes don't linger
+            if (t is CancellationException) throw t
+            if (recoverEpoch != mine) return@action ActionResult.NotDone(null)
+            idleFailed(recoverVerifyError(t))
+        } finally {
+            api.close()
+        }
+    }
+
+    /**
+     * Step 2: the new master password. The same UVK is opened from the phrase, the account's identity key is checked
+     * against it before anything is sent (a substituted key stops here), and the reset is committed under the server
+     * policy's KDF parameters. Success ends every session of the account, this device's included.
+     */
+    @Throws(CancellationException::class)
+    suspend fun recoverCommit(newPassword: String): ActionResult = action {
+        if (state.screen != AppScreen.RECOVER) return@action ActionResult.NotDone(null)
+        recoveryLockout(store.pendingServer)?.let { return@action ActionResult.Failed(it) }
+        val secret = recoverSecret
+        val verify = recoverVerify
+        val origin = store.baseUrl
+        if (secret == null || verify == null || origin == null) {
+            update { it.copy(recoverVerified = false) }
+            return@action ActionResult.Failed(RecoverCopy.EXPIRED)
+        }
+        // The one irreversible outcome of this screen is a weak master password: checked here, whatever the UI did.
+        if (!Strength.meetsMasterPasswordFloor(newPassword)) return@action ActionResult.Failed(RecoverCopy.WEAK_PASSWORD)
+        busy()
+        val mine = recoverEpoch
+        val originKey = OriginCanon.originKey(origin)
+        val tag = coordinator.tag(originKey) // A12: tagged before any await
+        val recoveredEmail = recoverEmail // captured before any await: a commit that lands revokes this account's sessions
+        val api = clients.probe(origin)
+        try {
+            // The KDF parameters are the server's fenced policy, never a guess; fetched now if this visit has none.
+            val policy = coordinator.livePolicy ?: coordinator.boundedPolicy(api).let { requireCurrentPolicy(it, coordinator.applyPolicy(it, tag)) }
+            if (recoverEpoch != mine) return@action ActionResult.NotDone(null)
+            val commit = withContext(Dispatchers.Default) { Account.recover(secret, verify, newPassword, policy.kdfParams) }
+            // Cancelled during the derivation (the secret may have been zeroed mid-read): never post it.
+            if (recoverEpoch != mine) return@action ActionResult.NotDone(null)
+            runBounded(BoundedOps.RECOVERY_CALL_MS) { api.recoverySelfCommit(commit) }
+            // Past the point of no return: every session of the recovered account is revoked, this device's too.
+            val cancelled = recoverEpoch != mine
+            if (!cancelled) zeroRecover()
+            val stored = store.load()
+            if (stored != null && recoveredEmail != null && stored.email.equals(recoveredEmail, ignoreCase = true)) {
+                coordinator.purgeRevoked(originKey, stored.userId)
+                dropFillSnapshot() // the extensions' copy goes with the session
+            }
+            if (cancelled) return@action ActionResult.NotDone(null)
+            update {
+                it.copy(
+                    busy = false, screen = landingScreen(), recoverVerified = false, lockReason = null, accountEmail = store.load()?.email,
+                    mustChangePassword = store.mustChangePassword, notice = RecoverCopy.DONE,
+                )
+            }
+            refreshQuick()
+            ActionResult.Ok
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            // The held material survives a failed commit: a transient failure retries without the first step.
+            if (recoverEpoch != mine) return@action ActionResult.NotDone(null)
+            idleFailed(recoverResetError(t))
+        } finally {
+            api.close()
+        }
+    }
+
+    private fun recoverVerifyError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> HouseholdCopy.CRYPTO_UNAVAILABLE
+        t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION
+        t is ApiException -> when {
+            t.status == 401 -> "We couldn't verify that email and recovery phrase."
+            t.code == "recovery_public_disabled" -> "Account recovery isn't available from this public address — connect from inside (VPN/LAN) and try again."
+            else -> HouseholdCopy.SERVER_PROBLEM
+        }
+        t is kotlinx.io.IOException -> HouseholdCopy.UNREACHABLE
+        else -> "Recovery failed. Please try again."
+    }
+
+    private fun recoverResetError(t: Throwable): String = when {
+        t is CryptoUnavailableException -> HouseholdCopy.CRYPTO_UNAVAILABLE
+        t is KdfPolicyViolationException -> HouseholdCopy.WEAK_KDF_ACTION
+        t is CryptoException && t.message?.contains("identity key mismatch") == true -> HouseholdCopy.IDENTITY_MISMATCH
+        t is ApiException -> when {
+            t.code == "invalid_ticket" || t.status == 401 -> RecoverCopy.EXPIRED
+            t.code == "recovery_account_not_active" -> "This account is disabled — self-recovery isn't available. Ask your admin to recover it."
+            else -> HouseholdCopy.SERVER_PROBLEM
+        }
+        t is kotlinx.io.IOException -> HouseholdCopy.UNREACHABLE
+        else -> "Recovery failed. Please try again."
     }
 
     /** Probe the server's policy again (after [AppState.serverUnreachable]). */
@@ -863,6 +1060,7 @@ open class SessionController(
         autoLockSeconds = store.baseUrl?.let { store.origin(OriginCanon.originKey(it)).autoLockSeconds } ?: p.autoLockSeconds,
         recoveryFingerprintShort = p.recoveryFingerprint.take(32),
         signupMode = effectiveSignupMode(p.signupMode),
+        clipboardClearSeconds = p.clipboardClearSeconds.coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS),
     )
 
     /** Gap 6: the same quick-unlock gates the ladder enforces at unlock, and why one refuses. */
@@ -1346,4 +1544,15 @@ open class SessionController(
         const val TOTP_INVALID = "That one-time code key isn't valid base32 or an otpauth:// link."
         const val ITEM_GONE = "This item is no longer here."
     }
+}
+
+/** The recover wizard's fixed sentences and its idle bound (Android's wording). */
+internal object RecoverCopy {
+    /** How long the new-password step may sit while the raw recovery secret is held. */
+    const val IDLE_MS = 300_000L
+    const val TIMEOUT = "Timed out for your security. Start the recovery again."
+    const val NOT_A_PHRASE = "That doesn't look like a recovery phrase — check it and try again."
+    const val EXPIRED = "Your recovery session expired — start again."
+    const val WEAK_PASSWORD = "Choose a stronger master password — mix length with upper/lower case, digits, or symbols."
+    const val DONE = "Master password reset — sign in with your new password."
 }

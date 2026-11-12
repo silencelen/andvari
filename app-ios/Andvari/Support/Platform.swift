@@ -15,8 +15,9 @@ extension String {
 /// A copy stays on this device's own pasteboard (never Universal Clipboard) and expires.
 @MainActor
 enum Clipboard {
-    /// The server policy has no clipboard-clear time the app can read, so every copy lives this long.
-    static let lifetime: TimeInterval = 60
+    /// How long a copy lives: the server policy's clipboard-clear time (the core clamps it to 1–300 s), kept
+    /// current by the model. The policy's own default until a policy has been read.
+    static var lifetime: TimeInterval = 30
 
     static func copy(_ value: String) {
         UIPasteboard.general.setItems(

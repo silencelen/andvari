@@ -59,8 +59,13 @@ struct UnlockView: View {
                     .disabled(model.state.busy)
                 }
             }
-            Button("Sign out") {
-                confirmSignOut = true
+            VStack(spacing: 14) {
+                Button("Forgot your master password?") {
+                    model.openRecover()
+                }
+                Button("Sign out") {
+                    confirmSignOut = true
+                }
             }
             .font(.footnote)
             .foregroundStyle(Palette.inkDim)

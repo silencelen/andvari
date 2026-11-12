@@ -9,6 +9,7 @@ enum Screen: Equatable {
     case trustGate
     case welcome
     case unlock
+    case recover
     case recoveryReveal
     case recoveryCapture
     case vault
@@ -20,6 +21,7 @@ enum Screen: Equatable {
             (AppScreen.trustGate, .trustGate),
             (AppScreen.welcome, .welcome),
             (AppScreen.unlock, .unlock),
+            (AppScreen.recover, .recover),
             (AppScreen.recoveryReveal, .recoveryReveal),
             (AppScreen.recoveryCapture, .recoveryCapture),
             (AppScreen.vault, .vault),
@@ -102,6 +104,9 @@ final class AppModel: ObservableObject {
             gateForInvite = false
         }
         state = next
+        if let seconds = next.policy?.clipboardClearSeconds {
+            Clipboard.lifetime = TimeInterval(seconds)
+        }
         syncCredentialIdentities(next)
     }
 
@@ -118,7 +123,7 @@ final class AppModel: ObservableObject {
             guard key != suggestedKey else { return }
             suggestedKey = key
             CredentialIdentities.replace(controller.credentialIdentities())
-        case .vault, .unlock, .recoveryReveal, .recoveryCapture, .loading:
+        case .vault, .unlock, .recover, .recoveryReveal, .recoveryCapture, .loading:
             break
         case .welcome, .chooseServer, .trustGate, .upgradeRequired:
             // No session behind these screens (an unlock screen has one): nothing may stay suggested.
@@ -184,6 +189,40 @@ final class AppModel: ObservableObject {
 
     func changeServer() {
         controller.changeServer()
+    }
+
+    /// Back out of the server field: the server already chosen stays.
+    func cancelChangeServer() {
+        controller.cancelChangeServer()
+    }
+
+    // MARK: - Forgot the master password
+
+    func openRecover() {
+        controller.openRecover()
+    }
+
+    func cancelRecover() {
+        controller.cancelRecover()
+    }
+
+    func recoverVerify(email: String, phrase: String) async -> Outcome {
+        await run { try await $0.recoverVerify(email: email, phrase: phrase) }
+    }
+
+    func recoverCommit(newPassword: String) async -> Outcome {
+        await run { try await $0.recoverCommit(newPassword: newPassword) }
+    }
+
+    // MARK: - Identity
+
+    /// This account's identity code (32 hex digits), from the key this device holds. Nil while locked.
+    func identityCode() -> String? {
+        controller.identityCode()
+    }
+
+    func identityCodeFull() -> String? {
+        controller.identityCodeFull()
     }
 
     func retryServer() async -> Outcome {

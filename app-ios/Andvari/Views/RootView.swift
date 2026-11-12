@@ -53,6 +53,8 @@ struct RootView: View {
             WelcomeView()
         case .unlock:
             UnlockView()
+        case .recover:
+            RecoverView()
         case .recoveryReveal:
             RecoveryRevealView()
         case .recoveryCapture:

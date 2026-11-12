@@ -22,10 +22,10 @@ The owner's direction: the iOS app reaches function parity with the Android app 
 | Account deletion | Not in the Android app (done on the web) | None | Server call exists for the web | M | App Store rule: an app that creates accounts must let the person start deletion in the app |
 | Demo account for App Review | Not applicable | None | Not applicable | S | A reachable demo server and credentials in the review notes |
 | View cards and notes | Full: detail with copy rows, expiry, masked number | Full since 2026-11-11: card detail with reveal and copy; notes were already shown | Yes | Done | |
-| Recover an account (admin-issued temporary password) | Full (`RecoverScreen`) | None; the app shows "set a new master password on the web" when a temporary password is in use | Yes (`recoverVerify`, `recoverCommit` flows; partly in the view model) | M | None |
-| Clipboard clear by policy | Clears after the server's `clipboardClearSeconds` | Fixed 60 s expiry on a local-only pasteboard item | Policy is in core | S | iOS cannot clear the pasteboard later from the background; an expiring item is the mechanism, so this is reading the policy's number |
-| Cancel on "change server" | Yes | No way back from the server field once opened | Controller | S | None |
-| Identity fingerprint | Shown in Household (code and QR) | None | Yes | S | None |
+| Recover an account (email and recovery phrase, then a new master password) | Full (`RecoverScreen`) | Done: from sign-in and unlock; the new-password step ends after 5 idle minutes or on leaving the app | In the controller (`recoverVerify`, `recoverCommit`) | Done | None |
+| Clipboard clear by policy | Clears after the server's `clipboardClearSeconds` | Done: the expiry of the local-only pasteboard item is the policy's number, clamped to 1–300 s | Policy is in core | Done | iOS cannot clear the pasteboard later from the background; an expiring item is the mechanism |
+| Cancel on "change server" | Yes | Done: Cancel returns to the screen the field was opened from | Controller | Done | None |
+| Identity fingerprint | Shown in Household (code and QR) | Code and full fingerprint in Settings; no QR | Yes | Done (QR with sharing) | None |
 | Sign-in two-step code | Full | Full | Yes | Done | |
 | Trust Gate, enroll, recovery phrase capture | Full | Full | Yes | Done | |
 | Logins: add, edit, delete, generator, one-time codes | Full | Full | Yes | Done | |

@@ -7,6 +7,9 @@ struct SettingsView: View {
     @State private var quickOn = false
     @State private var message: String?
     @State private var confirmSignOut = false
+    @State private var identityCode: String?
+    @State private var identityCodeFull: String?
+    @State private var showFullCode = false
 
     var body: some View {
         NavigationStack {
@@ -20,6 +23,30 @@ struct SettingsView: View {
                     }
                 }
                 .listRowBackground(Palette.raised)
+
+                if let identityCode {
+                    Section {
+                        Text(Self.grouped(identityCode))
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Your identity code")
+                            .accessibilityValue(identityCode.map(String.init).joined(separator: " "))
+                        if let identityCodeFull {
+                            DisclosureGroup("Full fingerprint", isExpanded: $showFullCode) {
+                                Text(Self.grouped(identityCodeFull))
+                                    .font(.footnote.monospaced())
+                                    .foregroundStyle(Palette.inkDim)
+                                    .textSelection(.enabled)
+                            }
+                            .font(.footnote)
+                        }
+                    } header: {
+                        Text("Your identity code")
+                    } footer: {
+                        Text("Someone sharing a vault with you sees this code for you on their screen. Compare it in person or on a call you trust: if it matches, they are really sharing with you.")
+                    }
+                    .listRowBackground(Palette.raised)
+                }
 
                 Section {
                     Toggle(isOn: $quickOn) {
@@ -80,6 +107,8 @@ struct SettingsView: View {
         }
         .onAppear {
             quickOn = quick.enrolled
+            identityCode = model.identityCode()
+            identityCodeFull = model.identityCodeFull()
         }
         .onChange(of: model.state.quickUnlock.enrolled) { _, enrolled in
             quickOn = enrolled
@@ -89,6 +118,16 @@ struct SettingsView: View {
                 setQuickUnlock(on)
             }
         }
+    }
+
+    /// Hex in groups of four, so two people can read it to each other.
+    private static func grouped(_ hex: String) -> String {
+        stride(from: 0, to: hex.count, by: 4).map { start in
+            let from = hex.index(hex.startIndex, offsetBy: start)
+            let to = hex.index(from, offsetBy: 4, limitedBy: hex.endIndex) ?? hex.endIndex
+            return String(hex[from..<to])
+        }
+        .joined(separator: " ")
     }
 
     private var quick: QuickUnlockView {
