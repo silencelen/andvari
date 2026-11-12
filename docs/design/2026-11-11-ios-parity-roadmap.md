@@ -18,10 +18,10 @@ The owner's direction: the iOS app reaches function parity with the Android app 
 
 | Capability | Android | iOS today | Core | Size | iOS constraint |
 |---|---|---|---|---|---|
-| Personal vault confirmation | A device that never confirmed its personal vault asks once, shows who else holds it, and confirms or re-designates (`PersonalVaultBanner`, `PersonalVaultCard`) | None. A new login then fails with "Choose a vault for this item", and captured logins stay pending | Yes (`SyncEngine` personal-choice API) | M | None. Blocks adding logins on any device where the question arises |
+| Personal vault confirmation | A device that never confirmed its personal vault asks once, shows who else holds it, and confirms or re-designates (`PersonalVaultBanner`, `PersonalVaultCard`) | Full since 2026-11-11 (`PersonalVaultFlow`): the notice at the top of the vault, all six states | Yes | Done | |
 | Account deletion | Not in the Android app (done on the web) | None | Server call exists for the web | M | App Store rule: an app that creates accounts must let the person start deletion in the app |
 | Demo account for App Review | Not applicable | None | Not applicable | S | A reachable demo server and credentials in the review notes |
-| View cards and notes | Full: detail with copy rows, expiry, masked number | List only; the detail is built for logins | Yes | S | None |
+| View cards and notes | Full: detail with copy rows, expiry, masked number | Full since 2026-11-11: card detail with reveal and copy; notes were already shown | Yes | Done | |
 | Recover an account (admin-issued temporary password) | Full (`RecoverScreen`) | None; the app shows "set a new master password on the web" when a temporary password is in use | Yes (`recoverVerify`, `recoverCommit` flows; partly in the view model) | M | None |
 | Clipboard clear by policy | Clears after the server's `clipboardClearSeconds` | Fixed 60 s expiry on a local-only pasteboard item | Policy is in core | S | iOS cannot clear the pasteboard later from the background; an expiring item is the mechanism, so this is reading the policy's number |
 | Cancel on "change server" | Yes | No way back from the server field once opened | Controller | S | None |
@@ -35,7 +35,7 @@ The owner's direction: the iOS app reaches function parity with the Android app 
 
 | Capability | Android | iOS today | Core | Size | iOS constraint |
 |---|---|---|---|---|---|
-| Create and edit cards | Full editor (number, expiry, CVC, holder, postal code) | None | Yes (`ItemDoc.card`, `CardDisplay`) | M | None |
+| Create and edit cards | Full editor (number, expiry, CVC, holder, postal code) | Full since 2026-11-11 (pulled forward): add, edit, delete, in the personal vault | Yes | Done | |
 | Create and edit secure notes | Full | None | Yes | S | None |
 | Choose the vault for a new item; move or copy an item between vaults | Vault picker in the editor; `MoveCopyControl` | None (personal vault only) | Yes (`moveOrCopyItem` logic partly in the view model) | M | None |
 | Trash: restore and purge deleted items | `TrashScreen` | None (delete only) | Yes | S | None |
