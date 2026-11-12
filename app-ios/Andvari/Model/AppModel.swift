@@ -293,6 +293,11 @@ final class AppModel: ObservableObject {
         controller.previousPassword(itemId: itemId, index: Int32(index))
     }
 
+    /// What to say under a card number while it is typed: one that cannot be saved, or one that looks unusual.
+    func cardNumberWarning(_ number: String) -> String? {
+        controller.cardNumberWarning(number: number)
+    }
+
     func revealSecret(_ itemId: String, _ field: SecretField) -> String? {
         controller.revealSecret(itemId: itemId, field: field)
     }

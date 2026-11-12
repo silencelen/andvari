@@ -389,10 +389,10 @@ private struct PendingSaveRow: View {
                 .font(.footnote)
                 .foregroundStyle(Palette.inkFaint)
             if let shown {
+                // Not selectable, like every revealed secret: a copy goes through the expiring clipboard only.
                 Text(shown)
                     .font(.footnote.monospaced())
                     .foregroundStyle(Palette.ink)
-                    .textSelection(.enabled)
             }
             // Said once: a Save that fails for the reason already shown adds nothing.
             if let failure, failure != pending.reason {

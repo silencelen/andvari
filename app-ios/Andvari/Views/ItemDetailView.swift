@@ -18,6 +18,9 @@ struct ItemDetailView: View {
     @State private var copies = 0
     @State private var editing = false
     @State private var gone = false
+    /// Bumped whenever the item is read again: the previous-password rows start over, hidden, so nothing shown stays on
+    /// screen under a list that may have changed underneath it.
+    @State private var generation = 0
 
     init(itemId: String) {
         self.itemId = itemId
@@ -110,9 +113,9 @@ struct ItemDetailView: View {
         }
         if detail.previousPasswords > 0 {
             Section {
-                ForEach(Array(model.passwordHistory(itemId).enumerated()), id: \.offset) { index, retired in
-                    PreviousPasswordRow(itemId: itemId, index: index, retired: retired) { value in
-                        copy(value, as: "previous-\(index)")
+                ForEach(historyRows) { row in
+                    PreviousPasswordRow(itemId: itemId, index: row.index, retired: row.retired) { value in
+                        copy(value, as: "previous-\(row.index)")
                     }
                 }
             } header: {
@@ -293,7 +296,16 @@ struct ItemDetailView: View {
             .formatted(date: .abbreviated, time: .shortened)
     }
 
+    /// One row per earlier password. The id names the entry (when it was retired, and where it sits now) and the read
+    /// it came from, never the place alone: a row's shown password cannot end up beside another entry.
+    private var historyRows: [HistoryRow] {
+        model.passwordHistory(itemId).enumerated().map { index, retired in
+            HistoryRow(id: "\(generation)|\(index)|\(retired.timeIntervalSince1970)", index: index, retired: retired)
+        }
+    }
+
     private func load() {
+        generation += 1
         if let next = model.itemDetail(itemId) {
             detail = next
         } else if detail != nil {
@@ -444,6 +456,13 @@ struct CountdownRing: View {
     }
 }
 
+/// Where one earlier password sits in the list read now.
+private struct HistoryRow: Identifiable {
+    let id: String
+    let index: Int
+    let retired: Date
+}
+
 /// One earlier password of a login: when it was retired, shown only on request, and copied like the current one.
 private struct PreviousPasswordRow: View {
     @EnvironmentObject private var model: AppModel
@@ -458,10 +477,10 @@ private struct PreviousPasswordRow: View {
             Text("Replaced \(retired.formatted(date: .abbreviated, time: .shortened))")
                 .font(.subheadline)
                 .foregroundStyle(Palette.inkDim)
+            // Not selectable: a copy goes through Copy, which keeps it on this device and lets it expire.
             Text(shown ?? "••••••••")
                 .font(.body.monospaced())
                 .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
             HStack(spacing: 16) {
                 Button(shown == nil ? "Show" : "Hide") {
                     shown = shown == nil ? model.previousPassword(itemId, index) : nil

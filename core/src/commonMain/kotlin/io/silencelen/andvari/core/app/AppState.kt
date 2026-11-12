@@ -199,6 +199,9 @@ data class CardDetail(
     val postalCode: String?,
     val hasNumber: Boolean,
     val hasCode: Boolean,
+    /** The stored month and year, each as stored ("07", "2031"), for an editor: never re-split from [expiry]. */
+    val expMonth: String?,
+    val expYear: String?,
 )
 
 /** The fields of a card being added or edited, as typed. Not a data class: no toString of the number. */

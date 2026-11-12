@@ -41,6 +41,12 @@ struct CardEditorView: View {
                 Section("Card") {
                     secretField("Card number", text: $draft.number, shown: $showNumber)
                         .keyboardType(.numberPad)
+                    if let warning = model.cardNumberWarning(draft.number) {
+                        Text(warning)
+                            .font(.footnote)
+                            .foregroundStyle(Palette.inkDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack(spacing: 12) {
                         TextField("Month (MM)", text: $draft.expMonth)
                             .keyboardType(.numbersAndPunctuation)
@@ -160,14 +166,9 @@ struct CardEditorView: View {
         next.favorite = detail.favorite
         next.cardholder = card.cardholder ?? ""
         next.postalCode = card.postalCode ?? ""
-        let halves = (card.expiry ?? "").split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        if halves.count == 2 {
-            next.expMonth = halves[0]
-            next.expYear = halves[1]
-        } else if let only = halves.first, !only.isEmpty {
-            // One half only: a four-digit value is the year.
-            if only.count == 4 { next.expYear = only } else { next.expMonth = only }
-        }
+        // Each half into its own field, as stored: a card with a year and no month keeps its year in the year field.
+        next.expMonth = card.expMonth ?? ""
+        next.expYear = card.expYear ?? ""
         // A save writes every field, so a secret that cannot be read now must not be saved as empty.
         let secrets: [(Bool, SecretField, WritableKeyPath<CardDraft, String>)] = [
             (card.hasNumber, SecretField.cardNumber, \CardDraft.number),

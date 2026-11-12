@@ -743,6 +743,7 @@ open class SessionController(
                     summary = CardDisplay.subtitle(doc), cardholder = c.cardholderName?.ifEmpty { null },
                     expiry = listOfNotNull(c.expMonth?.ifEmpty { null }, c.expYear?.ifEmpty { null }).joinToString("/").ifEmpty { null },
                     postalCode = c.postalCode?.ifEmpty { null }, hasNumber = !c.number.isNullOrEmpty(), hasCode = !c.securityCode.isNullOrEmpty(),
+                    expMonth = c.expMonth?.ifEmpty { null }, expYear = c.expYear?.ifEmpty { null },
                 )
             },
         )
@@ -835,6 +836,10 @@ open class SessionController(
         if ((input.expMonth.isNotBlank() && month == null) || (input.expYear.isNotBlank() && year == null)) return@action ActionResult.Failed(CARD_EXPIRY_INVALID)
         val existing = itemId?.let { live.engine.item(it) ?: return@action ActionResult.Failed(ITEM_GONE) }
         if (existing != null && existing.doc.type != "card") return@action ActionResult.Failed(ITEM_GONE)
+        // No card number is longer than 19 digits (ISO/IEC 7812). A number already stored is kept as it is, whatever
+        // its length, so editing an odd card's name never fails on a number the person did not touch.
+        val digits = CardNormalize.digitsOnly(input.number)
+        if (digits.length > CARD_NUMBER_MAX_DIGITS && digits != existing?.doc?.card?.number) return@action ActionResult.Failed(CARD_NUMBER_TOO_LONG)
         if (existing == null && live.account.personalVaultId.isEmpty()) return@action ActionResult.Failed(HouseholdCopy.NO_PERSONAL_VAULT)
         // A copy of the existing document and of its card, never a rebuild: fields this client does not know survive.
         val base = existing?.doc ?: ItemDoc(type = "card", name = "", card = CardData())
@@ -844,7 +849,7 @@ open class SessionController(
             favorite = input.favorite,
             card = (base.card ?: CardData()).copy(
                 cardholderName = input.cardholder.trim().ifBlank { null },
-                number = CardNormalize.digitsOnly(input.number).ifBlank { null },
+                number = digits.ifBlank { null },
                 expMonth = month,
                 expYear = year,
                 securityCode = CardNormalize.digitsOnly(input.securityCode).ifBlank { null },
@@ -858,6 +863,19 @@ open class SessionController(
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
         ActionResult.Ok
+    }
+
+    /**
+     * A line to show under a card number while it is typed, or null: a number that cannot be saved, or one that does
+     * not pass the usual check (a warning only, since an odd but real card must still be savable).
+     */
+    fun cardNumberWarning(number: String): String? {
+        val digits = CardNormalize.digitsOnly(number)
+        return when {
+            digits.length > CARD_NUMBER_MAX_DIGITS -> CARD_NUMBER_TOO_LONG
+            digits.length >= 12 && !CardNormalize.luhnValid(digits) -> CARD_NUMBER_UNUSUAL
+            else -> null
+        }
     }
 
     /** Delete an item (it goes to the server's trash). */
@@ -1556,6 +1574,9 @@ open class SessionController(
         const val QUICK_NOT_ENABLED = "Couldn't turn on quick unlock."
         const val CARD_NAME_REQUIRED = "Give the card a name."
         const val CARD_EXPIRY_INVALID = "That expiry date can't be read. Use a month and a year, like 07 and 2031."
+        const val CARD_NUMBER_MAX_DIGITS = 19
+        const val CARD_NUMBER_TOO_LONG = "A card number has at most 19 digits. Check the number."
+        const val CARD_NUMBER_UNUSUAL = "This number doesn't pass the usual check for card numbers. You can still save it."
         const val NAME_REQUIRED = "Give the login a name."
         const val TOTP_INVALID = "That one-time code key isn't valid base32 or an otpauth:// link."
         const val ITEM_GONE = "This item is no longer here."
