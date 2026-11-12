@@ -1,0 +1,177 @@
+# Builds the iOS app for devices, unsigned, and keeps it as an artifact. No secrets and no signing
+# here: the official build is signed and sent to TestFlight from this artifact on a machine that
+# holds the certificate. The artifact is what a signed archive would contain, minus the signatures.
+name: iOS unsigned build
+
+on:
+  push:
+    branches: [ios-ui, ios-localsign]
+    paths:
+      - "app-ios/**"
+      - "extension/**"
+      - "core/**"
+      - "spec/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "scripts/ci/build-libsodium-ios.sh"
+      - ".github/workflows/ios-unsigned.yml"
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: CFBundleVersion to build with (a whole number; default 100 + this workflow's run number)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unsigned:
+    name: unsigned device build
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      BUILD_NUMBER_INPUT: ${{ inputs.build_number }}
+      RUN_NUMBER: ${{ github.run_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          xcodebuild -version
+          xcodebuild -version | grep -qE '^Xcode (2[6-9]|[3-9][0-9])' || { echo "need Xcode 26+"; exit 1; }
+
+      # The number only has to be higher than every build already uploaded. Whoever signs can raise it
+      # again before signing, so this is a default and not a promise.
+      - name: Build number
+        run: |
+          N="${BUILD_NUMBER_INPUT:-$((100 + RUN_NUMBER))}"
+          case "$N" in ''|*[!0-9]*) echo "build number must be a whole number: $N"; exit 1;; esac
+          echo "BUILD_NUMBER=$N" >> "$GITHUB_ENV"
+          echo "build number $N"
+
+      - name: Java
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Restore libsodium
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/libsodium
+          key: libsodium-ios-${{ hashFiles('scripts/ci/build-libsodium-ios.sh') }}
+
+      - name: Kotlin/Native tools cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      - name: Kotlin framework and Safari files
+        run: app-ios/scripts/prepare.sh iosArm64
+
+      - name: Archive without signing
+        run: |
+          brew install xcodegen
+          (cd app-ios && xcodegen generate)
+          set +e
+          xcodebuild -project app-ios/Andvari.xcodeproj -scheme Andvari -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            archive > xcodebuild.log 2>&1
+          status=$?
+          grep -E ': error: ' xcodebuild.log | sort -u | head -100
+          tail -40 xcodebuild.log
+          exit "$status"
+
+      - name: Check the bundle
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/app.xcarchive/Products/Applications/Andvari.app"
+          # Safari needs the extension's files at the bundle root; a build that nests them still signs and uploads.
+          for f in manifest.json background.js content.js popup.html popup.js options.html kdf-worker.js icons/icon128.png; do
+            test -f "$APP/PlugIns/AndvariSafari.appex/$f" || { echo "missing from Safari appex root: $f"; exit 1; }
+          done
+          test -d "$APP/PlugIns/AndvariAutoFill.appex" || { echo "AutoFill extension missing"; exit 1; }
+          for b in "$APP" "$APP/PlugIns/AndvariSafari.appex" "$APP/PlugIns/AndvariAutoFill.appex"; do
+            exe="$b/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$b/Info.plist")"
+            archs="$(lipo -archs "$exe")"
+            [ "$archs" = "arm64" ] || { echo "$exe: expected arm64 only, got $archs"; exit 1; }
+            v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$b/Info.plist")"
+            [ "$v" = "$BUILD_NUMBER" ] || { echo "$b: CFBundleVersion $v, expected $BUILD_NUMBER"; exit 1; }
+            /usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$b/Info.plist" | grep -qx false \
+              || { echo "$b: ITSAppUsesNonExemptEncryption is not false"; exit 1; }
+            # Nothing here may look signed for distribution: that is the signer's work.
+            test ! -e "$b/embedded.mobileprovision" || { echo "$b: has a provisioning profile"; exit 1; }
+            llvm="$(otool -l "$exe" | grep -c __LLVM || true)"
+            [ "$llvm" = "0" ] || { echo "$exe: has a bitcode segment"; exit 1; }
+            echo "== $exe"
+            otool -L "$exe" | tail -n +2
+            codesign -dvv "$exe" 2>&1 | grep -E '^(Identifier|CodeDirectory|Signature|TeamIdentifier)' || true
+          done
+          echo "== bundle"
+          (cd "$APP/.." && find Andvari.app | sort)
+          echo "== archive"
+          (cd "$RUNNER_TEMP/app.xcarchive" && find . -maxdepth 3 | sort)
+
+      # tar keeps the executable bits and any symlinks, which a plain artifact upload drops.
+      - name: Package
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/unsigned"
+          mkdir -p "$OUT/entitlements"
+          cp -R "$RUNNER_TEMP/app.xcarchive/Products/Applications/Andvari.app" "$OUT/Andvari.app"
+          if [ -d "$RUNNER_TEMP/app.xcarchive/dSYMs" ]; then cp -R "$RUNNER_TEMP/app.xcarchive/dSYMs" "$OUT/dSYMs"; fi
+          # The entitlements each target asks for, as XML and named by bundle id. Signing adds the
+          # identifiers that depend on the team and the provisioning profile.
+          for t in Andvari AndvariSafari AndvariAutoFill; do
+            case "$t" in
+              Andvari) b="$OUT/Andvari.app";;
+              *) b="$OUT/Andvari.app/PlugIns/$t.appex";;
+            esac
+            id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$b/Info.plist")"
+            plutil -convert xml1 -o "$OUT/entitlements/$id.entitlements" "app-ios/$t/$t.entitlements"
+          done
+          cat > "$OUT/build-info.json" <<EOF
+          {
+            "commit": "$GITHUB_SHA",
+            "ref": "$GITHUB_REF",
+            "run_id": "$GITHUB_RUN_ID",
+            "build_number": "$BUILD_NUMBER",
+            "marketing_version": "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$OUT/Andvari.app/Info.plist")",
+            "xcode": "$(xcodebuild -version | tr '\n' ' ' | sed 's/ *$//')",
+            "sdk": "$(xcrun --sdk iphoneos --show-sdk-version)"
+          }
+          EOF
+          cat "$OUT/build-info.json"
+          tar -C "$OUT" -czf "$RUNNER_TEMP/andvari-ios-unsigned.tar.gz" Andvari.app entitlements build-info.json $( [ -d "$OUT/dSYMs" ] && echo dSYMs )
+          shasum -a 256 "$RUNNER_TEMP/andvari-ios-unsigned.tar.gz"
+          ls -la "$RUNNER_TEMP/andvari-ios-unsigned.tar.gz"
+
+      - name: Keep the unsigned build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: andvari-ios-unsigned
+          path: ${{ runner.temp }}/andvari-ios-unsigned.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
