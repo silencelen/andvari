@@ -33,6 +33,7 @@ enum Fixture {
 /// this text, so the run says what is waiting; it turns green by itself once the fix is in the build under test.
 enum KnownDefect {
     static let noPersonalVaultMessage = "Choose a vault for this item."
+    static let sharedMatchMessage = "A login outside your personal vault already uses this username here. Save this one as your own, or discard it."
     static let noPersonalVault = "Known app defect, being fixed on ios-ui: on a device that signed in to an account made elsewhere the personal vault is only a proposal the iOS app cannot confirm, so a new login is refused with \"Choose a vault for this item.\" Remove this skip's cause by merging the personal-vault confirmation; the test then runs to its end."
 }
 

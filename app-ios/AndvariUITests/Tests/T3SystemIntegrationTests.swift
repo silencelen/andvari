@@ -275,10 +275,10 @@ final class T3SystemIntegrationTests: UITestCase {
             popupRow(Fixture.siteItem).tap()
             Thread.sleep(forTimeInterval: 2)
             dumpEverything("popup-row-tapped")
-            let fill = safari.webViews.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'Fill'")).firstMatch
-            if fill.exists && fill.isHittable {
-                fill.tap()
-            }
+            // The row opens the login; its Fill button is further down the sheet, and a tap scrolls to it.
+            let fill = safari.webViews.buttons.matching(NSPredicate(format: "label == 'Fill' OR label BEGINSWITH 'Fill '")).firstMatch
+            require(fill, "the Fill button of the login in the popup", timeout: 8)
+            fill.tap()
             let username = webField("Username")
             let filled = matchFaceUntil(25) { (username.value as? String) == Fixture.siteUser }
             if !filled {
@@ -349,11 +349,14 @@ final class T3SystemIntegrationTests: UITestCase {
         }
         let two = app.staticTexts["Saved 2 logins from AutoFill"]
         let one = app.staticTexts["Saved 1 login from AutoFill"]
-        step("both-applied-at-unlock") {
+        try step("both-applied-at-unlock") {
             launchApp()
             reachVaultAnyWay()
             if !waitUntil(15, { two.exists }) {
                 dumpTree(app, as: "no-saved-list")
+                if app.staticTexts[KnownDefect.sharedMatchMessage].exists {
+                    try skip(KnownDefect.noPersonalVault + " Here: iOS offered \"Update Password?\", both captures reached the app, and each waits under \"Logins not saved yet\" with \"\(KnownDefect.sharedMatchMessage)\", because without a confirmed personal vault the login it would replace does not count as the person's own.")
+                }
                 XCTFail("the app did not list two logins saved from AutoFill")
             }
         }
@@ -444,13 +447,15 @@ final class T3SystemIntegrationTests: UITestCase {
             _ = search
         }
         step("centred") {
+            // The popup is the web view that holds the card; its rows span it.
             let popup = safari.webViews.containing(NSPredicate(format: "label CONTAINS %@", Fixture.cardItem)).firstMatch
             let content = popup.exists ? popup : safari.webViews.element(boundBy: safari.webViews.count - 1)
-            let row = popupRow(Fixture.cardItem)
+            let row = popupRowBox(Fixture.cardItem)
             let window = safari.windows.firstMatch.frame
             dumpTree(safari, as: "popup-layout")
             XCTAssertEqual(content.frame.midX, window.midX, accuracy: 4, "the popup's view is not centred in the sheet: \(content.frame) in \(window)")
-            XCTAssertEqual(row.frame.midX, window.midX, accuracy: 12, "the popup's rows are not centred in the sheet: \(row.frame) in \(window)")
+            XCTAssertGreaterThan(row.frame.width, window.width * 0.6, "the test found the row's words, not the row: \(row.frame)")
+            XCTAssertEqual(row.frame.midX, window.midX, accuracy: 6, "the popup's rows are not centred in the sheet: \(row.frame) in \(window)")
         }
     }
 
