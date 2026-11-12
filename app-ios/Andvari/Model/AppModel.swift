@@ -318,7 +318,7 @@ final class AppModel: ObservableObject {
         await run { try await $0.saveNote(itemId: itemId, input: input) }
     }
 
-    // MARK: - Trash
+    // MARK: - Trash and history
 
     func openTrash() async -> Outcome {
         await run { try await $0.openTrash() }
@@ -334,6 +334,23 @@ final class AppModel: ObservableObject {
 
     func purgeFromTrash(_ itemId: String) async -> Outcome {
         await run { try await $0.purgeFromTrash(itemId: itemId) }
+    }
+
+    func openItemHistory(_ itemId: String) async -> Outcome {
+        await run { try await $0.openItemHistory(itemId: itemId) }
+    }
+
+    func closeItemHistory() {
+        controller.closeItemHistory()
+    }
+
+    /// One earlier version's password, for an explicit Show. Held only while the history is open.
+    func historyPassword(_ itemId: String, _ rev: Int64) -> String? {
+        controller.historyPassword(itemId: itemId, rev: rev)
+    }
+
+    func restoreItemVersion(_ itemId: String, _ rev: Int64) async -> Outcome {
+        await run { try await $0.restoreItemVersion(itemId: itemId, rev: rev) }
     }
 
     func deleteItem(_ itemId: String) async -> Outcome {

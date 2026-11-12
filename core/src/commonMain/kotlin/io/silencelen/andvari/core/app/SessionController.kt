@@ -5,6 +5,7 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CardDisplay
+import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.ItemDoc
@@ -989,6 +990,72 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- item history (the server keeps an item's last 10 saves) ----
+
+    /** The open history: whose, and its versions decrypted. Held only while it is open. */
+    private var historyRead: Pair<String, List<DecryptedItemVersion>>? = null
+
+    private fun historyView(live: VaultSession.Unlocked, itemId: String, versions: List<DecryptedItemVersion>): ItemHistoryView {
+        val vaultId = live.engine.item(itemId)?.vaultId
+        return ItemHistoryView(
+            itemId = itemId,
+            versions = versions.map { v -> ItemVersionView(v.rev, v.archivedAt, v.doc.name, safeDetail(v.doc), !v.doc.login?.password.isNullOrEmpty()) },
+            canRestore = vaultId != null && canWrite(live, vaultId),
+        )
+    }
+
+    /** Read [itemId]'s earlier versions ([AppState.history]), newest first. */
+    @Throws(CancellationException::class)
+    suspend fun openItemHistory(itemId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val item = live.engine.item(itemId) ?: return@action ActionResult.Failed(ITEM_GONE)
+        busy()
+        val versions = runBounded(BoundedOps.FLAT_MS) { live.engine.itemVersions(itemId, item.vaultId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        historyRead = itemId to versions
+        update { it.copy(busy = false, history = historyView(live, itemId, versions)) }
+        ActionResult.Ok
+    }
+
+    /** The history closed: the versions read go. */
+    fun closeItemHistory() {
+        historyRead = null
+        update { it.copy(history = null) }
+    }
+
+    /** One earlier version's password, for an explicit Show; null when it has none or the history is not open. */
+    fun historyPassword(itemId: String, rev: Long): String? = guarded({ null }) {
+        historyRead?.takeIf { it.first == itemId }?.second?.firstOrNull { it.rev == rev }?.doc?.login?.password?.ifEmpty { null }
+    }
+
+    /**
+     * Put an earlier version back: an ordinary save of it over the item (the version it replaces is kept in the history
+     * by the server), without the attachments the item no longer has.
+     */
+    @Throws(CancellationException::class)
+    suspend fun restoreItemVersion(itemId: String, rev: Long): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val version = historyRead?.takeIf { it.first == itemId }?.second?.firstOrNull { it.rev == rev } ?: return@action ActionResult.Failed(ItemCopy.HISTORY_GONE)
+        val item = live.engine.item(itemId) ?: return@action ActionResult.Failed(ITEM_GONE)
+        if (!canWrite(live, item.vaultId)) return@action ActionResult.Failed(ItemCopy.READ_ONLY)
+        // An item's kind never changes: a version of another kind is not this item's.
+        if (version.doc.type != item.doc.type) return@action ActionResult.Failed(ItemCopy.HISTORY_GONE)
+        val doc = live.engine.versionDocForRestore(itemId, version.doc)
+        busy()
+        val outcome = saves.exclusive { live.engine.save(itemId, doc, item.vaultId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else ItemCopy.VERSION_RESTORED) }
+        writeFillSnapshot()
+        // The history again, best effort: the version just replaced is in it once the server has the restore.
+        val fresh = runCatching { runBounded(BoundedOps.FLAT_MS) { live.engine.itemVersions(itemId, item.vaultId) } }
+            .onFailure { if (it is CancellationException) throw it }.getOrNull()
+        if (fresh != null && session.get() === live && historyRead?.first == itemId) {
+            historyRead = itemId to fresh
+            update { it.copy(history = historyView(live, itemId, fresh)) }
+        }
+        ActionResult.Ok
+    }
+
     /** Delete an item (it goes to the server's trash). */
     @Throws(CancellationException::class)
     suspend fun deleteItem(itemId: String): ActionResult = action {
@@ -1569,6 +1636,7 @@ open class SessionController(
         saves.locked()
         personal.reset()
         trashRead = emptyMap()
+        historyRead = null
     }
 
     private fun lock(reason: String?) {
@@ -1644,7 +1712,7 @@ open class SessionController(
     private fun cleared(s: AppState, reason: String?) = s.copy(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
-        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), trash = null,
+        personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), trash = null, history = null,
     )
 
     private companion object {
@@ -1710,11 +1778,13 @@ internal object RecoverCopy {
     const val DONE = "Master password reset — sign in with your new password."
 }
 
-/** What the trash says. */
+/** What the trash and the item history say. */
 internal object ItemCopy {
     const val TRASH_RESTORED = "Item restored."
     const val TRASH_PURGED = "Item deleted for good."
     const val TRASH_GONE = "That item is no longer in the trash. Open the trash again."
     const val TRASH_UNREADABLE = "No readable version of this item is left, so it can only be deleted for good."
     const val READ_ONLY = "You can only view this vault, so this can't be changed here."
+    const val HISTORY_GONE = "That version is no longer listed. Open the history again."
+    const val VERSION_RESTORED = "Restored that version. The one it replaced is in the history."
 }
