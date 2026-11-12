@@ -80,6 +80,10 @@ enum Format {
 /// Sentences more than one screen uses.
 enum Wording {
     static let genericFailure = "Something went wrong. Try again."
+    /// How to set up the Safari extension, and why Safari's per-site question matters: until andvari may run on a
+    /// site, it can neither fill a card there nor see a login to offer to save.
+    static let safariExtensionHelp =
+        "AutoFill fills your logins in Safari and in apps. For cards, and for saving logins you sign in with, turn on the andvari extension in Safari: tap the extensions button in the address bar, choose Manage Extensions and turn on andvari. Safari then asks before andvari may run on each site. Choose Always Allow, then Always Allow on Every Website: that is what lets andvari fill cards and offer to save logins on any site. On iOS 26.2 and later, iOS itself offers to save new passwords to andvari."
     static let punycodeCaution =
         "This address uses international characters, shown here as punycode (xn--). Check it is exactly the server you expect."
     static let loopbackHttp =

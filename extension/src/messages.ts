@@ -341,6 +341,9 @@ export type Req =
    *  app ran the Trust Gate, so the worker commits it as the options page's Connect does. `app` says what the app
    *  answered: its server (now in effect), none yet, or nothing (another browser, or no answer). */
   | { type: "appServer" }
+  /** Popup ONLY, Safari build: what the app answered the popup's own native ask (its server, or null for none), relayed
+   *  when the worker's ask got no answer. Adopted exactly as the worker's own answer is. */
+  | { type: "appServerAnswer"; url: string | null; nativeSave?: boolean }
   /** Popup ONLY, Safari build: why no server is in effect, for the popup's Details. Answered at once, before the
    *  worker's start settles, and carries no secret: stages, kinds and an origin. */
   | { type: "serverDiag" }
@@ -656,7 +659,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                 ? { ok: boolean; url?: string; code?: "invalid" | "storage" | "not_allowed" }
                                               : T extends "forgetLegacyServer"
                                                 ? { ok: boolean }
-                                              : T extends "appServer"
+                                              : T extends "appServer" | "appServerAnswer"
                                                 ? { app: "set" | "none" | "unavailable" }
                                               : T extends "serverDiag"
                                                 ? ServerDiag | null

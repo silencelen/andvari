@@ -38,8 +38,10 @@ function fakeElement(id = ""): Record<string, unknown> {
 
 type Answer = (msg: { type: string }) => unknown;
 
-/** Load the Safari popup bundle into a fresh page whose worker answers with [answer]. */
-async function loadPopup(answer: Answer) {
+/** Load the Safari popup bundle into a fresh page whose worker answers with [answer]. [native] is what the app's
+ *  handler answers the popup's own native ask (through `browser.runtime`, as Safari documents it); [granted] is what
+ *  the permissions API says about any origin. */
+async function loadPopup(answer: Answer, opts: { native?: unknown; granted?: boolean } = {}) {
   const out = await esbuild.build({
     entryPoints: [new URL("./popup.ts", import.meta.url).pathname],
     bundle: true,
@@ -55,6 +57,7 @@ async function loadPopup(answer: Answer) {
     return elements.get(id)!;
   };
   const sent: string[] = [];
+  const relayed: { type: string }[] = [];
   const errors: unknown[] = [];
   // The page's timers, so the test can stop them all (the popup polls once a second for as long as it is open).
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -81,9 +84,10 @@ async function loadPopup(answer: Answer) {
     runtime: {
       sendMessage: async (msg: { type: string }) => {
         sent.push(msg.type);
+        relayed.push(msg);
         return answer(msg);
       },
-      sendNativeMessage: async () => ({ ok: true, type: "appServer", url: null }),
+      sendNativeMessage: async () => opts.native ?? { ok: true, type: "appServer", url: null },
       getURL: (p: string) => `safari-web-extension://x/${p}`,
       getManifest: () => ({ version: "0.0.0" }),
       onMessage: { addListener: () => undefined },
@@ -93,8 +97,10 @@ async function loadPopup(answer: Answer) {
       },
     },
     tabs: { query: async () => [{ id: 1, url: "https://login.example.com/x" }], create: async () => ({}) },
-    permissions: { contains: async () => true, request: async () => true },
+    permissions: { contains: async () => opts.granted ?? true, request: async () => true },
   };
+  const nativeAsks: unknown[] = [];
+  const browser = { runtime: { sendNativeMessage: async (_app: string, msg: unknown) => (nativeAsks.push(msg), opts.native ?? { ok: true, type: "appServer", url: null }) } };
   const window: Record<string, unknown> = {
     addEventListener: (type: string, fn: (e: unknown) => unknown) => void (windowListeners[type] ??= []).push(fn),
     removeEventListener: () => undefined,
@@ -107,7 +113,7 @@ async function loadPopup(answer: Answer) {
     location: { href: "safari-web-extension://x/popup.html", search: "" },
   };
   const context = vm.createContext({
-    window, document, chrome, console, setTimeout: pageTimeout, clearTimeout, setInterval: pageInterval, clearInterval, URL, TextEncoder, TextDecoder, crypto: globalThis.crypto,
+    window, document, chrome, browser, console, setTimeout: pageTimeout, clearTimeout, setInterval: pageInterval, clearInterval, URL, TextEncoder, TextDecoder, crypto: globalThis.crypto,
     navigator: { clipboard: { writeText: async () => undefined }, userAgent: "smoke", credentials: undefined },
     requestAnimationFrame: (fn: () => void) => pageTimeout(fn, 0),
     location: window.location,
@@ -120,7 +126,7 @@ async function loadPopup(answer: Answer) {
     errors.push(e);
   }
   const settle = (ms = 60): Promise<void> => new Promise((r) => setTimeout(r, ms));
-  return { byId, sent, errors, settle, windowListeners, dispose };
+  return { byId, sent, relayed, errors, settle, windowListeners, dispose, nativeAsks };
 }
 
 const lockedStatus = { unlocked: false, count: 0, email: null, mustChangePassword: false, lockNotice: null, quickUnlock: { enrolled: false, armed: false, attemptsRemaining: 0, offerDismissed: true, kind: null }, totpPending: null, personalChange: false, personalChangeText: null, personalProposal: false, waitingGrants: 0, wrongVault: 0, rememberedEmail: null };
@@ -194,3 +200,69 @@ test("a popup opened again inside the unlock's lifetime shows the list without a
   assert.equal(page.byId("unlocked").hidden, false);
   page.dispose();
 });
+
+test("the Safari popup shows no desktop setup banners, no connection test, and never pings the server", async () => {
+  const answer: Answer = (msg) => {
+    switch (msg.type) {
+      case "appServer": return { app: "set" };
+      case "serverInfo": return { url: "https://home.example", trustedStore: true, block: null };
+      case "status": return { ...lockedStatus, pageSummoned: true }; // no Face ID by itself in this test
+      case "cardFillOffers": return { fillable: false, origin: null, crossOriginFormsOnly: false };
+      default: return undefined;
+    }
+  };
+  // Every grant reads as missing: the desktop builds would show both banners.
+  const page = await loadPopup(answer, { granted: false });
+  await page.settle(300);
+  assert.deepEqual(page.errors, []);
+  assert.equal(page.byId("host-grant-cta").hidden, true, "no \"Finish setup … in Options\": nothing here reaches the server");
+  assert.equal(page.byId("autofill-grant").hidden, true, "no \"Autofill is off\": the system fills logins, and Safari asks per site");
+  assert.ok(!page.sent.includes("ping"), "the server is never pinged from this build");
+  assert.equal(page.byId("conn").hidden, true);
+  assert.equal(page.byId("ping").hidden, true);
+  page.dispose();
+});
+
+test("when the worker's ask of the app got no answer, the popup asks the app and hands its answer to the worker", async () => {
+  let adopted: unknown = null;
+  const answer: Answer = (msg) => {
+    switch (msg.type) {
+      case "appServer": return { app: "unavailable" }; // the worker's own native ask timed out
+      case "appServerAnswer": adopted = msg; return { app: "set" };
+      case "serverInfo": return adopted ? { url: "https://home.example", trustedStore: true, block: null } : { url: "https://no-server.invalid", trustedStore: true, block: { kind: "unsettled" } };
+      case "status": return { ...lockedStatus, pageSummoned: true };
+      case "cardFillOffers": return { fillable: false, origin: null, crossOriginFormsOnly: false };
+      default: return undefined;
+    }
+  };
+  const page = await loadPopup(answer, { native: { ok: true, type: "appServer", url: "https://home.example", nativeSave: true } });
+  await page.settle(300);
+  assert.deepEqual(page.errors, []);
+  assert.deepEqual({ ...(adopted as object) }, { type: "appServerAnswer", url: "https://home.example", nativeSave: true });
+  assert.ok(page.sent.indexOf("appServerAnswer") < page.sent.indexOf("serverInfo"), "relayed before anything shows a server");
+  assert.equal(page.byId("confirm-server").hidden, true, "the server is in effect: no \"no server\" card");
+  page.dispose();
+});
+
+test("with no server from the app, the popup says to choose it in the app, and offers no Options and no default", async () => {
+  const answer: Answer = (msg) => {
+    switch (msg.type) {
+      case "appServer": return { app: "none" };
+      case "serverInfo": return { url: "https://no-server.invalid", trustedStore: true, block: { kind: "unsettled" } };
+      case "status": return { ...lockedStatus };
+      default: return undefined;
+    }
+  };
+  const page = await loadPopup(answer);
+  await page.settle(300);
+  assert.deepEqual(page.errors, []);
+  assert.equal(page.byId("confirm-server").hidden, false);
+  assert.equal(page.byId("confirm-server-h").textContent, "No server yet");
+  assert.match(String(page.byId("confirm-server-body").textContent), /Choose your server in the andvari app/);
+  assert.equal(page.byId("confirm-server-open").hidden, true, "no \"Confirm in Options\"");
+  assert.equal(page.byId("confirm-server-not-mine").hidden, true, "no \"use the default instead\": there is none");
+  assert.equal(page.byId("server-origin").textContent, "No server yet");
+  assert.ok(!page.sent.includes("appServerAnswer"), "nothing to relay");
+  page.dispose();
+});
+

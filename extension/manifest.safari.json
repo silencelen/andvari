@@ -11,15 +11,10 @@
     "nativeMessaging"
   ],
   "host_permissions": [
-    "https://andvari.monahanhosting.com/*",
     "https://*/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": true
-  },
   "commands": {
     "_execute_action": {
       "description": "Open andvari"

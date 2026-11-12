@@ -73,7 +73,7 @@ import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
-import { appServerToAdopt, askAppServerDetailed, nativeSender } from "./appserver";
+import { appServerToAdopt, askAppServerDetailed, nativeSender, parseAppServerReply, type AppServerAnswer } from "./appserver";
 import { queueSaveToApp, savesThroughApp } from "./appsave";
 import { AppVault, vaultFromApp, type AppVaultCardFields, type CardFieldName } from "./appvault";
 
@@ -242,6 +242,7 @@ const PASSIVE_MSGS = new Set<Req["type"]>([
   "passwordReuse",
   "serverInfo", // A15: the popup header / options render — not user activity
   "appServer", // Safari: the popup asks for the app's server on every open — not user activity
+  "appServerAnswer", // Safari: …and relays the app's answer when the worker's own ask did not get one
   "serverDiag",
 ]);
 
@@ -570,6 +571,9 @@ async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Pr
   // A16 review: a later application never moves the dialed origin, so one that names another origin than the one this
   // worker dials leaves the server unknown in this worker life (unsettled) instead of lifting the block onto the wrong one.
   dialBlock = !atStart && st.url !== serverUrl ? { kind: "unsettled" } : st.block;
+  // Safari: the store build has no default server (build.mjs). Until the app names one, nothing is dialed and no
+  // autofill is registered, since the exclusion of the person's own vault origin cannot be written yet.
+  if (dialBlock === null && noServerChosen()) dialBlock = { kind: "unsettled" };
   trustedStoreOk = st.trustedStore;
   // A16 review R4: a block that stands from now on dials nothing — a live socket included.
   if (dialBlock) {
@@ -1287,6 +1291,11 @@ async function commitServerUrl(raw: unknown): Promise<Res<"setServerUrl">> {
   return { ok: true, url: canonical };
 }
 
+/** Safari: the worker's origin is the build's placeholder, so no server has been chosen (the app has named none yet). */
+function noServerChosen(): boolean {
+  return BUILD_TARGET === "safari" && serverUrl === DEFAULT_SERVER_URL;
+}
+
 /** A15: what the pages show — the origin this worker's api is built for (what is in effect, not a store read), whether
  *  a server choice can be kept here at all, and (A15 review F1) a block: while one stands, no server is dialed. */
 function serverInfo(): Res<"serverInfo"> {
@@ -1296,7 +1305,8 @@ function serverInfo(): Res<"serverInfo"> {
 /** A15 review F1: "Not mine" — drop the pending server and lift the block; the default is then the server. */
 async function forgetLegacyServer(): Promise<Res<"forgetLegacyServer">> {
   if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };
-  dialBlock = null;
+  // Safari has no default to fall back to: the server stays unknown until the app names one.
+  dialBlock = noServerChosen() ? { kind: "unsettled" } : null;
   await registerAutofillScripts();
   return { ok: true };
 }
@@ -1362,23 +1372,7 @@ function syncAppServer(): Promise<Res<"appServer">> {
       if (asked.call === "resolved") systemSavesPasswords = asked.nativeSave;
       appServerDiag.nativeError = asked.error;
       appServerDiag.app = asked.answer.kind;
-      const adopt = appServerToAdopt(asked.answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
-      if (adopt === null) {
-        appServerDiag.adopt = asked.answer.kind === "set" ? "already in effect" : null;
-        return { app: asked.answer.kind };
-      }
-      const r = await commitServerUrl(adopt);
-      if (r.ok) {
-        // commitServerUrl lifts the block only when the switch applied; say so when it did not.
-        appServerDiag.adopt = serverUrl === adopt && dialBlock === null ? "adopted" : "kept, but the switch did not apply";
-        return { app: serverUrl === adopt && dialBlock === null ? "set" : "unavailable" };
-      }
-      if (r.code === "storage" && (await adoptAppServerUnkept(adopt))) {
-        appServerDiag.adopt = "adopted for this session (the store did not keep it)";
-        return { app: "set" };
-      }
-      appServerDiag.adopt = `not adopted (${r.code ?? "unknown"})`;
-      return { app: "unavailable" };
+      return await adoptAppAnswer(asked.answer, "");
     } catch (e) {
       appServerDiag.adopt = `failed: ${String(e).slice(0, 200)}`;
       return { app: "unavailable" };
@@ -1388,8 +1382,68 @@ function syncAppServer(): Promise<Res<"appServer">> {
   })();
   return appServerInFlight;
 }
-// Safari: the earlier build's own session is retired first (ownSessionRetired), under the origin it was made at.
-void serverReady.then(() => syncAppServer());
+
+/** One adoption at a time: the worker's own ask and an answer the popup relays can arrive together. */
+let appAdoptChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Adopt what the app answered, when it names a server other than the one in effect (commitServerUrl: the trusted store,
+ * then the origin-clean switch). [via] is added to the Details' account of it ("" for the worker's own ask).
+ */
+function adoptAppAnswer(answer: AppServerAnswer, via: string): Promise<Res<"appServer">> {
+  const run = async (): Promise<Res<"appServer">> => {
+    const adopt = appServerToAdopt(answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
+    if (adopt === null) {
+      if (answer.kind === "set") appServerDiag.adopt = `already in effect${via}`;
+      else if (via === "") appServerDiag.adopt = null;
+      return { app: answer.kind };
+    }
+    const r = await commitServerUrl(adopt);
+    if (r.ok) {
+      // commitServerUrl lifts the block only when the switch applied; say so when it did not.
+      const applied = serverUrl === adopt && dialBlock === null;
+      appServerDiag.adopt = `${applied ? "adopted" : "kept, but the switch did not apply"}${via}`;
+      return { app: applied ? "set" : "unavailable" };
+    }
+    if (r.code === "storage" && (await adoptAppServerUnkept(adopt))) {
+      appServerDiag.adopt = `adopted for this session (the store did not keep it)${via}`;
+      return { app: "set" };
+    }
+    appServerDiag.adopt = `not adopted (${r.code ?? "unknown"})${via}`;
+    return { app: "unavailable" };
+  };
+  const next = appAdoptChain.then(run, run);
+  appAdoptChain = next.catch(() => {});
+  return next;
+}
+
+/**
+ * Safari: the popup asked the app itself and relays the answer (on a device the worker's own ask timed out while the
+ * popup's, a moment later, resolved: the worker then kept no server). Only this extension's own pages may send it
+ * (sendergate.ts); content scripts cannot. The answer is read with the same parser as the worker's own and adopted the
+ * same way, after worker start and the retirement of an earlier build's session, as the worker's own ask waits for.
+ */
+async function adoptRelayedAppServer(msg: Extract<Req, { type: "appServerAnswer" }>): Promise<Res<"appServerAnswer">> {
+  if (BUILD_TARGET !== "safari") return { app: "unavailable" };
+  const answer = parseAppServerReply({ ok: true, type: "appServer", url: msg.url });
+  if (answer.kind === "unavailable") return { app: "unavailable" };
+  const started = await Promise.race([serverReady.then(() => true), delay(APP_SERVER_START_WAIT_MS).then(() => false)]);
+  if (!started) return { app: "unavailable" };
+  await Promise.race([ownSessionRetired, delay(APP_SERVER_START_WAIT_MS)]);
+  if (typeof msg.nativeSave === "boolean") systemSavesPasswords = msg.nativeSave;
+  return adoptAppAnswer(answer, " (the popup's answer)");
+}
+
+// Safari: the earlier build's own session is retired first (ownSessionRetired), under the origin it was made at. A
+// handler that has not answered yet (it is started on demand) is asked again a little later, twice at most.
+void serverReady.then(async () => {
+  for (const wait of [0, 5_000, 20_000]) {
+    if (BUILD_TARGET !== "safari") return;
+    if (wait > 0) await delay(wait);
+    await syncAppServer();
+    if (appServerDiag.native === "resolved") return;
+  }
+});
 
 /** Apply a server change. Order is the whole story (§4.1): lock under the OLD origin
  *  first — the armed branch stashes the live token pair into the OLD origin's quick-unlock record
@@ -2381,6 +2435,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return forgetLegacyServer();
     case "appServer":
       return syncAppServer();
+    case "appServerAnswer":
+      return adoptRelayedAppServer(msg);
     case "serverDiag":
       return serverDiag();
     case "personalAcceptChange":
@@ -3833,6 +3889,9 @@ function noOwnSession(type: Req["type"]): unknown {
 async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown | undefined> {
   const vault = APP_VAULT!;
   switch (msg.type) {
+    case "ping":
+      // This build never contacts the server: the andvari app does, and the popup shows no connection test.
+      return { ok: false, error: "the andvari app talks to the server, not this extension" } satisfies Res<"ping">;
     case "status":
       return {
         unlocked: vault.unlocked,

@@ -419,14 +419,18 @@ test("A15 review F1: only the gate's commit and 'Not mine' lift the block; the p
   assert.ok(commit.indexOf("await switchChain;") < commit.indexOf("if (serverUrl === canonical) dialBlock = null;"), "…and only once the switch took effect");
   const forget = spanOf(bg, "async function forgetLegacyServer(", "\n}\n");
   assert.ok(forget.includes("if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };"));
-  assert.ok(forget.indexOf("forgetPendingServer(") < forget.indexOf("dialBlock = null;"));
+  assert.ok(forget.indexOf("forgetPendingServer(") < forget.indexOf("dialBlock = noServerChosen() ? { kind: \"unsettled\" } : null;"));
   // The Safari build's third lift: with no store to keep a choice, the app's own Trust-Gated origin (read through the
   // native handler, which no page can write) is used for one worker life, once the origin-clean switch applied.
   const unkept = spanOf(bg, "async function adoptAppServerUnkept(", "\n}\n");
   assert.ok(unkept.indexOf("await switchChain;") < unkept.indexOf("if (serverUrl !== canonical) return false;"));
   assert.ok(unkept.indexOf("if (serverUrl !== canonical) return false;") < unkept.indexOf("dialBlock = null;"));
   assert.equal((bg.match(/adoptAppServerUnkept\(/g) ?? []).length, 2, "defined once, called once: from the Safari-only ask");
-  assert.equal((bg.match(/dialBlock = null;/g) ?? []).length, 3, "nowhere else");
+  assert.equal((bg.match(/dialBlock = null;/g) ?? []).length, 2, "nowhere else");
+  // "Not mine" lifts it too, except in the Safari build while no server is chosen: there is no default to fall back to.
+  assert.equal((bg.match(/dialBlock = noServerChosen\(\) \? \{ kind: "unsettled" \} : null;/g) ?? []).length, 1);
+  assert.match(bg, /function noServerChosen\(\): boolean \{\s*return BUILD_TARGET === "safari" && serverUrl === DEFAULT_SERVER_URL;/);
+  assert.match(bg, /if \(dialBlock === null && noServerChosen\(\)\) dialBlock = \{ kind: "unsettled" \};/, "no server chosen: nothing dialed, no autofill");
   assert.ok(bg.includes("return { url: serverUrl, trustedStore: trustedStoreOk, block: dialBlock };"));
 });
 

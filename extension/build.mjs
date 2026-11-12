@@ -2,7 +2,8 @@
 // references dist-relative names, so `dist/` is what you "Load unpacked". @noble is bundled in
 // (pure JS, no WASM asset) — nothing loads over the network, and no eval, so the MV3 CSP is happy.
 import * as esbuild from "esbuild";
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 // RELEASE=1 → minified, no sourcemaps (what gets zipped for /downloads).
 // Default = debuggable dev build for load-unpacked iteration.
@@ -13,6 +14,24 @@ const target = process.env.TARGET === "firefox" || process.env.TARGET === "safar
 
 rmSync("dist", { recursive: true, force: true }); // no stale entry/sourcemap leftovers in the zip
 mkdirSync("dist", { recursive: true });
+
+// The Safari build ships inside the App Store app and has no default server: it uses the server chosen in the andvari
+// app, and none until the app names one. The reference origin in serverurl.ts is replaced, in that build only, by a
+// name that can never resolve (RFC 6761 `.invalid`), which the worker treats as "no server chosen"; the build fails if
+// the reference origin is left anywhere in dist/ (checked at the end).
+const REFERENCE_ORIGIN = "https://andvari.monahanhosting.com";
+const NO_SERVER_ORIGIN = "https://no-server.invalid";
+const noDefaultServer = {
+  name: "safari-no-default-server",
+  setup(build) {
+    build.onLoad({ filter: /[\\/]src[\\/]serverurl\.ts$/ }, (args) => {
+      const source = readFileSync(args.path, "utf8");
+      const line = `export const DEFAULT_SERVER_URL = "${REFERENCE_ORIGIN}";`;
+      if (!source.includes(line)) throw new Error("serverurl.ts no longer declares DEFAULT_SERVER_URL the way the Safari build expects");
+      return { contents: source.replace(line, `export const DEFAULT_SERVER_URL = "${NO_SERVER_ORIGIN}";`), loader: "ts" };
+    });
+  },
+};
 
 await esbuild.build({
   entryPoints: {
@@ -35,6 +54,7 @@ await esbuild.build({
   sourcemap: !release,
   // buildtarget.ts reads this: the App Store-distributed Safari build has no self-update channel.
   define: { __ANDVARI_TARGET__: JSON.stringify(target) },
+  plugins: target === "safari" ? [noDefaultServer] : [],
 });
 
 cpSync({ firefox: "manifest.firefox.json", safari: "manifest.safari.json", chrome: "manifest.json" }[target], "dist/manifest.json");
@@ -62,5 +82,12 @@ if (target === "safari") {
   cpSync("safari-diag.js", "dist/safari-diag.js"); // the popup's reader for what it recorded
 }
 cpSync("icons", "dist/icons", { recursive: true }); // both manifests reference icons/icon{16,32,48,128}.png
-cpSync("INSTALL.txt", "dist/INSTALL.txt"); // tester-facing steps travel inside the zip
+// Tester-facing load-unpacked steps travel inside the desktop zips; the Safari build is installed with the app.
+if (target !== "safari") cpSync("INSTALL.txt", "dist/INSTALL.txt");
+if (target === "safari") {
+  const host = new URL(REFERENCE_ORIGIN).host;
+  const walk = (dir) => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? walk(join(dir, name)) : [join(dir, name)]));
+  const left = walk("dist").filter((f) => !f.endsWith(".png") && readFileSync(f, "utf8").includes(host));
+  if (left.length > 0) throw new Error(`the Safari build must name no default server, but ${host} is in: ${left.join(", ")}`);
+}
 console.log(`built → dist/ (${target}${release ? ", release" : ""}; Load unpacked: extension/dist)`);

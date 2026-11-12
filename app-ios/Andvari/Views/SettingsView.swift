@@ -1,4 +1,5 @@
 import AndvariCore
+import AuthenticationServices
 import SwiftUI
 
 struct SettingsView: View {
@@ -10,6 +11,8 @@ struct SettingsView: View {
     @State private var identityCode: String?
     @State private var identityCodeFull: String?
     @State private var showFullCode = false
+    /// Whether andvari is the AutoFill provider iOS uses (nil until the system has said).
+    @State private var autofillOn: Bool?
 
     var body: some View {
         NavigationStack {
@@ -69,6 +72,20 @@ struct SettingsView: View {
                 .listRowBackground(Palette.raised)
 
                 Section {
+                    LabeledContent("AutoFill", value: autofillOn.map { $0 ? "On" : "Off" } ?? "–")
+                    if autofillOn == false {
+                        Button("Open AutoFill settings") {
+                            ASSettingsHelper.openCredentialProviderAppSettings { _ in }
+                        }
+                    }
+                } header: {
+                    Text("AutoFill and Safari")
+                } footer: {
+                    Text(Wording.safariExtensionHelp)
+                }
+                .listRowBackground(Palette.raised)
+
+                Section {
                     Button("Lock now") {
                         model.lock()
                     }
@@ -109,6 +126,10 @@ struct SettingsView: View {
             quickOn = quick.enrolled
             identityCode = model.identityCode()
             identityCodeFull = model.identityCodeFull()
+            readAutofillState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            readAutofillState() // back from the Settings app
         }
         .onChange(of: model.state.quickUnlock.enrolled) { _, enrolled in
             quickOn = enrolled
@@ -116,6 +137,14 @@ struct SettingsView: View {
         .onChange(of: quickOn) { _, on in
             if on != quick.enrolled {
                 setQuickUnlock(on)
+            }
+        }
+    }
+
+    private func readAutofillState() {
+        ASCredentialIdentityStore.shared.getState { state in
+            Task { @MainActor in
+                autofillOn = state.isEnabled
             }
         }
     }

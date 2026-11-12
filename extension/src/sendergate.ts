@@ -87,6 +87,7 @@ export const SENDER_CLASS = {
   forgetLegacyServer: "extension",
   // Safari: the app's server is adopted only on our own popup's word (and the worker's own start).
   appServer: "extension",
+  appServerAnswer: "extension",
   serverDiag: "extension",
   appUnlock: "extension",
 } as const satisfies Record<ReqType, SenderClass>;
@@ -146,6 +147,7 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
   setServerUrl: { ok: false, code: "not_allowed" },
   forgetLegacyServer: { ok: false },
   appServer: { app: "unavailable" },
+  appServerAnswer: { app: "unavailable" },
   serverDiag: null,
   appUnlock: { ok: false, state: "unavailable" },
 };
