@@ -319,6 +319,34 @@ final class AppModel: ObservableObject {
         await run { try await $0.saveNote(itemId: itemId, input: input, vaultId: vaultId) }
     }
 
+    // MARK: - Two-step sign-in
+
+    func loadTwoStep() async -> Outcome {
+        await run { try await $0.loadTwoStep() }
+    }
+
+    /// The master password proves it is the account's owner before a new code is set up.
+    func beginTwoStep(password: String) async -> Outcome {
+        await run { try await $0.beginTwoStep(password: password) }
+    }
+
+    /// The key being set up (shown once, to add to an authenticator); nil when none is.
+    func twoStepSetup() -> TwoStepSetup? {
+        controller.twoStepSetup()
+    }
+
+    func confirmTwoStep(code: String) async -> Outcome {
+        await run { try await $0.confirmTwoStep(code: code) }
+    }
+
+    func disableTwoStep(code: String) async -> Outcome {
+        await run { try await $0.disableTwoStep(code: code) }
+    }
+
+    func closeTwoStep() {
+        controller.closeTwoStep()
+    }
+
     // MARK: - Vaults
 
     func dismissVaultNotice(_ id: String) {

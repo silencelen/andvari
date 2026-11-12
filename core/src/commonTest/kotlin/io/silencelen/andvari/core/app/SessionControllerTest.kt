@@ -685,6 +685,50 @@ open class SessionControllerTest {
         assertEquals("sig", saved.dupeAck)
     }
 
+    // ---- two-step sign-in ----
+
+    @Test
+    fun twoStepSignInIsReadAndTurnedOffWithACodeAndNothingOutlivesTheScreen() = test {
+        unlocked()
+        var enrolled = true
+        var disabledWith: String? = null
+        routes["/account/totp"] = {
+            respond(json.encodeToString(io.silencelen.andvari.core.model.TotpStatus.serializer(), io.silencelen.andvari.core.model.TotpStatus(enrolled, false)), HttpStatusCode.OK, headers)
+        }
+        routes["/account/totp/disable"] = { request ->
+            disabledWith = json.decodeFromString(io.silencelen.andvari.core.model.TotpCodeRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()).code
+            enrolled = false
+            respond(json.encodeToString(io.silencelen.andvari.core.model.TotpStatus.serializer(), io.silencelen.andvari.core.model.TotpStatus(false, false)), HttpStatusCode.OK, headers)
+        }
+        assertNull(controller.state.twoStep)
+        assertEquals(ActionResult.Ok, controller.loadTwoStep())
+        assertEquals(TwoStepView(enrolled = true, settingUp = false), controller.state.twoStep)
+        assertEquals(ActionResult.NotDone(null), controller.confirmTwoStep("123456"), "nothing is being set up")
+        assertEquals(ActionResult.Ok, controller.disableTwoStep(" 123456 "))
+        assertEquals("123456", disabledWith)
+        assertEquals(TwoStepView(enrolled = false, settingUp = false), controller.state.twoStep)
+        assertEquals(ItemCopy.TWO_STEP_OFF, controller.state.notice)
+        controller.closeTwoStep()
+        assertNull(controller.state.twoStep)
+        assertNull(controller.twoStepSetup())
+    }
+
+    @Test
+    fun aRefusedCodeOrAWeakServerSaysWhyAndChangesNothing() = test {
+        unlocked()
+        routes["/account/totp"] = { respond("""{"enrolled":true,"pendingSetup":false}""", HttpStatusCode.OK, headers) }
+        routes["/account/totp/disable"] = { respond("""{"error":"bad_totp_code","message":"no"}""", HttpStatusCode.BadRequest, headers) }
+        assertEquals(ActionResult.Ok, controller.loadTwoStep())
+        assertIs<ActionResult.Failed>(controller.disableTwoStep("000000"))
+        assertEquals(TwoStepView(enrolled = true, settingUp = false), controller.state.twoStep, "still on")
+        // Setting up needs the master password proven under the account's own key settings: this fixture's are below the
+        // floor any server may send, so the proof is refused before anything is sent, and nothing is set up.
+        routes["/account/keys"] = { respond(json.encodeToString(AccountKeys.serializer(), cached), HttpStatusCode.OK, headers) }
+        assertIs<ActionResult.Failed>(controller.beginTwoStep(PASSWORD))
+        assertNull(controller.twoStepSetup())
+        assertFalse(calls.any { it.endsWith("/account/totp/setup") }, "no setup request left the device")
+    }
+
     // ---- lifecycle notices ----
 
     @Test

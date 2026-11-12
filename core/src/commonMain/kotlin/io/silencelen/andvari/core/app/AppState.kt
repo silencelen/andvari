@@ -64,6 +64,8 @@ data class AppState(
     val recoverVerified: Boolean,
     /** VAULT: what happened to shared vaults since the last look (spec 03 §11), each dismissable. */
     val vaultNotices: List<VaultNoticeView>,
+    /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
+    val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
     val trash: List<TrashItemView>?,
     /** One item's earlier versions while they are open ([SessionController.openItemHistory]); null otherwise. */
@@ -105,7 +107,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, recoverVerified = false, vaultNotices = emptyList(), trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, recoverVerified = false, vaultNotices = emptyList(), twoStep = null, trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -210,6 +212,20 @@ data class CardDetail(
     val expMonth: String?,
     val expYear: String?,
 )
+
+/** Two-step sign-in, as the server reports it for this account. */
+data class TwoStepView(
+    /** A code from an authenticator is asked for at every sign-in. */
+    val enrolled: Boolean,
+    /** A new key is being set up on this device ([SessionController.twoStepSetup]) and waits for its first code. */
+    val settingUp: Boolean,
+)
+
+/**
+ * The key a two-step setup adds to an authenticator, shown once: base32 and as an otpauth:// link. Not a data class: no
+ * toString of the key.
+ */
+class TwoStepSetup(val secret: String, val uri: String)
 
 /** One lifecycle notice (spec 03 §11): a vault deleted, restored, left, transferred, or an anomaly the server reported. */
 data class VaultNoticeView(
