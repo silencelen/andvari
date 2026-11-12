@@ -716,7 +716,7 @@ open class SessionControllerTest {
         unlockedWithAPersonalVault()
         // The personal vault's row, as a sync delivers it (the rig's cache starts with items only).
         namespaces.caches.getValue("$homeKey/${reg.userId}").upsertVault(WireVault(reg.personalVault.vaultId, "personal", 1, reg.personalVault.metaBlob, 1_000))
-        val vaults = controller.newItemVaults()
+        val vaults = controller.vaultsForNewItems()
         assertEquals(listOf(reg.personalVault.vaultId), vaults.map { it.vaultId })
         assertTrue(vaults.single().personal, "the personal vault, first, is the default")
         val elsewhere = "00000000-0000-4000-8000-0000000000e9"
