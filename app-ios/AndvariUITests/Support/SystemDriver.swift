@@ -267,15 +267,18 @@ extension UITestCase {
     // MARK: - Safari
 
     /// Open [url] in a fresh Safari and wait for the page's heading. A Safari that has just started sometimes comes
-    /// up on its start page and drops the address it was opened with, so it is started first, and the address is
-    /// typed when opening it did not take; three tries in all before the test is told.
+    /// up on its start page and drops the address it was opened with, or leaves a load pending; so it is started
+    /// first, the address is typed when opening it did not take, and Safari is started again halfway. Four tries in
+    /// all, then the test is told, with Safari's tree.
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
         let shown = { browser.webViews.staticTexts[heading].exists }
-        browser.terminate()
-        browser.launch()
-        _ = waitUntil(20) { browser.textFields["TabBarItemTitle"].exists || browser.buttons["TabBarItemTitle"].exists || browser.otherElements["TabBarItemTitle"].exists }
-        for attempt in 1...3 {
+        for attempt in 1...4 {
+            if attempt == 1 || attempt == 3 {
+                browser.terminate()
+                browser.launch()
+                _ = waitUntil(20) { browser.textFields["TabBarItemTitle"].exists || browser.buttons["TabBarItemTitle"].exists || browser.otherElements["TabBarItemTitle"].exists }
+            }
             XCUIDevice.shared.system.open(URL(string: url)!)
             if waitUntil(15, shown) { break }
             closeSafariTips()
@@ -286,10 +289,11 @@ extension UITestCase {
                 browser.typeText(url + "\n")
                 if waitUntil(20, shown) { break }
             }
-            if attempt == 3 {
+            if attempt == 4 {
                 dumpTree(browser, as: "safari-no-page")
-                XCTFail("Safari did not show \(url) in three tries")
+                XCTFail("Safari did not show \(url) in four tries")
             }
+            Thread.sleep(forTimeInterval: 5)
         }
         // The page is there; give Safari's own first-run tips a moment to appear, and close them.
         Thread.sleep(forTimeInterval: 1.5)
@@ -312,13 +316,28 @@ extension UITestCase {
 
     /// Type into a field of the page, closing what Safari offers for it first.
     func typeInPage(_ text: String, field: XCUIElement, heading: String) {
-        focus(field, heading: heading)
-        closeFillOffer()
-        if !safari.keyboards.firstMatch.exists {
-            field.tap()
-            Thread.sleep(forTimeInterval: 1.5)
+        // A keyboard on screen may belong to the field before, and closing Safari's offer can hand the focus back
+        // to it: type only once this field itself has the keyboard.
+        for _ in 0..<4 where !hasKeyboardFocus(field) {
+            focus(field, heading: heading)
             closeFillOffer()
+            if !hasKeyboardFocus(field) {
+                field.tap()
+                Thread.sleep(forTimeInterval: 1.5)
+                closeFillOffer()
+            }
         }
+        if !hasKeyboardFocus(field) {
+            dumpEverything("no-focus")
+            XCTFail("the page's \(field.label) field never took the keyboard")
+        }
+        field.typeText(text)
+    }
+
+    /// Whether [element] holds the keyboard (XCUITest's own attribute, as its tree dumps show it).
+    func hasKeyboardFocus(_ element: XCUIElement) -> Bool {
+        element.exists && ((element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false)
+    }
         field.typeText(text)
     }
 
