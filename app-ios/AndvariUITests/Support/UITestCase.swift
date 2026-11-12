@@ -149,6 +149,8 @@ class UITestCase: XCTestCase {
 
     func enter(_ text: String, into field: XCUIElement, what: String, file: StaticString = #filePath, line: UInt = #line) {
         require(field, what, file: file, line: line)
+        // On a slow runner the field exists before it can be touched (a sheet still arriving, the cover still leaving).
+        _ = waitUntil(15) { field.isHittable }
         field.tap()
         // The keyboard takes a moment to belong to the field.
         Thread.sleep(forTimeInterval: 0.6)

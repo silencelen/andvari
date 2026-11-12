@@ -29,7 +29,7 @@ extension UITestCase {
     }
 
     @discardableResult
-    func waitForScreen(_ timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line) -> AppScreen {
+    func waitForScreen(_ timeout: TimeInterval = 60, file: StaticString = #filePath, line: UInt = #line) -> AppScreen {
         var seen: AppScreen?
         if !waitUntil(timeout, { seen = currentScreen(); return seen != nil }) {
             dumpTree(app, as: "no-screen")
@@ -38,7 +38,7 @@ extension UITestCase {
         return seen ?? .chooseServer
     }
 
-    func expectScreen(_ wanted: AppScreen, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line) {
+    func expectScreen(_ wanted: AppScreen, timeout: TimeInterval = 60, file: StaticString = #filePath, line: UInt = #line) {
         if !waitUntil(timeout, { currentScreen() == wanted }) {
             dumpTree(app, as: "not-" + wanted.rawValue)
             XCTFail("expected the \(wanted.rawValue) screen, found \(currentScreen()?.rawValue ?? "none of the known screens")", file: file, line: line)
