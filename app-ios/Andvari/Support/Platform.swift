@@ -192,3 +192,33 @@ final class TouchRecognizer: UIGestureRecognizer {
         state = .failed
     }
 }
+
+// MARK: - Appearance
+
+/// The app's own light or dark choice, on this device only; it follows the device until changed.
+enum Appearance: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    static let storageKey = "appearance"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: "Match device"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
