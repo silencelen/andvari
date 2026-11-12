@@ -62,6 +62,8 @@ data class AppState(
     val accountEmail: String?,
     /** RECOVER: the email and phrase were verified; the screen now asks for the new master password. */
     val recoverVerified: Boolean,
+    /** VAULT: what happened to shared vaults since the last look (spec 03 §11), each dismissable. */
+    val vaultNotices: List<VaultNoticeView>,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
     val trash: List<TrashItemView>?,
     /** One item's earlier versions while they are open ([SessionController.openItemHistory]); null otherwise. */
@@ -103,7 +105,7 @@ data class AppState(
         /** Before [SessionController.start]. */
         val initial = AppState(
             screen = AppScreen.LOADING, server = null, policy = null, serverUnreachable = false, trustGate = null,
-            totpRequired = false, accountEmail = null, recoverVerified = false, trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
+            totpRequired = false, accountEmail = null, recoverVerified = false, vaultNotices = emptyList(), trash = null, history = null, personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), quickUnlock = QuickUnlockView(available = false, enrolled = false, fresh = false, refusal = null, reason = null),
             lockReason = null, items = emptyList(), query = "", syncing = false, recoveryWaived = false,
             recoveryCaptureError = null, recoveryReplacedNotice = false, mustChangePassword = false, busy = false,
             error = null, notice = null, upgradeMessage = null,
@@ -207,6 +209,15 @@ data class CardDetail(
     /** The stored month and year, each as stored ("07", "2031"), for an editor: never re-split from [expiry]. */
     val expMonth: String?,
     val expYear: String?,
+)
+
+/** One lifecycle notice (spec 03 §11): a vault deleted, restored, left, transferred, or an anomaly the server reported. */
+data class VaultNoticeView(
+    val id: String,
+    /** The whole sentence, Android's word for word ([io.silencelen.andvari.core.client.LifecycleNoticeCopy]). */
+    val text: String,
+    /** An anomaly: something the server said that could not be verified, or a change that was refused. */
+    val warning: Boolean,
 )
 
 /** A vault an item can be put in ([SessionController.newItemVaults], [SessionController.moveTargets]). */

@@ -321,6 +321,10 @@ final class AppModel: ObservableObject {
 
     // MARK: - Vaults
 
+    func dismissVaultNotice(_ id: String) {
+        controller.dismissVaultNotice(id: id)
+    }
+
     /// Where a new item may go: the personal vault first, then the shared vaults this account can write.
     func newItemVaults() -> [VaultChoiceView] {
         controller.newItemVaults()

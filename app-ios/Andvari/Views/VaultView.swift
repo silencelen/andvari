@@ -78,6 +78,14 @@ struct VaultView: View {
                 }
                 .listRowBackground(Palette.raised)
             }
+            if !model.state.vaultNotices.isEmpty {
+                Section {
+                    ForEach(model.state.vaultNotices, id: \.id) { notice in
+                        VaultNoticeRow(notice: notice)
+                    }
+                }
+                .listRowBackground(Palette.raised)
+            }
             if !model.state.appliedSaves.isEmpty {
                 Section {
                     ForEach(model.state.appliedSaves, id: \.id) { applied in
@@ -614,3 +622,30 @@ private struct PersonalVaultNotice: View {
         }
     }
 }
+
+/// What happened to a shared vault since the last look (spec 03 §11): a deletion, a restore, a transfer, or something
+/// the server said that could not be verified, which reads as a warning. Each goes when dismissed.
+private struct VaultNoticeRow: View {
+    @EnvironmentObject private var model: AppModel
+    let notice: VaultNoticeView
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: notice.warning ? "exclamationmark.triangle" : "info.circle")
+                .foregroundStyle(notice.warning ? Palette.danger : Palette.inkDim)
+                .accessibilityHidden(true)
+            Text(notice.text)
+                .font(.subheadline)
+                .foregroundStyle(notice.warning ? Palette.danger : Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Dismiss") {
+                model.dismissVaultNotice(notice.id)
+            }
+            .font(.subheadline)
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
