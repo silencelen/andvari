@@ -265,13 +265,10 @@ final class T4VaultFeatureTests: UITestCase {
         }
         let number = safari.webViews.textFields["Card number"]
         try step("number-tapped-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html", heading: "Two card forms")
+            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
             // Until this fill shows the default works, the next card tests use the layout that keeps the menu in reach.
             Self.cardLayout = "Top"
-            let filled = try tapAndFill(number, "the new card's number", layout: "Compact") { self.digits(number) == Fixture.cardNumber }
-            let words = popupWords()
-            closePopup()
-            XCTAssertTrue(filled, "the new card's number was not filled. The popup says: \(words)")
+            try tapAndFill(number, "the new card's number", layout: "Compact") { self.digits(number) == Fixture.cardNumber }
             Self.cardLayout = "Compact"
         }
     }
@@ -286,22 +283,16 @@ final class T4VaultFeatureTests: UITestCase {
         let codes = { self.safari.webViews.textFields.matching(NSPredicate(format: "label == 'Security code'")) }
         let number = { self.safari.webViews.textFields["Card number"] }
         try step("saved-card-code-tapped-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html", heading: "Two card forms")
-            let filled = try tapAndFill(codes().element(boundBy: 0), "the saved card's security code", layout: layout) {
+            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
+            try tapAndFill(codes().element(boundBy: 0), "the saved card's security code", layout: layout) {
                 self.digits(codes().element(boundBy: 0)) == Fixture.cardCode
             }
-            let words = popupWords()
-            closePopup()
-            XCTAssertTrue(filled, "the saved card's code was not filled. The popup says: \(words)")
             XCTAssertEqual(digits(number()), "", "the new-card form was filled from the saved card's field")
             XCTAssertEqual(digits(codes().element(boundBy: 1)), "", "the new card's code was filled from the saved card's field")
         }
         try step("new-card-number-tapped-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html", heading: "Two card forms")
-            let filled = try tapAndFill(number(), "the new card's number", layout: layout) { self.digits(number()) == Fixture.cardNumber }
-            let words = popupWords()
-            closePopup()
-            XCTAssertTrue(filled, "the new card's number was not filled. The popup says: \(words)")
+            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
+            try tapAndFill(number(), "the new card's number", layout: layout) { self.digits(number()) == Fixture.cardNumber }
             XCTAssertEqual(digits(codes().element(boundBy: 1)), Fixture.cardCode, "the new card's code was not filled")
             XCTAssertEqual(digits(codes().element(boundBy: 0)), "", "the saved card's code was filled from the new card's field")
         }
@@ -317,12 +308,9 @@ final class T4VaultFeatureTests: UITestCase {
         let layout = useCardLayout()
         let number = safari.webViews.textFields["Card number"]
         try step("form-scrolled-into-view-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-inner-scroll.html", heading: "Checkout")
+            openInSafari(Fixture.siteOrigin + "/test-pages/card-inner-scroll.html?uitest-events", heading: "Checkout")
             XCTAssertTrue(scrollToComfort(number, in: safari, tries: 16), "the card form could not be scrolled into view inside the modal")
-            let filled = try tapAndFill(number, "the card number", layout: layout) { self.digits(number) == Fixture.cardNumber }
-            let words = popupWords()
-            closePopup()
-            XCTAssertTrue(filled, "the card number was not filled once in view. The popup says: \(words)")
+            try tapAndFill(number, "the card number", layout: layout) { self.digits(number) == Fixture.cardNumber }
         }
         let unseen = popupSays("be seen on the page, so nothing was filled")
         step("scrolled-away-fills-nothing") {
@@ -330,7 +318,7 @@ final class T4VaultFeatureTests: UITestCase {
             let title = safari.webViews.staticTexts["Checkout"]
             XCTAssertTrue(scrollToComfort(title, in: safari, tries: 16), "the modal could not be scrolled back up")
             let before = digits(number)
-            XCTAssertTrue(fillCardFromPopup(until: { unseen.exists }, keepKeyboard: true), "the popup did not say the field can't be seen. It says: \(popupWords())")
+            XCTAssertTrue(fillCardFromPopup(until: { unseen.exists }, keepKeyboard: true), "the popup did not say the field can't be seen. It says: \(popupWords()). The page saw: \(pageEvents())")
             closePopup()
             XCTAssertEqual(digits(number), before, "a fill with the field out of view changed it")
         }
@@ -444,7 +432,13 @@ final class T4VaultFeatureTests: UITestCase {
     private func deleteLogin(_ name: String) {
         openItem(name)
         app.buttons["Edit"].tap()
+        require(app.navigationBars["Edit login"], "the login editor")
+        // The button is at the foot of the editor, built once the form is scrolled to it.
         let delete = app.buttons["Delete login"]
+        for _ in 0..<8 where !delete.exists {
+            app.swipeUp()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
         require(delete, "Delete login in the editor")
         scrollToComfort(delete)
         delete.tap()
@@ -564,28 +558,44 @@ final class T4VaultFeatureTests: UITestCase {
         return outcome()
     }
 
-    /// Tap [field] on the page, then fill the seeded card from the popup, keeping the keyboard up when Safari's page
-    /// menu can be reached past it. True when [filled] holds. When the menu was behind the keyboard, the keyboard had to
-    /// be closed to reach the popup; if the popup then says nothing was tapped, the field went with the keyboard, and
-    /// the test is skipped with that finding.
-    private func tapAndFill(_ field: XCUIElement, _ what: String, layout: String, until filled: @escaping () -> Bool) throws -> Bool {
+    /// Tap [field] on the page until it has the keyboard, then fill the seeded card from the popup, keeping the keyboard
+    /// up when Safari's page menu can be reached past it, until [filled] holds; the popup is closed after. Otherwise the
+    /// test fails with what the popup said and what the page saw (its event log, served with ?uitest-events). One case
+    /// is skipped with its finding instead: the menu was behind the keyboard, closing the keyboard took the focus from
+    /// the field while the page kept it, and the popup then said nothing was tapped.
+    private func tapAndFill(_ field: XCUIElement, _ what: String, layout: String, until filled: @escaping () -> Bool) throws {
         require(field, what)
-        field.tap()
-        _ = waitUntil(5) { self.safari.keyboards.firstMatch.exists }
+        // A moment after the page shows, as a person takes; tapped again when Safari took a tap as nothing.
+        Thread.sleep(forTimeInterval: 2)
+        for _ in 0..<3 where !hasKeyboardFocus(field) {
+            field.tap()
+            _ = waitUntil(4) { self.hasKeyboardFocus(field) }
+        }
+        let focused = hasKeyboardFocus(field)
         let menu = safari.buttons["PageFormatMenuButton"]
         let reachable = waitUntil(3) { menu.exists && menu.isHittable }
         shot("field-tapped-\(layout.lowercased())")
         if !reachable { dumpTree(safari, as: "page-menu-behind-keyboard-\(layout.lowercased())") }
         let letGo = popupSays("Tap the card number field on the page first")
         _ = fillCardFromPopup(until: { filled() || letGo.exists }, keepKeyboard: true)
-        if !filled() && letGo.exists {
-            let words = popupWords()
-            if !reachable {
-                try skip("App defect (found 2026-11-13): no card can be filled from the popup in Safari's \(layout) tab layout. A card fill goes only into the form of the field the person tapped, and while that field has the keyboard, Safari's page menu (the way to the popup) is behind it. Closing the keyboard first (its Done) takes the focus from the field while the page keeps it, which lets the field go (noteFocusLeft in extension/src/content.ts), so the popup says “\(words)” and fills nothing.")
-            }
-            XCTFail("the popup let go of \(what) though the keyboard stayed up: it says \(words)")
+        if filled() {
+            closePopup()
+            return
         }
-        return filled()
+        let saidLetGo = letGo.exists
+        let words = popupWords()
+        closePopup()
+        let seen = pageEvents()
+        if saidLetGo && focused && !reachable && seen.contains("hasFocus=true now=body") {
+            try skip("App defect (found 2026-11-13): no card can be filled from the popup in Safari's \(layout) tab layout. A card fill goes only into the form of the field the person tapped, and while that field has the keyboard, Safari's page menu (the way to the popup) is behind it. Closing the keyboard (its Done) blurs the field while the page keeps its focus, and the content script lets a field go when focus moves elsewhere in the page (noteFocusLeft, extension/src/content.ts), so the popup says “\(words)” and fills nothing. What the page saw: \(seen)")
+        }
+        XCTFail("\(what) was not filled (it had the keyboard: \(focused); Safari's page menu was in reach with the keyboard up: \(reachable)). The popup says: \(words). The page saw: \(seen)")
+    }
+
+    /// The page's own event log (served with ?uitest-events): presses, focus moves, and whether the page had focus.
+    private func pageEvents() -> String {
+        let line = safari.webViews.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'events:'")).firstMatch
+        return line.exists ? line.label : "no event log"
     }
 
     /// The tab layout the card fills run in (test07's finding), chosen in Settings when it is not the default; the
