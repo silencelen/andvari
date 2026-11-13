@@ -2,10 +2,12 @@ import SwiftUI
 import UIKit
 
 // Fields for secrets: a recovery phrase, a password or card number shown while it is edited, a note. Each has
-// autocorrection, spell checking, smart punctuation, inline predictions and capitalization off, so the keyboard
-// neither rewrites what is typed (a smart dash in a base64url phrase is a different phrase) nor learns it into its
-// dictionary or suggestions. SwiftUI's TextField and TextEditor can turn off autocorrection only, so these are UIKit
-// views. A hidden secret is a secure text entry, which iOS types with the system keyboard only and never learns.
+// autocorrection, spell checking, smart punctuation, inline predictions, capitalization and Writing Tools off, so the
+// keyboard neither rewrites what is typed (a smart dash in a base64url phrase is a different phrase) nor learns it into
+// its dictionary or suggestions, and nothing offers to send it off to be rewritten. SwiftUI's TextField and TextEditor
+// can turn off autocorrection only, so these are UIKit views. A hidden secret is a secure text entry, which iOS types
+// with the system keyboard only and never learns. Keyboards from other apps are kept out of the whole app
+// (AppDelegate, ThirdPartyKeyboards): they need not honour any of these traits.
 
 /// What every secret field turns off.
 @MainActor
@@ -17,6 +19,9 @@ private func harden(_ field: UITextField) {
     field.smartInsertDeleteType = .no
     field.autocapitalizationType = .none
     field.inlinePredictionType = .no
+    if #available(iOS 18.0, *) {
+        field.writingToolsBehavior = .none
+    }
 }
 
 @MainActor
@@ -26,7 +31,11 @@ private func harden(_ view: UITextView) {
     view.smartQuotesType = .no
     view.smartDashesType = .no
     view.smartInsertDeleteType = .no
+    view.autocapitalizationType = .none
     view.inlinePredictionType = .no
+    if #available(iOS 18.0, *) {
+        view.writingToolsBehavior = .none
+    }
 }
 
 private func bodyFont(monospaced: Bool) -> UIFont {

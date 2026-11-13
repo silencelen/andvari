@@ -30,6 +30,18 @@ enum Clipboard {
     }
 }
 
+// MARK: - Keyboards
+
+/// Whether a keyboard from another app may type into andvari (round-6 review M3). Off unless the person turns it on
+/// in Settings. Such a keyboard is another developer's code: it receives every keystroke typed with it, passwords and
+/// notes included, and need not honour a field's traits or stay off the network.
+enum ThirdPartyKeyboards {
+    static let storageKey = "allowThirdPartyKeyboards"
+
+    /// Read each time UIKit asks (AppDelegate), never cached here.
+    static var allowed: Bool { UserDefaults.standard.bool(forKey: storageKey) }
+}
+
 // MARK: - Device
 
 /// The device's biometric, for labels and symbols.
