@@ -57,6 +57,7 @@ struct UnlockView: View {
                     }
                     .buttonStyle(QuietButtonStyle())
                     .disabled(model.state.busy)
+                    .accessibilityIdentifier("unlock.biometric")
                 }
             }
             VStack(spacing: 14) {
@@ -70,6 +71,7 @@ struct UnlockView: View {
             .font(.footnote)
             .foregroundStyle(Palette.inkDim)
             .disabled(model.state.busy)
+            .accessibilityIdentifier("unlock.sign-out")
         }
         .confirmationDialog(Wording.signOutTitle, isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) {
@@ -95,6 +97,7 @@ struct UnlockView: View {
                 Text(email)
                     .font(.subheadline)
                     .foregroundStyle(Palette.inkDim)
+                    .accessibilityIdentifier("unlock.account")
             }
             if let reason = model.state.lockReason {
                 Text(reason)

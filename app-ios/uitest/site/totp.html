@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One-time code</title>
+<style>
+body { font: 18px -apple-system, sans-serif; margin: 24px; }
+label { display: block; margin-top: 16px; }
+input { font: inherit; width: 100%; padding: 10px; box-sizing: border-box; }
+button { font: inherit; margin-top: 20px; padding: 12px 20px; }
+</style>
+</head>
+<body>
+<h1>One-time code</h1>
+<form method="post" action="submitted">
+<label for="code">Verification code</label>
+<input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" aria-label="Verification code">
+<button id="submit" type="submit">Verify</button>
+</form>
+<p><a href="index.html">All test pages</a></p>
+</body>
+</html>

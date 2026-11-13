@@ -76,6 +76,17 @@ jobs:
       - name: Compile for device and link the framework
         run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:compileKotlinIosArm64 :core:linkDebugFrameworkIosArm64
 
+      # The UI tests' stand-in for the Secure Enclave key exists only in the simulator target's source set
+      # (core/src/iosSimulatorArm64Main). The device framework must not contain it.
+      - name: No simulator quick-unlock key in the device framework
+        run: |
+          F=core/build/bin/iosArm64/debugFramework/AndvariCore.framework/AndvariCore
+          # A sentence the device build does have, so a pass means the check can read the framework.
+          scripts/ci/binary-has-text.py "$F" "This device can't hold a quick-unlock key."
+          if scripts/ci/binary-has-text.py "$F" "simulator-only software quick-unlock key"; then
+            echo "the simulator-only quick-unlock key is in the device framework"; exit 1
+          fi
+
       - name: Tests on the iOS simulator
         run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:iosSimulatorArm64Test
 

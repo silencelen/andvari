@@ -1,0 +1,190 @@
+# Runs the iOS app's UI tests in the iOS Simulator against a throwaway andvari server on the runner's loopback.
+# No secrets and no signing identity: the app is signed ad hoc for the simulator, and the account, the server's
+# keys and the test site's certificate are made in the job and discarded with it (app-ios/uitest/README.md).
+# Read a run with app-ios/scripts/uitest-report.sh <run id>.
+name: iOS UI tests
+
+on:
+  push:
+    branches: [ios-uitest]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-uitest-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  uitest:
+    name: UI tests on the iOS simulator
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Select Xcode 26
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          xcodebuild -version
+          xcrun simctl list runtimes
+
+      - name: Java
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Everything Gradle and npm produce for this job, keyed on every input they read. A change to the app's
+      # Swift or to the tests alone skips the Kotlin/Native link, which is most of a cold run.
+      - name: Restore the built core, Safari files and server
+        id: built
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            core/build/bin/iosSimulatorArm64/releaseFramework
+            app-ios/AndvariSafari/web
+            server/build/libs/andvari-server.jar
+            tools/uitest-seed/build/libs/andvari-uitest-seed.jar
+          key: uitest-built-${{ runner.os }}-${{ hashFiles('core/**', 'server/**', 'tools/uitest-seed/**', 'extension/**', 'spec/**', 'gradle/**', '*.gradle.kts', 'gradle.properties', 'docs/self-hosting.md', 'deploy/**', 'scripts/ci/build-libsodium-ios.sh', 'app-ios/scripts/prepare.sh') }}
+
+      - name: Restore libsodium
+        if: steps.built.outputs.cache-hit != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: core/build/libsodium
+          key: libsodium-ios-${{ hashFiles('scripts/ci/build-libsodium-ios.sh') }}
+
+      - name: Kotlin/Native tools cache
+        if: steps.built.outputs.cache-hit != 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      - name: Kotlin framework and Safari files
+        if: steps.built.outputs.cache-hit != 'true'
+        run: app-ios/scripts/prepare.sh iosSimulatorArm64
+
+      - name: Server and seeding tool
+        if: steps.built.outputs.cache-hit != 'true'
+        run: ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx3g :server:shadowJar :tools:uitest-seed:shadowJar
+
+      - name: Keep the built core, Safari files and server
+        if: steps.built.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            core/build/bin/iosSimulatorArm64/releaseFramework
+            app-ios/AndvariSafari/web
+            server/build/libs/andvari-server.jar
+            tools/uitest-seed/build/libs/andvari-uitest-seed.jar
+          key: ${{ steps.built.outputs.cache-primary-key }}
+
+      # The stand-in quick-unlock key is compiled for the simulator only (core/src/iosSimulatorArm64Main); the
+      # device framework is checked for its absence in ios-core.yml. Here: it is really in the build under test.
+      - name: The simulator build has its stand-in quick-unlock key
+        run: |
+          scripts/ci/binary-has-text.py core/build/bin/iosSimulatorArm64/releaseFramework/AndvariCore.framework/AndvariCore \
+            "simulator-only software quick-unlock key"
+
+      - name: Names for the test site
+        run: echo "127.0.0.1 site.andvari-uitest.test other-uitest.test plainhttp-uitest.test" | sudo tee -a /etc/hosts
+
+      - name: Start the server, seed the account, serve the test site
+        run: |
+          mkdir -p out
+          app-ios/uitest/start-backend.sh "$RUNNER_TEMP/uitest-backend"
+          # The site answers under its names, with a certificate its CA vouches for: what Safari will ask of it.
+          . app-ios/uitest/env.sh
+          curl -fsS --cacert "$RUNNER_TEMP/uitest-backend/ca.pem" "$UITEST_SITE_ORIGIN/login.html" | grep -q "Sign in"
+          curl -fsS "$UITEST_HTTP_ORIGIN/login.html" | grep -q "Sign in"
+
+      - name: Boot a fresh simulator
+        run: |
+          UDID="$(app-ios/uitest/boot-simulator.sh "$RUNNER_TEMP/uitest-backend/ca.pem" | tail -1)"
+          echo "UITEST_UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl list devices booted
+
+      - name: Build the app and the tests
+        run: |
+          brew install xcodegen
+          (cd app-ios && xcodegen generate)
+          set +e
+          # Signed ad hoc, so the simulator sees the entitlements (App Group, credential provider). No team, no profile.
+          xcodebuild build-for-testing -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
+            -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
+            > out/xcodebuild-build.log 2>&1
+          status=$?
+          grep -E ': error: ' out/xcodebuild-build.log | sort -u | head -100
+          grep -E ': warning: ' out/xcodebuild-build.log | grep '/app-ios/' | sort -u | head -100
+          tail -40 out/xcodebuild-build.log
+          exit "$status"
+
+      - name: Run the UI tests
+        run: |
+          . app-ios/uitest/env.sh
+          set +e
+          # TEST_RUNNER_X reaches the test runner as X. The runner is a simulator process and writes its
+          # screenshots and summary straight into out/.
+          env TEST_RUNNER_UITEST_OUT_DIR="$PWD/out" \
+              TEST_RUNNER_UITEST_SERVER_ORIGIN="$UITEST_SERVER_ORIGIN" \
+              TEST_RUNNER_UITEST_EMAIL="$UITEST_EMAIL" \
+              TEST_RUNNER_UITEST_PASSWORD="$UITEST_PASSWORD" \
+              TEST_RUNNER_UITEST_SITE_ORIGIN="$UITEST_SITE_ORIGIN" \
+              TEST_RUNNER_UITEST_SITE_HOST="$UITEST_SITE_HOST" \
+              TEST_RUNNER_UITEST_HTTP_ORIGIN="$UITEST_HTTP_ORIGIN" \
+              TEST_RUNNER_UITEST_OTHER_ORIGIN="$UITEST_OTHER_ORIGIN" \
+              TEST_RUNNER_UITEST_OTHER_HOST="$UITEST_OTHER_HOST" \
+            xcodebuild test-without-building -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
+              -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
+              -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult \
+              > out/xcodebuild-test.log 2>&1
+          status=$?
+          grep -E "^Test Case .* (passed|failed|skipped)|error:" out/xcodebuild-test.log | head -200
+          tail -15 out/xcodebuild-test.log
+          exit "$status"
+
+      - name: Summary
+        if: always()
+        run: |
+          python3 app-ios/uitest/summarize.py out/uitest-summary.json --markdown >> "$GITHUB_STEP_SUMMARY" || true
+          python3 app-ios/uitest/summarize.py out/uitest-summary.json || true
+
+      - name: Collect logs
+        if: always()
+        run: |
+          app-ios/uitest/stop-backend.sh "$RUNNER_TEMP/uitest-backend" || true
+          cp "$RUNNER_TEMP/uitest-backend/server.log" "$RUNNER_TEMP/uitest-backend/site.log" out/ 2>/dev/null || true
+          # The screenshots are also inside the result bundle; this copy is for when the direct write failed.
+          if [ -d out/AndvariUITests.xcresult ] && [ ! -d out/screenshots ]; then
+            xcrun xcresulttool export attachments --path out/AndvariUITests.xcresult --output-path out/attachments || true
+          fi
+          # What the simulator's system said about the app and its extensions, for a failure nobody can watch.
+          if [ -n "${UITEST_UDID:-}" ]; then
+            xcrun simctl spawn "$UITEST_UDID" log show --last 45m --style compact \
+              --predicate 'process BEGINSWITH "Andvari" OR (process IN {"MobileSafari", "com.apple.WebKit.Networking", "trustd"} AND (eventMessage CONTAINS[c] "uitest.test" OR eventMessage CONTAINS ":8443" OR eventMessage CONTAINS[c] "andvari uitest CA")) OR (eventMessage CONTAINS[c] "andvari" AND NOT process IN {"installcoordinationd", "CoreSimulatorBridge", "runningboardd", "SpringBoard", "backboardd", "lsd", "installd"})' \
+              > out/simulator.log 2>&1 || true
+          fi
+          ls -la out out/screenshots 2>/dev/null | head -150
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ios-uitest
+          path: out
+          if-no-files-found: warn
+          retention-days: 14
