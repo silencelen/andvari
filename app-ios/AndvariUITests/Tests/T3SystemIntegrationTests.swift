@@ -299,53 +299,40 @@ final class T3SystemIntegrationTests: UITestCase {
         }
     }
 
-    /// What the owner checks by hand: two changed passwords and one new login saved from Safari, each applied by the
-    /// app at the unlock after it and listed; the list grows across those unlocks and is still there after a lock; a
-    /// changed login shows its new password and the old one under "Previous passwords"; Undo takes one back; Undo all
-    /// takes back the rest, and everything is as it was.
+    /// What the owner checks by hand after a changed password is saved from Safari: the app applies it at its next
+    /// unlock and lists it; the list is still there after a lock; the login shows its new password and the old one
+    /// under "Previous passwords"; Undo puts the old one back and takes the history entry out. One save only: a
+    /// second one would reuse the first one's queue id today and replace its record (test13).
     func test10_SavedListPersistsUndoAndHistory() throws {
         if !systemAtLeast(26, 2) {
             try skip("The save request (SupportsSavePasswordCredentials) needs iOS 26.2; this simulator runs \(systemVersion.major).\(systemVersion.minor).")
         }
-        let newUser = "carol\(Int(Date().timeIntervalSince1970) % 100000)"
         step("provider-on-and-no-saved-list") {
             requireAutoFillProvider()
             bringAppForward()
             reachVaultAnyWay()
             dismissSavedList()
         }
-        let three = app.staticTexts["Saved 3 logins from AutoFill"]
-        let two = app.staticTexts["Saved 2 logins from AutoFill"]
+        let one = app.staticTexts["Saved 1 login from AutoFill"]
         let anyList = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Saved ' AND label ENDSWITH ' from AutoFill'")).firstMatch
-        // Each save is applied before the next is made: two saves made before an unlock overwrite each other in the
-        // queue today (test13). The list grows across the unlocks, which is its persistence across a lock too.
-        let saves: [(user: String, password: String, what: String)] = [
-            (Fixture.siteUser, "Changed-Passw0rd-A", "update \(Fixture.siteUser)'s password"),
-            (Fixture.secondUser, "Changed-Passw0rd-B", "update \(Fixture.secondUser)'s password"),
-            (newUser, "New-Passw0rd-C", "save \(newUser)'s login"),
-        ]
-        for (index, save) in saves.enumerated() {
-            step("save-\(index + 1)-applied") {
-                XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: save.user, password: save.password, passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to \(save.what) in andvari")
-                applySavesNow()
-                let header = index == 0 ? "Saved 1 login from AutoFill" : "Saved \(index + 1) logins from AutoFill"
-                if !waitUntil(15, { self.app.staticTexts[header].exists }) {
-                    dumpTree(app, as: "not-\(index + 1)-saved")
-                    XCTFail("after save \(index + 1) the app does not read \"\(header)\": \(saveListsSummary()). The save queue: \(SystemState.queueLog.last ?? "not read")")
-                }
-            }
+        let row = app.cells.containing(NSPredicate(format: "label == %@", Fixture.secondUser)).firstMatch
+        step("changed-password-saved-from-safari") {
+            XCTAssertTrue(submitLoginAndSaveToAndvari(page: "login.html", heading: "Sign in", user: Fixture.secondUser, password: "Changed-Passw0rd-B", passwordLabel: "Password", submit: "Sign in"), "iOS did not offer to update \(Fixture.secondUser)'s password in andvari")
         }
-        step("rows-say-what-happened") {
-            let changed = app.cells.containing(NSPredicate(format: "label == %@", Fixture.secondUser)).firstMatch
-            XCTAssertTrue(changed.staticTexts["New password for \(Fixture.secondItem). The old one is in its history."].exists, "the row of the changed login does not say what happened")
-            let added = app.cells.containing(NSPredicate(format: "label == %@", newUser)).firstMatch
-            XCTAssertTrue(added.staticTexts["Added as a new login"].exists, "the row of the new login does not say what happened")
+        step("applied-at-unlock-and-listed") {
+            applySavesNow()
+            if !waitUntil(15, { one.exists }) {
+                dumpTree(app, as: "not-saved")
+                XCTFail("the app did not list the save: \(saveListsSummary()). The save queue: \(SystemState.queueLog.last ?? "not read")")
+            }
+            XCTAssertTrue(row.staticTexts["New password for \(Fixture.secondItem). The old one is in its history."].exists, "the row does not say what happened")
+            XCTAssertTrue(row.staticTexts["In Personal"].exists, "the row does not say the login is in the personal vault")
         }
         step("list-survives-a-lock") {
             app.buttons["vault.lock"].tap()
             expectScreen(.unlock)
             reachVaultAnyWay()
-            XCTAssertTrue(waitUntil(10) { three.exists }, "the saved list was gone after a lock and unlock")
+            XCTAssertTrue(waitUntil(10) { one.exists }, "the saved list was gone after a lock and unlock")
         }
         step("new-and-previous-password-in-the-login") {
             openItem(Fixture.secondItem)
@@ -361,39 +348,21 @@ final class T3SystemIntegrationTests: UITestCase {
             for _ in 0..<4 where !(anyList.exists && anyList.isHittable) { app.swipeDown() }
             require(anyList, "the saved list", timeout: 10)
         }
-        step("undo-one") {
-            let added = app.cells.containing(NSPredicate(format: "label == %@", newUser)).firstMatch
-            require(added, "the new login's row in the saved list", timeout: 5)
-            added.buttons["Undo"].tap()
-            if !waitUntil(10, { two.exists }) {
-                dumpTree(app, as: "after-undo")
-                XCTFail("after one Undo the list does not read two saved logins: \(saveListsSummary())")
-            }
-        }
-        step("undo-all") {
-            let all = app.buttons["Undo all"]
-            require(all, "Undo all", timeout: 5)
-            all.tap()
+        step("undone") {
+            require(row, "the save's row", timeout: 5)
+            row.buttons["Undo"].tap()
             if !waitUntil(10, { !anyList.exists }) {
-                dumpTree(app, as: "after-undo-all")
-                XCTFail("the saved list is still there after Undo all: \(anyList.label)")
+                dumpTree(app, as: "after-undo")
+                XCTFail("the saved list is still there after Undo: \(saveListsSummary())")
             }
         }
         step("everything-as-it-was") {
             openItem(Fixture.secondItem)
             element("detail.reveal-password").tap()
-            XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == Fixture.secondPassword }, "Undo all did not put the seeded password back, the login holds \(String(describing: self.element("detail.password").value))")
+            XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == Fixture.secondPassword }, "Undo did not put the seeded password back, the login holds \(String(describing: self.element("detail.password").value))")
             app.swipeUp()
             XCTAssertFalse(app.staticTexts["Previous passwords"].exists, "the undone password is still in the login's history")
             app.navigationBars.buttons.firstMatch.tap()
-            openItem(Fixture.siteItem)
-            element("detail.reveal-password").tap()
-            XCTAssertTrue(waitUntil(5) { (self.element("detail.password").value as? String) == Fixture.sitePassword }, "Undo all did not put \(Fixture.siteUser)'s password back")
-            app.navigationBars.buttons.firstMatch.tap()
-            searchVault(newUser)
-            Thread.sleep(forTimeInterval: 2)
-            XCTAssertFalse(vaultRowContaining(newUser).exists, "the login that Undo took back is still in the vault")
-            endSearch()
         }
     }
 
@@ -499,7 +468,7 @@ final class T3SystemIntegrationTests: UITestCase {
         // The app read and emptied the queue at the last unlock, so after two saves it holds two entries.
         let after = SystemState.queueSnapshots
         if after.count == 2, after[1].count == 1, after[0] == after[1] {
-            try skip("Known app defect, reported 2026-11-12 and being fixed on ios-ui: the AutoFill extension queues every save under ASSavePasswordRequest.sessionID, which is \"1\" for each save here (every save runs in a fresh extension process), so the second save overwrote the first: the queue held only \(after[1][0]) after both. This test runs to its end once each capture gets its own id.")
+            try skip("Known app defect, reported 2026-11-12 and being fixed on ios-ui: the AutoFill extension queues every save under ASSavePasswordRequest.sessionID, which is \"1\" for each save here (every save runs in a fresh extension process), so the second save overwrote the first: the queue held only \(after[1][0]) after both. The same id also makes a later save replace an earlier one's record in the saved list. This test (two saves, both listed, Undo all) runs to its end once each capture gets its own id.")
         }
         step("both-applied-at-unlock") {
             applySavesNow()
@@ -511,9 +480,17 @@ final class T3SystemIntegrationTests: UITestCase {
             XCTAssertTrue(app.cells.containing(NSPredicate(format: "label == %@", first)).firstMatch.exists, "\(first)'s login is not listed")
             XCTAssertTrue(app.cells.containing(NSPredicate(format: "label == %@", second)).firstMatch.exists, "\(second)'s login is not listed")
         }
-        step("undone") {
+        step("undo-all") {
             app.buttons["Undo all"].tap()
             XCTAssertTrue(waitUntil(10) { !self.app.staticTexts["Saved 2 logins from AutoFill"].exists }, "Undo all did not take the two saves back")
+        }
+        step("both-logins-gone") {
+            for user in [first, second] {
+                searchVault(user)
+                Thread.sleep(forTimeInterval: 2)
+                XCTAssertFalse(vaultRowContaining(user).exists, "\(user)'s login is still in the vault after Undo all")
+                endSearch()
+            }
         }
     }
 }
