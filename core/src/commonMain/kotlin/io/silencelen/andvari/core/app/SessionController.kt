@@ -1305,8 +1305,38 @@ open class SessionController(
 
     // ---- two-step sign-in (spec 03 §2: a TOTP factor the server checks at sign-in) ----
 
-    /** The key being set up, held only while the two-step screen is open; it never enters the state. */
-    private var twoStepPending: TwoStepSetup? = null
+    /**
+     * The key being set up (round-6 review L4), with when it was minted and whose it is (this server and account). It
+     * is held while the two-step screen is open and through a trip away from the app (to add it to an authenticator,
+     * which may lock the app), for at most [TWO_STEP_PENDING_MS] from when the server minted it: a lock keeps it, and
+     * after the next unlock the screen comes back on its confirm step ([resumeTwoStep]). A sign-out, a server switch, an
+     * ended session, its time running out, a confirm, or closing the screen while unlocked drop it. Only the key and its
+     * link are kept, never the password. It never enters the state.
+     */
+    private class PendingTwoStep(val setup: TwoStepSetup, val mintedAtMs: Long, val owner: String)
+
+    private var twoStepPending: PendingTwoStep? = null
+
+    /** This server and account, as a pending key records whose it is. */
+    private fun ownerOf(live: VaultSession.Unlocked): String = (store.baseUrl?.let(OriginCanon::originKey) ?: "") + "/" + live.account.userId
+
+    /** The pending key while it is [live]'s and in time; one past its time, or another account's, is dropped here. */
+    private fun pendingTwoStep(live: VaultSession.Unlocked): TwoStepSetup? {
+        val pending = twoStepPending ?: return null
+        val age = clocks.monotonicMs() - pending.mintedAtMs
+        if (age !in 0 until TWO_STEP_PENDING_MS || pending.owner != ownerOf(live)) {
+            twoStepPending = null
+            return null
+        }
+        return pending.setup
+    }
+
+    /** Back from a trip away in the middle of a setup: the two-step screen opens again on its confirm step. */
+    private fun resumeTwoStep() {
+        val live = session.get() ?: return
+        if (pendingTwoStep(live) == null) return
+        update { it.copy(twoStep = TwoStepView(enrolled = false, settingUp = true, resumed = true)) }
+    }
 
     /** Read whether two-step sign-in is on ([AppState.twoStep]). */
     @Throws(CancellationException::class)
@@ -1322,7 +1352,7 @@ open class SessionController(
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         if (!twoStepScreen.still(token)) return@action screenGone()
-        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = twoStepPending != null)) }
+        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = pendingTwoStep(live) != null)) }
         ActionResult.Ok
     }
 
@@ -1345,19 +1375,20 @@ open class SessionController(
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         // The screen closed meanwhile: the new key is not held (the server drops it unconfirmed).
         if (!twoStepScreen.still(token)) return@action screenGone()
-        twoStepPending = TwoStepSetup(setup.secretBase32, setup.otpauthUri)
+        val link = authenticatorLink(setup.secretBase32, setup.otpauthUri, store.baseUrl?.let(::hostOf) ?: "")
+        twoStepPending = PendingTwoStep(TwoStepSetup(setup.secretBase32, link), clocks.monotonicMs(), ownerOf(live))
         update { it.copy(busy = false, twoStep = TwoStepView(enrolled = it.twoStep?.enrolled ?: false, settingUp = true)) }
         ActionResult.Ok
     }
 
-    /** The key being set up, to show once (as a QR code and as text); null when none is. */
-    fun twoStepSetup(): TwoStepSetup? = twoStepPending
+    /** The key being set up, to show (as a QR code and as text) while unlocked; null when none is. */
+    fun twoStepSetup(): TwoStepSetup? = guarded({ null }) { session.get()?.let(::pendingTwoStep) }
 
     /** Confirm the key being set up with a code it shows now: two-step sign-in is on from here. */
     @Throws(CancellationException::class)
     suspend fun confirmTwoStep(code: String): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
-        if (twoStepPending == null) return@action ActionResult.NotDone(null)
+        if (pendingTwoStep(live) == null) return@action ActionResult.NotDone(null)
         val token = twoStepScreen.now()
         busy()
         val status = try {
@@ -1392,10 +1423,13 @@ open class SessionController(
         ActionResult.Ok
     }
 
-    /** The two-step screen closed: a key not yet confirmed is forgotten here (the server drops it unconfirmed). */
+    /**
+     * The two-step screen closed. Closed by the person (unlocked), a key not yet confirmed is forgotten (the server drops
+     * it unconfirmed). Closed because the app locked, the key stays for the trip ([twoStepPending]).
+     */
     fun closeTwoStep() {
         twoStepScreen.close()
-        twoStepPending = null
+        if (session.get() != null) twoStepPending = null
         update { it.copy(twoStep = null) }
     }
 
@@ -1802,6 +1836,7 @@ open class SessionController(
         writeFillSnapshot()
         refreshSaveQueue()
         refreshPersonalVault()
+        resumeTwoStep()
     }
 
     // ---- the personal vault ----
@@ -2081,19 +2116,20 @@ open class SessionController(
     }
 
     /** Whatever a session's screens held in memory about the vault goes with it, however the session ended. */
-    private fun forgetSessionViews() {
+    /** What a lock forgets. [keepTwoStep]: an ordinary lock keeps a key being set up for the trip it came from (L4). */
+    private fun forgetSessionViews(keepTwoStep: Boolean = false) {
         saves.locked()
         personal.reset()
         trashRead = emptyMap()
         historyRead = null
         moveGestures.clear()
-        twoStepPending = null
+        if (!keepTwoStep) twoStepPending = null
         deletedVaults = emptyMap()
     }
 
     private fun lock(reason: String?) {
         session.lock()
-        forgetSessionViews()
+        forgetSessionViews(keepTwoStep = true)
         zeroSecrets()
         backgroundLockPending = false
         val stored = store.load()
@@ -2169,6 +2205,9 @@ open class SessionController(
 
     private companion object {
         const val SYNC_EVERY_MS = 5 * 60 * 1000L
+
+        /** How long a key being set up is kept from when the server minted it (round-6 review L4). */
+        const val TWO_STEP_PENDING_MS = 10 * 60 * 1000L
         const val POLICY_REFRESH_MS = 60 * 60 * 1000L
         const val LOGOUT_MS = 5_000L
 
@@ -2255,4 +2294,28 @@ internal object SharingCopy {
     const val TYPE_THE_NAME = "Type the vault's name exactly to delete it."
     const val COPY_RUNNING = "Wait for the copy into your personal vault to finish first."
     const val OWNER_CANNOT_LEAVE = "You own this vault, so you can't leave it: make someone else the owner, or delete it."
+}
+
+/**
+ * The link an authenticator adds a two-step key from (round-6 review L4): issuer "andvari", labelled with the server's
+ * [host], never the email (the label shows in the authenticator's list). The algorithm, digits and period of the
+ * server's own link are kept where they are not the standard ones; a link that does not parse gives the standard ones.
+ */
+internal fun authenticatorLink(secret: String, serverLink: String, host: String): String {
+    fun enc(s: String) = buildString {
+        for (b in s.encodeToByteArray()) {
+            val c = (b.toInt() and 0xff).toChar()
+            if (c.isLetterOrDigit() && c.code < 0x80 || c in "-._~") append(c) else append('%').append((b.toInt() and 0xff).toString(16).uppercase().padStart(2, '0'))
+        }
+    }
+    val config = runCatching { Totp.parseUri(serverLink) }.getOrNull()
+    return buildString {
+        append("otpauth://totp/andvari:").append(enc(host.ifEmpty { "andvari" }))
+        append("?secret=").append(enc(secret)).append("&issuer=andvari")
+        if (config != null) {
+            if (config.algorithm.name != "SHA1") append("&algorithm=").append(config.algorithm.name)
+            if (config.digits != 6) append("&digits=").append(config.digits)
+            if (config.periodSeconds != 30) append("&period=").append(config.periodSeconds)
+        }
+    }
 }
