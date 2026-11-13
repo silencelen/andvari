@@ -448,10 +448,14 @@ function userActivated(): boolean {
   return ua?.isActive === true;
 }
 
-/** The field's styles as the fill rules read them: a change between the choice and the fill refuses the fill. */
+/**
+ * The field's styles as the fill rules read them, less what focus and scrolling change on their own (a background a
+ * page sets on :focus, a masked box's place on screen): a change between the choice and the fill refuses the fill.
+ */
 function styleDigest(el: HTMLElement): string {
   const f = probeVisibility(el, { onScreen: false, hitTest: false, fill: true });
-  return JSON.stringify([f.chain, f.ink]);
+  const chain = f.chain.map((c) => [c.display, c.visibility, c.opacity, c.filter, c.mask, c.blend]);
+  return JSON.stringify([chain, f.ink === null ? null : [f.ink.color, f.ink.textFill, f.ink.fontSize]]);
 }
 
 function setCardFocus(next: FillableControl | null): void {
