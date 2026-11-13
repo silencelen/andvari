@@ -55,6 +55,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -153,6 +154,9 @@ open class SessionControllerTest {
 
         /** What an extension does with a captured login: seal it to the published key and queue it (under [id], here). */
         fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, site, username, password, clocks.wall, "safari") { id }
+
+        /** The id of the listed automatic save for [host]. */
+        fun appliedId(host: String): String = controller.state.appliedSaves.single { it.host == host }.id
 
         /** The AutoFill extension's view of the same shared state: its own vault object, as in another process. */
         fun autofill() = AutofillVault(store, snapshots, quickKeys, clocks, http)
@@ -1090,7 +1094,7 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.usePersonalVaultServed())
         assertNull(controller.state.personalVault)
         settle { controller.state.appliedSaves.isNotEmpty() }
-        assertEquals(listOf("a"), controller.state.appliedSaves.map { it.id })
+        assertEquals(listOf("shop.example"), controller.state.appliedSaves.map { it.host })
         assertTrue(controller.state.pendingSaves.isEmpty())
         assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("New", "me", "pw", listOf("https://new.example"), "", "", false)))
         // The confirmation is remembered on the device: the next unlock does not ask again.
@@ -1324,9 +1328,10 @@ open class SessionControllerTest {
         assertTrue(cache.pending().none { it.itemId == remote }, "nothing was queued for it either")
     }
 
-    /** A record as the importer stores it, sealed to the account. */
-    private fun Rig.storedSaveRecord(id: String, site: String, itemId: String, password: String, intent: Boolean) {
-        val record = """{"id":"$id","site":"$site","username":"me","itemId":"$itemId","replacedName":null,"password":"$password","keptOld":false,"appliedAtMs":${clocks.wall},"intent":$intent}"""
+    /** A record as the importer stores it, sealed to the account ([queueId] null: as a build before record ids stored it). */
+    private fun Rig.storedSaveRecord(id: String, site: String, itemId: String, password: String, intent: Boolean, queueId: String? = null) {
+        val entry = queueId?.let { ""","queueId":"$it"""" } ?: ""
+        val record = """{"id":"$id","site":"$site","username":"me","itemId":"$itemId","replacedName":null,"password":"$password","keptOld":false,"appliedAtMs":${clocks.wall},"intent":$intent$entry}"""
         val sealedRecord = Bytes.toB64(crypto.sealTo(enrolled.account.identityPub, record.encodeToByteArray()))
         appliedLog.write("""["$sealedRecord"]""".encodeToByteArray())
     }
@@ -1341,9 +1346,9 @@ open class SessionControllerTest {
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.isNotEmpty() }
         assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name }, "written once")
-        assertEquals(listOf("a"), controller.state.appliedSaves.map { it.id })
+        assertEquals(listOf("shop.example"), controller.state.appliedSaves.map { it.host })
         assertTrue(queue.map.isEmpty())
-        assertEquals(ActionResult.Ok, controller.undoAppliedSave("a"))
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave(appliedId("shop.example")))
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
     }
 
@@ -1358,12 +1363,13 @@ open class SessionControllerTest {
         controller.lock()
         // The lock fell between the write and the bookkeeping: the entry is still queued and the record is still an intent.
         capture("a", "https://shop.example/", "me", "pw-1")
-        storedSaveRecord("a", "https://shop.example/", written, "pw-1", intent = true)
+        storedSaveRecord("r-1", "https://shop.example/", written, "pw-1", intent = true, queueId = "a")
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.isNotEmpty() }
         assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
         assertTrue(queue.map.isEmpty(), "the entry it came from is gone")
-        assertEquals(ActionResult.Ok, controller.undoAppliedSave("a"), "nothing was written that the list does not show")
+        assertEquals(listOf("r-1"), controller.state.appliedSaves.map { it.id }, "listed under its own id")
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave("r-1"), "nothing was written that the list does not show")
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
     }
 
@@ -1400,7 +1406,8 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
         settle { controller.state.appliedSaves.isNotEmpty() }
         val applied = controller.state.appliedSaves.single()
-        assertEquals(AppliedSaveView("a", "shop.example", "me", null, false, clocks.wall, PERSONAL), applied)
+        assertEquals(AppliedSaveView(applied.id, "shop.example", "me", null, false, clocks.wall, PERSONAL), applied)
+        assertNotEquals("a", applied.id, "the list names its own record, never the queue entry")
         assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
         assertTrue(queue.map.isEmpty())
         // The record of it is kept sealed, in app-private storage, and survives a lock: the list is there after the next unlock.
@@ -1412,7 +1419,7 @@ open class SessionControllerTest {
         settle { controller.state.appliedSaves.isNotEmpty() }
         assertEquals(listOf(applied), controller.state.appliedSaves)
         // Undo, a lock later, removes exactly the login it added.
-        assertEquals(ActionResult.Ok, controller.undoAppliedSave("a"))
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave(applied.id))
         assertEquals(listOf("Example"), controller.state.items.map { it.name })
         assertTrue(controller.state.appliedSaves.isEmpty())
         assertNull(appliedLog.bytes)
@@ -1426,7 +1433,7 @@ open class SessionControllerTest {
         capture("new", "https://login.example.com/reset", "fam", "hunter3")
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.isNotEmpty() }
-        assertEquals(listOf(AppliedSaveView("new", "login.example.com", "fam", "Example", false, clocks.wall, PERSONAL)), controller.state.appliedSaves)
+        assertEquals(listOf(AppliedSaveView(appliedId("login.example.com"), "login.example.com", "fam", "Example", false, clocks.wall, PERSONAL)), controller.state.appliedSaves)
         assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertEquals(1, controller.state.items.size, "updated, not duplicated")
         assertTrue(controller.state.pendingSaves.isEmpty())
@@ -1435,7 +1442,7 @@ open class SessionControllerTest {
         assertEquals(listOf(clocks.wall), controller.passwordHistory(ITEM_ID), "when it was retired, newest first")
         assertEquals("hunter2", controller.previousPassword(ITEM_ID, 0), "read one at a time, on request")
         assertNull(controller.previousPassword(ITEM_ID, 1))
-        assertEquals(ActionResult.Ok, controller.undoAppliedSave("new"))
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave(appliedId("login.example.com")))
         assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertEquals(0, controller.itemDetail(ITEM_ID)?.previousPasswords, "the history entry is taken out again")
         assertTrue(controller.state.appliedSaves.isEmpty())
@@ -1451,7 +1458,7 @@ open class SessionControllerTest {
         settle { controller.state.appliedSaves.size == 2 }
         assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "the https login on the default port is untouched")
         assertEquals(setOf(null), controller.state.appliedSaves.map { it.replaced }.toSet(), "both were added as logins of their own")
-        assertEquals(listOf(true, false), controller.state.appliedSaves.sortedBy { it.id }.map { it.plainHttp })
+        assertEquals(listOf(false, true), controller.state.appliedSaves.map { it.plainHttp }.sorted(), "one of them is the http login")
         assertEquals(3, controller.state.items.size)
     }
 
@@ -1471,7 +1478,7 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.confirmPendingSave("d"))
         assertEquals("hunter3", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertTrue(controller.state.pendingSaves.isEmpty())
-        assertEquals(listOf("d"), controller.state.appliedSaves.map { it.id }, "a save by hand is listed and can be undone too")
+        assertEquals(listOf("login.example.com"), controller.state.appliedSaves.map { it.host }, "a save by hand is listed and can be undone too")
     }
 
     @Test
@@ -1507,7 +1514,7 @@ open class SessionControllerTest {
         capture("a-second", "https://login.example.com/x", "fam", "corrected")
         controller.unlock(PASSWORD)
         settle { controller.state.appliedSaves.isNotEmpty() }
-        assertEquals(listOf("a-second"), controller.state.appliedSaves.map { it.id })
+        assertEquals(1, controller.state.appliedSaves.size)
         assertEquals("corrected", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertTrue(queue.map.isEmpty() && controller.state.pendingSaves.isEmpty(), "the older capture is dropped, not offered")
         // A further change to the same login in this unlock is not applied by itself.
@@ -1603,7 +1610,7 @@ open class SessionControllerTest {
         settle { controller.state.appliedSaves.size >= 5 && controller.state.pendingSaves.count { it.reason == SaveImporter.TOO_MANY } == 2 }
         assertTrue(controller.state.appliedSaves.map { it.id }.containsAll(listed), "the list survived the lock")
         assertEquals(heldBack, controller.state.pendingSaves.filter { it.reason == SaveImporter.TOO_MANY }.map { it.id }.toSet(), "the holds too")
-        settle { "late" in controller.state.appliedSaves.map { it.id } }
+        settle { "late.example" in controller.state.appliedSaves.map { it.host } }
         assertEquals(1, controller.state.items.count { it.name == "late.example" }, "the cut-short save is listed once, never written twice")
         assertTrue(queue.map.keys.none { it == "late" })
     }
@@ -1618,9 +1625,10 @@ open class SessionControllerTest {
         val added = controller.state.items.single { it.name == "shop.example" }.itemId
         // The same username and password, but a note and a code were added since: that is the person's work.
         assertEquals(ActionResult.Ok, controller.saveLogin(added, LoginInput("shop.example", "me", "pw", listOf("https://shop.example"), "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP", "the recovery codes are in the safe", false)))
-        assertEquals(ActionResult.Failed(SaveImporter.UNDO_EDITED), controller.undoAppliedSave("added"))
+        val record = appliedId("shop.example")
+        assertEquals(ActionResult.Failed(SaveImporter.UNDO_EDITED), controller.undoAppliedSave(record))
         assertEquals(listOf("Example", "shop.example"), controller.state.items.map { it.name })
-        assertEquals(listOf("added"), controller.state.appliedSaves.map { it.id }, "the record stays, with the reason said")
+        assertEquals(listOf(record), controller.state.appliedSaves.map { it.id }, "the record stays, with the reason said")
     }
 
     @Test
@@ -1673,8 +1681,9 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "edited-since", listOf("https://login.example.com/x"), "", "", false)))
         val added = controller.state.items.single { it.name == "shop.example" }.itemId
         assertEquals(ActionResult.Ok, controller.saveLogin(added, LoginInput("shop.example", "me", "edited-too", listOf("https://shop.example"), "", "", false)))
-        assertIs<ActionResult.Failed>(controller.undoAppliedSave("new"))
-        assertIs<ActionResult.Failed>(controller.undoAppliedSave("added"))
+        val replaced = appliedId("login.example.com")
+        assertIs<ActionResult.Failed>(controller.undoAppliedSave(replaced))
+        assertIs<ActionResult.Failed>(controller.undoAppliedSave(appliedId("shop.example")))
         assertIs<ActionResult.Failed>(controller.undoAllAppliedSaves())
         assertEquals("edited-since", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
         assertEquals("edited-too", controller.revealSecret(added, SecretField.PASSWORD), "a login changed since it was added is not deleted")
@@ -1682,7 +1691,55 @@ open class SessionControllerTest {
         controller.dismissAppliedSaves()
         assertTrue(controller.state.appliedSaves.isEmpty())
         assertNull(appliedLog.bytes)
-        assertEquals(ActionResult.NotDone(null), controller.undoAppliedSave("new"), "dismissed: nothing left to undo from here")
+        assertEquals(ActionResult.NotDone(null), controller.undoAppliedSave(replaced), "dismissed: nothing left to undo from here")
+    }
+
+    /**
+     * Two saves whose queue entries had the same id (the entry of the first was gone once it was applied, and the next
+     * capture reused its name: an extension that names entries badly, or a forged entry). Each is listed under an id
+     * the importer minted, and each keeps its own Undo: a later record never replaces an earlier one.
+     */
+    @Test
+    fun twoSavesWhoseEntriesSharedAnIdAreBothListedEachWithItsOwnUndo() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("s-1", "https://login.example.com/reset", "fam", "hunter3") // alice's changed password
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 1 }
+        controller.lock()
+        capture("s-1", "https://shop.example/", "me", "pw") // the next save, under the same entry id
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 2 }
+        assertEquals(setOf("login.example.com", "shop.example"), controller.state.appliedSaves.map { it.host }.toSet())
+        assertTrue(controller.state.appliedSaves.none { it.id == "s-1" })
+        // Both survive a lock.
+        controller.lock()
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 2 }
+        // The first one's Undo still puts the replaced password back.
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave(appliedId("login.example.com")))
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals(ActionResult.Ok, controller.undoAppliedSave(appliedId("shop.example")))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        assertTrue(controller.state.appliedSaves.isEmpty())
+    }
+
+    @Test
+    fun undoAllTakesBackBothSavesWhoseEntriesSharedAnId() = test {
+        unlockedWithAPersonalVault()
+        controller.lock()
+        capture("s-1", "https://login.example.com/reset", "fam", "hunter3")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 1 }
+        controller.lock()
+        capture("s-1", "https://shop.example/", "me", "pw")
+        controller.unlock(PASSWORD)
+        settle { controller.state.appliedSaves.size == 2 }
+        assertEquals(ActionResult.Ok, controller.undoAllAppliedSaves())
+        assertEquals("hunter2", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        assertEquals(listOf("Example"), controller.state.items.map { it.name })
+        assertTrue(controller.state.appliedSaves.isEmpty())
+        assertNull(appliedLog.bytes)
     }
 
     @Test
