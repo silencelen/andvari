@@ -72,6 +72,10 @@ data class AppState(
     val trash: List<TrashItemView>?,
     /** One item's earlier versions while they are open ([SessionController.openItemHistory]); null otherwise. */
     val history: ItemHistoryView?,
+    /** The files of the item an editor has open ([SessionController.openAttachmentDraft]); null otherwise. */
+    val attachmentDraft: AttachmentDraftView? = null,
+    /** A save with new files is sending them ([UploadView]); null otherwise. Leaving the app gives it a short grace. */
+    val upload: UploadView? = null,
     /** VAULT: the personal vault is not confirmed on this device; what the person has to decide. Null when it is. */
     val personalVault: PersonalVaultView?,
     /** VAULT: captured logins that could not be saved by themselves; each says why and can be saved or discarded. */
@@ -129,6 +133,10 @@ data class PolicyView(
     val signupMode: String,
     /** How long a copied secret may stay on the clipboard, already clamped (1 to 300 seconds). */
     val clipboardClearSeconds: Int,
+    /** The largest one file may be, already clamped ([AttachmentRules.limits]). */
+    val attachmentMaxBytes: Long = AttachmentRules.DEFAULT_FILE_BYTES,
+    /** The most one item's files may come to, already clamped. */
+    val itemAttachmentsMaxBytes: Long = AttachmentRules.DEFAULT_ITEM_BYTES,
 )
 
 /** What the Trust Gate shows for an address (design 2026-07-15 §4.3): the raw origin, never a display name. */
@@ -195,6 +203,8 @@ data class ItemDetail(
     val previousPasswords: Int,
     /** A payment card's fields; null for any other kind of item. */
     val card: CardDetail?,
+    /** The item's files, by name and size; opened one at a time ([SessionController.readAttachment]). */
+    val attachments: List<AttachmentView> = emptyList(),
 )
 
 /**

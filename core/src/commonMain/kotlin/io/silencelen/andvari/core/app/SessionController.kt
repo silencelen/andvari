@@ -1,6 +1,7 @@
 package io.silencelen.andvari.core.app
 
 import io.silencelen.andvari.core.client.ApiException
+import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.ClientPolicyClamps
@@ -11,10 +12,12 @@ import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
+import io.silencelen.andvari.core.client.ItemChangedVaultsException
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.LoginData
+import io.silencelen.andvari.core.client.NoPersonalVaultException
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.OriginProbeFence
 import io.silencelen.andvari.core.client.Strength
@@ -63,6 +66,8 @@ import io.silencelen.andvari.core.client.session.enrollOriginMoved
 import io.silencelen.andvari.core.client.session.parseInviteField
 import io.silencelen.andvari.core.client.session.sessionElsewhere
 import io.silencelen.andvari.core.client.session.signInOriginMoved
+import io.silencelen.andvari.core.crypto.Attachments
+import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.PasswordGenerator
@@ -109,6 +114,8 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param appliedSaveLog where the list of automatic saves is kept across a lock: app-private, never shared.
  * @param moveMemoLog where a move or copy that did not finish is kept across a lock, sealed to the account:
  *  app-private, never shared ([VaultMoves]).
+ * @param pendingSaveLog where a save with new files is kept until it is done, sealed to the account ([PendingSave]).
+ * @param pendingBlobs where that save's files are kept meanwhile, each encrypted under its own key: app-private.
  */
 open class SessionController(
     private val store: SessionPersistence,
@@ -125,6 +132,8 @@ open class SessionController(
     private val saveQueue: SaveQueueStore = SaveQueueStore.None,
     private val appliedSaveLog: FillSnapshotStore = InMemoryFillSnapshots(),
     private val moveMemoLog: FillSnapshotStore = InMemoryFillSnapshots(),
+    pendingSaveLog: FillSnapshotStore = InMemoryFillSnapshots(),
+    pendingBlobs: BlobStore = InMemoryBlobs(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + uiContext)
     private val session = VaultSession(clocks)
@@ -171,8 +180,9 @@ open class SessionController(
     private var ticker: Job? = null
     private var sinceSyncMs = 0L
 
-    /** H08: a lock on leaving the foreground that waited for a running action. */
+    /** H08: a lock on leaving the foreground that waited for a running action, and when the app left. */
     private var backgroundLockPending = false
+    private var backgroundAtMono = 0L
 
     /** The personal-vault question, as Android asks it ([PersonalVaultFlow]). */
     private val personal = PersonalVaultFlow(
@@ -197,6 +207,11 @@ open class SessionController(
             writeFillSnapshot()
         },
     )
+
+    /** Saves with new files, kept until they are done: on disk while the origin's policy allows an offline cache, else in memory. */
+    private val pendingSaves = PendingSaves(pendingSaveLog, pendingBlobs) {
+        store.baseUrl?.let { coordinator.cacheAllowed(OriginCanon.originKey(it)) } == true
+    }
 
     /** The policy probe a landing started ([refreshPolicyIfStale]), while it runs. */
     private var policyRefresh: Job? = null
@@ -237,6 +252,7 @@ open class SessionController(
     /** One idle check, and the 5-minute quiet sync while unlocked (spec 03 §6). The ticker calls it every [tickMs]. */
     internal fun tick() {
         if (state.screen == AppScreen.RECOVER && state.recoverVerified && !state.busy && clocks.monotonicMs() - recoverVerifiedAtMono >= RecoverCopy.IDLE_MS) recoverTimedOut()
+        checkBackgroundGrace()
         checkIdleLock()
         if (tickMs > 0) {
             sinceSyncMs += tickMs
@@ -253,18 +269,38 @@ open class SessionController(
         refreshSaveQueue() // a login captured while the app was open in the background
     }
 
-    /** The app left the foreground: the vault locks (a suspended app cannot run the idle timer). */
-    fun onBackground() {
+    /**
+     * The app left the foreground: the vault locks (a suspended app cannot run the idle timer). True when the lock waits
+     * for running work, an upload most of all (H08; owner decision 2026-11-12): it lands when the work ends, or
+     * [AttachmentRules.BACKGROUND_GRACE_MS] after the app left, whichever is first. The host keeps the app running
+     * meanwhile (on iOS a background task) and calls [backgroundTimeEnded] if the system's time runs out first. The
+     * screen is covered at once.
+     */
+    fun onBackground(): Boolean {
         // Recovery does not survive a trip to the background, at either step: the second holds the raw recovery secret,
         // the first a typed phrase (and maybe a verify in flight, which the fence then stops).
         if (state.screen == AppScreen.RECOVER) recoverTimedOut()
-        if (session.get() == null) return
+        if (session.get() == null) return false
         // H08: never close the engine under a running action; the lock lands when it ends.
-        if (state.busy) {
+        if (state.busy || state.upload != null) {
+            if (!backgroundLockPending) backgroundAtMono = clocks.monotonicMs()
             backgroundLockPending = true
-            return
+            return true
         }
         lock(REASON_BACKGROUND)
+        return false
+    }
+
+    /** The time the system gave the app in the background ran out: a lock that waited for running work lands now. */
+    fun backgroundTimeEnded() {
+        if (!backgroundLockPending) return
+        backgroundLockPending = false
+        if (session.get() != null) lock(REASON_BACKGROUND)
+    }
+
+    /** A lock that waited for running work lands once the app has been away its grace, the work done or not. */
+    private fun checkBackgroundGrace() {
+        if (backgroundLockPending && clocks.monotonicMs() - backgroundAtMono !in 0 until AttachmentRules.BACKGROUND_GRACE_MS) backgroundTimeEnded()
     }
 
     /** The person interacted with the app: the idle window starts again. */
@@ -766,6 +802,7 @@ open class SessionController(
                     expMonth = c.expMonth?.ifEmpty { null }, expYear = c.expYear?.ifEmpty { null },
                 )
             },
+            attachments = doc.attachments.map { AttachmentView(it.id, it.name, it.size) },
         )
     }
 
@@ -833,11 +870,12 @@ open class SessionController(
                 totp = totp.ifEmpty { null },
             ),
         )
+        if (savingFiles(itemId)) return@action ActionResult.NotDone(null) // this editor's save runs already
         busy()
         // INV-EDIT: an edit is sealed under the vault its item lives in; a new login goes to the personal vault.
         // Alone with respect to the save queue: an automatic save never writes over this edit from an older read.
-        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId ?: vaultId) }
-        if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
+        val outcome = saveWithFiles(live, itemId, doc, existing?.vaultId ?: vaultId)
+        if (outcome == null || session.get() !== live) return@action notDone(live) // locked meanwhile, or this editor's save runs already
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
         ActionResult.Ok
@@ -880,9 +918,10 @@ open class SessionController(
                 brand = CardNormalize.brand(input.number),
             ),
         )
+        if (savingFiles(itemId)) return@action ActionResult.NotDone(null) // this editor's save runs already
         busy()
-        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId ?: vaultId) }
-        if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
+        val outcome = saveWithFiles(live, itemId, doc, existing?.vaultId ?: vaultId)
+        if (outcome == null || session.get() !== live) return@action notDone(live) // locked meanwhile, or this editor's save runs already
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
         ActionResult.Ok
@@ -916,9 +955,10 @@ open class SessionController(
         // A copy of the existing document, never a rebuild: attachments and fields this client does not know survive.
         val base = existing?.doc ?: ItemDoc(type = "note", name = "")
         val doc = base.copy(name = input.name.trim(), notes = input.text.ifBlank { null }, favorite = input.favorite)
+        if (savingFiles(itemId)) return@action ActionResult.NotDone(null) // this editor's save runs already
         busy()
-        val outcome = saves.exclusive { live.engine.save(itemId, doc, existing?.vaultId ?: vaultId) }
-        if (session.get() !== live) return@action ActionResult.NotDone(null) // locked meanwhile
+        val outcome = saveWithFiles(live, itemId, doc, existing?.vaultId ?: vaultId)
+        if (outcome == null || session.get() !== live) return@action notDone(live) // locked meanwhile, or this editor's save runs already
         update { it.copy(busy = false, items = summaries(it.query), notice = if (outcome == SaveOutcome.QUEUED) HouseholdCopy.SAVE_OFFLINE else it.notice) }
         writeFillSnapshot()
         ActionResult.Ok
@@ -953,6 +993,12 @@ open class SessionController(
     /** A read whose screen closed (or opened again) meanwhile: nothing is assigned, and the controller is idle again. */
     private fun screenGone(): ActionResult {
         update { it.copy(busy = false) }
+        return ActionResult.NotDone(null)
+    }
+
+    /** An action that ends without doing its work: idle again, unless the vault locked meanwhile (the lock reset the state). */
+    private fun notDone(live: VaultSession.Unlocked): ActionResult {
+        if (session.get() === live) idle()
         return ActionResult.NotDone(null)
     }
 
@@ -1102,6 +1148,297 @@ open class SessionController(
             update { it.copy(history = historyView(live, itemId, fresh)) }
         }
         ActionResult.Ok
+    }
+
+    // ---- attachments (spec 02 §6; owner decision 2026-11-12) ----
+
+    /**
+     * The files of the item an editor has open: the kept files it takes off, and the files it adds, each encrypted under a
+     * key of its own and set aside as it is added (its plaintext zeroed then). A new item's id is minted when its editor
+     * opens, so every try of its save uses it (F71). It lives while the editor is open.
+     */
+    private class Draft(val itemId: String?, val newItemId: String) {
+        val removed = LinkedHashSet<String>()
+        val added = ArrayList<AttachmentRef>()
+
+        /** The save this editor kept and has not finished ([PendingSave.id]), and the new files it names. */
+        var keptId: String? = null
+        val keptFiles = HashSet<String>()
+
+        /** A save of it is running: its files cannot change, and closing the editor does not take the save back. */
+        var saving = false
+    }
+
+    private var draft: Draft? = null
+
+    /** The resumption of kept saves after an unlock, while it runs: one at a time. */
+    private var resuming: Job? = null
+
+    /** What one file, and an item's files together, may come to here: the server's policy, held to this app's ([AttachmentRules]). */
+    fun attachmentLimits(): AttachmentLimitsView =
+        AttachmentRules.limits(state.policy?.attachmentMaxBytes, state.policy?.itemAttachmentsMaxBytes)
+
+    private fun keptFiles(live: VaultSession.Unlocked, d: Draft): List<AttachmentRef> =
+        d.itemId?.let { live.engine.item(it)?.doc?.attachments }.orEmpty().filter { it.id !in d.removed }
+
+    private fun draftView(live: VaultSession.Unlocked, d: Draft): AttachmentDraftView {
+        val kept = keptFiles(live, d)
+        return AttachmentDraftView(
+            kept = kept.map { AttachmentView(it.id, it.name, it.size) },
+            added = d.added.map { AttachmentView(it.id, it.name, it.size) },
+            totalBytes = kept.sumOf { it.size } + d.added.sumOf { it.size },
+            limits = attachmentLimits(),
+        )
+    }
+
+    /** An editor opened ([itemId] null: a new item): its files are listed, and files can be added and taken off. */
+    fun openAttachmentDraft(itemId: String?) {
+        val live = session.get() ?: return
+        discardDraft(live)
+        val d = Draft(itemId, itemId ?: live.account.newItemId())
+        draft = d
+        update { it.copy(attachmentDraft = draftView(live, d)) }
+    }
+
+    /** The editor closed: the files it added go, and a save of it that did not finish is not tried again. */
+    fun closeAttachmentDraft() {
+        session.get()?.let(::discardDraft)
+        draft = null
+        update { it.copy(attachmentDraft = null) }
+    }
+
+    private fun discardDraft(live: VaultSession.Unlocked) {
+        val d = draft ?: return
+        draft = null
+        if (d.saving) return // the save runs on, and lets its files go when it is done
+        d.keptId?.let { runCatching { pendingSaves.forget(live.account, it) } }
+        d.added.filter { it.id !in d.keptFiles }.forEach { runCatching { pendingSaves.dropBlob(it.id) } }
+    }
+
+    /** A lock: the editor is gone. What its last save kept stays, to be finished after the next unlock; the rest goes. */
+    private fun lockDraft() {
+        val d = draft ?: return
+        draft = null
+        d.added.filter { it.id !in d.keptFiles }.forEach { runCatching { pendingSaves.dropBlob(it.id) } }
+    }
+
+    /**
+     * Add a file to the open editor's item. [name] is what it is called (a path is cut to its last part). The file is
+     * held to [attachmentLimits] (the app checks its size against them before it reads it, too), encrypted off the main
+     * thread under a key of its own and set aside, and [bytes] zeroed: it goes up with the item's next save.
+     */
+    @Throws(CancellationException::class)
+    suspend fun addAttachment(name: String, bytes: ByteArray): ActionResult = action {
+        try {
+            val live = session.get() ?: return@action ActionResult.NotDone(null)
+            val d = draft?.takeIf { !it.saving } ?: return@action ActionResult.NotDone(null)
+            val held = keptFiles(live, d).sumOf { it.size } + d.added.sumOf { it.size }
+            AttachmentRules.refusal(bytes.size.toLong(), held, attachmentLimits())?.let { return@action ActionResult.Failed(it) }
+            busy()
+            val key = live.account.newFileKey()
+            val crypto = live.account.cryptoProvider()
+            val sealed = try {
+                withContext(Dispatchers.Default) { Attachments.encrypt(crypto, key, bytes).let { it.header + it.ciphertext } }
+            } catch (t: Throwable) {
+                key.fill(0)
+                throw t
+            }
+            val ref = AttachmentRef(id = live.account.newItemId(), name = fileName(name), size = bytes.size.toLong(), fileKey = Bytes.toB64(key))
+            key.fill(0)
+            if (session.get() !== live || draft !== d || d.saving) {
+                sealed.fill(0)
+                return@action notDone(live) // locked, or the editor closed, meanwhile
+            }
+            val setAside = try {
+                pendingSaves.putBlob(ref.id, sealed)
+            } finally {
+                sealed.fill(0)
+            }
+            if (!setAside) return@action idleFailed(AttachmentCopy.FILE_NOT_SET_ASIDE)
+            d.added += ref
+            update { it.copy(busy = false, attachmentDraft = draftView(live, d)) }
+            ActionResult.Ok
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    /** Take a file off the open editor's item: an added one goes now; a kept one leaves the item at its next save. */
+    fun removeAttachment(attachmentId: String) {
+        val live = session.get() ?: return
+        val d = draft?.takeIf { !it.saving } ?: return
+        val added = d.added.firstOrNull { it.id == attachmentId }
+        if (added != null) {
+            d.added.remove(added)
+            if (attachmentId !in d.keptFiles) runCatching { pendingSaves.dropBlob(attachmentId) }
+        } else if (keptFiles(live, d).any { it.id == attachmentId }) {
+            d.removed += attachmentId
+        }
+        update { it.copy(attachmentDraft = draftView(live, d)) }
+    }
+
+    /** What a file is called: the last part of a path, without control characters, at most 200 characters. */
+    private fun fileName(raw: String): String =
+        raw.substringAfterLast('/').substringAfterLast('\\').filter { it >= ' ' && it != '\u007f' }.trim().take(200).ifEmpty { "File" }
+
+    /**
+     * One file of an item, decrypted, for a preview or to save to Files: the caller keeps it in memory and writes no
+     * copy of it. Refused past what this app opens ([AttachmentRules.MAX_FILE_BYTES]); the download is bounded by the
+     * file's size. No bytes and no error: the vault locked meanwhile.
+     */
+    @Throws(CancellationException::class)
+    suspend fun readAttachment(itemId: String, attachmentId: String): AttachmentContent = withContext(uiContext) {
+        val live = session.get() ?: return@withContext AttachmentContent("", null, null)
+        val ref = live.engine.item(itemId)?.doc?.attachments?.firstOrNull { it.id == attachmentId }
+            ?: return@withContext AttachmentContent("", null, AttachmentCopy.FILE_GONE)
+        if (ref.size > AttachmentRules.MAX_FILE_BYTES) return@withContext AttachmentContent(ref.name, null, AttachmentCopy.FILE_TOO_LARGE_TO_OPEN)
+        session.touch()
+        try {
+            val bytes = runBounded(BoundedOps.attachmentMs(ref.size)) { live.engine.downloadAttachment(ref) }
+            if (session.get() !== live) {
+                bytes.fill(0)
+                AttachmentContent(ref.name, null, null)
+            } else {
+                AttachmentContent(ref.name, bytes, null)
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            AttachmentContent(ref.name, null, HouseholdCopy.forError(t))
+        }
+    }
+
+    /**
+     * Save [doc] with the open editor's changes to its files (spec 02 §6, files first): files taken off leave the item,
+     * and new ones go up before the item that names them. A save with new files is kept ([PendingSave]) before anything
+     * is sent, so one a lock cuts short is finished after the next unlock under the same ids, never made twice, and a
+     * second Save of the same editor replaces it. Null: the vault locked before the save was done, or a save of the same
+     * editor runs already.
+     */
+    private suspend fun saveWithFiles(live: VaultSession.Unlocked, itemId: String?, doc: ItemDoc, vaultId: String?): SaveOutcome? {
+        val d = draft?.takeIf { it.itemId == itemId } ?: return saves.exclusive { live.engine.save(itemId, doc, vaultId) }
+        if (d.saving) return null
+        val withFiles = doc.copy(attachments = doc.attachments.filter { it.id !in d.removed } + d.added)
+        val newItemId = if (itemId == null) d.newItemId else null
+        if (d.added.isEmpty()) {
+            val outcome = saves.exclusive { live.engine.saveWithUploads(itemId, withFiles, emptyList(), vaultId, newItemId = newItemId) }
+            if (draft === d) draft = null
+            return outcome
+        }
+        val home = vaultId ?: live.account.personalVaultId.ifEmpty { throw NoPersonalVaultException() }
+        val p = PendingSave(
+            id = d.keptId ?: live.account.newItemId(), itemId = itemId, newItemId = d.newItemId, vaultId = home,
+            baseRev = itemId?.let { live.engine.item(it)?.rev } ?: 0L, doc = withFiles, newFiles = d.added.map { it.id },
+        )
+        if (!pendingSaves.keep(live.account, p)) throw IllegalStateException(AttachmentCopy.FILE_NOT_SET_ASIDE)
+        // Files an earlier try of this editor's save named and this one does not: set aside for nothing now.
+        d.keptFiles.filter { it !in p.newFiles }.forEach { runCatching { pendingSaves.dropBlob(it) } }
+        d.keptId = p.id
+        d.keptFiles.clear()
+        d.keptFiles += p.newFiles
+        d.saving = true
+        try {
+            val outcome = finishPendingSave(live, p) ?: return null
+            if (draft === d) draft = null
+            return outcome
+        } finally {
+            d.saving = false
+        }
+    }
+
+    /** A save of the editor open on [itemId] runs. */
+    private fun savingFiles(itemId: String?): Boolean = draft?.let { it.itemId == itemId && it.saving } == true
+
+    /** The server has the item as [p] saves it: every new file of it is in the item (a lock came after the save, before it was let go). */
+    private fun landed(live: VaultSession.Unlocked, p: PendingSave): Boolean =
+        live.engine.item(p.newItemId)?.doc?.attachments?.map { it.id }?.containsAll(p.newFiles) == true
+
+    /**
+     * Send a kept save's new files, then the item that names them, from the revision it was edited from (someone else's
+     * change since is kept as a conflict copy, never overwritten); the save is let go once the server has the item. Null:
+     * the vault locked first, and the save stays kept.
+     */
+    private suspend fun finishPendingSave(live: VaultSession.Unlocked, p: PendingSave): SaveOutcome? {
+        val refs = p.doc.attachments.associateBy { it.id }
+        try {
+            if (!landed(live, p)) {
+                update { it.copy(upload = UploadView(0, p.newFiles.size)) }
+                for ((i, id) in p.newFiles.withIndex()) {
+                    val ref = refs[id] ?: throw IllegalStateException(AttachmentCopy.FILE_NOT_SET_ASIDE)
+                    val sealed = pendingSaves.blob(id) ?: throw IllegalStateException(AttachmentCopy.FILE_NOT_SET_ASIDE)
+                    try {
+                        runBounded(BoundedOps.attachmentMs(ref.size)) { live.engine.uploadEncryptedAttachment(id, p.newItemId, p.vaultId, sealed) }
+                    } finally {
+                        sealed.fill(0)
+                    }
+                    if (session.get() !== live) return null
+                    update { it.copy(upload = UploadView(i + 1, p.newFiles.size)) }
+                }
+            }
+            return saves.exclusive {
+                when {
+                    session.get() !== live -> null
+                    landed(live, p) -> SaveOutcome.APPLIED
+                    else -> live.engine.saveWithUploads(
+                        p.itemId, p.doc, emptyList(), p.vaultId,
+                        newItemId = if (p.itemId == null) p.newItemId else null, baseItemRev = p.baseRev,
+                    )
+                }?.also { pendingSaves.forget(live.account, p.id) }
+            }
+        } finally {
+            if (session.get() === live) update { it.copy(upload = null) }
+        }
+    }
+
+    /**
+     * After an unlock: the saves with files a lock cut short (or that could not reach the server) are finished, under the
+     * ids they were given. One the server refuses for good is let go and said; one that still cannot get through stays
+     * for the next unlock. Files set aside for an editor the app was closed in go.
+     */
+    private fun resumePendingSaves() {
+        val live = session.get() ?: return
+        if (resuming?.isActive == true) return
+        val kept = runCatching {
+            pendingSaves.sweep(live.account, draft?.added?.mapTo(HashSet()) { it.id }.orEmpty())
+            pendingSaves.load(live.account)
+        }.getOrDefault(emptyList())
+        if (kept.isEmpty()) return
+        resuming = scope.launch {
+            var done = 0
+            try {
+                for (p in kept) {
+                    if (session.get() !== live) return@launch
+                    if (draft?.keptId == p.id) continue // its editor is open: its own Save finishes it
+                    try {
+                        finishPendingSave(live, p) ?: return@launch
+                        done++
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        if (session.get() !== live) return@launch
+                        val name = p.doc.name.ifBlank { "An item" }
+                        if (givenUp(t)) {
+                            runCatching { pendingSaves.forget(live.account, p.id) }
+                            update { it.copy(notice = AttachmentCopy.savedWithoutFiles(name, HouseholdCopy.forError(t))) }
+                        } else {
+                            update { it.copy(notice = AttachmentCopy.savedLater(name)) }
+                        }
+                    }
+                }
+            } finally {
+                afterAction() // a lock that waited for this upload lands now
+            }
+            if (done > 0 && session.get() === live) {
+                update { it.copy(items = summaries(it.query), notice = if (done == 1) AttachmentCopy.KEPT_SAVE_DONE else "$done ${AttachmentCopy.KEPT_SAVES_DONE}") }
+                writeFillSnapshot()
+            }
+        }
+    }
+
+    /** A kept save the server refuses for good: an item gone or moved, a vault this account may no longer write, too large. */
+    private fun givenUp(t: Throwable): Boolean = when (t) {
+        is ItemChangedVaultsException -> true
+        is ApiException -> t.status in 400..499 && t.status != 401 && t.status != 408 && t.status != 429
+        is IllegalStateException -> t.message == AttachmentCopy.FILE_NOT_SET_ASIDE
+        else -> false
     }
 
     // ---- shared vaults: create, rename, delete and restore, leave (spec 03 §10, §11) ----
@@ -1701,7 +2038,7 @@ open class SessionController(
 
     /** H08: a lock on leaving the foreground lands once the action it waited for ends. */
     private fun afterAction() {
-        if (backgroundLockPending && !state.busy) {
+        if (backgroundLockPending && !state.busy && state.upload == null) {
             backgroundLockPending = false
             if (session.get() != null) lock(REASON_BACKGROUND)
         }
@@ -1774,6 +2111,8 @@ open class SessionController(
         recoveryFingerprintShort = p.recoveryFingerprint.take(32),
         signupMode = effectiveSignupMode(p.signupMode),
         clipboardClearSeconds = p.clipboardClearSeconds.coerceIn(1, ClientPolicyClamps.CLIPBOARD_CLEAR_MAX_SECONDS),
+        attachmentMaxBytes = AttachmentRules.limits(p.attachmentMaxBytes, p.itemAttachmentsMaxBytes).perFileBytes,
+        itemAttachmentsMaxBytes = AttachmentRules.limits(p.attachmentMaxBytes, p.itemAttachmentsMaxBytes).perItemBytes,
     )
 
     /** Gap 6: the same quick-unlock gates the ladder enforces at unlock, and why one refuses. */
@@ -1865,6 +2204,7 @@ open class SessionController(
         refreshSaveQueue()
         refreshPersonalVault()
         resumeTwoStep()
+        resumePendingSaves()
     }
 
     // ---- the personal vault ----
@@ -1963,6 +2303,7 @@ open class SessionController(
     private fun dropFillSnapshot() {
         runCatching { fillSnapshots.delete() }
         runCatching { saves.dropAll() }
+        pendingSaves.dropDurable() // and the saves with files kept on disk (one in memory goes with the account)
     }
 
     /**
@@ -2139,7 +2480,7 @@ open class SessionController(
             if (s.screen == AppScreen.VAULT || s.screen == AppScreen.RECOVERY_REVEAL || s.screen == AppScreen.RECOVERY_CAPTURE) lock(idleReason)
             return
         }
-        if (s.busy) return // never close the engine under a running action
+        if (s.busy || s.upload != null) return // never close the engine under a running action, or an upload
         if (session.idleExpired()) lock(idleReason)
     }
 
@@ -2150,6 +2491,9 @@ open class SessionController(
      * both go.
      */
     private fun forgetSessionViews(ordinaryLock: Boolean = false) {
+        lockDraft()
+        resuming?.cancel() // a kept save being finished stays kept, for the next unlock
+        if (!ordinaryLock) pendingSaves.dropAll()
         saves.locked()
         personal.reset()
         trashRead = emptyMap()
@@ -2235,6 +2579,7 @@ open class SessionController(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
+        attachmentDraft = null, upload = null,
     )
 
     private companion object {

@@ -2,6 +2,7 @@
 
 package io.silencelen.andvari.core.ios
 
+import io.silencelen.andvari.core.app.BlobStore
 import io.silencelen.andvari.core.app.FillSnapshotStore
 import io.silencelen.andvari.core.app.SaveQueue
 import io.silencelen.andvari.core.app.SaveQueueStore
@@ -250,6 +251,49 @@ internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
     override fun delete() {
         runCatching { NSFileManager.defaultManager.removeItemAtPath(path, error = null) }
         runCatching { NSFileManager.defaultManager.removeItemAtPath("$path.tmp", error = null) }
+    }
+}
+
+/**
+ * The files set aside for a save with new files (owner decision 2026-11-12): one file per attachment id in [dir] of the
+ * app's own container, never the App Group. Each is the attachment encrypted under its own key, as it goes up; written
+ * whole through a rename, excluded from backup, with the protection class of the vault cache.
+ */
+internal class FileBlobStore(private val dir: String) : BlobStore {
+    private val fm get() = NSFileManager.defaultManager
+    private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
+
+    /** Only an id this app mints names a file here (a UUID), so no name reaches outside [dir]. */
+    private fun pathOf(id: String): String? = if (ID.matches(id)) "$dir/$id" else null
+
+    override fun put(id: String, bytes: ByteArray): Boolean = runCatching {
+        val path = pathOf(id) ?: return@runCatching false
+        fm.createDirectoryAtPath(dir, withIntermediateDirectories = true, attributes = attributes, error = null)
+        NSURL.fileURLWithPath(dir).setResourceValue(true, forKey = NSURLIsExcludedFromBackupKey, error = null)
+        val tmp = "$path.${NSUUID().UUIDString}.tmp"
+        if (!fm.createFileAtPath(tmp, contents = bytes.toNSData(), attributes = attributes)) return@runCatching false
+        if (rename(tmp, path) != 0) {
+            fm.removeItemAtPath(tmp, error = null)
+            return@runCatching false
+        }
+        true
+    }.getOrDefault(false)
+
+    override fun get(id: String): ByteArray? = runCatching { pathOf(id)?.let { fm.contentsAtPath(it)?.toByteArray() } }.getOrNull()
+
+    override fun delete(id: String) {
+        pathOf(id)?.let { path -> runCatching { fm.removeItemAtPath(path, error = null) } }
+    }
+
+    override fun ids(): List<String> =
+        runCatching { fm.contentsOfDirectoryAtPath(dir, error = null)?.mapNotNull { it as? String } }.getOrNull().orEmpty().filter { ID.matches(it) }
+
+    override fun clear() {
+        runCatching { fm.removeItemAtPath(dir, error = null) }
+    }
+
+    private companion object {
+        val ID = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
     }
 }
 

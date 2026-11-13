@@ -2,7 +2,9 @@ package io.silencelen.andvari.core.ios
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.darwin.Darwin
+import io.silencelen.andvari.core.app.ActionResult
 import io.silencelen.andvari.core.app.AutofillVault
+import io.silencelen.andvari.core.app.BlobStore
 import io.silencelen.andvari.core.app.FillAvailability
 import io.silencelen.andvari.core.app.FillCard
 import io.silencelen.andvari.core.app.FillCredential
@@ -10,6 +12,7 @@ import io.silencelen.andvari.core.app.FillLogin
 import io.silencelen.andvari.core.app.FillSnapshotStore
 import io.silencelen.andvari.core.app.FillUnlock
 import io.silencelen.andvari.core.app.SaveQueue
+import io.silencelen.andvari.core.app.ScanPdf
 import io.silencelen.andvari.core.app.SaveQueueStore
 import io.silencelen.andvari.core.app.SaveQueued
 import io.silencelen.andvari.core.app.ServerShare
@@ -27,6 +30,7 @@ import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.httpsOnly
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.coroutines.Dispatchers
+import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.UIKit.UIDevice
 import kotlin.coroutines.cancellation.CancellationException
@@ -89,11 +93,38 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     seams.saveQueue,
     seams.appliedSaves,
     seams.moveMemos,
+    seams.pendingSaveLog,
+    seams.pendingFiles,
 ) {
     constructor(config: IosStorageConfig) : this(IosSeams(config))
 
     constructor() : this(IosStorageConfig())
+
+    /**
+     * One file of an item, decrypted, for a preview or to save to Files ([readAttachment]): in memory only, as NSData,
+     * which the app writes nowhere. The core's copy of the bytes is zeroed once handed over.
+     */
+    @Throws(CancellationException::class)
+    suspend fun openAttachment(itemId: String, attachmentId: String): AttachmentFile {
+        val content = readAttachment(itemId, attachmentId)
+        val bytes = content.bytes ?: return AttachmentFile(content.name, null, content.error)
+        return try {
+            AttachmentFile(content.name, bytes.toNSData(), null)
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    /** Add [data], called [name], to the open editor's item ([addAttachment]): read whole by the app, within the limits. */
+    @Throws(CancellationException::class)
+    suspend fun addAttachmentData(name: String, data: NSData): ActionResult = addAttachment(name, data.toByteArray())
+
+    /** A scan's pages (each a JPEG, in order) as one PDF, made in memory ([ScanPdf]); null when a page is not a JPEG it can carry. */
+    fun scannedPdf(pages: List<NSData>): NSData? = ScanPdf.build(pages.map { it.toByteArray() })?.toNSData()
 }
+
+/** One file of an item as the app shows it or saves it to Files: its bytes in memory, or why there are none (neither: locked). */
+class AttachmentFile(val name: String, val data: NSData?, val error: String?)
 
 /**
  * The platform seams one controller uses. The app never reads the App Group's copy of its state (round-7 review L6): its
@@ -135,6 +166,10 @@ internal class IosSeams(
 
     /** Moves and copies that did not finish, sealed to the account: in the app's own container, never the App Group. */
     val moveMemos: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/move-memos.json")
+
+    /** Saves with new files kept until done, sealed to the account, and their files, each encrypted: in the app's own container. */
+    val pendingSaveLog: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/pending-saves.json")
+    val pendingFiles: BlobStore = FileBlobStore("${IosNamespaceStorage.defaultRoot()}/pending-files")
 
     private companion object {
         /** What says the private store holds anything ([PrefsSessionPersistence]'s server, pending server and session). */

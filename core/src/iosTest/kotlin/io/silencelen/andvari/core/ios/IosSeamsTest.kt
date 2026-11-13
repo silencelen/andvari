@@ -218,6 +218,33 @@ class IosSeamsTest {
     }
 
     @Test
+    fun theFilesSetAsideForASaveAreKeptWholeUnderTheirIdsOnly() {
+        val dir = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
+        try {
+            val files = FileBlobStore("$dir/pending-files")
+            val id = "00000000-0000-4000-8000-0000000000f1"
+            assertTrue(files.ids().isEmpty())
+            assertTrue(files.put(id, "one".encodeToByteArray()))
+            assertTrue(files.put(id, "two-longer".encodeToByteArray()))
+            assertEquals("two-longer", files.get(id)?.decodeToString())
+            assertEquals(listOf(id), files.ids(), "no temporary file is left")
+            assertFalse(files.put("../escape", "x".encodeToByteArray()), "only an id names a file")
+            assertFalse(files.put("ABC", "x".encodeToByteArray()))
+            assertNull(files.get("../pending-files/$id"))
+            NSFileManager.defaultManager.createFileAtPath("$dir/pending-files/stray.bin", contents = "x".encodeToByteArray().toNSData(), attributes = null)
+            assertEquals(listOf(id), files.ids(), "what is not an id is not listed")
+            files.delete(id)
+            assertNull(files.get(id))
+            assertTrue(files.put(id, "three".encodeToByteArray()))
+            files.clear()
+            assertTrue(files.ids().isEmpty())
+            assertFalse(NSFileManager.defaultManager.fileExistsAtPath("$dir/pending-files"))
+        } finally {
+            NSFileManager.defaultManager.removeItemAtPath(dir, error = null)
+        }
+    }
+
+    @Test
     fun aNamespaceHoldsItsCacheAndDeviceStateAndTheCacheCanGo() {
         val root = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
         try {
