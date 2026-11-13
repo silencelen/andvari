@@ -91,7 +91,9 @@ struct SettingsView: View {
                 } header: {
                     Text("Keyboards")
                 } footer: {
-                    Text("Off: only Apple's keyboards type into andvari. A keyboard from another app receives everything typed with it, passwords and notes included, and need not follow andvari's settings for secret fields. Turn this on only for a keyboard you trust.")
+                    // Round-7 review L5: Apple documents the delegate method as the app's choice ("thereby always uses the
+                    // system keyboard") and says nothing of when iOS asks again, so the footer does not promise it applies at once.
+                    Text("Off: only Apple's keyboards type into andvari. A keyboard from another app receives everything typed with it, passwords and notes included, and need not follow andvari's settings for secret fields. Turn this on only for a keyboard you trust. iOS may apply a change only after you close andvari and open it again.")
                 }
                 .listRowBackground(Palette.raised)
 
