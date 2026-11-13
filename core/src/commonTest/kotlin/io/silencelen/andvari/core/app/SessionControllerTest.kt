@@ -143,6 +143,7 @@ open class SessionControllerTest {
                     val path = request.url.encodedPath
                     calls += path
                     val route = routes.entries.firstOrNull { path.endsWith(it.key) }?.value
+                        ?: prefixRoutes.entries.firstOrNull { path.startsWith(it.key) }?.value
                     route?.invoke(this, request) ?: respond("""{"error":"not_found","message":"no"}""", HttpStatusCode.NotFound, headers)
                 },
             )
@@ -150,8 +151,16 @@ open class SessionControllerTest {
             override val deviceName = "test device"
         }
 
+        /** Route answers by path prefix (an attachment's path names it), tried after [routes]. */
+        val prefixRoutes = mutableMapOf<String, suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData>()
+
         val moveMemoLog = InMemoryFillSnapshots()
-        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog)
+        val pendingLog = InMemoryFillSnapshots()
+        val pendingFiles = InMemoryBlobs()
+        val controller = SessionController(
+            store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
+            pendingLog, pendingFiles,
+        )
 
         /** What an extension does with a captured login: seal it to the published key and queue it (under [id], here). */
         fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, site, username, password, clocks.wall, "safari") { id }
@@ -960,6 +969,386 @@ open class SessionControllerTest {
         assertIs<ActionResult.Failed>(controller.beginTwoStep(PASSWORD))
         assertNull(controller.twoStepSetup())
         assertFalse(calls.any { it.endsWith("/account/totp/setup") }, "no setup request left the device")
+    }
+
+    // ---- attachments (owner decision 2026-11-12) ----
+
+    /** What the attachment routes saw and hold: by id, the item a file was sent for and its bytes as they went up. */
+    private class FileServer {
+        val stored = LinkedHashMap<String, Pair<String, ByteArray>>()
+        val uploads = mutableListOf<String>()
+
+        /** Each put pushed: the item and the revision it was sent from. */
+        val pushedBases = mutableListOf<Pair<String, Long>>()
+
+        /** While set, an upload waits for it; [started] is completed as one arrives. */
+        var gate: CompletableDeferred<Unit>? = null
+        var started: CompletableDeferred<Unit>? = null
+
+        /** The server cannot be reached for uploads. */
+        var fail = false
+    }
+
+    /** [onlineServer], with the attachment routes of the real one: an upload of the same bytes for the same item is taken again. */
+    private fun Rig.fileServer(): FileServer {
+        onlineServer()
+        val files = FileServer()
+        val push = routes.getValue("/sync/push")
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            body.mutations.forEach { files.pushedBases += it.itemId to it.baseItemRev }
+            push(request)
+        }
+        prefixRoutes["/api/v1/attachments/"] = { request ->
+            val id = request.url.encodedPath.substringAfterLast('/')
+            if (request.method == io.ktor.http.HttpMethod.Post) {
+                files.uploads += id
+                files.started?.complete(Unit)
+                files.gate?.await()
+                if (files.fail) throw IOException("unreachable")
+                val itemId = assertNotNull(request.url.parameters["itemId"])
+                val vaultId = assertNotNull(request.url.parameters["vaultId"])
+                // A copy, as a server holds what came over the wire: the client zeroes its own array once the upload is done.
+                val bytes = (request.body as OutgoingContent.ByteArrayContent).bytes().copyOf()
+                val held = files.stored[id]
+                if (held != null && (held.first != itemId || !held.second.contentEquals(bytes))) {
+                    respond("""{"error":"attachment_id_taken","message":"taken"}""", HttpStatusCode.BadRequest, headers)
+                } else {
+                    files.stored[id] = itemId to bytes
+                    val meta = io.silencelen.andvari.core.model.AttachmentMeta(id, itemId, vaultId, bytes.size.toLong(), "sha")
+                    respond(json.encodeToString(io.silencelen.andvari.core.model.AttachmentMeta.serializer(), meta), HttpStatusCode.OK, headers)
+                }
+            } else {
+                val held = files.stored[id]
+                if (held == null) respond("""{"error":"not_found","message":"no"}""", HttpStatusCode.NotFound, headers)
+                else respond(held.second, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/octet-stream"))
+            }
+        }
+        clocks.wall = System_now() // the device's clock and the server's agree, as on a phone
+        return files
+    }
+
+    private fun Rig.kept(): List<PendingSave> = PendingSaves(pendingLog, pendingFiles) { true }.load(enrolled.account)
+
+    @Test
+    fun aNewItemsFileGoesUpBeforeTheItemAndOpensFromMemory() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(null)
+        val plain = ByteArray(200_000) { (it % 251).toByte() }
+        val given = plain.copyOf()
+        assertEquals(ActionResult.Ok, controller.addAttachment("/private/var/mobile/tmp/Lease.pdf", given))
+        assertTrue(given.all { it == 0.toByte() }, "the plaintext handed over is zeroed")
+        val draft = assertNotNull(controller.state.attachmentDraft)
+        assertEquals(listOf("Lease.pdf"), draft.added.map { it.name }, "called by the last part of its path")
+        assertEquals(200_000L, draft.totalBytes)
+        val setAside = assertNotNull(pendingFiles.get(draft.added.single().id))
+        assertEquals(io.silencelen.andvari.core.crypto.Attachments.wireLength(200_000), setAside.size.toLong(), "set aside encrypted, as it goes up")
+        assertFalse(setAside.copyOfRange(24, 1_024).contentEquals(plain.copyOfRange(0, 1_000)))
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Bank", "me", "pw", listOf("https://bank.example"), "", "", false)))
+        val upload = calls.indexOfFirst { it.startsWith("/api/v1/attachments/") }
+        assertTrue(upload >= 0 && upload < calls.indexOfLast { it.endsWith("/sync/push") }, "the file went up before the item that names it")
+        val row = controller.state.items.single { it.name == "Bank" }
+        val detail = assertNotNull(controller.itemDetail(row.itemId))
+        assertEquals(listOf(AttachmentView(draft.added.single().id, "Lease.pdf", 200_000)), detail.attachments)
+        assertEquals(row.itemId, files.stored.values.single().first, "sent for the item it is in")
+        val opened = controller.readAttachment(row.itemId, detail.attachments.single().id)
+        assertNull(opened.error)
+        assertContentEquals(plain, opened.bytes, "opened in memory")
+        assertNull(pendingLog.bytes, "nothing is kept once the save is done")
+        assertTrue(pendingFiles.ids().isEmpty())
+        assertNull(controller.state.upload)
+        controller.closeAttachmentDraft()
+        assertNull(controller.state.attachmentDraft)
+        assertEquals(1, controller.state.items.count { it.name == "Bank" })
+    }
+
+    @Test
+    fun aFileIsHeldToThePolicysLimitsBeforeItIsSetAside() = test {
+        routes["/client-policy"] = {
+            respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(attachmentMaxBytes = 1_000, itemAttachmentsMaxBytes = 2_000)), HttpStatusCode.OK, headers)
+        }
+        unlockedWithAPersonalVault()
+        assertEquals(AttachmentLimitsView(1_000, 2_000), controller.attachmentLimits())
+        assertEquals(ActionResult.NotDone(null), controller.addAttachment("a.txt", ByteArray(10)), "no editor is open")
+        controller.openAttachmentDraft(null)
+        assertEquals(AttachmentLimitsView(1_000, 2_000), controller.state.attachmentDraft?.limits)
+        assertEquals(ActionResult.Failed("This file is empty."), controller.addAttachment("a.txt", ByteArray(0)))
+        assertEquals(ActionResult.Failed("This file is larger than 1 KB, the most one file can be here."), controller.addAttachment("a.txt", ByteArray(1_001)))
+        assertEquals(ActionResult.Ok, controller.addAttachment("a.txt", ByteArray(800) { 1 }))
+        assertEquals(ActionResult.Ok, controller.addAttachment("b.txt", ByteArray(800) { 2 }))
+        assertEquals(
+            ActionResult.Failed("This item's files would come to more than 2 KB, the most one item can hold."),
+            controller.addAttachment("c.txt", ByteArray(800) { 3 }),
+        )
+        assertEquals(1_600L, controller.state.attachmentDraft?.totalBytes)
+        assertEquals(2, pendingFiles.ids().size)
+        controller.removeAttachment(assertNotNull(controller.state.attachmentDraft).added.first().id)
+        assertEquals(listOf("b.txt"), controller.state.attachmentDraft?.added?.map { it.name })
+        assertEquals(1, pendingFiles.ids().size, "a file taken off goes at once")
+        controller.closeAttachmentDraft()
+        assertTrue(pendingFiles.ids().isEmpty(), "closing the editor takes what it added away")
+        assertNull(controller.state.attachmentDraft)
+        assertNull(pendingLog.bytes)
+    }
+
+    @Test
+    fun theLimitsAreTheServersHeldToWhatThisAppReadsIntoMemory() {
+        assertEquals(AttachmentLimitsView(25L shl 20, 100L shl 20), AttachmentRules.limits(null, null))
+        assertEquals(AttachmentLimitsView(50L shl 20, 200L shl 20), AttachmentRules.limits(1L shl 30, 10L shl 30), "a server never raises them past the app's")
+        assertEquals(AttachmentLimitsView(5L shl 20, 8L shl 20), AttachmentRules.limits(5L shl 20, 8L shl 20), "and lowers them as it likes")
+        assertEquals(AttachmentLimitsView(1, 1), AttachmentRules.limits(0, -5))
+        assertEquals("25 MB", AttachmentRules.size(25L shl 20))
+        assertEquals("500 KB", AttachmentRules.size(500L * 1024))
+    }
+
+    @Test
+    fun aSaveWithFilesALockCutShortIsFinishedAfterTheNextUnlockUnderTheSameIds() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(null)
+        val plain = ByteArray(70_000) { 3 }
+        assertEquals(ActionResult.Ok, controller.addAttachment("scan.pdf", plain.copyOf()))
+        val fileId = assertNotNull(controller.state.attachmentDraft).added.single().id
+        val pushes = calls.count { it.endsWith("/sync/push") }
+        files.gate = CompletableDeferred()
+        files.started = CompletableDeferred()
+        kotlinx.coroutines.coroutineScope {
+            val save = async { controller.saveLogin(null, LoginInput("Bank", "me", "pw", listOf("https://bank.example"), "", "", false)) }
+            withTimeout(10_000) { assertNotNull(files.started).await() }
+            assertEquals(UploadView(0, 1), controller.state.upload)
+            val again = controller.saveLogin(null, LoginInput("Bank", "me", "pw", listOf("https://bank.example"), "", "", false))
+            assertEquals(ActionResult.NotDone(null), again, "a second Save while the first runs does nothing, never a save without its files")
+            assertTrue(controller.state.busy, "and the first save is still running")
+            controller.lock() // an explicit lock is immediate, upload or not
+            assertEquals(AppScreen.UNLOCK, controller.state.screen)
+            assertNull(controller.state.upload)
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        files.gate = null
+        assertEquals(pushes, calls.count { it.endsWith("/sync/push") }, "the item was not sent")
+        val sealed = assertNotNull(pendingLog.bytes, "the save is kept")
+        assertFalse(sealed.decodeToString().contains("Bank"), "sealed to the account")
+        assertEquals(listOf(fileId), pendingFiles.ids(), "with its file, encrypted")
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null && controller.state.upload == null }
+        val bank = controller.state.items.filter { it.name == "Bank" }
+        assertEquals(1, bank.size, "made once")
+        assertEquals(listOf(fileId), controller.itemDetail(bank.single().itemId)?.attachments?.map { it.id }, "under the id it was given")
+        assertEquals(setOf(fileId), files.stored.keys)
+        assertEquals(bank.single().itemId, files.stored.getValue(fileId).first, "and the item's id from its first try")
+        assertEquals(AttachmentCopy.KEPT_SAVE_DONE, controller.state.notice)
+        assertTrue(pendingFiles.ids().isEmpty())
+        assertContentEquals(plain, controller.readAttachment(bank.single().itemId, fileId).bytes)
+    }
+
+    @Test
+    fun leavingTheAppDuringAnUploadLocksWhenItEndsOrWhenTheGraceRunsOut() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+
+        suspend fun savingBlocked(name: String, then: suspend (kotlinx.coroutines.Deferred<ActionResult>) -> Unit) = kotlinx.coroutines.coroutineScope {
+            controller.openAttachmentDraft(null)
+            assertEquals(ActionResult.Ok, controller.addAttachment("$name.pdf", ByteArray(1_000) { 5 }))
+            files.gate = CompletableDeferred()
+            files.started = CompletableDeferred()
+            val save = async { controller.saveLogin(null, LoginInput(name, "me", "pw", emptyList(), "", "", false)) }
+            withTimeout(10_000) { assertNotNull(files.started).await() }
+            then(save)
+        }
+
+        // The upload ends within the grace: the save is done, and the vault locks the moment it is.
+        savingBlocked("First") { save ->
+            assertTrue(controller.onBackground(), "the lock waits for the upload")
+            clocks.mono += AttachmentRules.BACKGROUND_GRACE_MS - 1
+            controller.tick()
+            assertEquals(AppScreen.VAULT, controller.state.screen, "within the grace")
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.Ok, save.await())
+            assertEquals(AppScreen.UNLOCK, controller.state.screen, "locked the moment it finished")
+            assertEquals("Locked when you left the app.", controller.state.lockReason)
+        }
+        assertNull(pendingLog.bytes)
+        files.gate = null
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertTrue(controller.state.items.any { it.name == "First" })
+
+        // The grace runs out first: the vault locks then, and the save is finished after the next unlock.
+        savingBlocked("Second") { save ->
+            assertTrue(controller.onBackground())
+            clocks.mono += AttachmentRules.BACKGROUND_GRACE_MS
+            controller.tick()
+            assertEquals(AppScreen.UNLOCK, controller.state.screen, "the grace ran out")
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        assertNotNull(pendingLog.bytes)
+        files.gate = null
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null && controller.state.items.any { it.name == "Second" } }
+
+        // The system's time runs out first: the same.
+        savingBlocked("Third") { save ->
+            assertTrue(controller.onBackground())
+            controller.backgroundTimeEnded()
+            assertEquals(AppScreen.UNLOCK, controller.state.screen)
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        files.gate = null
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null && controller.state.items.any { it.name == "Third" } }
+
+        // Back within the grace: nothing locks, and the save goes on.
+        savingBlocked("Fourth") { save ->
+            assertTrue(controller.onBackground())
+            controller.onForeground()
+            clocks.mono += AttachmentRules.BACKGROUND_GRACE_MS
+            controller.tick()
+            assertEquals(AppScreen.VAULT, controller.state.screen)
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.Ok, save.await())
+            assertEquals(AppScreen.VAULT, controller.state.screen)
+        }
+        files.gate = null
+        assertEquals(listOf(1, 1, 1, 1), listOf("First", "Second", "Third", "Fourth").map { n -> controller.state.items.count { it.name == n } }, "each made once")
+        // Nothing running: leaving locks at once.
+        assertFalse(controller.onBackground())
+        assertEquals(AppScreen.UNLOCK, controller.state.screen)
+    }
+
+    @Test
+    fun aSecondTryOfTheSameEditorReplacesItsKeptSaveAndClosingTheEditorTakesItBack() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(null)
+        assertEquals(ActionResult.Ok, controller.addAttachment("a.pdf", ByteArray(1_000) { 1 }))
+        files.fail = true
+        val input = LoginInput("Bank", "me", "pw", emptyList(), "", "", false)
+        assertIs<ActionResult.Failed>(controller.saveLogin(null, input))
+        assertIs<ActionResult.Failed>(controller.saveLogin(null, input))
+        assertEquals(1, kept().size, "one kept save, however many tries")
+        files.fail = false
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, input))
+        assertEquals(1, controller.state.items.count { it.name == "Bank" })
+        assertNull(pendingLog.bytes)
+        controller.closeAttachmentDraft()
+
+        // A save that failed, whose editor is then closed, is not tried again.
+        controller.openAttachmentDraft(null)
+        assertEquals(ActionResult.Ok, controller.addAttachment("b.pdf", ByteArray(1_000) { 2 }))
+        files.fail = true
+        assertIs<ActionResult.Failed>(controller.saveLogin(null, LoginInput("Scan", "", "", emptyList(), "", "", false)))
+        assertEquals(1, kept().size)
+        controller.closeAttachmentDraft()
+        assertNull(pendingLog.bytes)
+        assertTrue(pendingFiles.ids().isEmpty())
+        files.fail = false
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        delay(100)
+        assertTrue(controller.state.items.none { it.name == "Scan" })
+    }
+
+    @Test
+    fun anEditTakesAFileOffKeepsTheOthersAndIsSentFromTheRevisionItWasEditedFrom() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(null)
+        assertEquals(ActionResult.Ok, controller.addAttachment("one.pdf", ByteArray(500) { 1 }))
+        assertEquals(ActionResult.Ok, controller.addAttachment("two.pdf", ByteArray(600) { 2 }))
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Lease", "flat 3", false)))
+        controller.closeAttachmentDraft()
+        val note = controller.state.items.single { it.name == "Lease" }.itemId
+        val (one, two) = assertNotNull(controller.itemDetail(note)).attachments
+        controller.openAttachmentDraft(note)
+        assertEquals(listOf(one, two), controller.state.attachmentDraft?.kept)
+        controller.removeAttachment(one.id)
+        assertEquals(ActionResult.Ok, controller.addAttachment("three.pdf", ByteArray(700) { 3 }))
+        assertEquals(listOf(two), controller.state.attachmentDraft?.kept)
+        assertEquals(1_300L, controller.state.attachmentDraft?.totalBytes)
+        val rev = assertNotNull(namespaces.caches.getValue("$homeKey/${reg.userId}").getItem(note)).rev
+        assertEquals(ActionResult.Ok, controller.saveNote(note, NoteInput("Lease", "flat 3, renewed", false)))
+        assertEquals(listOf("two.pdf", "three.pdf"), assertNotNull(controller.itemDetail(note)).attachments.map { it.name })
+        assertEquals(note to rev, files.pushedBases.last(), "sent from the revision it was edited from")
+        assertEquals("flat 3, renewed", controller.revealSecret(note, SecretField.NOTES))
+    }
+
+    @Test
+    fun aKeptSaveWhoseItemTheServerAlreadyHasIsLetGoAndNotSentAgain() = test {
+        unlockedWithAPersonalVault()
+        fileServer()
+        controller.openAttachmentDraft(null)
+        assertEquals(ActionResult.Ok, controller.addAttachment("a.pdf", ByteArray(500) { 1 }))
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Lease", "", false)))
+        controller.closeAttachmentDraft()
+        val note = controller.state.items.single { it.name == "Lease" }.itemId
+        val doc = assertNotNull(namespaces.caches.getValue("$homeKey/${reg.userId}").getItem(note)).doc
+        // A lock fell after the item was saved and before its kept save was let go.
+        assertTrue(PendingSaves(pendingLog, pendingFiles) { true }.keep(enrolled.account, PendingSave("p-1", null, note, reg.personalVault.vaultId, 0, doc, doc.attachments.map { it.id })))
+        controller.lock()
+        val pushes = calls.count { it.endsWith("/sync/push") }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null }
+        assertEquals(pushes, calls.count { it.endsWith("/sync/push") }, "nothing was sent")
+        assertEquals(listOf("Lease"), controller.state.items.map { it.name }.filter { it.startsWith("Lease") }, "and no copy was made")
+    }
+
+    @Test
+    fun aFileLargerThanThisAppOpensIsNotDownloaded() = test {
+        unlockedWithAPersonalVault()
+        val big = io.silencelen.andvari.core.client.AttachmentRef("00000000-0000-4000-8000-0000000000f1", "video.mov", AttachmentRules.MAX_FILE_BYTES + 1, "k")
+        val doc = ItemDoc(type = "note", name = "Video", attachments = listOf(big))
+        val upload = enrolled.account.encryptItem(reg.personalVault.vaultId, NOTE_ID, doc)
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertItem(WireItem(NOTE_ID, reg.personalVault.vaultId, 1, 1_000, 2_000, false, false, upload.formatVersion, emptyList(), upload.blob), null)
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(listOf(AttachmentView(big.id, "video.mov", big.size)), controller.itemDetail(NOTE_ID)?.attachments)
+        val read = controller.readAttachment(NOTE_ID, big.id)
+        assertNull(read.bytes)
+        assertEquals(AttachmentCopy.FILE_TOO_LARGE_TO_OPEN, read.error)
+        assertTrue(calls.none { it.contains("/attachments/") }, "nothing was downloaded")
+        assertEquals(AttachmentCopy.FILE_GONE, controller.readAttachment(NOTE_ID, "00000000-0000-4000-8000-0000000000f2").error)
+        controller.lock()
+        val locked = controller.readAttachment(NOTE_ID, big.id)
+        assertTrue(locked.bytes == null && locked.error == null, "locked: nothing, and nothing to say")
+    }
+
+    @Test
+    fun keptSavesFollowThePolicyAndGoWithTheAccount() = test {
+        var durable = true
+        val log = InMemoryFillSnapshots()
+        val blobs = InMemoryBlobs()
+        val saves = PendingSaves(log, blobs) { durable }
+        val doc = ItemDoc(type = "note", name = "Lease")
+        assertTrue(saves.keep(enrolled.account, PendingSave("p-1", null, "n-1", "v", 0, doc, listOf("f-1"))))
+        assertTrue(saves.putBlob("f-1", byteArrayOf(1, 2, 3)))
+        assertNotNull(log.bytes, "on disk while the policy allows an offline cache")
+        durable = false
+        assertTrue(saves.keep(enrolled.account, PendingSave("p-2", null, "n-2", "v", 0, doc, listOf("f-2"))))
+        assertTrue(saves.putBlob("f-2", byteArrayOf(4)))
+        assertEquals(listOf("p-2"), saves.load(enrolled.account).map { it.id }, "only in memory otherwise")
+        assertEquals(listOf("f-1"), blobs.ids())
+        saves.dropDurable()
+        assertNull(log.bytes)
+        assertTrue(blobs.ids().isEmpty())
+        assertEquals(listOf("p-2"), saves.load(enrolled.account).map { it.id }, "what is in memory stays while the account does")
+        saves.forget(enrolled.account, "p-2")
+        assertNull(saves.blob("f-2"), "a save let go takes its files")
+        assertTrue(saves.keep(enrolled.account, PendingSave("p-3", null, "n-3", "v", 0, doc, listOf("f-3"))))
+        saves.dropAll()
+        assertTrue(saves.load(enrolled.account).isEmpty())
+        // The rig's sign-out takes them all.
+        unlockedWithAPersonalVault()
+        fileServer().fail = true
+        controller.openAttachmentDraft(null)
+        assertEquals(ActionResult.Ok, controller.addAttachment("a.pdf", ByteArray(500) { 1 }))
+        assertIs<ActionResult.Failed>(controller.saveNote(null, NoteInput("Lease", "", false)))
+        assertNotNull(pendingLog.bytes)
+        assertEquals(ActionResult.Ok, controller.signOut())
+        assertNull(pendingLog.bytes, "a sign-out takes what was kept")
+        assertTrue(pendingFiles.ids().isEmpty())
     }
 
     // ---- lifecycle notices ----

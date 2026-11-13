@@ -2646,6 +2646,7 @@ class SyncEngine(
         vaultId: String? = null,
         onProgress: ((done: Int, total: Int) -> Unit)? = null,
         newItemId: String? = null,
+        baseItemRev: Long? = null,
     ): SaveOutcome {
         // [newItemId] (F71 review): a RETRY of a failed NEW-item save must reuse the id the
         // first attempt minted — attachments committed by that attempt are bound to it, and
@@ -2705,10 +2706,25 @@ class SyncEngine(
             // A13 review RF4 (web q54's core twin): the seal is the step that can still refuse here — INV-WRITE-KEY, a
             // home that moved, or a key a pull dropped during the upload awaits above. The folded rows are dequeued only
             // once it has succeeded, so a refusal leaves the item's offline backlog queued exactly as it was.
-            val m = putMutation(provenance, id, doc, folded?.base ?: existing?.rev ?: 0)
+            // [baseItemRev]: a save finished after a lock (owner decision 2026-11-12) goes from the revision it was edited from,
+            // so a change someone made since is kept as a conflict copy, as a queued offline put's would be (H37).
+            val m = putMutation(provenance, id, doc, folded?.base ?: baseItemRev ?: existing?.rev ?: 0)
             if (folded != null) dequeueFolded(folded)
             sendOrQueue(m)?.let { return@withLock it }
             reconcileAfterWrite(m)
+        }
+    }
+
+    /**
+     * Upload one attachment already encrypted under its own key (the header and the ciphertext, as [saveWithUploads]
+     * sends it) for [itemId] in [vaultId]: what a kept save sends after a lock cut it short (owner decision 2026-11-12).
+     * The id was minted once, so "taken" can only mean an earlier attempt of this same save landed: that is success.
+     */
+    suspend fun uploadEncryptedAttachment(attachmentId: String, itemId: String, vaultId: String, sealed: ByteArray) {
+        try {
+            api.uploadAttachment(attachmentId, itemId, vaultId, sealed)
+        } catch (e: ApiException) {
+            if (e.code != "attachment_id_taken") throw e
         }
     }
 
