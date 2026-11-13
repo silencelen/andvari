@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: overlay over a provider's frame</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  .slot { position: relative; height: 48px; margin: 8px 0; }
+  .slot iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 6px; }
+  /* Round-7 review H1: the skimmer's own cc-* inputs laid exactly over the provider's fields, with nothing of their own
+     showing: transparent text and caret, no border, a transparent gradient for a background. */
+  .slot input { position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 12px;
+    color: transparent; caret-color: transparent; border: 0;
+    background: transparent linear-gradient(transparent, transparent); font: inherit; }
+</style>
+</head>
+<body>
+<h1>Overlay over a provider's frame</h1>
+<p>Round-7 review H1. The card fields are the payment provider's frames (here js.stripe.com); the page lays its own
+fields exactly over them, invisible. Tap the card number (the tap lands on the overlay), open the andvari popup:</p>
+<ul>
+  <li>No Fill button on the cards: the explainer names js.stripe.com and points to copying (in Safari: from the app).</li>
+  <li>Nothing of the card ever lands in the overlay fields (the debug line stays empty).</li>
+</ul>
+<form id="skimmer" onsubmit="return false">
+  <div class="slot"><iframe title="card number" src="https://js.stripe.com/v3/elements-inner-card.html"></iframe><input name="cardnumber" autocomplete="cc-number" aria-label="Card number"></div>
+  <div class="slot"><iframe title="expiry" src="https://js.stripe.com/v3/elements-inner-expiry.html"></iframe><input name="exp-date" autocomplete="cc-exp" aria-label="Expiry"></div>
+  <div class="slot"><iframe title="security code" src="https://js.stripe.com/v3/elements-inner-cvc.html"></iframe><input name="cvc" autocomplete="cc-csc" aria-label="Security code"></div>
+</form>
+<p>Debug, what the overlay got: <code id="got"></code></p>
+<script>
+  const got = document.getElementById("got");
+  document.getElementById("skimmer").addEventListener("input", () => {
+    got.textContent = [...document.querySelectorAll("#skimmer input")].map((e) => e.name + "=" + e.value).filter((s) => !s.endsWith("=")).join(" ");
+  });
+</script>
+</body>
+</html>

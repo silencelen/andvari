@@ -1,20 +1,20 @@
-// node --test. Round-5 review C1, round-6 review H1/M2: a card number goes only into a field the person can see, in
-// the form of the field the person chose. A skimmer injects an invisible card form (opacity 0 or near it, a filter,
-// a clip or mask, transparent text, 0x0, off-screen, or tucked under the payment provider's frame or an overlay that
-// lets the pointer through) into a checkout whose real fields are in that frame; the popup's Fill used to land in it.
-// The rules are pure (detect.ts visibilityOf and its helpers); the DOM probe that feeds them and the fill path's use
-// of them are pinned below.
+// node --test. Round-5 review C1, round-6 review H1/M2, round-7 review H1 and its regressions: a card number goes only
+// into a field the person chose and can see, of the form that field is in, and never into a page whose card fields
+// are a payment provider's frames (the structural defence: paymentproviders.ts; these rules are defence in depth for
+// first-party card forms). The rules are pure (detect.ts visibilityOf and its helpers); the DOM probe that feeds them
+// and the fill path's use of them are pinned below.
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  clipLeavesWhole,
   colorAlpha,
   filterOpacity,
+  maskAlphaAt,
   MIN_FIELD_PX,
   MIN_OPACITY,
+  MIN_TEXT_ALPHA,
   paintsOver,
-  proxiedControl,
+  samplePoints,
   visibilityOf,
   type InkFacts,
   type PaintFacts,
@@ -23,11 +23,12 @@ import {
 import { chooseAnchoredCardTarget } from "./messages.ts";
 
 const shown = { display: "block", visibility: "visible", opacity: "1" };
+const page = { left: 0, top: 0, width: 390, height: 2400 };
 const base: VisibilityFacts = {
   chain: [{ ...shown, display: "inline-block" }, shown, shown],
   ink: null,
   rect: { left: 20, top: 300, width: 240, height: 36 },
-  extent: { left: 0, top: 0, width: 390, height: 2400 },
+  extents: [page],
   viewport: null,
   hit: null,
 };
@@ -55,7 +56,7 @@ test("transparent: the opacity of the field and its ancestors combines, and an u
   assert.equal(visibilityOf(facts({ chain: [{ ...shown, opacity: "" }] })), "transparent");
 });
 
-test("a fill holds every field to near-full opacity, over every ancestor and any filter (round-6 H1)", () => {
+test("a fill holds every field to near-full opacity, over every ancestor and any filter", () => {
   assert.ok(MIN_OPACITY >= 0.9);
   assert.equal(fill(facts({ chain: [shown, { ...shown, opacity: "0.5" }] })), "transparent");
   assert.equal(fill(facts({ chain: [{ ...shown, opacity: "0.95" }, { ...shown, opacity: "0.9" }] })), "transparent", "0.855 combined");
@@ -83,25 +84,41 @@ test("filterOpacity reads a computed filter list", () => {
   assert.equal(filterOpacity("opacity(oops)"), null);
 });
 
-test("clipped or masked: by itself or by any ancestor; an inset that only rounds the corners is not a clip", () => {
-  assert.equal(fill(facts({ chain: [{ ...shown, clipPath: "circle(2px at 50% 50%)" }] })), "clipped");
-  assert.equal(fill(facts({ chain: [shown, { ...shown, clipPath: "inset(50%)" }] })), "clipped", "the visually-hidden pattern");
-  assert.equal(fill(facts({ chain: [shown, { ...shown, clip: "rect(0px, 0px, 0px, 0px)" }] })), "clipped");
-  assert.equal(fill(facts({ chain: [shown, { ...shown, mask: "linear-gradient(transparent, transparent)" }] })), "clipped");
-  assert.equal(fill(facts({ chain: [{ ...shown, clipPath: "inset(0px round 8px)", clip: "auto", mask: "none" }] })), "ok");
-  assert.equal(clipLeavesWhole("inset(2px 2px 2px 2px round 4px) border-box"), true);
-  assert.equal(clipLeavesWhole("inset(10px)"), false);
-  assert.equal(clipLeavesWhole("polygon(0 0, 1px 0, 1px 1px)"), false);
-  assert.equal(clipLeavesWhole('url("#c")'), false);
+test("any blend mode but normal refuses the fill: a near-black field lightened onto the page shows nothing (round-7 H1)", () => {
+  assert.equal(fill(facts({ chain: [{ ...shown, blend: "lighten" }] })), "blended");
+  assert.equal(fill(facts({ chain: [shown, { ...shown, blend: "multiply" }] })), "blended", "on an ancestor too");
+  assert.equal(fill(facts({ chain: [{ ...shown, blend: "normal" }] })), "ok");
 });
 
-test("what is typed must show: not transparent text on a transparent background, not text the colour of its background, not tiny text", () => {
+test("a mask hides a field only where it removes it: a fade at a panel's edge does not (round-7 regression 3)", () => {
+  const panel = { left: 0, top: 0, width: 390, height: 800 };
+  const fade = "linear-gradient(rgb(0, 0, 0) 80%, rgba(0, 0, 0, 0))";
+  assert.equal(maskAlphaAt(fade, panel, 140, 300), 1, "the field sits in the opaque part");
+  assert.ok(maskAlphaAt(fade, panel, 140, 760)! < 0.5, "and in the fade it is faint");
+  assert.equal(maskAlphaAt("linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0))", panel, 140, 300), 0, "a transparent mask hides everything");
+  assert.equal(maskAlphaAt("linear-gradient(to right, rgb(0, 0, 0) 50%, rgba(0, 0, 0, 0) 50%)", panel, 300, 300), 0);
+  assert.equal(maskAlphaAt("linear-gradient(90deg, rgb(0, 0, 0) 50%, rgba(0, 0, 0, 0) 50%)", panel, 100, 300), 1);
+  assert.equal(maskAlphaAt('url("mask.svg")', panel, 140, 300), null, "an image is not told");
+  assert.equal(maskAlphaAt("radial-gradient(rgb(0, 0, 0), rgba(0, 0, 0, 0))", panel, 140, 300), null);
+  assert.equal(maskAlphaAt("none", panel, 140, 300), 1);
+  const field = { left: 20, top: 300, width: 240, height: 36 };
+  const masked = (mask: string): string => fill(facts({ rect: field, chain: [shown, { ...shown, mask, maskBox: panel }] }));
+  assert.equal(masked(fade), "ok");
+  assert.equal(masked("linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0))"), "transparent");
+  assert.equal(masked('url("mask.svg")'), "clipped");
+  // A clip is judged by what it removes: the hit test's sample points (a clipped point is not the field's).
+  assert.equal(fill(facts({ chain: [{ ...shown, display: "inline-block" }], hit: "other", viewport: { width: 390, height: 844 } })), "covered");
+});
+
+test("what is typed must show: text at least half opaque, not the background's colour, not tiny (round-7 H1)", () => {
+  assert.equal(MIN_TEXT_ALPHA, 0.5);
   const f = (over: Partial<InkFacts>): string => fill(facts({ ink: { ...ink, ...over } }));
   assert.equal(f({}), "ok");
-  assert.equal(f({ color: "rgba(0, 0, 0, 0)", textFill: "rgba(0, 0, 0, 0)", background: "rgba(0, 0, 0, 0)" }), "transparent");
-  assert.equal(f({ color: "transparent", textFill: "transparent", background: "transparent" }), "transparent");
-  assert.equal(f({ textFill: "rgba(0, 0, 0, 0)", background: "color(srgb 1 1 1 / 0)" }), "transparent", "-webkit-text-fill-color paints over color");
-  assert.equal(f({ color: "rgba(0, 0, 0, 0)", textFill: "rgba(0, 0, 0, 0)" }), "ok", "transparent text on an opaque field: a masked input drawing its own overlay");
+  // The review's overlay: transparent text over a transparent gradient, nothing to show what was filled.
+  assert.equal(f({ color: "rgba(0, 0, 0, 0)", textFill: "rgba(0, 0, 0, 0)", background: "rgba(0, 0, 0, 0)", backgroundImage: "linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0))" }), "unreadable");
+  assert.equal(f({ color: "rgba(0, 0, 0, 0)", textFill: "rgba(0, 0, 0, 0)" }), "unreadable", "an opaque background no longer excuses invisible text");
+  assert.equal(f({ textFill: "rgba(0, 0, 0, 0.4)" }), "unreadable", "-webkit-text-fill-color paints over color");
+  assert.equal(f({ color: "rgba(17, 17, 17, 0.6)", textFill: "rgba(17, 17, 17, 0.6)" }), "ok");
   assert.equal(f({ color: "rgb(255, 255, 255)", textFill: "rgb(255, 255, 255)", background: "rgb(254, 254, 254)" }), "unreadable");
   assert.equal(f({ fontSize: "0px" }), "unreadable");
   assert.equal(f({ fontSize: "5.5px" }), "unreadable");
@@ -110,7 +127,7 @@ test("what is typed must show: not transparent text on a transparent background,
   assert.equal(colorAlpha("rgb(1, 2, 3)"), 1);
 });
 
-test("too small to use, or off the page or its scrolling container", () => {
+test("too small to use, or off the page; on the page means inside the page or the field's scrolling container", () => {
   assert.equal(visibilityOf(facts({ rect: { left: 20, top: 300, width: 0, height: 0 } })), "tiny");
   assert.equal(visibilityOf(facts({ rect: { left: 20, top: 300, width: 240, height: MIN_FIELD_PX - 1 } })), "tiny");
   assert.equal(visibilityOf(facts({ rect: { left: -9999, top: 300, width: 240, height: 36 } })), "offpage");
@@ -118,25 +135,31 @@ test("too small to use, or off the page or its scrolling container", () => {
   assert.equal(visibilityOf(facts({ rect: { left: 5000, top: 300, width: 240, height: 36 } })), "offpage");
   // Below the fold is still on the page: a long checkout is found before it is scrolled to.
   assert.equal(visibilityOf(facts({ rect: { left: 20, top: 1800, width: 240, height: 36 } })), "ok");
-  // Scrolled: the box and the extent are both in viewport coordinates.
-  assert.equal(visibilityOf(facts({ rect: { left: 20, top: -100, width: 240, height: 36 }, extent: { left: 0, top: -600, width: 390, height: 2400 } })), "ok");
+  // Scrolled: the box and the extents are both in viewport coordinates.
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: -100, width: 240, height: 36 }, extents: [{ left: 0, top: -600, width: 390, height: 2400 }] })), "ok");
   // Round-6 M2: a field low in a scrolling modal is in that container's extent, though past the page's own height.
+  const viewportPage = { left: 0, top: 0, width: 390, height: 844 };
   const modal = { left: 0, top: 40, width: 390, height: 3000 };
-  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 2600, width: 240, height: 36 }, extent: modal })), "ok");
-  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 3100, width: 240, height: 36 }, extent: modal })), "offpage");
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 2600, width: 240, height: 36 }, extents: [viewportPage, modal] })), "ok");
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 3100, width: 240, height: 36 }, extents: [viewportPage, modal] })), "offpage");
+  // Round-7 regression 1: a fixed login modal's field outside a smaller scroller is still on the page.
+  const smallScroller = { left: 0, top: 600, width: 390, height: 200 };
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 100, width: 240, height: 36 }, extents: [viewportPage, smallScroller] })), "ok");
 });
 
-test("at fill time every field must be on screen, and nothing may paint over its centre", () => {
+test("at fill time every field must be on screen, and nothing may paint over any of its sample points", () => {
   const screen = { width: 390, height: 844 };
   assert.equal(visibilityOf(facts({ viewport: screen, rect: { left: 20, top: 900, width: 240, height: 36 } })), "offscreen");
-  assert.equal(visibilityOf(facts({ viewport: screen, hit: "other" })), "covered", "a field tucked under the provider's frame");
+  assert.equal(visibilityOf(facts({ viewport: screen, hit: "other" })), "covered", "a field tucked under something");
   assert.equal(visibilityOf(facts({ hit: "other" })), "covered", "covered whether or not it is the chosen field");
+  const points = samplePoints({ left: 0, top: 0, width: 200, height: 40 });
+  assert.deepEqual(points, [{ x: 100, y: 20 }, { x: 50, y: 20 }, { x: 150, y: 20 }, { x: 100, y: 10 }, { x: 100, y: 30 }], "the centre and halfway to each side");
 });
 
-test("a cover is something that paints: an opaque background, an image, a backdrop filter, replaced content; a floating label or an empty overlay is not", () => {
+test("a cover is something that paints: an opaque background, an image, a backdrop filter, replaced content; a pseudo-element at its own opacity and size", () => {
   const p = (over: Partial<PaintFacts>): boolean =>
     paintsOver({ opacity: 1, background: "rgba(0, 0, 0, 0)", backgroundImage: "none", backdrop: "none", replaced: false, pseudo: [], ...over });
-  assert.equal(p({}), false, "a transparent overlay (a toast layer, a floating label)");
+  assert.equal(p({}), false, "a transparent overlay (a toast layer)");
   assert.equal(p({ background: "rgb(255, 255, 255)" }), true);
   assert.equal(p({ background: "rgba(0, 0, 0, 0.5)" }), true, "a modal's backdrop");
   assert.equal(p({ background: "rgba(0, 0, 0, 0.2)" }), false, "a faint tint leaves it readable");
@@ -145,16 +168,10 @@ test("a cover is something that paints: an opaque background, an image, a backdr
   assert.equal(p({ backdrop: "blur(8px)" }), true);
   assert.equal(p({ replaced: true }), true, "an image or a frame over it");
   assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none" }] }), true, "a ::before that paints over it");
-});
-
-test("only a radio is drawn through a proxy; a select is held to every rule (round-6 H1)", () => {
-  assert.equal(visibilityOf(facts({ chain: [{ ...shown, opacity: "0" }], rect: { left: 20, top: 300, width: 1, height: 1 }, hit: "other" }), true), "ok");
-  assert.equal(visibilityOf(facts({ chain: [{ ...shown, visibility: "hidden" }] }), true), "hidden");
-  assert.equal(visibilityOf(facts({ rect: { left: -9999, top: 300, width: 240, height: 36 } }), true), "offpage");
-  assert.equal(visibilityOf(facts({ viewport: { width: 390, height: 844 }, rect: { left: 20, top: 900, width: 240, height: 36 } }), true), "offscreen");
-  const detect = readFileSync(new URL("./detect.ts", import.meta.url), "utf-8");
-  assert.match(detect, /export function proxiedControl\(el: Element\): boolean \{\s*return el instanceof HTMLInputElement && el\.type === "radio";\s*\}/);
-  assert.equal(typeof proxiedControl, "function");
+  // Round-7 regression 5: a filled text field's ripple (::before at opacity 0) and a hairline (::after, 1px high) are no cover.
+  assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none", opacity: "0" }] }), false);
+  assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none", width: "240px", height: "1px" }] }), false);
+  assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none", opacity: "1", width: "240px", height: "36px" }] }), true);
 });
 
 test("the grant follows the form holding the chosen field, in the frame that chose last (round-6 M2)", () => {
@@ -178,59 +195,91 @@ const detect = readFileSync(new URL("./detect.ts", import.meta.url), "utf-8");
 const content = readFileSync(new URL("./content.ts", import.meta.url), "utf-8");
 const background = readFileSync(new URL("./background.ts", import.meta.url), "utf-8");
 
-test("detection collects only fields that pass the page-time rules, for logins and cards alike", () => {
-  assert.match(detect, /function isVisible\(el: HTMLElement\): boolean \{\s*return isRendered\(el\) && visibilityOf\(probeVisibility\(el, \{ onScreen: false, hitTest: false \}\), proxiedControl\(el\)\) === "ok";/);
+test("detection collects only fields that pass the page-time rules; selects and radios drawn through a proxy are collected", () => {
+  assert.match(detect, /function isVisible\(el: HTMLElement\): boolean \{\s*return isRendered\(el\) && visibilityOf\(probeVisibility\(el, \{ onScreen: false, hitTest: false \}\), proxiedAtDetection\(el\)\) === "ok";/);
+  assert.match(detect, /export function proxiedAtDetection\(el: Element\): boolean \{\s*return el instanceof HTMLSelectElement \|\| \(el instanceof HTMLInputElement && el\.type === "radio"\);/);
   const collect = detect.slice(detect.indexOf("function collect(root: Document | ShadowRoot): Field[] {"));
   assert.ok(collect.includes("if (el.disabled || el.readOnly || !isVisible(el)) continue;"), "inputs (login and card)");
   assert.ok(collect.includes("if (el.disabled || !isVisible(el) || el.type !== \"select-one\") continue;"), "selects");
+  // At fill time only a radio, or a select for the expiry or the brand, is excused (regression 2); never a number or code.
+  assert.match(detect, /return el instanceof HTMLSelectElement && \(kind === "cardexpmonth" \|\| kind === "cardexpyear" \|\| kind === "cardtype"\);/);
+  assert.ok(!detect.includes("revealCovers") && !detect.includes("MAX_COVER_SCAN"), "no global scan of the page (regression 7)");
 });
 
-test("only the person chooses the card field: a trusted press on it or a Tab onto it, with user activation", () => {
-  const choose = content.slice(content.indexOf("function noteCardFocus("), content.indexOf("function deepActiveElement("));
-  assert.match(choose, /lastPress\.target === t/, "the press landed on that very field");
-  assert.match(choose, /if \(\(pressed \|\| tabbed\) && userActivated\(\) && cardFormForInput\(t\) !== null\) setCardFocus\(t\);/);
+test("the hit test looks at several points, and a field's label, floating label or adornment is part of the field", () => {
+  const shows = detect.slice(detect.indexOf("export function whatShowsAt("), detect.indexOf("export function probeVisibility("));
+  assert.match(shows, /for \(const \{ x, y \} of points\)/);
+  assert.match(shows, /if \(ignore\(at\) \|\| isFieldPart\(el, at\)\) continue;/);
+  const part = detect.slice(detect.indexOf("export function isFieldPart("), detect.indexOf("export function samplePoints("));
+  assert.match(part, /labels\.some\(\(l\) => l === at \|\| l\.contains\(at\)\)/, "a <label> for the field");
+  assert.match(part, /if \(wrapper === null \|\| !wrapper\.contains\(at\) \|\| at\.contains\(el\)\) return false;/, "inside its own wrapper, never an ancestor of it");
+  assert.match(part, /FRAMES\.has\(at\.tagName\.toUpperCase\(\)\)/, "a frame is never part of a field");
+  assert.match(detect, /if \(node\.querySelectorAll\(CONTROLS\)\.length !== 1\) break;/, "a wrapper holds no other control");
+});
+
+test("only the person chooses the card field, and the choice is held to the fill rules (round-7 H1, M2-tab, regression 6)", () => {
+  const choose = content.slice(content.indexOf("function chooseIfPersonPut("), content.indexOf("/** The innermost element focus is on"));
+  assert.match(choose, /const onField = press !== null && press\.target === t && now - press\.at < CHOOSE_PRESS_MS;/, "a press on that very field");
+  assert.match(choose, /const nearField = press !== null && press\.sameTask && target !== null && \(labels\.some\(\(l\) => l === target \|\| l\.contains\(target\)\) \|\| \(wrapper !== null && wrapper\.contains\(target\)\)\);/, "or on its label or wrapper, focusing it in the same task");
+  assert.match(choose, /!tab\.event\.defaultPrevented && tab\.moves === focusMoves &&\s*from !== null && from === tab\.from;/, "a Tab not prevented, from the field focused at keydown, nothing moved in between");
+  assert.match(choose, /const from = focus\?\.relatedTarget instanceof Element \? focus\.relatedTarget : null;/);
+  assert.match(choose, /if \(!\(onField \|\| nearField \|\| tabbed\) \|\| !userActivated\(\) \|\| cardFormForInput\(t\) === null\) return;/);
+  assert.match(choose, /if \(!chosenFieldSeen\(t\)\) return;\s*setCardFocus\(t\);/, "a field that cannot be seen is not chosen");
   assert.ok(!/cardFocus = t/.test(choose), "a focus alone never sets it");
   assert.match(content, /return ua\?\.isActive === true;/, "no activation API, no choice");
-  assert.match(content, /for \(const type of \["pointerdown", "touchstart", "mousedown"\]\) document\.addEventListener\(type, notePress, \{ capture: true, passive: true \}\);/);
-  assert.match(content, /e\.isTrusted && e\.key === "Tab" && !e\.altKey && !e\.ctrlKey && !e\.metaKey\) lastTab = performance\.now\(\);/);
-  assert.match(content, /noteCardFocus\(t\);\s*maybeOpen\(t\);/, "looked at on every trusted focusin");
-  assert.match(content, /noteCardFocus\(t \?\? null\); \/\/ a press on a card field that already had focus/, "and on a trusted click");
+  assert.match(content, /for \(const type of \["pointerdown", "touchstart", "mousedown", "click"\]\) document\.addEventListener\(type, notePress, \{ capture: true, passive: true \}\);/);
+  assert.match(content, /setTimeout\(\(\) => \{\s*press\.sameTask = false;\s*\}, 0\);/, "the same task, and no longer");
+  assert.match(content, /lastTab = \{ event: e, from: document\.activeElement, moves: focusMoves, at: performance\.now\(\) \};/);
+  assert.match(content, /noteCardFocus\(t, e\);\s*maybeOpen\(t\);/, "every trusted focusin is looked at");
+  assert.match(content, /try \{\s*chooseIfPersonPut\(t, focus\);\s*\} finally \{\s*if \(focus !== undefined\) focusMoves\+\+;\s*\}/, "and counted after it is looked at");
   // Let go when focus moves elsewhere in the page; kept when the page loses focus to the popup.
   assert.match(content, /if \(document\.hasFocus\(\) && deepActiveElement\(\) !== cardFocus\) setCardFocus\(null\);/);
-  assert.match(content, /noteFocusLeft\(\); \/\/ H1/);
+  // The place and styles at the choice; a fill refuses if either changed.
+  assert.match(content, /chosenAs = \{ place: contentPositionOf\(next\), digest: styleDigest\(next\) \};/);
 });
 
-test("a card fill writes only the fields that can be seen, of the chosen field's form, and refuses when the chosen field or its frame cannot be", () => {
+test("a card fill: never into a page whose card fields are a provider's frames; only the chosen form's fields that can be seen", () => {
   const fill = content.slice(content.indexOf("async function fillCardIntoForm("), content.indexOf("// ---- G2 save-card capture"));
   assert.ok(!content.includes("cardFormBySig"), "no more \"the first form with the grant's signature\"");
+  const provider = fill.indexOf('if (providerHost !== null) return { ...nothing("provider_frame"), providerHost };');
   const focus = fill.indexOf('if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");');
-  const before = fill.indexOf('if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");');
+  const changedBefore = fill.indexOf('if (before === "changed") return nothing("field_changed");');
+  const before = fill.indexOf('if (before === null) return nothing("not_visible");');
   const reveal = fill.indexOf('await safeSend({ type: "revealCardForFill", itemId })');
+  const providerAfter = fill.indexOf('if (providerLate !== null) return { ...nothing("provider_frame"), providerHost: providerLate };');
   const after = fill.indexOf('if (seen === null) return nothing("not_visible");');
   const write = fill.indexOf("return applyCardFill(now, r.fields, seen);");
-  assert.ok(focus > 0 && focus < before && before < reveal && reveal < after && after < write, "checked before the card is asked for and again before it is written");
+  assert.ok(provider > 0 && provider < focus && focus < changedBefore && changedBefore < before && before < reveal && reveal < providerAfter && providerAfter < after && after < write, "checked before the card is asked for and again before it is written");
   const seen = content.slice(content.indexOf("function cardFieldsSeen("), content.indexOf("function frameChainSeen("));
-  assert.match(seen, /revealCovers\(scanScopes\(\), live\.map\(\(f\) => centre\(f\.input\)\), \(\) =>/, "covers that let the pointer through are hit-tested too");
-  assert.match(seen, /probeVisibility\(f\.input, \{ onScreen: true, hitTest: true, fill: true, ignore: isOwnUiHost \}\), proxiedControl\(f\.input\), MIN_OPACITY\) === "ok"/, "every field: on screen, hit-tested, full rules");
-  assert.match(seen, /if \(passing === null \|\| !passing\.some\(\(f\) => f\.input === anchor\)\) return null;/, "the chosen field must pass");
-  assert.match(seen, /if \(!frameChainSeen\(centre\(anchor\)\)\) return null;/, "and the frame it is in");
+  assert.match(seen, /if \(!live\.some\(\(f\) => f\.input === anchor\) \|\| !chosenFieldSeen\(anchor\)\) return null;/, "the chosen field, full rules");
+  assert.match(seen, /if \(moved \|\| styleDigest\(anchor\) !== chosenAs\.digest\) return "changed";/, "where and as it was at the choice");
+  assert.match(seen, /visibilityOf\(probeVisibility\(f\.input, \{ onScreen: true, hitTest: true, fill: true, ignore: isOwnUiHost \}\), proxiedAtFill\(f\.input, f\.kind\), MIN_OPACITY\) === "ok"/, "every other field: on screen, hit-tested, full rules but the proxy's");
+  assert.match(seen, /if \(!frameChainSeen\(\{ x: r\.left \+ r\.width \/ 2, y: r\.top \+ r\.height \/ 2 \}\)\) return null;/, "and the frame it is in");
   const chain = content.slice(content.indexOf("function frameChainSeen("), content.indexOf("function cardFormsAllClosed("));
   assert.match(chain, /frame = win\.frameElement;/);
   assert.match(chain, /if \(frame === null \|\| parent === null/, "a frame element that cannot be reached fails");
-  assert.match(chain, /visibilityOf\(\{ \.\.\.facts, ink: null, hit: whatShowsAt\(el, mapped\.x, mapped\.y\) \}, false, MIN_OPACITY\) === "ok"/);
+  assert.match(chain, /visibilityOf\(\{ \.\.\.facts, ink: null, hit: whatShowsAt\(el, \[mapped\]\) \}, false, MIN_OPACITY\) !== "ok"/);
   const apply = content.slice(content.indexOf("function applyCardFill("), content.indexOf("/** Popup-granted card fill"));
   assert.match(apply, /if \(!seen\.has\(input\)\) \{\s*unseen\(kind\);\s*continue;/, "a field that cannot be seen is never written");
   assert.match(apply, /if \(splitRan && panBoxes\.some\(\(b\) => !seen\.has\(b\)\)\) \{\s*unseen\("cardnumber"\);/, "a split number goes in whole or not at all");
-  assert.match(apply, /if \(!seen\.has\(ref\.input\)\) \{\s*unseen\(ref\.kind\);/);
+  const scan = content.slice(content.indexOf("function providerFramesHere("), content.indexOf("/** The live control → the metadata surface"));
+  assert.match(scan, /for \(const frame of scope\.querySelectorAll\("iframe, frame"\)\)/, "every frame element the scan sees, by its own src");
 });
 
-test("the worker builds the grant from the chosen form, in the frame that chose (round-6 M2)", () => {
+test("the worker: no card into a tab with a provider's frame or cross-origin card fields; the grant from the chosen form", () => {
+  const block = background.slice(background.indexOf("function providerBlock("), background.indexOf("function eligibleCardFrames("));
+  assert.match(block, /if \(Array\.isArray\(f\.providers\) && f\.providers\.length > 0\) return f\.providers\[0\]!;/);
+  assert.match(block, /if \(Array\.isArray\(f\.forms\) && f\.forms\.length > 0 && f\.origin !== top\)/, "card fields in a frame of another origin");
+  assert.match(background, /const providerHost = providerBlock\(tab\.id, top\);\s*if \(providerHost !== null\) return \{ ok: false, code: "provider_frame", providerHost,/, "fillCardFromPopup");
+  assert.match(background, /if \(providerHost !== null\) return \{ fillable: false, origin: null, crossOriginFormsOnly: true, providerHost \};/, "cardFillOffers: the explainer, never Fill");
+  assert.match(background, /if \(providerBlock\(tabId, top\) !== null\) return no; \/\/ round-7 H1/, "no chip");
+  assert.match(background, /if \(providerBlock\(tabId, top\) !== null\) return \{ ok: false, error: "a payment provider's frame takes the card on this page" \};/, "and none at the redemption");
   assert.match(background, /const target = chooseAnchoredCardTarget\(eligible\) \?\? chooseCardTarget\(eligible\);/);
   const info = background.slice(background.indexOf("async function cardFormInfo("), background.indexOf("function broadcastRescanCardForms("));
   assert.match(info, /const anchor = typeof a === "number" && Number\.isInteger\(a\) && a >= 0 && a < msg\.forms\.length \? a : null;/, "an index out of range is no choice");
-  const report = content.slice(content.indexOf("function reportCardForm("), content.indexOf("function cardTargetOf("));
-  assert.match(report, /void safeSend\(\{ type: "cardFormInfo", forms, anchor \}\);/);
-  assert.match(content, /function setCardFocus\(next: FillableControl \| null\): void \{\s*if \(next === cardFocus\) return;\s*cardFocus = next;\s*reportCardForm\(\);/, "a new choice is reported at once");
+  assert.match(info, /msg\.choseNow === true \|\| was\?\.anchor !== anchor \|\| was\.anchorAt === undefined \? Date\.now\(\) : was\.anchorAt/, "L7: every choice is stamped");
+  const report = content.slice(content.indexOf("function reportCardForm("), content.indexOf("/** Bumped by every choice"));
+  assert.match(report, /void safeSend\(\{ type: "cardFormInfo", forms, anchor, providers, choseNow \}\);/);
 });
 
 test("the Safari lane releases no card number or security code to an extension page", () => {
