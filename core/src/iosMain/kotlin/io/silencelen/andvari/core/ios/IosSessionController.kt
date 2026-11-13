@@ -24,19 +24,12 @@ import io.silencelen.andvari.core.client.session.PublishingPrefs
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SecretStore
 import io.silencelen.andvari.core.client.session.SessionPersistence
-import io.silencelen.andvari.core.client.session.holdsSessionTokens
 import io.silencelen.andvari.core.client.session.httpsOnly
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.coroutines.Dispatchers
 import platform.Foundation.NSFileManager
-import platform.Foundation.NSUserDefaults
 import platform.UIKit.UIDevice
 import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.contentOrNull
-import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.session.SESSION_TOKENS_SECRET
 
 /** The App Group the app shares with its Safari and AutoFill extensions. */
@@ -102,23 +95,23 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     constructor() : this(IosStorageConfig())
 }
 
-/** The platform seams one controller uses. Building them adopts the state an earlier build kept in the group, once ([adoptGroupState]). */
+/**
+ * The platform seams one controller uses. The app never reads the App Group's copy of its state (round-7 review L6): its
+ * own state is in its private defaults alone. An install whose private store is empty (a fresh install, or a reinstall:
+ * the Keychain outlives an uninstall, the private defaults do not) first deletes any session tokens an earlier install
+ * left in the Keychain, so it starts at the server screen with nothing of the earlier install's session.
+ */
 internal class IosSeams(
     config: IosStorageConfig,
     snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath),
     savesDir: String? = config.sharedSuite?.let(::groupSavesDir),
-    /**
-     * Whether this install is already signed in: its session's tokens are in the app's own Keychain group, where no
-     * extension can put them. Only such an install has state of its own in the group to adopt ([adoptGroupState]).
-     */
-    signedIn: () -> Boolean = { holdsSessionTokens(KeychainSecrets(config.keychainService, null)) },
-    /** Remove the session's tokens from the app's own Keychain group: stale ones a reinstall finds there (round-7 L6). */
-    dropTokens: () -> Unit = { KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null) },
+    /** Remove the session's tokens from the app's own Keychain group (what an earlier install left there). */
+    dropStaleTokens: () -> Unit = { KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null) },
 ) {
     private val own = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
-        runCatching { adoptGroupState(config, own, signedIn, dropTokens) }
+        if (PRIVATE_STATE_KEYS.all { own.getString(it) == null }) runCatching { dropStaleTokens() }
     }
 
     /**
@@ -144,54 +137,8 @@ internal class IosSeams(
     val moveMemos: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/move-memos.json")
 
     private companion object {
-        const val ADOPTED = "ios.privateState.v1"
-
-        /**
-         * Once per install: builds before this one kept the app's state in the App Group itself, where an extension could
-         * rewrite it. For an install that is signed in ([signedIn]: an update of such a build), that state is copied
-         * into the app's private defaults (each key only where the private store has none, the origin last, since it is
-         * what says "a layout is here"); then this is marked done, and from then on the group is only written. A fresh
-         * install has nothing of its own in the group, so it adopts nothing (round-6 review L7): whatever is there was
-         * written by something else, an extension that ran first among them. A start that was cut short copies again;
-         * nothing is removed from the group, which the extensions go on reading.
-         */
-        fun adoptGroupState(config: IosStorageConfig, own: UserDefaultsPrefs, signedIn: () -> Boolean, dropTokens: () -> Unit) {
-            val group = config.sharedSuite ?: return
-            if (group == config.defaultsSuite || own.getString(ADOPTED) != null) return
-            val shared = NSUserDefaults(suiteName = group)
-            // Round-7 review L6: tokens in the Keychain with an empty private store are this install's own only when the
-            // group holds the session they belong to, as a build that kept its state there left it (a session record
-            // naming the group's own server). Otherwise they outlived an uninstall (the Keychain does; the group need
-            // not, and an extension may have filled it before this first start): they go, and nothing is adopted.
-            if (signedIn() && own.getString("baseUrl") == null && own.getString("session") == null && !groupHoldsItsSession(shared)) {
-                dropTokens()
-                own.putString(ADOPTED, "1")
-                return
-            }
-            if (signedIn()) {
-                val ours = shared.dictionaryRepresentation().mapNotNull { (key, value) ->
-                    val name = key as? String ?: return@mapNotNull null
-                    val text = value as? String ?: return@mapNotNull null
-                    if (name.startsWith("ns.") || name in GLOBAL_KEYS) name to text else null
-                }
-                for ((name, text) in ours.sortedBy { it.first == "baseUrl" }) {
-                    if (own.getString(name) == null) own.putString(name, text)
-                }
-            }
-            own.putString(ADOPTED, "1")
-        }
-
-        /** Whether the group holds a session record for a user at the group's own server (what a build that kept its state there left). */
-        fun groupHoldsItsSession(shared: NSUserDefaults): Boolean = runCatching {
-            val server = shared.stringForKey("baseUrl") ?: return false
-            val session = Json.parseToJsonElement(shared.stringForKey("session") ?: return false).jsonObject
-            val sessionServer = session["baseUrl"]?.jsonPrimitive?.contentOrNull ?: return false
-            val user = session["userId"]?.jsonPrimitive?.contentOrNull
-            !user.isNullOrEmpty() && OriginCanon.canonicalOrigin(sessionServer) == OriginCanon.canonicalOrigin(server)
-        }.getOrDefault(false)
-
-        /** [PrefsSessionPersistence]'s global keys. */
-        val GLOBAL_KEYS = setOf("baseUrl", "pendingServer", "session", "mustChangePassword", "highWaterWallMs", "lastSyncAt")
+        /** What says the private store holds anything ([PrefsSessionPersistence]'s server, pending server and session). */
+        val PRIVATE_STATE_KEYS = listOf("baseUrl", "pendingServer", "session")
     }
 }
 
