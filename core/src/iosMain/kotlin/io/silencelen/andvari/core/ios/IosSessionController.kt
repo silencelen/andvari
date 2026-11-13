@@ -32,6 +32,7 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.coroutines.Dispatchers
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
+import platform.UIKit.UIApplication
 import platform.UIKit.UIDevice
 import kotlin.coroutines.cancellation.CancellationException
 import io.silencelen.andvari.core.client.session.SESSION_TOKENS_SECRET
@@ -128,21 +129,41 @@ class AttachmentFile(val name: String, val data: NSData?, val error: String?)
 
 /**
  * The platform seams one controller uses. The app never reads the App Group's copy of its state (round-7 review L6): its
- * own state is in its private defaults alone. An install whose private store is empty (a fresh install, or a reinstall:
- * the Keychain outlives an uninstall, the private defaults do not) first deletes any session tokens an earlier install
- * left in the Keychain, so it starts at the server screen with nothing of the earlier install's session.
+ * own state is in its private defaults alone.
+ *
+ * The first start of an install (a fresh install, or a reinstall: the Keychain outlives an uninstall, the app's
+ * container and private defaults do not) deletes what an earlier install left in the Keychain, the session's tokens and
+ * the quick-unlock blobs and keys (round-8 review L), so it starts at the server screen with nothing of the earlier
+ * install, and offers no Face ID that was not turned on in this one. A first start is told by an install marker in the
+ * app's container, which can be seen before the first unlock after a reboot, while the private defaults cannot be read
+ * then: so nothing is deleted unless the marker is absent, the protected data can be read now (not a launch iOS
+ * prewarmed before the first unlock), and the private store is empty. The marker is written then, whatever was found.
  */
 internal class IosSeams(
     config: IosStorageConfig,
     snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath),
     savesDir: String? = config.sharedSuite?.let(::groupSavesDir),
-    /** Remove the session's tokens from the app's own Keychain group (what an earlier install left there). */
-    dropStaleTokens: () -> Unit = { KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null) },
+    /** Remove what an earlier install left in the Keychain: the session's tokens, and every quick-unlock blob and key. */
+    dropStaleInstall: () -> Unit = {
+        KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null)
+        IosQuickUnlockKeys(KeychainSecrets("${config.keychainService}.quickunlock", config.keychainAccessGroup), config.keychainAccessGroup).wipeAll()
+    },
+    /** The install marker, in the app's own container. */
+    installMarker: String = "${IosNamespaceStorage.defaultRoot()}/.installed",
+    /** Whether the device's protected data can be read now (false in a launch prewarmed before the first unlock). */
+    protectedDataAvailable: () -> Boolean = ::protectedDataNow,
 ) {
     private val own = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
-        if (PRIVATE_STATE_KEYS.all { own.getString(it) == null }) runCatching { dropStaleTokens() }
+        val fm = NSFileManager.defaultManager
+        if (!fm.fileExistsAtPath(installMarker) && protectedDataAvailable()) {
+            if (PRIVATE_STATE_KEYS.all { own.getString(it) == null }) runCatching { dropStaleInstall() }
+            runCatching {
+                fm.createDirectoryAtPath(installMarker.substringBeforeLast('/'), withIntermediateDirectories = true, attributes = null, error = null)
+                fm.createFileAtPath(installMarker, contents = null, attributes = null)
+            }
+        }
     }
 
     /**
@@ -176,6 +197,9 @@ internal class IosSeams(
         val PRIVATE_STATE_KEYS = listOf("baseUrl", "pendingServer", "session")
     }
 }
+
+/** UIApplication's word on the protected data; false where there is no application to ask (a test process). */
+private fun protectedDataNow(): Boolean = runCatching { UIApplication.sharedApplication.protectedDataAvailable }.getOrDefault(false)
 
 internal fun quickUnlockKeys(config: IosStorageConfig): QuickUnlockKeys =
     IosQuickUnlockKeys(KeychainSecrets("${config.keychainService}.quickunlock", config.keychainAccessGroup), config.keychainAccessGroup)

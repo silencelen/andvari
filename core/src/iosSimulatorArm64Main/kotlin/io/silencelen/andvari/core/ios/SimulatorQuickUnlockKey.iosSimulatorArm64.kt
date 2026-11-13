@@ -8,6 +8,8 @@ import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.value
+import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.CName
 import platform.CoreFoundation.CFErrorGetCode
 import platform.CoreFoundation.CFErrorRefVar
 import platform.CoreFoundation.CFRelease
@@ -35,7 +37,8 @@ import platform.Security.kSecPrivateKeyAttrs
  *
  * This file is in the `iosSimulatorArm64Main` source set, which is compiled only for the simulator target. The device
  * target (`iosArm64Main`) has a one-line actual that returns null. .github/workflows/ios-core.yml checks that the
- * sentence logged below is absent from the device framework.
+ * symbol below ([simulatorSoftwareQuickUnlockKey]) is absent from the device framework the app links, and a device
+ * refuses any key that is not the Secure Enclave's at run time anyway.
  */
 internal actual fun simulatorQuickUnlockKey(tag: String, accessGroup: String?): SecKeyRef? = memScoped {
     val owned = CfOwned()
@@ -61,3 +64,8 @@ internal actual fun simulatorQuickUnlockKey(tag: String, accessGroup: String?): 
         owned.release()
     }
 }
+
+/** The exported symbol that marks a framework built with the simulator's software key (never a device's). */
+@OptIn(ExperimentalNativeApi::class)
+@CName("andvari_simulator_software_quick_unlock_key")
+fun simulatorSoftwareQuickUnlockKey(): Int = 1

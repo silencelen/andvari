@@ -95,11 +95,12 @@ jobs:
           key: ${{ steps.built.outputs.cache-primary-key }}
 
       # The stand-in quick-unlock key is compiled for the simulator only (core/src/iosSimulatorArm64Main); the
-      # device framework is checked for its absence in ios-core.yml. Here: it is really in the build under test.
+      # device framework is checked for its absence in ios-core.yml. Here: it is really in the build under test, by the
+      # symbol that marks it (the same check ios-core.yml makes, the other way round).
       - name: The simulator build has its stand-in quick-unlock key
         run: |
-          scripts/ci/binary-has-text.py core/build/bin/iosSimulatorArm64/releaseFramework/AndvariCore.framework/AndvariCore \
-            "simulator-only software quick-unlock key"
+          nm -gU core/build/bin/iosSimulatorArm64/releaseFramework/AndvariCore.framework/AndvariCore > framework-symbols.txt
+          grep -q 'andvari_simulator_software_quick_unlock_key$' framework-symbols.txt
 
       - name: Names for the test site
         run: echo "127.0.0.1 site.andvari-uitest.test other-uitest.test plainhttp-uitest.test" | sudo tee -a /etc/hosts

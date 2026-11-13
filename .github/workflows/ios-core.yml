@@ -73,17 +73,20 @@ jobs:
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
 
       # gradle.properties caps the heap for small Linux hosts. Kotlin/Native links inside Gradle and needs more.
+      # The release framework: the one the app links (FRAMEWORK_SEARCH_PATHS in app-ios/project.yml).
       - name: Compile for device and link the framework
-        run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:compileKotlinIosArm64 :core:linkDebugFrameworkIosArm64
+        run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:compileKotlinIosArm64 :core:linkReleaseFrameworkIosArm64
 
       # The UI tests' stand-in for the Secure Enclave key exists only in the simulator target's source set
-      # (core/src/iosSimulatorArm64Main). The device framework must not contain it.
+      # (core/src/iosSimulatorArm64Main), which exports andvari_simulator_software_quick_unlock_key. The device framework
+      # the app links must not contain it (a device also refuses any key that is not the Secure Enclave's at run time).
       - name: No simulator quick-unlock key in the device framework
         run: |
-          F=core/build/bin/iosArm64/debugFramework/AndvariCore.framework/AndvariCore
-          # A sentence the device build does have, so a pass means the check can read the framework.
-          scripts/ci/binary-has-text.py "$F" "This device can't hold a quick-unlock key."
-          if scripts/ci/binary-has-text.py "$F" "simulator-only software quick-unlock key"; then
+          F=core/build/bin/iosArm64/releaseFramework/AndvariCore.framework/AndvariCore
+          nm -gU "$F" > framework-symbols.txt
+          # A symbol every build exports, so a pass means the check could read the framework's symbols.
+          grep -q 'andvari_quick_unlock_secure_enclave_only$' framework-symbols.txt || { echo "the framework's symbols could not be read"; exit 1; }
+          if grep -q 'andvari_simulator_software_quick_unlock_key$' framework-symbols.txt; then
             echo "the simulator-only quick-unlock key is in the device framework"; exit 1
           fi
 
