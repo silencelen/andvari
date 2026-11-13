@@ -59,7 +59,7 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | A changed password saved from Safari: applied at the next unlock and listed, kept across a lock, the new password and the previous one in the login, Undo, everything as it was | Works | `T3…test10` |
 | The popup lists cards (masked number); the popup's root fills its sheet and a row is centred in it (within 3 points) | Works | `T3…test11` |
 | A login for another site chosen in the popup: nothing filled until a confirmation that names both sites | Works | `T3…test12` |
-| Two logins saved before the app is next unlocked both arrive and are listed; Undo all takes both back | Skipped while the defect below is present (the test checks the queue and says so) | `T3…test13` |
+| Two logins saved before the app is next unlocked both arrive and are listed; Undo all takes both back | Works since the save-id fix (below); the test checks the queue and skips with the reason if two saves ever share an entry again | `T3…test13` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
@@ -68,7 +68,8 @@ dump; none of them loosens an assertion.
 
 ### Findings the tests show
 
-- **Saves made before the app is next opened overwrite each other** (reported 2026-11-12). The AutoFill
+- **Saves made before the app is next opened overwrote each other** (found 2026-11-12, fixed on ios-ui by
+  6e90fc5 and 4b8c7c0). The AutoFill
   extension queues a save under `ASSavePasswordRequest.sessionID`, which is "1" for every save on the iOS 26.5
   simulator (each save runs in a fresh extension process), and the queue's `put` replaces an entry with the same
   id. After three saves the App Group's `saves/` held only `q-s-1.json`, and the app listed only the last one.
