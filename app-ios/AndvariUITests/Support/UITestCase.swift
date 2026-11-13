@@ -209,9 +209,21 @@ class UITestCase: XCTestCase {
         require(field, what, file: file, line: line)
         // On a slow runner the field exists before it can be touched (a sheet still arriving, the cover still leaving).
         _ = waitUntil(15) { field.isHittable }
-        field.tap()
-        // The keyboard takes a moment to belong to the field.
-        Thread.sleep(forTimeInterval: 0.6)
+        // The keyboard takes a moment to belong to the field, longer the first time a simulator shows one; a tap
+        // that lands while something else still has the focus is tried again.
+        for _ in 0..<3 {
+            field.tap()
+            if waitUntil(5, { self.hasKeyboardFocus(field) }) { break }
+        }
+        if !hasKeyboardFocus(field) {
+            dumpTree(app, as: "no-keyboard-focus")
+            XCTFail("\(what) never took the keyboard", file: file, line: line)
+        }
         field.typeText(text)
+    }
+
+    /// Whether [element] holds the keyboard (XCUITest's own attribute, as its tree dumps show it).
+    func hasKeyboardFocus(_ element: XCUIElement) -> Bool {
+        element.exists && ((element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false)
     }
 }

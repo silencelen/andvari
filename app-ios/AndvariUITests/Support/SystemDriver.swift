@@ -246,6 +246,12 @@ extension UITestCase {
         XCTAssertTrue(enableSafariExtension(), "the Safari extension could not be turned on")
     }
 
+    /// Bring the app forward and unlock it: the app applies what the extensions queued at an unlock.
+    func applySavesNow() {
+        bringAppForward()
+        reachVaultAnyWay()
+    }
+
     /// Dismiss the "Saved … from AutoFill" list if one is up, so a test counts only its own saves.
     func dismissSavedList() {
         let header = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Saved ' AND label ENDSWITH ' from AutoFill'")).firstMatch
@@ -334,11 +340,6 @@ extension UITestCase {
         field.typeText(text)
     }
 
-    /// Whether [element] holds the keyboard (XCUITest's own attribute, as its tree dumps show it).
-    func hasKeyboardFocus(_ element: XCUIElement) -> Bool {
-        element.exists && ((element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false)
-    }
-
     /// Submit a login on the test site and answer iOS's offer to save it with andvari. False when no offer came.
     func submitLoginAndSaveToAndvari(page: String, heading: String, user: String, password: String, passwordLabel: String, submit: String) -> Bool {
         openInSafari(Fixture.siteOrigin + "/" + page, heading: heading)
@@ -360,6 +361,7 @@ extension UITestCase {
         Thread.sleep(forTimeInterval: 4)
         // What the extension left in the App Group's save queue, for a reader of a failure about lost saves.
         let files = saveQueueFiles()
+        SystemState.queueSnapshots.append(files)
         SystemState.queueLog.append("after \(user): \(files.joined(separator: ", "))")
         XCTContext.runActivity(named: "save queue after \(user): \(files.joined(separator: ", "))") { _ in }
         return true
@@ -626,6 +628,7 @@ extension UITestCase {
 enum SystemState {
     /// The save queue's files after each capture in this run (saveQueueFiles).
     static var queueLog: [String] = []
+    static var queueSnapshots: [[String]] = []
     static var providerEnabled = false
     static var extensionEnabled = false
 }
