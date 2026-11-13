@@ -32,6 +32,8 @@ struct ItemDetailView: View {
     @State private var confirmRestore: ItemVersionView?
     /// Passwords of earlier versions the person chose to show, by revision; dropped when the history closes.
     @State private var shownVersions: [Int64: String] = [:]
+    /// The file open in its sheet, decrypted in memory there.
+    @State private var openedFile: OpenedFile?
 
     init(itemId: String) {
         self.itemId = itemId
@@ -59,6 +61,12 @@ struct ItemDetailView: View {
         }
         .sheet(isPresented: $moving) {
             MoveCopySheet(itemId: itemId, targets: moveTargets, canMove: canMoveOut)
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
+        }
+        .sheet(item: $openedFile) { file in
+            AttachmentPreview(itemId: itemId, file: file)
                 .environmentObject(model)
                 .tint(Palette.goldText)
                 .privacyShield()
@@ -263,6 +271,11 @@ struct ItemDetailView: View {
                 Text("Kept when a password was replaced. Newest first.")
             }
             .listRowBackground(Palette.raised)
+        }
+        if !detail.attachments.isEmpty {
+            AttachmentsSection(files: detail.attachments) { file in
+                openedFile = OpenedFile(file)
+            }
         }
         if !moveTargets.isEmpty {
             Section {

@@ -22,6 +22,7 @@ struct NoteEditorView: View {
     @State private var vaultChoices: [VaultChoiceView] = []
     @State private var vaultId: String?
     @State private var message: String?
+    @StateObject private var files = FileAdding()
 
     var body: some View {
         NavigationStack {
@@ -41,6 +42,8 @@ struct NoteEditorView: View {
                         .accessibilityLabel("Note")
                 }
                 .listRowBackground(Palette.raised)
+
+                AttachmentsEditorSection(adding: files)
 
                 if let message {
                     Section {
@@ -69,7 +72,7 @@ struct NoteEditorView: View {
                     Button("Cancel") {
                         dismiss()
                     }
-                    .disabled(saving)
+                    .disabled(saving || files.working)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if saving {
@@ -78,7 +81,7 @@ struct NoteEditorView: View {
                         Button("Save") {
                             save()
                         }
-                        .disabled(draft.name.trimmed.isEmpty || unreadable || model.state.busy)
+                        .disabled(draft.name.trimmed.isEmpty || unreadable || model.state.busy || files.working)
                     }
                 }
             }
@@ -91,11 +94,14 @@ struct NoteEditorView: View {
                 Text("It goes to the trash on your server.")
             }
         }
+        .modifier(FilePickers(adding: files, model: model))
+        .interactiveDismissDisabled(saving || files.working)
         .onAppear {
             load()
         }
         .onDisappear {
             draft = NoteDraft()
+            model.closeAttachmentDraft()
         }
     }
 
@@ -105,6 +111,7 @@ struct NoteEditorView: View {
         guard let itemId else {
             vaultChoices = model.newItemVaults()
             vaultId = VaultPickerSection.initialSelection(vaultChoices)
+            model.openAttachmentDraft(nil)
             return
         }
         guard let detail = model.itemDetail(itemId), detail.type == "note" else {
@@ -125,6 +132,7 @@ struct NoteEditorView: View {
             next.text = text
         }
         draft = next
+        model.openAttachmentDraft(itemId)
     }
 
     private func save() {

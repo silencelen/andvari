@@ -71,6 +71,7 @@ struct LoginEditorView: View {
     @State private var confirmDelete = false
     @State private var vaultChoices: [VaultChoiceView] = []
     @State private var vaultId: String?
+    @StateObject private var files = FileAdding()
 
     init(itemId: String?) {
         self.itemId = itemId
@@ -91,6 +92,7 @@ struct LoginEditorView: View {
                     Toggle("Favorite", isOn: $draft.favorite)
                 }
                 .listRowBackground(Palette.raised)
+                AttachmentsEditorSection(adding: files)
                 if let message {
                     Section {
                         InlineMessage(text: message)
@@ -123,12 +125,14 @@ struct LoginEditorView: View {
                 Text("It goes to the trash on your server.")
             }
         }
-        .interactiveDismissDisabled(saving)
+        .modifier(FilePickers(adding: files, model: model))
+        .interactiveDismissDisabled(saving || files.working)
         .onAppear {
             load()
         }
         .onDisappear {
             forget()
+            model.closeAttachmentDraft()
         }
         .onChange(of: draft) {
             // Typing happens outside the window the touch watcher sees.
@@ -227,7 +231,7 @@ struct LoginEditorView: View {
             Button("Cancel") {
                 dismiss()
             }
-            .disabled(saving)
+            .disabled(saving || files.working)
         }
         ToolbarItem(placement: .confirmationAction) {
             if saving {
@@ -252,7 +256,7 @@ struct LoginEditorView: View {
     }
 
     private var canSave: Bool {
-        !draft.name.trimmed.isEmpty && !unreadable && !model.state.busy
+        !draft.name.trimmed.isEmpty && !unreadable && !model.state.busy && !files.working
     }
 
     private func load() {
@@ -261,6 +265,7 @@ struct LoginEditorView: View {
         guard let itemId else {
             vaultChoices = model.newItemVaults()
             vaultId = VaultPickerSection.initialSelection(vaultChoices)
+            model.openAttachmentDraft(nil)
             return
         }
         guard let detail = model.itemDetail(itemId) else {
@@ -288,6 +293,7 @@ struct LoginEditorView: View {
             next[keyPath: keyPath] = value
         }
         draft = next
+        model.openAttachmentDraft(itemId)
     }
 
     private func forget() {
