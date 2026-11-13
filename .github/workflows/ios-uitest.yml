@@ -163,6 +163,7 @@ jobs:
               TEST_RUNNER_UITEST_HTTP_ORIGIN="$UITEST_HTTP_ORIGIN" \
               TEST_RUNNER_UITEST_OTHER_ORIGIN="$UITEST_OTHER_ORIGIN" \
               TEST_RUNNER_UITEST_OTHER_HOST="$UITEST_OTHER_HOST" \
+              TEST_RUNNER_UITEST_CONTROL_ORIGIN="http://127.0.0.1:$UITEST_HTTP_PORT" \
             xcodebuild test-without-building -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
               -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
               -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult \
