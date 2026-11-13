@@ -25,10 +25,12 @@ import kotlinx.serialization.json.Json
  *    another try replays the same ids, and the server's dedup converges instead of making a second copy. Where the
  *    item changed since a try that already copied it, no new gesture is minted while that copy is in the target
  *    (round-6 review L5): the person is told it is there.
- *  - A kept gesture whose copy was seen is replayed only while that copy is still in the target, as a sync just before
- *    shows it (round-7 review M3): the server answers a replayed copy leg from its journal without making the copy
- *    again, so a copy deleted since would let the delete leg remove the only original. A copy that is gone drops the
- *    gesture, and a new one (a new copy) is minted.
+ *  - A kept gesture is replayed only while its copy is in the target, as a sync just before shows it (round-7 review
+ *    M3, round-8 review M): the server answers a replayed copy leg from its journal without making the copy again, so
+ *    a copy deleted since would let the delete leg remove the only original. That holds whatever ended the earlier try
+ *    (a timeout of the delete leg, or the app being stopped after the copy leg, is TRANSIENT and says nothing of the
+ *    copy). A copy that is not there drops the gesture, and a new one (a new copy) is minted. The cost: a copy leg
+ *    still in flight when the next try starts lands as a second copy, never as a lost original.
  *
  * Not thread-safe: each platform calls it from one place (Android's main dispatcher, iOS's actions).
  */
@@ -140,13 +142,13 @@ class VaultMoves(private val store: Store = Store.Memory()) {
 
     /**
      * The gesture for moving ([move]) or copying [item] into [targetVaultId], or that an earlier try's copy is there.
-     * A kept gesture whose copy was seen is checked against the target after [sync] first (round-7 review M3); a sync
-     * that fails throws, and nothing is replayed unchecked.
+     * Any kept gesture is checked against the target after [sync] first (round-8 review M); a sync that fails throws,
+     * and nothing is replayed unchecked.
      */
     suspend fun prepare(engine: SyncEngine, item: VaultItem, targetVaultId: String, move: Boolean, sync: suspend () -> Unit): Prepared {
         val k = key(item.itemId, targetVaultId, move)
         var kept = memos()[k]
-        if (kept != null && kept.copySeen) {
+        if (kept != null) {
             sync()
             if (engine.item(kept.gesture.newItemId)?.vaultId != targetVaultId) {
                 memos.remove(k)
@@ -154,8 +156,9 @@ class VaultMoves(private val store: Store = Store.Memory()) {
                 kept = null
             }
         }
+        // Here a kept gesture's copy is in the target.
         if (kept != null && kept.gesture.sourceRev == item.rev) return Prepared.Run(kept.gesture)
-        if (kept != null && engine.item(kept.gesture.newItemId)?.vaultId == targetVaultId) {
+        if (kept != null) {
             if (!kept.copySeen) {
                 memos[k] = kept.copy(copySeen = true)
                 persist()

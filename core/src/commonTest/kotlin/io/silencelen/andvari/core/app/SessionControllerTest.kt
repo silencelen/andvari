@@ -1478,6 +1478,70 @@ open class SessionControllerTest {
         assertTrue(controller.state.items.any { it.itemId == puts.last() }, "and it is there")
     }
 
+    /**
+     * Round-8 review M: a try whose delete leg timed out after the copy leg (TRANSIENT, as the app being stopped there is)
+     * kept its gesture without knowing what became of the copy. When the copy is deleted before the next try, that try
+     * syncs, finds it gone, and makes a new copy before the original goes: never a replay the server would answer from
+     * its journal with no copy made.
+     */
+    @Test
+    fun aMoveWhoseDeleteLegTimedOutIsReplayedOnlyWhileItsCopyIsThere() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        val family = controller.moveTargets(ITEM_ID).single()
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
+        moveServer(server, delete = "applied", pushed)
+        val copyLeg = routes.getValue("/sync/push")
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            if (body.mutations.any { it.op == "delete" }) {
+                pushed += body.mutations
+                throw IOException("timed out")
+            }
+            copyLeg(request)
+        }
+        assertEquals(ActionResult.Failed(ItemCopy.MOVE_RETRY), controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        val firstCopy = pushed.single { it.op == "put" }.itemId
+        assertNotNull(moveMemoLog.bytes, "the try is kept")
+        controller.lock()
+        // The copy is deleted meanwhile: the next sync no longer has it.
+        namespaces.caches.getValue("$homeKey/${reg.userId}").deleteItem(firstCopy)
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        moveServer(server, delete = "applied", pushed)
+        assertEquals(ActionResult.Ok, controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        val puts = pushed.filter { it.op == "put" }.map { it.itemId }
+        assertEquals(2, puts.size)
+        assertNotEquals(firstCopy, puts.last(), "a new copy, never a replay of the one that is gone")
+        assertTrue(pushed.indexOfLast { it.op == "put" } < pushed.indexOfLast { it.op == "delete" }, "made before the original goes")
+        assertTrue(controller.state.items.any { it.itemId == puts.last() }, "and it is there")
+        assertNull(moveMemoLog.bytes, "the move is done")
+    }
+
+    /** The same timeout with the copy still there: the next try replays the same ids, so no second copy is made. */
+    @Test
+    fun aMoveWhoseDeleteLegTimedOutReplaysTheSameIdsWhileItsCopyIsThere() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        val family = controller.moveTargets(ITEM_ID).single()
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
+        moveServer(server, delete = "applied", pushed)
+        val copyLeg = routes.getValue("/sync/push")
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            if (body.mutations.any { it.op == "delete" }) throw IOException("timed out")
+            copyLeg(request)
+        }
+        assertEquals(ActionResult.Failed(ItemCopy.MOVE_RETRY), controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        moveServer(server, delete = "applied", pushed)
+        assertEquals(ActionResult.Ok, controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        assertEquals(1, pushed.filter { it.op == "put" }.map { it.itemId }.toSet().size, "one copy, replayed")
+        assertEquals(1, pushed.filter { it.op == "put" }.map { it.mutationId }.toSet().size, "under the same mutation id")
+    }
+
     @Test
     fun aMovedItemThatChangedMeanwhileIsKeptAndNoSecondCopyIsMinted() = test {
         unlockedWithAPersonalVault()
