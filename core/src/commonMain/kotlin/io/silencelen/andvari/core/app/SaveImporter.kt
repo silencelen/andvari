@@ -118,6 +118,11 @@ internal class SaveImporter(
      */
     @Serializable
     private data class AppliedRecord(
+        /**
+         * The record's own id, minted here when the save is written: what the list, its Undo and Undo all name. Never
+         * the queue entry's id: a later capture, or a forged one, can reuse an entry's name, and must not take another
+         * save's Undo away. (In a record from before this was kept, it is the entry's id.)
+         */
         val id: String,
         val site: String,
         val username: String,
@@ -137,7 +142,11 @@ internal class SaveImporter(
         val capturedAtMs: Long = 0,
         /** A digest of the login as a save ADDED it: an undo removes the login only while it is still exactly that. */
         val docDigest: String? = null,
-    )
+        /** The queue entry the save came from, removed once the write is settled ("" in a record from before: [id] is it). */
+        val queueId: String = "",
+    ) {
+        val entry: String get() = queueId.ifEmpty { id }
+    }
 
     /** What is kept at rest: the records, each sealed to the account, and the ids the cap held back. */
     @Serializable
@@ -323,14 +332,14 @@ internal class SaveImporter(
         if (wroteAny) wrote()
     }
 
-    /** The write happened: the entry leaves the queue and the record is listed. */
-    private fun finish(live: VaultSession.Unlocked, id: String, record: AppliedRecord) {
+    /** The write happened: the entry ([queueId]) leaves the queue and the record is listed under its own id. */
+    private fun finish(live: VaultSession.Unlocked, queueId: String, record: AppliedRecord) {
         // A session that ended meanwhile keeps its entry and its stored intent: the next unlock settles them.
         if (!opAlive) return
-        queue.remove(id)
-        pending.remove(id)
-        held.remove(id)
-        applied[id] = record.copy(intent = false)
+        queue.remove(queueId)
+        pending.remove(queueId)
+        held.remove(queueId)
+        applied[record.id] = record.copy(intent = false)
         storeApplied(live, Persist.CHANGE)
     }
 
@@ -349,7 +358,7 @@ internal class SaveImporter(
             val item = live.engine.item(record.itemId)
             when {
                 record.intent && item != null && (record.replacedName == null || item.doc.login?.password == record.password) -> {
-                    queue.remove(id)
+                    queue.remove(record.entry)
                     applied[id] = record.copy(intent = false)
                     changed = true
                 }
@@ -367,7 +376,7 @@ internal class SaveImporter(
      * is stored as an intent first, so a lock between the write and the bookkeeping cannot leave a write nothing lists.
      * A write that fails takes its intent with it.
      */
-    private suspend fun write(live: VaultSession.Unlocked, id: String, p: Pending): AppliedRecord {
+    private suspend fun write(live: VaultSession.Unlocked, queueId: String, p: Pending): AppliedRecord {
         val captured = p.login
         val host = UriMatch.normalizeHost(captured.site) ?: error("not a site")
         val now = clocks.wallMs()
@@ -379,10 +388,10 @@ internal class SaveImporter(
         val address = (if (schemeOf(captured.site) == Scheme.HTTP) "http://" else "https://") + host + (portOf(captured.site)?.let { ":$it" } ?: "")
         val doc = ItemDoc(type = "login", name = UriMatch.normalizeHostUnicode(captured.site) ?: host, login = LoginData(username = captured.username, password = captured.password, uris = listOf(address)))
         val record = AppliedRecord(
-            id, captured.site, captured.username, itemId, target?.doc?.name, captured.password, keep, now, intent = true,
-            capturedAtMs = captured.capturedAtMs, docDigest = if (target == null) digest(doc) else null,
+            Bytes.uuidV4FromBytes(crypto().randomBytes(16)), captured.site, captured.username, itemId, target?.doc?.name, captured.password, keep, now,
+            intent = true, capturedAtMs = captured.capturedAtMs, docDigest = if (target == null) digest(doc) else null, queueId = queueId,
         )
-        applied[id] = record
+        applied[record.id] = record
         storeApplied(live, Persist.CHANGE)
         try {
             if (target == null) {
@@ -398,7 +407,7 @@ internal class SaveImporter(
         } catch (c: CancellationException) {
             throw c // the intent stays stored: the next unlock looks at the vault and settles it
         } catch (t: Throwable) {
-            applied.remove(id)
+            applied.remove(record.id)
             storeApplied(live, Persist.CHANGE) // nothing, once the session has ended: the intent stays for the next unlock
             throw t
         }
