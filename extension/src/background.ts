@@ -3963,8 +3963,12 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     case "revealCardField": {
       // The popup's copy of ONE field of one card: only that field is asked of the app.
       if (sender.tab !== undefined) return { ok: false, error: "not allowed from a page" } satisfies Res<"revealCardField">;
+      // The card number and the security code are never copied in this build (round-5 C4: the popup has no copy
+      // button for them), and the worker does not release them to an extension page either (round-6 review): they
+      // are filled into a page, or copied in the app.
+      if (msg.field === "number" || msg.field === "cvv") return { ok: false, error: "not in this build" } satisfies Res<"revealCardField">;
       if (!vault.unlocked) return { ok: false, error: "locked" } satisfies Res<"revealCardField">;
-      const wanted: CardFieldName[] = msg.field === "number" ? ["number"] : msg.field === "expiry" ? ["expMonth", "expYear"] : msg.field === "name" ? ["name"] : ["cvv"];
+      const wanted: CardFieldName[] = msg.field === "expiry" ? ["expMonth", "expYear"] : ["name"];
       const c = await appVaultCard(msg.itemId, wanted);
       return (c === null ? { ok: false, error: "unknown item" } : cardFieldValue(c, msg.field)) satisfies Res<"revealCardField">;
     }
