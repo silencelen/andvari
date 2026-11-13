@@ -202,3 +202,10 @@ test("a card fill writes only the fields that can be seen, of the chosen field's
   assert.match(apply, /if \(splitRan && panBoxes\.some\(\(b\) => !seen\.has\(b\)\)\) \{\s*unseen\("cardnumber"\);/, "a split number goes in whole or not at all");
   assert.match(apply, /if \(!seen\.has\(ref\.input\)\) \{\s*unseen\(ref\.kind\);/);
 });
+
+test("the Safari lane releases no card number or security code to an extension page", () => {
+  const background = readFileSync(new URL("./background.ts", import.meta.url), "utf-8");
+  const appLane = background.slice(background.indexOf('case "revealCardField": {'), background.indexOf('case "reveal":\n      return appVaultReveal(msg, sender);'));
+  assert.match(appLane, /if \(msg\.field === "number" \|\| msg\.field === "cvv"\) return \{ ok: false, error: "not in this build" \}/);
+  assert.ok(appLane.indexOf('msg.field === "number"') < appLane.indexOf("appVaultCard("), "refused before the app is asked");
+});
