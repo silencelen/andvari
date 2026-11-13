@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: skimmer form</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; padding-bottom: 140px; }
+  .provider { border: 2px dashed #888; border-radius: 8px; padding: 24px; text-align: center; color: #555; margin: 16px 0; }
+  /* The skimmer: an invisible expiry select fixed on screen, number and security code under an opaque footer that
+     lets the pointer through, a name field washed out by a filter, and one in transparent ink. */
+  #skim-exp { position: fixed; top: 50%; left: 50%; width: 1px; height: 1px; opacity: 0; }
+  #skim-number, #skim-csc { position: fixed; bottom: 30px; left: 16px; width: 200px; }
+  #skim-csc { left: 230px; width: 80px; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; height: 110px; background: #222; color: #eee; padding: 16px; pointer-events: none; z-index: 10; }
+  #skim-name { filter: opacity(0); }
+  #skim-zip { color: transparent; -webkit-text-fill-color: transparent; background: transparent; border: none; }
+  .real label { display: block; margin: 8px 0 4px; }
+</style>
+</head>
+<body>
+<h1>Checkout</h1>
+<p>Round-6 review H1. The real card fields would be in the payment provider's frame (the dashed box). A skimmer added
+an invisible card form to this page, and its script focused the expiry select once.</p>
+<ol>
+  <li>Without tapping anything, open the andvari popup and Fill a card: nothing is filled ("Tap the card number field
+  on the page first").</li>
+  <li>Tap the visible "Email" field, then Fill: nothing is filled.</li>
+  <li>Nothing of the card ever lands in the hidden fields (the debug line below stays empty).</li>
+</ol>
+<div class="provider">Payment provider frame (card number, expiry, security code)</div>
+<div class="real"><label for="email">Email</label><input id="email" type="email" autocomplete="email"></div>
+<form id="skimmer" onsubmit="return false">
+  <select id="skim-exp" name="exp-month" autocomplete="cc-exp-month">
+    <option value="">MM</option><option>01</option><option>02</option><option>03</option><option>04</option><option>05</option><option>06</option>
+    <option>07</option><option>08</option><option>09</option><option>10</option><option>11</option><option>12</option>
+  </select>
+  <input id="skim-number" name="cardnumber" autocomplete="cc-number">
+  <input id="skim-csc" name="cvc" autocomplete="cc-csc">
+  <input id="skim-name" name="ccname" autocomplete="cc-name">
+  <input id="skim-zip" name="postal" autocomplete="postal-code">
+</form>
+<p>Debug, what the skimmer got: <code id="got"></code></p>
+<footer>Footer: secure checkout · help · terms</footer>
+<script>
+  setTimeout(() => document.getElementById("skim-exp").focus(), 500);
+  const got = document.getElementById("got");
+  document.getElementById("skimmer").addEventListener("input", () => {
+    got.textContent = [...document.querySelectorAll("#skimmer input, #skimmer select")].map((e) => e.name + "=" + e.value).filter((s) => !s.endsWith("=")).join(" ");
+  });
+</script>
+</body>
+</html>

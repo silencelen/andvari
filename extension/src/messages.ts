@@ -122,8 +122,8 @@ export type CardFillFailCode =
   | "no_form"
   | "no_fields"
   | "unreachable"
-  | "no_focus" //    no card field was focused in the page: the fill does not guess which form is meant (round-5 C1)
-  | "not_visible"; // a field of the focused form cannot be seen (hidden, transparent, tiny, off the page, covered)
+  | "no_focus" //    no card field was chosen in the page: the fill does not guess which form is meant (round-5 C1)
+  | "not_visible"; // the chosen field, or the frame it is in, cannot be seen (hidden, transparent, tiny, off screen, covered)
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -134,6 +134,9 @@ export interface CardFillOutcome {
   filled: "card" | "partial" | "nothing";
   filledKinds: CardFieldKind[];
   missedKinds: CardFieldKind[];
+  /** Of [missedKinds], those left empty because their field cannot be seen (round-6 review H1: a fill writes only
+   *  into fields that pass the visibility rules, never into a hidden one). */
+  unseenKinds?: CardFieldKind[];
   code?: CardFillFailCode;
 }
 

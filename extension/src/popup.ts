@@ -1079,11 +1079,15 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
     const missed = cardLabels(r.outcome.missedKinds);
     const landed = cardLabels(r.outcome.filledKinds).filter((l) => !missed.includes(l));
     const remedy = copiesLongLivedSecrets() ? "Copy instead:" : "Copy what's missing from the andvari app.";
+    // Round-6 review H1: a field that can't be seen is left empty, never filled; scrolling it into view and filling
+    // again is the first remedy.
+    const unseen = cardLabels(r.outcome.unseenKinds ?? []);
+    const why = unseen.length > 0 ? ` The ${unseen.join(", ")} field can't be seen on the page: scroll so it shows and fill again, or` : "";
     showMsg(
       "info",
       landed.length > 0
-        ? `Filled ${landed.join(", ")} — couldn't fill ${missed.join(", ")}. ${remedy}`
-        : `Couldn't fill ${missed.join(", ")}. ${remedy}`,
+        ? `Filled ${landed.join(", ")} — couldn't fill ${missed.join(", ")}.${why} ${why ? remedy.charAt(0).toLowerCase() + remedy.slice(1) : remedy}`
+        : `Couldn't fill ${missed.join(", ")}.${why} ${why ? remedy.charAt(0).toLowerCase() + remedy.slice(1) : remedy}`,
     );
   } else {
     showMsg("err", cardFillErrorCopy(r?.outcome?.code ?? r?.code));

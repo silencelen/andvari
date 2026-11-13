@@ -358,11 +358,13 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // field inside a shadow root blurs shadow-blind exactly like it focuses, so it retargets the
     // same way or the warning silently never fires on those checkouts. PLUS one added 2026-10 by
     // the reuse alert's per-value custody `input` listener (security review, root cause E) — it
-    // must see the same shadow-retargeted field the keydown armed. SEVEN total; reverting any to
+    // must see the same shadow-retargeted field the keydown armed. PLUS one added by round-6 review H1:
+    // the press listener (pointerdown/touchstart/mousedown) records the innermost element a press landed
+    // on, so only a press on the card field itself chooses it. EIGHT total; reverting any to
     // e.target drops the count. The submit listener and the click submit-control probe stay
     // deliberate non-members (submit does not compose; the control probe walks the WHOLE path).
     // The `[=(]` prefix keeps the count over CODE shapes only.
-    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(7);
+    expect(ct.match(/[=(] ?e\.composedPath\(\)\[0\]/g)).toHaveLength(8);
     // [K15] RE-SCOPED (design 2026-07-26 §Gate+pins, deliberate): the C1 chip adds a SECOND
     // consumer to the focusin listener, and the design's binding resolution is
     // `const t = e.composedPath()[0] ?? null; maybeOpen(t); void maybeCardChip(t);` — ONE retarget
