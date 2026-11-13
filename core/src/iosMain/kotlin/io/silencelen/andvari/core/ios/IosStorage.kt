@@ -50,6 +50,7 @@ import platform.Foundation.NSURL
 import platform.Foundation.NSURLIsExcludedFromBackupKey
 import platform.Foundation.NSUTF8StringEncoding
 import platform.Foundation.NSUserDefaults
+import platform.Foundation.NSUUID
 import platform.Foundation.NSUserDomainMask
 import platform.Foundation.create
 import platform.Foundation.dataUsingEncoding
@@ -70,8 +71,10 @@ import platform.Security.kSecMatchLimit
 import platform.Security.kSecMatchLimitOne
 import platform.Security.kSecReturnData
 import platform.Security.kSecValueData
+import platform.posix.RENAME_EXCL
 import platform.posix.memcpy
 import platform.posix.rename
+import platform.posix.renamex_np
 
 /** Non-secret state in NSUserDefaults: the app's standard defaults, or the [suite] (an App Group, later). */
 internal class UserDefaultsPrefs(suite: String?) : KeyValuePrefs {
@@ -253,18 +256,21 @@ internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
 /**
  * The save queue in a directory of the App Group container: `key.json` is the published key, and each queued save is
  * `q-<id>.json`. The Safari extension's native handler writes entries in this same layout
- * (SafariWebExtensionHandler.swift). Every write is a rename into place; entries are ciphertext.
+ * (SafariWebExtensionHandler.swift). Every write is a rename into place; entries are ciphertext. An entry is never
+ * replaced: it goes into place with RENAME_EXCL, which fails when the name is taken, here and in the handler alike.
  */
 internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
     private val fm get() = NSFileManager.defaultManager
     private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
 
-    private fun writeWhole(path: String, bytes: ByteArray): Boolean = runCatching {
+    /** [bytes] to [path] whole, through a temporary file of its own; [exclusive]: never over an existing [path]. */
+    private fun writeWhole(path: String, bytes: ByteArray, exclusive: Boolean = false): Boolean = runCatching {
         fm.createDirectoryAtPath(dir, withIntermediateDirectories = true, attributes = attributes, error = null)
         NSURL.fileURLWithPath(dir).setResourceValue(true, forKey = NSURLIsExcludedFromBackupKey, error = null)
-        val tmp = "$path.tmp"
+        val tmp = "$path.${NSUUID().UUIDString}.tmp"
         if (!fm.createFileAtPath(tmp, contents = bytes.toNSData(), attributes = attributes)) return@runCatching false
-        if (rename(tmp, path) != 0) {
+        val moved = if (exclusive) renamex_np(tmp, path, RENAME_EXCL.convert()) else rename(tmp, path)
+        if (moved != 0) {
             fm.removeItemAtPath(tmp, error = null)
             return@runCatching false
         }
@@ -303,7 +309,7 @@ internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
         return out
     }
 
-    override fun put(id: String, bytes: ByteArray): Boolean = SaveQueue.validId(id) && writeWhole("$dir/$ENTRY_PREFIX$id$ENTRY_SUFFIX", bytes)
+    override fun add(id: String, bytes: ByteArray): Boolean = SaveQueue.validId(id) && writeWhole("$dir/$ENTRY_PREFIX$id$ENTRY_SUFFIX", bytes, exclusive = true)
 
     override fun remove(id: String) {
         if (SaveQueue.validId(id)) runCatching { fm.removeItemAtPath("$dir/$ENTRY_PREFIX$id$ENTRY_SUFFIX", error = null) }

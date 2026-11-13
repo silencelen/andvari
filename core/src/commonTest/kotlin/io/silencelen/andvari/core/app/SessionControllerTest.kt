@@ -51,6 +51,7 @@ import kotlinx.serialization.json.Json
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -150,8 +151,8 @@ open class SessionControllerTest {
 
         val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog)
 
-        /** What an extension does with a captured login: seal it to the published key and queue it. */
-        fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, id, site, username, password, clocks.wall, "safari")
+        /** What an extension does with a captured login: seal it to the published key and queue it (under [id], here). */
+        fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, site, username, password, clocks.wall, "safari") { id }
 
         /** The AutoFill extension's view of the same shared state: its own vault object, as in another process. */
         fun autofill() = AutofillVault(store, snapshots, quickKeys, clocks, http)
@@ -1739,8 +1740,46 @@ open class SessionControllerTest {
         assertEquals(SaveQueued.REFUSED, capture("../escape", "shop.example", "me", "pw"), "an id is a file name")
         repeat(SaveQueue.MAX_ENTRIES) { assertEquals(SaveQueued.QUEUED, capture("e$it", "shop$it.example", "me", "pw")) }
         assertEquals(SaveQueued.REFUSED, capture("one-more", "shop.example", "me", "pw"), "full")
-        assertEquals(SaveQueued.QUEUED, capture("e0", "shop0.example", "me", "pw2"), "the same form's later capture replaces its entry")
         assertTrue(queue.map.values.all { it.size <= SaveQueue.MAX_ENTRY_BYTES })
+    }
+
+    @Test
+    fun anEntryIsNeverReplacedAndATakenIdIsTriedAgainUnderANewOne() = test {
+        unlocked()
+        settle { queue.key != null }
+        controller.lock()
+        assertEquals(SaveQueued.QUEUED, capture("e0", "shop.example", "me", "pw"))
+        val first = queue.map.getValue("e0").copyOf()
+        assertEquals(SaveQueued.REFUSED, capture("e0", "shop.example", "me", "pw2"), "every id it is given is taken")
+        assertContentEquals(first, queue.map.getValue("e0"), "the entry is untouched")
+        val ids = ArrayDeque(listOf("e0", "e1"))
+        assertEquals(SaveQueued.QUEUED, SaveQueue.enqueue(queue, crypto, "shop.example", "me", "pw3", clocks.wall, "autofill") { ids.removeFirst() })
+        assertEquals(setOf("e0", "e1"), queue.map.keys)
+        assertContentEquals(first, queue.map.getValue("e0"))
+        // Ids minted for the capture: 128 random bits each, never the same twice.
+        val minted = (1..20).map { SaveQueue.newId(crypto) }
+        assertTrue(minted.all { SaveQueue.validId(it) && it.matches(Regex("s-[0-9a-f]{32}")) })
+        assertEquals(minted.size, minted.toSet().size)
+    }
+
+    /**
+     * The AutoFill extension's saves while the app is closed: each is a new extension process, whose save request
+     * says sessionID "1" every time. Every one reaches the next unlock: none replaces another.
+     */
+    @Test
+    fun severalSavesMadeBeforeTheAppIsOpenedAllReachTheNextUnlock() = test {
+        unlocked()
+        settle { queue.key != null }
+        controller.lock()
+        // As IosAutofill.queueSave does it: the id is minted here, whatever the request called itself.
+        for ((site, password) in listOf("https://login.example.com/x" to "changed-1", "https://shop.example/" to "pw", "https://other.example/" to "pw-2")) {
+            assertEquals(SaveQueued.QUEUED, SaveQueue.enqueue(queue, crypto, site, if (site.contains("login.")) "fam" else "me", password, clocks.wall, "autofill"))
+        }
+        assertEquals(3, queue.map.size, "three saves, three entries")
+        controller.unlock(PASSWORD)
+        settle { controller.state.pendingSaves.size + controller.state.appliedSaves.size == 3 }
+        val hosts = (controller.state.pendingSaves.map { it.host } + controller.state.appliedSaves.map { it.host }).toSet()
+        assertEquals(setOf("login.example.com", "shop.example", "other.example"), hosts)
     }
 
     @Test

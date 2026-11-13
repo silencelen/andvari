@@ -84,26 +84,42 @@ function bounded(p: Promise<unknown>, ms: number): Promise<unknown> {
   });
 }
 
+/** How many ids one capture tries: the handler never replaces an entry, and answers a taken id as such. */
+export const ID_ATTEMPTS = 3;
+
+/** A new entry id: 128 bits from the platform's CSPRNG. */
+export function newSaveId(): string {
+  return `c-${[...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
 /**
- * Seal a captured login to the app's account and queue it through the native handler. [id] names the capture (letters,
- * digits and dashes), so a corrected password for the same form replaces its entry. Never throws.
+ * Seal a captured login to the app's account and queue it through the native handler, as an entry of its own: every
+ * attempt has a new id from [mintId] (tests pass their own), and the handler never replaces an entry, so no capture
+ * can overwrite another. A taken id is tried again under a new one. A retry after a lost answer may queue the same
+ * login twice; the app keeps only the newest capture of a login. Never throws.
  */
 export async function queueSaveToApp(
   sendNative: NativeSend,
-  capture: { id: string; site: string; username: string; password: string },
+  capture: { site: string; username: string; password: string },
   nowMs: number,
   timeoutMs = 3000,
+  mintId: () => string = newSaveId,
 ): Promise<AppSaveResult> {
   try {
     const key = parseSaveKeyReply(await bounded(sendNative({ type: "saveKey" }), timeoutMs));
     if (key === "none") return "no_account";
     if (key === "unavailable") return "unavailable";
-    if (!/^[A-Za-z0-9-]{1,64}$/.test(capture.id)) return "refused";
     const entry = buildQueuedSave(key, capture.site, capture.username, capture.password, nowMs);
     if (entry === null) return "refused";
-    const r = (await bounded(sendNative({ type: "queueSave", id: capture.id, entry }), timeoutMs)) as { ok?: unknown; type?: unknown; queued?: unknown } | undefined;
-    if (typeof r !== "object" || r === null || r.type !== "queueSave") return "unavailable";
-    return r.ok === true && r.queued === true ? "queued" : "refused";
+    for (let attempt = 0; attempt < ID_ATTEMPTS; attempt++) {
+      const id = mintId();
+      if (!/^[A-Za-z0-9-]{1,64}$/.test(id)) return "refused";
+      const r = (await bounded(sendNative({ type: "queueSave", id, entry }), timeoutMs)) as { ok?: unknown; type?: unknown; queued?: unknown; taken?: unknown } | undefined;
+      if (typeof r !== "object" || r === null || r.type !== "queueSave") return "unavailable";
+      if (r.ok === true && r.queued === true) return "queued";
+      if (r.ok !== true || r.taken !== true) return "refused";
+    }
+    return "refused";
   } catch {
     return "unavailable";
   }

@@ -20,6 +20,7 @@ import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSUUID
 import platform.Foundation.NSUserDefaults
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -173,17 +174,26 @@ class IosSeamsTest {
             assertNull(files.read())
 
             // The save queue beside it: no key published, so the extension queues nothing.
-            assertEquals(SaveQueued.NO_ACCOUNT, fill.queueSave("session 1", "shop.example", "me", "pw"))
+            assertEquals(SaveQueued.NO_ACCOUNT, fill.queueSave("shop.example", "me", "pw"))
             val queue = FileSaveQueue("$dir/saves")
             val key = createCryptoProvider().boxKeypairFromSeed(ByteArray(32) { 7 })
             queue.publish("""{"v":1,"origin":"https://home.example","userId":"u1","identityPub":"${Bytes.toB64(key.publicKey)}"}""".encodeToByteArray())
-            assertEquals(SaveQueued.QUEUED, fill.queueSave("session 1", "shop.example", "me", "pw"))
-            assertEquals(SaveQueued.QUEUED, fill.queueSave("session 1", "shop.example", "me", "pw2"), "the same form replaces its entry")
-            assertEquals(SaveQueued.QUEUED, fill.queueSave("session/2", "shop.example", "me", "pw"))
+            // Three saves in a row (the system's sessionID says "1" for each): three entries, none replacing another.
+            assertEquals(SaveQueued.QUEUED, fill.queueSave("shop.example", "me", "pw"))
+            assertEquals(SaveQueued.QUEUED, fill.queueSave("shop.example", "me", "pw2"))
+            assertEquals(SaveQueued.QUEUED, fill.queueSave("other.example", "me", "pw"))
             val entries = queue.entries()
-            assertEquals(2, entries.size)
+            assertEquals(3, entries.size)
+            assertTrue(entries.keys.all { it.matches(Regex("s-[0-9a-f]{32}")) }, entries.keys.toString())
             assertTrue(entries.values.none { it.decodeToString().contains("password") || it.decodeToString().contains("shop.example") }, "sealed at rest")
-            assertFalse(queue.put("../escape", "x".encodeToByteArray()))
+            assertFalse(queue.add("../escape", "x".encodeToByteArray()))
+            // An entry is never replaced, by this process or another (the Safari handler renames the same way).
+            val taken = entries.keys.first()
+            assertFalse(queue.add(taken, "other".encodeToByteArray()), "a taken id is refused")
+            assertContentEquals(entries.getValue(taken), queue.entries().getValue(taken), "and the entry is untouched")
+            assertTrue(queue.add("s-new", "x".encodeToByteArray()))
+            queue.remove("s-new")
+            assertTrue(NSFileManager.defaultManager.contentsOfDirectoryAtPath("$dir/saves", error = null).orEmpty().none { (it as String).endsWith(".tmp") }, "no temporary file is left")
             // What another process may leave here: an oversized entry, a name that is not an id, a stray file.
             val fm = NSFileManager.defaultManager
             fm.createFileAtPath("$dir/saves/q-huge.json", contents = ByteArray(SaveQueue.MAX_ENTRY_BYTES + 1) { 97 }.toNSData(), attributes = null)
@@ -193,7 +203,7 @@ class IosSeamsTest {
             assertFalse(fm.fileExistsAtPath("$dir/saves/q-huge.json") || fm.fileExistsAtPath("$dir/saves/stray.bin"), "the rest is removed")
             assertEquals("""{"v":1,"origin":"https://home.example","userId":"u1","identityPub":"${Bytes.toB64(key.publicKey)}"}""", queue.publication()?.decodeToString(), "the key file is not an entry")
             queue.remove(entries.keys.first())
-            assertEquals(1, queue.entries().size)
+            assertEquals(2, queue.entries().size)
             queue.clear()
             assertTrue(queue.entries().isEmpty())
             assertNull(queue.publication())

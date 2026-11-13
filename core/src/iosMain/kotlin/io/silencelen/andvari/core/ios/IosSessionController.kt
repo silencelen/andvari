@@ -14,7 +14,6 @@ import io.silencelen.andvari.core.app.SaveQueueStore
 import io.silencelen.andvari.core.app.SaveQueued
 import io.silencelen.andvari.core.app.ServerShare
 import io.silencelen.andvari.core.app.SessionController
-import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.session.BiometricHost
 import io.silencelen.andvari.core.client.session.HttpClients
 import io.silencelen.andvari.core.client.session.KeyValuePrefs
@@ -217,13 +216,12 @@ class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: S
 
     /**
      * Queue a login the system asked this extension to save (iOS 26.2): sealed to the account's public key, for the app
-     * to show and import at its next unlock. [id] names the form's session, so a later event for the same form
-     * replaces its entry. Needs no unlock and sends nothing.
+     * to show and import at its next unlock. Every call is an entry of its own, under an id minted from the system's
+     * CSPRNG: the save request's sessionID is no identity (it starts again at "1" in every extension process), so it
+     * is not taken here. Needs no unlock and sends nothing.
      */
-    fun queueSave(id: String, site: String, username: String, password: String): SaveQueued =
-        runCatching { SaveQueue.enqueue(saves, createCryptoProvider(), saveId(id), site, username, password, IosClocks.wallMs(), "autofill") }.getOrDefault(SaveQueued.REFUSED)
-
-    private fun saveId(raw: String): String = "s-" + OriginCanon.pathSafe(raw).filter { it.isLetterOrDigit() || it == '-' }.take(48).ifEmpty { "form" }
+    fun queueSave(site: String, username: String, password: String): SaveQueued =
+        runCatching { SaveQueue.enqueue(saves, createCryptoProvider(), site, username, password, IosClocks.wallMs(), "autofill") }.getOrDefault(SaveQueued.REFUSED)
 
     /** End the fill: the keys are zeroed. */
     fun close() = vault.close()

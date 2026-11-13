@@ -52,7 +52,8 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             let key = Self.savesDirectory().flatMap { try? String(contentsOf: $0.appendingPathComponent("key.json"), encoding: .utf8) }
             reply(["ok": true, "type": "saveKey", "key": key.map { $0 as Any } ?? NSNull()], to: context)
         case "queueSave":
-            reply(["ok": true, "type": "queueSave", "queued": Self.queueSave(id: message?["id"] as? String, entry: message?["entry"] as? String)], to: context)
+            let queued = Self.queueSave(id: message?["id"] as? String, entry: message?["entry"] as? String)
+            reply(["ok": true, "type": "queueSave", "queued": queued == .queued, "taken": queued == .taken], to: context)
         case "vaultOpen":
             AppVaultSession.open { self.reply($0, to: context) }
         case "vaultSecret":
@@ -76,27 +77,38 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     private static let maxEntries = 50
     private static let maxEntryBytes = 8 * 1024
 
+    private enum Queued { case queued, taken, refused }
+
     private static func savesDirectory() -> URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?.appendingPathComponent("saves", isDirectory: true)
     }
 
-    private static func queueSave(id: String?, entry: String?) -> Bool {
+    /// An entry is never replaced: it is written to a temporary file of its own and renamed into place with
+    /// RENAME_EXCL, which fails when the name is taken (as the core's FileSaveQueue does). The extension mints a new id
+    /// for every capture, so a taken id is answered as such and it tries again under another.
+    private static func queueSave(id: String?, entry: String?) -> Queued {
         guard let id, let entry, let dir = savesDirectory(),
               id.range(of: "\\A[A-Za-z0-9-]{1,64}\\z", options: .regularExpression) != nil,
               let data = entry.data(using: .utf8), !data.isEmpty, data.count <= maxEntryBytes
-        else { return false }
+        else { return .refused }
         let fm = FileManager.default
         // Only while the app has published a key: no account, no queue.
-        guard fm.fileExists(atPath: dir.appendingPathComponent("key.json").path) else { return false }
-        let file = dir.appendingPathComponent("q-\(id).json")
+        guard fm.fileExists(atPath: dir.appendingPathComponent("key.json").path) else { return .refused }
         let queued = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasPrefix("q-") && $0.hasSuffix(".json") }
-        if !fm.fileExists(atPath: file.path), queued.count >= maxEntries { return false }
+        if queued.count >= maxEntries { return .refused }
+        let file = dir.appendingPathComponent("q-\(id).json")
+        let tmp = dir.appendingPathComponent("q-\(id).json.\(UUID().uuidString).tmp")
         do {
-            try data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
-            return true
+            try data.write(to: tmp, options: [.withoutOverwriting, .completeFileProtectionUnlessOpen])
         } catch {
-            return false
+            return .refused
         }
+        if renamex_np(tmp.path, file.path, UInt32(RENAME_EXCL)) != 0 {
+            let taken = errno == EEXIST
+            try? fm.removeItem(at: tmp)
+            return taken ? .taken : .refused
+        }
+        return .queued
     }
 
     private func reply(_ body: [String: Any], to context: NSExtensionContext) {
