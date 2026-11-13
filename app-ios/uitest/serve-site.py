@@ -6,10 +6,16 @@ usage: serve-site.py <dir> <https port> <http port> <cert.pem> <key.pem>
 A POST is answered with a page that says what was submitted (field names, a digest of each value, and a
 one-time code), so a form submission navigates like a real sign-in, the browser's save offer has something
 to follow, and a test can check what was submitted without the page showing a value.
+
+POST /control/vault-create|vault-delete|vault-restore?name=… let a test act as another device of the test
+account (tools/uitest-seed `vault`), to see what the app learns at its next sync. Both ports listen on loopback
+only and the account is a throwaway one.
 """
 import functools
 import hashlib
 import http.server
+import os
+import subprocess
 import ssl
 import sys
 import threading
@@ -23,6 +29,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     timeout = 20
 
     def do_POST(self):
+        if self.path.startswith("/control/"):
+            return self.control()
         length = int(self.headers.get("Content-Length") or 0)
         fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         names = ", ".join(sorted(fields)) or "nothing"
@@ -41,6 +49,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def control(self):
+        parsed = urllib.parse.urlparse(self.path)
+        action = {"/control/vault-create": "create", "/control/vault-delete": "delete", "/control/vault-restore": "restore"}.get(parsed.path)
+        name = (urllib.parse.parse_qs(parsed.query).get("name") or [""])[0]
+        if action is None or not name:
+            self.send_error(404)
+            return
+        command = ["java", "-jar", os.environ["UITEST_SEED_JAR"], "vault", action, os.environ["UITEST_SERVER_ORIGIN"],
+                   os.environ["UITEST_EMAIL"], os.environ["UITEST_PASSWORD"], name]
+        try:
+            done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            ok, out = done.returncode == 0, (done.stdout + done.stderr)[-2000:]
+        except subprocess.TimeoutExpired:
+            ok, out = False, "timed out"
+        sys.stderr.write("control %s %r: %s\n" % (action, name, "ok" if ok else out))
+        body = out.encode()
+        self.send_response(200 if ok else 500)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

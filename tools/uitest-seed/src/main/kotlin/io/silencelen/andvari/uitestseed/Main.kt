@@ -12,6 +12,7 @@ import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.LoginRequest
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.system.exitProcess
@@ -26,6 +27,9 @@ import kotlin.system.exitProcess
  *                                       enroll the first account with the bootstrap invite, as any client would,
  *                                       confirm its recovery phrase so a sign-in lands in the vault, and save the
  *                                       logins the tests look for
+ *   vault <create|delete|restore> <origin> <email> <master password> <vault name>
+ *                                       sign in as another device of the account and create, delete or restore one of
+ *                                       its shared vaults: what the app on the simulator then learns at its next sync
  *
  * Nothing here is a backdoor: the server is unmodified and every call is one the apps make.
  */
@@ -33,12 +37,13 @@ fun main(args: Array<String>) {
     when (args.firstOrNull()) {
         "env" -> env(File(args.getOrNull(1) ?: usage()))
         "seed" -> if (args.size == 7) seed(args[1], args[2], args[3], args[4], args[5], args[6]) else usage()
+        "vault" -> if (args.size == 6 && args[1] in setOf("create", "delete", "restore")) vault(args[1], args[2], args[3], args[4], args[5]) else usage()
         else -> usage()
     }
 }
 
 private fun usage(): Nothing {
-    System.err.println("usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site>")
+    System.err.println("usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site> | vault <create|delete|restore> <origin> <email> <password> <vault name>")
     exitProcess(2)
 }
 
@@ -95,5 +100,33 @@ private fun seed(origin: String, token: String, email: String, password: String,
     api.logout()
     println("seeded ${logins.size} items for $email at $origin")
     // The HTTP client's threads are not daemons.
+    exitProcess(0)
+}
+
+/** Another device of the account creates, deletes or restores the shared vault named [name], as its owner. */
+private fun vault(action: String, origin: String, email: String, password: String, name: String): Unit = runBlocking {
+    val crypto = createCryptoProvider()
+    val api = AndvariApi(origin, HttpClient(Java), platform = "linux")
+    val pre = api.prelogin(email)
+    val authKey = Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams, crypto)
+    val session = api.login(LoginRequest(email, authKey, Account.deviceInfo("uitest-other-device", "linux")))
+    val account = Account.unlock(session.userId, password, session.accountKeys, crypto)
+    val engine = SyncEngine(api, account, InMemoryVaultCache())
+    engine.sync()
+    when (action) {
+        "create" -> engine.createSharedVault(name)
+        "delete" -> {
+            val found = engine.vaultInfos().filter { it.type == "shared" && it.name == name }
+            check(found.size == 1) { "expected one shared vault named \"$name\", found ${found.size}" }
+            engine.deleteSharedVault(found.single().vaultId)
+        }
+        else -> {
+            val found = engine.listDeleted().filter { it.name == name }
+            check(found.size == 1) { "expected one deleted vault named \"$name\", found ${found.size}" }
+            engine.restoreSharedVault(found.single().vaultId, found.single().deleteId)
+        }
+    }
+    api.logout()
+    println("$action: \"$name\" done")
     exitProcess(0)
 }
