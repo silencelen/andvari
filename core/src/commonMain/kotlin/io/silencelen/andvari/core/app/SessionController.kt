@@ -1524,7 +1524,13 @@ open class SessionController(
         val target = vaultName(live, targetVaultId) ?: "the other vault"
         val source = vaultName(live, current.vaultId) ?: "its vault"
         val name = current.doc.name.ifBlank { "This item" }
-        val gesture = when (val prepared = moves.prepare(live.engine, current, targetVaultId, move)) {
+        val gesture = when (val prepared = try {
+            moves.prepare(live.engine, current, targetVaultId, move) { runBounded(BoundedOps.FLAT_MS) { live.engine.sync() } }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            // A kept try could not be checked against the target (offline): nothing is replayed unchecked.
+            return@action idleFailed(ItemCopy.MOVE_RETRY)
+        }) {
             is VaultMoves.Prepared.AlreadyCopied -> return@action ActionResult.Failed(VaultMoves.alreadyCopiedLine(name, target))
             is VaultMoves.Prepared.Run -> prepared.gesture
         }
