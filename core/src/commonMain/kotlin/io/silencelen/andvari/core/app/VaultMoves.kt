@@ -9,6 +9,7 @@ import io.silencelen.andvari.core.client.SourceDeleteDeniedException
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.client.VaultInfo
 import io.silencelen.andvari.core.client.VaultItem
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -24,6 +25,10 @@ import kotlinx.serialization.json.Json
  *    another try replays the same ids, and the server's dedup converges instead of making a second copy. Where the
  *    item changed since a try that already copied it, no new gesture is minted while that copy is in the target
  *    (round-6 review L5): the person is told it is there.
+ *  - A kept gesture whose copy was seen is replayed only while that copy is still in the target, as a sync just before
+ *    shows it (round-7 review M3): the server answers a replayed copy leg from its journal without making the copy
+ *    again, so a copy deleted since would let the delete leg remove the only original. A copy that is gone drops the
+ *    gesture, and a new one (a new copy) is minted.
  *
  * Not thread-safe: each platform calls it from one place (Android's main dispatcher, iOS's actions).
  */
@@ -31,10 +36,10 @@ class VaultMoves(private val store: Store = Store.Memory()) {
     /** Where the kept gestures live: this object's memory, or sealed in app-private storage across a lock (iOS). */
     interface Store {
         /** What was kept; empty when nothing was, or when it cannot be read now. */
-        fun load(): Map<String, MoveGesture>
+        fun load(): Map<String, Kept>
 
         /** Keep [memos], all of them; empty removes what was kept. */
-        fun save(memos: Map<String, MoveGesture>)
+        fun save(memos: Map<String, Kept>)
 
         /**
          * Kept in [file] (app-private storage), sealed to the signed-in account ([account], null while locked): a lock
@@ -42,7 +47,7 @@ class VaultMoves(private val store: Store = Store.Memory()) {
          * empty save removes the file whatever the state.
          */
         class Sealed(private val file: FillSnapshotStore, private val account: () -> Account?) : Store {
-            override fun load(): Map<String, MoveGesture> {
+            override fun load(): Map<String, Kept> {
                 val owner = account() ?: return emptyMap()
                 val sealed = file.read() ?: return emptyMap()
                 val plain = runCatching { owner.openQueuedSave(sealed) }.getOrNull() ?: return emptyMap()
@@ -53,7 +58,7 @@ class VaultMoves(private val store: Store = Store.Memory()) {
                 }
             }
 
-            override fun save(memos: Map<String, MoveGesture>) {
+            override fun save(memos: Map<String, Kept>) {
                 if (memos.isEmpty()) {
                     file.delete()
                     return
@@ -69,21 +74,25 @@ class VaultMoves(private val store: Store = Store.Memory()) {
 
             private companion object {
                 val json = Json { ignoreUnknownKeys = true }
-                val serializer = MapSerializer(String.serializer(), MoveGesture.serializer())
+                val serializer = MapSerializer(String.serializer(), Kept.serializer())
             }
         }
 
         /** Kept only here, in memory (tests). */
         class Memory : Store {
-            private var kept: Map<String, MoveGesture> = emptyMap()
+            private var kept: Map<String, Kept> = emptyMap()
 
-            override fun load(): Map<String, MoveGesture> = kept
+            override fun load(): Map<String, Kept> = kept
 
-            override fun save(memos: Map<String, MoveGesture>) {
+            override fun save(memos: Map<String, Kept>) {
                 kept = memos
             }
         }
     }
+
+    /** A kept gesture, and whether its copy was seen in the target (a try that failed after the copy was made). */
+    @Serializable
+    data class Kept(val gesture: MoveGesture, val copySeen: Boolean = false)
 
     /** What to do for a move or copy the person asked for. */
     sealed class Prepared {
@@ -112,12 +121,12 @@ class VaultMoves(private val store: Store = Store.Memory()) {
         TRANSIENT,
     }
 
-    private val memos = LinkedHashMap<String, MoveGesture>()
+    private val memos = LinkedHashMap<String, Kept>()
     private var loaded = false
 
     private fun key(itemId: String, targetVaultId: String, move: Boolean) = "$itemId|$targetVaultId|$move"
 
-    private fun memos(): MutableMap<String, MoveGesture> {
+    private fun memos(): MutableMap<String, Kept> {
         if (!loaded) {
             memos.putAll(runCatching { store.load() }.getOrDefault(emptyMap()))
             loaded = true
@@ -129,14 +138,32 @@ class VaultMoves(private val store: Store = Store.Memory()) {
         runCatching { store.save(memos.toMap()) }
     }
 
-    /** The gesture for moving ([move]) or copying [item] into [targetVaultId], or that an earlier try's copy is there. */
-    fun prepare(engine: SyncEngine, item: VaultItem, targetVaultId: String, move: Boolean): Prepared {
+    /**
+     * The gesture for moving ([move]) or copying [item] into [targetVaultId], or that an earlier try's copy is there.
+     * A kept gesture whose copy was seen is checked against the target after [sync] first (round-7 review M3); a sync
+     * that fails throws, and nothing is replayed unchecked.
+     */
+    suspend fun prepare(engine: SyncEngine, item: VaultItem, targetVaultId: String, move: Boolean, sync: suspend () -> Unit): Prepared {
         val k = key(item.itemId, targetVaultId, move)
-        val memo = memos()[k]
-        if (memo != null && memo.sourceRev == item.rev) return Prepared.Run(memo)
-        if (memo != null && engine.item(memo.newItemId)?.vaultId == targetVaultId) return Prepared.AlreadyCopied(memo.newItemId)
+        var kept = memos()[k]
+        if (kept != null && kept.copySeen) {
+            sync()
+            if (engine.item(kept.gesture.newItemId)?.vaultId != targetVaultId) {
+                memos.remove(k)
+                persist()
+                kept = null
+            }
+        }
+        if (kept != null && kept.gesture.sourceRev == item.rev) return Prepared.Run(kept.gesture)
+        if (kept != null && engine.item(kept.gesture.newItemId)?.vaultId == targetVaultId) {
+            if (!kept.copySeen) {
+                memos[k] = kept.copy(copySeen = true)
+                persist()
+            }
+            return Prepared.AlreadyCopied(kept.gesture.newItemId)
+        }
         val fresh = engine.newMoveGesture(item.itemId, targetVaultId, move)
-        memos[k] = fresh
+        memos[k] = Kept(fresh)
         persist()
         return Prepared.Run(fresh)
     }
@@ -155,8 +182,15 @@ class VaultMoves(private val store: Store = Store.Memory()) {
             t is ApiException && t.status == 403 -> Failure.FORBIDDEN
             else -> Failure.TRANSIENT
         }
+        val k = key(itemId, targetVaultId, move)
         if (failure == Failure.COPY_DENIED || failure == Failure.FORBIDDEN) {
-            if (memos().remove(key(itemId, targetVaultId, move)) != null) persist()
+            if (memos().remove(k) != null) persist()
+        } else if (failure == Failure.CHANGED_AFTER_COPY || failure == Failure.ORIGINAL_KEPT) {
+            // The copy was made and seen: a later replay must find it still there (M3).
+            memos()[k]?.let {
+                memos[k] = it.copy(copySeen = true)
+                persist()
+            }
         }
         return failure
     }

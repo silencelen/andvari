@@ -56,7 +56,7 @@ class VaultMovesWiringTest {
         val move = span(vm, "fun moveOrCopyItem(itemId: String, targetVaultId: String, move: Boolean) {", "\n    // ---- ")
         assertTrue(move.contains("if (move && !canMoveOut(current))"), "a move needs the source writable")
         assertTrue(move.contains("if (moveTargets(current).none { it.vaultId == targetVaultId })"), "the target must be one of the shared targets")
-        assertTrue(move.contains("moves.prepare(e, current, targetVaultId, move)"))
+        assertTrue(move.contains("moves.prepare(e, current, targetVaultId, move) { runBounded(BoundedOps.FLAT_MS) { e.sync() } }"), "a kept copy is checked after a sync (round-7 M3)")
         assertTrue(move.contains("is VaultMoves.Prepared.AlreadyCopied ->"), "an earlier try's copy is never made again")
         assertTrue(move.contains("moves.finished(itemId, targetVaultId, move)"))
         assertTrue(move.contains("moves.failed(itemId, targetVaultId, move, t)"))

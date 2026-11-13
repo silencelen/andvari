@@ -2249,7 +2249,7 @@ class AndvariViewModel(
                 names = Triple(current.doc.name.ifBlank { "This item" }, infos.find { it.vaultId == targetVaultId }?.name ?: "the other vault", infos.find { it.vaultId == current.vaultId }?.name ?: "its vault")
                 // #5 / L5: the memo is reused ONLY while the source content is unchanged; a changed item whose earlier
                 // try already made the copy mints nothing new.
-                val g = when (val prepared = moves.prepare(e, current, targetVaultId, move)) {
+                val g = when (val prepared = moves.prepare(e, current, targetVaultId, move) { runBounded(BoundedOps.FLAT_MS) { e.sync() } }) {
                     is VaultMoves.Prepared.AlreadyCopied -> {
                         _ui.value = _ui.value.copy(busy = false, error = VaultMoves.alreadyCopiedLine(names.first, names.second))
                         return@launch

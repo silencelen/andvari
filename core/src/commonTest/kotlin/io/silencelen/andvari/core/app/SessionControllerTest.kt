@@ -1038,6 +1038,36 @@ open class SessionControllerTest {
         assertNull(moveMemoLog.bytes)
     }
 
+    /**
+     * Round-7 review M3: after a move whose original could not be removed, the copy is deleted (here, or on another
+     * device). Another try must not replay the kept gesture, whose copy leg the server would answer from its journal
+     * without making the copy again, and then delete the only original: it finds the copy gone and mints a new one.
+     */
+    @Test
+    fun aKeptMoveWhoseCopyWasDeletedSinceMakesANewCopyBeforeAnyDelete() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        val family = controller.moveTargets(ITEM_ID).single()
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
+        moveServer(server, delete = "denied", pushed)
+        assertIs<ActionResult.Failed>(controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        val firstCopy = pushed.single { it.op == "put" }.itemId
+        controller.lock()
+        // The copy is deleted meanwhile: the next sync no longer has it.
+        namespaces.caches.getValue("$homeKey/${reg.userId}").deleteItem(firstCopy)
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        moveServer(server, delete = "applied", pushed)
+        assertEquals(ActionResult.Ok, controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        val puts = pushed.filter { it.op == "put" }.map { it.itemId }
+        assertEquals(2, puts.size)
+        assertNotEquals(firstCopy, puts.last(), "a new copy, not the replayed one")
+        val deletes = pushed.filter { it.op == "delete" }
+        assertTrue(pushed.indexOfLast { it.op == "put" } < pushed.indexOf(deletes.last()), "the new copy is made before the original goes")
+        assertTrue(controller.state.items.any { it.itemId == puts.last() }, "and it is there")
+    }
+
     @Test
     fun aMovedItemThatChangedMeanwhileIsKeptAndNoSecondCopyIsMinted() = test {
         unlockedWithAPersonalVault()
@@ -1054,10 +1084,12 @@ open class SessionControllerTest {
         // The original changes (another device's edit, pulled by a sync): another try would copy a different item, and
         // the earlier copy is there.
         val changed = enrolled.account.encryptItem(reg.personalVault.vaultId, ITEM_ID, item.copy(login = item.login!!.copy(password = "changed-elsewhere")))
-        val row = WireItem(ITEM_ID, reg.personalVault.vaultId, server.rev + 50, 1_000, 9_000, false, false, changed.formatVersion, changed.attachmentIds, changed.blob)
+        server.rev += 50
+        val row = WireItem(ITEM_ID, reg.personalVault.vaultId, server.rev, 1_000, 9_000, false, false, changed.formatVersion, changed.attachmentIds, changed.blob)
         val sync = routes.getValue("/sync")
         routes["/sync"] = {
-            val body = io.silencelen.andvari.core.model.SyncResponse(server.rev + 60, false, server.vaults.values.toList(), server.grants.values.toList(), listOf(row), emptyList())
+            // The server's counter only moves forward: the next ordinary sync answers above this one.
+            val body = io.silencelen.andvari.core.model.SyncResponse(++server.rev, false, server.vaults.values.toList(), server.grants.values.toList(), listOf(row), emptyList())
             respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
         }
         assertEquals(ActionResult.Ok, controller.refresh())
