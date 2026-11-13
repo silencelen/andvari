@@ -324,10 +324,60 @@ final class T4VaultFeatureTests: UITestCase {
         try skip("The iOS simulator has no third-party keyboard installed, and the suite cannot add one without shipping a keyboard extension in an app of its own, so whether andvari keeps such a keyboard out of its fields cannot be shown here. The switch itself is checked above: present, and off by default.")
     }
 
-    /// A read-only member's item offers Copy only. Not reachable here: the iOS app has no way yet to accept a vault
-    /// another member shares (no invitation or identity-check screen), so no vault this account only reads can be opened.
-    func test10_ReadOnlyVaultItemOffersCopyOnly() throws {
-        try skip("The iOS app cannot yet accept a shared vault from another member: there is no invitation or identity-code check screen, and a grant from someone this device has not verified is not adopted by itself. So no vault this account only reads can be opened on the simulator, and the Copy-only offer of its items cannot be shown. The seed tool can make the share once the app can accept it.")
+    /// A vault this account only reads. A second account shares it read-only and another device of this account accepts
+    /// it (tools/uitest-seed `share`), so the app here holds it after a sync with no invitation screen of its own. Its
+    /// login opens without Edit and offers Copy to another vault, not Move; the copy lands in the personal vault, where
+    /// it can be edited, and the original stays.
+    func test10_ReadOnlyVaultItemOffersCopyOnly() {
+        let vault = "Read Only \(stamp)"
+        let item = "Shared To Read \(stamp)"
+        step("shared-read-only-elsewhere-and-synced-here") {
+            XCTAssertNil(OtherDevice.shareReadOnly(vault: vault, item: item), "the read-only share could not be made")
+            bringAppForward()
+            reachVaultAnyWay()
+            for _ in 0..<3 where !vaultRow(item).exists {
+                refreshVault()
+                _ = waitUntil(10) { self.vaultRow(item).exists }
+            }
+            require(vaultRow(item), "\(item) from the read-only vault", timeout: 10)
+        }
+        let copyOnly = app.buttons["Copy to another vault…"]
+        step("no-edit-and-copy-only") {
+            openItem(item)
+            XCTAssertFalse(app.navigationBars.buttons["Edit"].exists, "a login in a vault this account only reads offers Edit")
+            scrollToComfort(copyOnly)
+            require(copyOnly, "Copy to another vault… in the read-only login")
+            XCTAssertFalse(app.buttons["Move or copy to another vault…"].exists, "a login in a vault this account only reads offers Move")
+        }
+        let sheet = app.navigationBars["Move or copy"]
+        step("sheet-copies-only") {
+            copyOnly.tap()
+            require(sheet, "the copy sheet")
+            XCTAssertTrue(containing("can be copied out, not moved", in: app).exists, "the sheet does not say the login can only be copied")
+            XCTAssertFalse(app.buttons["Move"].exists, "the sheet offers Move for a login in a vault this account only reads")
+            XCTAssertFalse(app.buttons["\(vault) (shared)"].exists, "the vault this account only reads is offered as a target")
+            app.buttons["Personal"].tap()
+            sheet.buttons["Copy"].tap()
+            XCTAssertTrue(waitUntil(20) { !sheet.exists }, "the copy did not finish")
+        }
+        step("copy-is-editable-original-is-not") {
+            if app.navigationBars.buttons.firstMatch.exists && !settingsButton.exists {
+                app.navigationBars.buttons.firstMatch.tap()
+            }
+            let rows = app.descendants(matching: .any).matching(identifier: "vault.item." + item)
+            XCTAssertTrue(waitUntil(15) { rows.count == 2 }, "the copy did not appear beside the read-only original")
+            var editable = 0
+            for index in 0..<2 {
+                let row = rows.element(boundBy: index)
+                scrollToComfort(row)
+                row.tap()
+                require(element("detail.username"), "the detail of \(item), row \(index + 1)")
+                if waitUntil(3, { self.app.navigationBars.buttons["Edit"].exists }) { editable += 1 }
+                app.navigationBars.buttons.firstMatch.tap()
+                _ = waitUntil(10) { self.settingsButton.exists }
+            }
+            XCTAssertEqual(editable, 1, "of the read-only login and its copy, \(editable) offer Edit; only the copy should")
+        }
     }
 
     // MARK: - Helpers
