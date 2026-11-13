@@ -123,7 +123,9 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
         val context = LAContext()
         evaluate(context, reasonOf(host, "Turn on quick unlock"))?.let { return QuickUnlockCopy.enrollFailure(it) }
         wipe(originKey, userId) // a new enrollment replaces any earlier one
-        val key = createKey(tag(originKey, userId)) ?: return QuickEnroll.Failed(QuickUnlockCopy.NO_SECURE_HARDWARE)
+        // The second key exists only in a simulator build ([simulatorQuickUnlockKey]); on a device it is always null.
+        val key = createKey(tag(originKey, userId)) ?: simulatorQuickUnlockKey(tag(originKey, userId), accessGroup)
+            ?: return QuickEnroll.Failed(QuickUnlockCopy.NO_SECURE_HARDWARE)
         try {
             val publicKey = SecKeyCopyPublicKey(key) ?: return failEnroll(originKey, userId)
             val wrapped = try {
@@ -300,3 +302,9 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
         const val USER_CANCELED = -128L
     }
 }
+
+/**
+ * The stand-in key of a simulator build, where there is no Secure Enclave, so the UI tests can exercise quick unlock.
+ * Always null on a device: the device actual is one line, and the simulator's code is not compiled into it.
+ */
+internal expect fun simulatorQuickUnlockKey(tag: String, accessGroup: String?): SecKeyRef?

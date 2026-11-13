@@ -67,6 +67,7 @@ struct SettingsView: View {
                         Label(Biometry.name, systemImage: Biometry.symbol)
                     }
                     .disabled(model.state.busy || !(quick.available || quick.enrolled))
+                    .accessibilityIdentifier("settings.quick-unlock")
                     LabeledContent("Auto-lock", value: autoLock)
                     LabeledContent("Copied secrets clear after", value: clipboardClear)
                 } header: {
@@ -75,10 +76,12 @@ struct SettingsView: View {
                     if let message {
                         Text(message)
                             .foregroundStyle(Palette.danger)
+                            .accessibilityIdentifier("settings.quick-unlock-message")
                     } else if let reason = quick.reason {
                         // Why the switch is unavailable (the core's sentence); nothing while it is merely off.
                         Text(reason)
                             .foregroundStyle(Palette.inkDim)
+                            .accessibilityIdentifier("settings.quick-unlock-message")
                     }
                 }
                 .listRowBackground(Palette.raised)
@@ -128,10 +131,12 @@ struct SettingsView: View {
                     Button("Lock now") {
                         model.lock()
                     }
+                    .accessibilityIdentifier("settings.lock")
                     Button("Sign out", role: .destructive) {
                         confirmSignOut = true
                     }
                     .disabled(model.state.busy)
+                    .accessibilityIdentifier("settings.sign-out")
                 }
                 .listRowBackground(Palette.raised)
 
@@ -160,6 +165,7 @@ struct SettingsView: View {
                     Button("Done") {
                         dismiss()
                     }
+                    .accessibilityIdentifier("settings.done")
                 }
             }
             .toolbarBackground(Palette.background, for: .navigationBar)

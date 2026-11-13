@@ -51,11 +51,13 @@ struct WelcomeView: View {
                     .truncationMode(.middle)
                     .accessibilityLabel("Server")
                     .accessibilityValue(model.state.server ?? "")
+                    .accessibilityIdentifier("welcome.server")
                 Button("Change") {
                     model.changeServer()
                 }
                 .font(.footnote.weight(.semibold))
                 .disabled(model.state.busy)
+                .accessibilityIdentifier("welcome.change-server")
             }
             if model.state.serverUnreachable {
                 HStack(spacing: 10) {
