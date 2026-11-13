@@ -394,14 +394,17 @@ extension UITestCase {
     /// Open andvari's popup on the page Safari shows and look at the phone until [done], answering Safari's
     /// per-site questions on the way. The popup asks for Face ID by itself once it has painted.
     @discardableResult
-    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true) -> Bool {
+    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true, keepKeyboard: Bool = false) -> Bool {
         closePopup()
         _ = waitUntil(4) { self.fillOfferButton.exists }
         closeFillOffer()
-        // The keyboard's bar has a Done of its own, and the keyboard hides Safari's toolbar.
-        let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
-        if safari.keyboards.firstMatch.exists && keyboardDone.exists { tapWhereItIs(keyboardDone, in: safari) }
         let menu = safari.buttons["PageFormatMenuButton"]
+        // The keyboard's bar has a Done of its own, and the keyboard can hide Safari's toolbar. Closing it takes the
+        // focus from the page's field, so [keepKeyboard] closes it only when the page menu cannot be reached past it.
+        let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
+        if safari.keyboards.firstMatch.exists && keyboardDone.exists && !(keepKeyboard && menu.exists && menu.isHittable) {
+            tapWhereItIs(keyboardDone, in: safari)
+        }
         if !waitUntil(10, { menu.exists && menu.isHittable }) {
             dumpTree(safari, as: "no-page-menu")
             XCTFail("Safari's page menu button is not reachable")
