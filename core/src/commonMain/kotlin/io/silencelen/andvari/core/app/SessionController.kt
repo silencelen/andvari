@@ -1320,6 +1320,9 @@ open class SessionController(
     /** This server and account, as a pending key records whose it is. */
     private fun ownerOf(live: VaultSession.Unlocked): String = (store.baseUrl?.let(OriginCanon::originKey) ?: "") + "/" + live.account.userId
 
+    /** Whether a key being set up is held (tests: what a lock or a revocation keeps). */
+    internal fun holdsTwoStepKey(): Boolean = twoStepPending != null
+
     /** The pending key while it is [live]'s and in time; one past its time, or another account's, is dropped here. */
     private fun pendingTwoStep(live: VaultSession.Unlocked): TwoStepSetup? {
         val pending = twoStepPending ?: return null
@@ -1711,7 +1714,9 @@ open class SessionController(
             ActionResult.Ok
         }
         is UnlockResult.Revoked -> {
-            // F26: a definitive rejection is a session-end: the ladder purged the session; say why on sign-in.
+            // F26: a definitive rejection is a session-end: the ladder purged the session; say why on sign-in. What the
+            // account kept across the lock goes with it (round-7 review L4): a key being set up, an unfinished move.
+            forgetSessionViews()
             update { cleared(it, REASON_SESSION_ENDED).copy(screen = landingScreen(), accountEmail = null, mustChangePassword = false) }
             refreshQuick()
             ActionResult.Failed(copy(r.cause))
@@ -2150,7 +2155,9 @@ open class SessionController(
         trashRead = emptyMap()
         historyRead = null
         if (ordinaryLock) moves.forget() else moves.drop()
-        if (!ordinaryLock) twoStepPending = null
+        // A key past its time goes now, not at the next unlock (round-7 review L4): it is not kept in memory while locked.
+        val pending = twoStepPending
+        if (!ordinaryLock || (pending != null && clocks.monotonicMs() - pending.mintedAtMs !in 0 until TWO_STEP_PENDING_MS)) twoStepPending = null
         deletedVaults = emptyMap()
     }
 

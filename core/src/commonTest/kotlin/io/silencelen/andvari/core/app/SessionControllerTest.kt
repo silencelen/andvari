@@ -925,6 +925,27 @@ open class SessionControllerTest {
         assertNull(controller.twoStepSetup())
     }
 
+    /** Round-7 review L4: a key past its time goes at the lock, and a session revoked at the next unlock takes it with it. */
+    @Test
+    fun aKeyBeingSetUpGoesAtALockPastItsTimeAndWithASessionRevokedAtUnlock() = test {
+        unlocked()
+        twoStepServer()
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        clocks.mono += 11 * MINUTE
+        controller.lock()
+        assertFalse(controller.holdsTwoStepKey(), "past its time: not kept while locked")
+        // In time at the lock, then the server says the session is dead at the next unlock.
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        controller.lock()
+        assertTrue(controller.holdsTwoStepKey(), "an ordinary lock keeps it for the trip")
+        routes["/account/keys"] = { respond("""{"error":"unauthorized","message":"revoked"}""", HttpStatusCode.Unauthorized, headers) }
+        routes["/auth/refresh"] = { respond("""{"error":"unauthorized","message":"revoked"}""", HttpStatusCode.Unauthorized, headers) }
+        assertIs<ActionResult.Failed>(controller.unlock(PASSWORD))
+        assertEquals("Your session ended — sign in again.", controller.state.lockReason)
+        assertFalse(controller.holdsTwoStepKey(), "the revoked session takes it with it")
+    }
+
     @Test
     fun aRefusedCodeOrAWeakServerSaysWhyAndChangesNothing() = test {
         unlocked()
