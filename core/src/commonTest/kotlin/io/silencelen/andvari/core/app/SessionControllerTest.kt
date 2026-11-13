@@ -828,6 +828,102 @@ open class SessionControllerTest {
         assertNull(controller.twoStepSetup())
     }
 
+    /**
+     * The server answers for a setup, with the account's keys re-wrapped under the KDF floor (the fixture's own are below
+     * it, and a password proof is only derived at or above it), so Turn on gets as far as a new key.
+     */
+    private fun Rig.twoStepServer(confirmed: () -> Unit = {}) {
+        val floor = io.silencelen.andvari.core.crypto.KdfParams(ops = 3, memBytes = io.silencelen.andvari.core.client.KdfUpgrade.MIN_MEM_BYTES)
+        val mk = io.silencelen.andvari.core.crypto.Keys.masterKey(crypto, PASSWORD, Bytes.fromB64(cached.kdfSalt), floor)
+        val wrap = io.silencelen.andvari.core.crypto.Keys.wrapKey(crypto, mk)
+        val uvk = enrolled.account.uvkCopyForPlatformWrap()
+        val wrapped = io.silencelen.andvari.core.crypto.Envelope.sealB64(crypto, wrap, uvk, io.silencelen.andvari.core.crypto.Ad.uvk(reg.userId))
+        routes["/account/keys"] = { respond(json.encodeToString(AccountKeys.serializer(), cached.copy(kdfParams = floor, wrappedUvk = wrapped)), HttpStatusCode.OK, headers) }
+        routes["/account/totp"] = { respond("""{"enrolled":false,"pendingSetup":false}""", HttpStatusCode.OK, headers) }
+        routes["/account/totp/setup"] = {
+            respond("""{"secretBase32":"JBSWY3DPEHPK3PXP","otpauthUri":"otpauth://totp/andvari:${EMAIL}?secret=JBSWY3DPEHPK3PXP&issuer=andvari&digits=8"}""", HttpStatusCode.OK, headers)
+        }
+        routes["/account/totp/confirm"] = {
+            confirmed()
+            respond("""{"enrolled":true,"pendingSetup":false}""", HttpStatusCode.OK, headers)
+        }
+    }
+
+    @Test
+    fun theAuthenticatorLinkNamesTheServerNotTheEmail() {
+        assertEquals("otpauth://totp/andvari:vault.example?secret=JBSWY3DPEHPK3PXP&issuer=andvari", authenticatorLink("JBSWY3DPEHPK3PXP", "otpauth://totp/andvari:me%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=andvari", "vault.example"))
+        assertEquals(
+            "otpauth://totp/andvari:vault.example?secret=JBSWY3DPEHPK3PXP&issuer=andvari&algorithm=SHA256&digits=8&period=60",
+            authenticatorLink("JBSWY3DPEHPK3PXP", "otpauth://totp/x:me@example.com?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=60", "vault.example"),
+            "the server's own algorithm, digits and period are kept",
+        )
+        assertEquals("otpauth://totp/andvari:%5B%3A%3A1%5D?secret=AB%3D%3D&issuer=andvari", authenticatorLink("AB==", "not a link", "[::1]"))
+    }
+
+    /**
+     * Round-6 review L4: setting up two-step sign-in sends the person to an authenticator, which locks the app. The key
+     * being set up stays (for ten minutes from when it was minted), the screen comes back on its confirm step after the
+     * unlock, and the code from it confirms. The link names the server, never the email.
+     */
+    @Test
+    fun aKeyBeingSetUpOutlivesTheTripToTheAuthenticatorAndIsConfirmedAfterTheUnlock() = test {
+        unlocked()
+        var confirms = 0
+        twoStepServer { confirms++ }
+        assertEquals(ActionResult.Ok, controller.loadTwoStep())
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        val setup = assertNotNull(controller.twoStepSetup())
+        assertEquals("JBSWY3DPEHPK3PXP", setup.secret)
+        assertEquals("otpauth://totp/andvari:home.example?secret=JBSWY3DPEHPK3PXP&issuer=andvari&digits=8", setup.uri)
+        assertFalse(setup.uri.contains(EMAIL) || setup.uri.contains("%40") || setup.uri.contains("example.com"), "never the email")
+        // Open in authenticator: the app leaves the foreground and locks; the screen goes with the lock.
+        controller.lock()
+        controller.closeTwoStep()
+        assertNull(controller.state.twoStep)
+        assertNull(controller.twoStepSetup(), "nothing is shown while locked")
+        clocks.mono += 4 * MINUTE
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(TwoStepView(enrolled = false, settingUp = true, resumed = true), controller.state.twoStep, "back on the confirm step")
+        assertEquals(setup.secret, controller.twoStepSetup()?.secret, "the same key, not a new one")
+        assertEquals(ActionResult.Ok, controller.loadTwoStep())
+        assertEquals(TwoStepView(enrolled = false, settingUp = true), controller.state.twoStep)
+        assertEquals(ActionResult.Ok, controller.confirmTwoStep("123456"))
+        assertEquals(1, confirms)
+        assertEquals(ItemCopy.TWO_STEP_ON, controller.state.notice)
+        assertNull(controller.twoStepSetup())
+        assertEquals(1, calls.count { it.endsWith("/account/totp/setup") }, "one key was minted")
+    }
+
+    @Test
+    fun aKeyBeingSetUpGoesAfterTenMinutesWhenTheScreenIsClosedOrOnSignOut() = test {
+        unlocked()
+        twoStepServer()
+        // Past its time while locked: not shown again, and nothing to confirm.
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        controller.lock()
+        controller.closeTwoStep()
+        clocks.mono += 11 * MINUTE
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertNull(controller.state.twoStep)
+        assertNull(controller.twoStepSetup())
+        assertEquals(ActionResult.NotDone(null), controller.confirmTwoStep("123456"))
+        // Closed by the person while unlocked: gone.
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        controller.closeTwoStep()
+        assertNull(controller.twoStepSetup())
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertNull(controller.state.twoStep)
+        // A sign-out drops it, though the app was only locked when it ran.
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.signOut())
+        seedSession()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertNull(controller.state.twoStep)
+        assertNull(controller.twoStepSetup())
+    }
+
     @Test
     fun aRefusedCodeOrAWeakServerSaysWhyAndChangesNothing() = test {
         unlocked()

@@ -260,6 +260,11 @@ data class TwoStepView(
     val enrolled: Boolean,
     /** A new key is being set up on this device ([SessionController.twoStepSetup]) and waits for its first code. */
     val settingUp: Boolean,
+    /**
+     * The person left the app in the middle of setting up (to add the key to an authenticator) and has just unlocked
+     * again: the app opens the two-step screen on its confirm step.
+     */
+    val resumed: Boolean = false,
 )
 
 /**

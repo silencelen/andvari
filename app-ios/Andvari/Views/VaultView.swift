@@ -13,6 +13,9 @@ struct VaultView: View {
     @State private var syncMessage: String?
     @State private var copies = 0
     @State private var undoAllFailure: String?
+    /// The two-step setup the person left the app in the middle of (to add the key to an authenticator), back on its
+    /// confirm step after the unlock (round-6 review L4).
+    @State private var resumeTwoStep = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -43,6 +46,24 @@ struct VaultView: View {
                 .environmentObject(model)
                 .tint(Palette.goldText)
                 .privacyShield()
+        }
+        .onChange(of: model.state.twoStep?.resumed == true, initial: true) { _, resumed in
+            if resumed, !showSettings { resumeTwoStep = true }
+        }
+        .sheet(isPresented: $resumeTwoStep) {
+            NavigationStack {
+                TwoStepView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                resumeTwoStep = false
+                            }
+                        }
+                    }
+            }
+            .environmentObject(model)
+            .tint(Palette.goldText)
+            .privacyShield()
         }
         .sheet(isPresented: $showNewCard) {
             CardEditorView(itemId: nil)
