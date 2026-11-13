@@ -85,6 +85,21 @@ struct Banners: View {
                     model.dismissError()
                 }
             }
+            // A save with files being finished after an unlock (an editor shows its own progress).
+            if let upload = model.state.upload, model.state.attachmentDraft == nil {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(Palette.gold)
+                    Text("Finishing a save with files: \(upload.done) of \(upload.total) sent.")
+                        .font(.subheadline)
+                        .foregroundStyle(Palette.ink)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Palette.raised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityElement(children: .combine)
+            }
             if let notice = model.state.notice {
                 Plate(text: notice, tone: .notice) {
                     model.dismissNotice()

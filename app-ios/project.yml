@@ -52,6 +52,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSFaceIDUsageDescription: andvari uses Face ID to unlock your vault.
+        NSCameraUsageDescription: andvari uses the camera to scan documents into an item, and to scan a household member's code when you check who they are.
     entitlements:
       path: Andvari/Andvari.entitlements
       properties:

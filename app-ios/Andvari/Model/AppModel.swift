@@ -1,5 +1,6 @@
 import AndvariCore
 import SwiftUI
+import UIKit
 
 /// The screen the controller names. `AppScreen` is a Kotlin enum, exported as a class with one static
 /// member per entry.
@@ -84,6 +85,8 @@ final class AppModel: ObservableObject {
     private var suggestedKey: String? = ""
     private var endObservation: (() -> Void)?
     private var wasInBackground = false
+    /// The time iOS gives the app to finish running work (an upload most of all) after it left; invalid when none is held.
+    private var grace: UIBackgroundTaskIdentifier = .invalid
 
     init() {
         let controller = IosSessionController()
@@ -97,6 +100,7 @@ final class AppModel: ObservableObject {
         endObservation = { observation.close() }
         controller.start()
         CredentialIdentities.publishProviderState()
+        TemporaryFiles.clear() // whatever a file export left when the app was stopped during it
     }
 
     private func receive(_ next: AppState) {
@@ -104,6 +108,10 @@ final class AppModel: ObservableObject {
             gateForInvite = false
         }
         state = next
+        // The work the lock waited for is done, or the vault locked: the time asked of iOS goes back.
+        if grace != .invalid, Screen(next.screen) != .vault || (!next.busy && next.upload == nil) {
+            endGrace()
+        }
         if let seconds = next.policy?.clipboardClearSeconds {
             Clipboard.lifetime = TimeInterval(seconds)
         }
@@ -137,13 +145,18 @@ final class AppModel: ObservableObject {
 
     // MARK: - Lifecycle
 
-    /// The vault locks when the app leaves the foreground; the idle check and a quiet sync run on return.
+    /// The vault locks when the app leaves the foreground; the idle check and a quiet sync run on return. The screen is
+    /// covered at once (PrivacyShield). Work still running (an upload most of all) gets up to 30 seconds, and the vault
+    /// locks the moment it ends or that runs out; the Lock button is always immediate.
     func scenePhaseChanged(to phase: ScenePhase) {
         switch phase {
         case .background:
             wasInBackground = true
-            controller.onBackground()
+            if controller.onBackground() {
+                holdForRunningWork()
+            }
         case .active:
+            endGrace()
             if wasInBackground {
                 wasInBackground = false
                 controller.onForeground()
@@ -152,6 +165,22 @@ final class AppModel: ObservableObject {
         default:
             break
         }
+    }
+
+    private func holdForRunningWork() {
+        guard grace == .invalid else { return }
+        grace = UIApplication.shared.beginBackgroundTask(withName: "Finish saving files") { [weak self] in
+            MainActor.assumeIsolated {
+                self?.controller.backgroundTimeEnded()
+                self?.endGrace()
+            }
+        }
+    }
+
+    private func endGrace() {
+        guard grace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(grace)
+        grace = .invalid
     }
 
     /// The person touched or typed: the idle window starts again.
@@ -317,6 +346,49 @@ final class AppModel: ObservableObject {
 
     func saveNote(itemId: String?, input: NoteInput, vaultId: String? = nil) async -> Outcome {
         await run { try await $0.saveNote(itemId: itemId, input: input, vaultId: vaultId) }
+    }
+
+    // MARK: - Files
+
+    /// An editor opened (nil: a new item): its files are listed, and files can be added and taken off.
+    func openAttachmentDraft(_ itemId: String?) {
+        controller.openAttachmentDraft(itemId: itemId)
+    }
+
+    /// The editor closed: what it added and did not save goes.
+    func closeAttachmentDraft() {
+        controller.closeAttachmentDraft()
+    }
+
+    func removeAttachment(_ id: String) {
+        controller.removeAttachment(attachmentId: id)
+    }
+
+    /// Why a file of `size` bytes cannot join the open editor's item, or nil when it can.
+    func attachmentRefusal(size: Int64) -> String? {
+        guard let draft = state.attachmentDraft else { return nil }
+        return AttachmentRules.shared.refusal(size: size, held: draft.totalBytes, limits: draft.limits)
+    }
+
+    /// The most a file may be read to now: the per-file limit, or what is left of the item's, whichever is less.
+    func attachmentReadLimit() -> Int64 {
+        guard let draft = state.attachmentDraft else { return 0 }
+        return max(0, min(draft.limits.perFileBytes, draft.limits.perItemBytes - draft.totalBytes))
+    }
+
+    /// The core encrypts the file and sets it aside; it goes up with the item's next save.
+    func addAttachment(name: String, data: Data) async -> Outcome {
+        await run { try await $0.addAttachmentData(name: name, data: data) }
+    }
+
+    /// One file, decrypted into memory; nil when the calling task was cancelled.
+    func openAttachment(itemId: String, attachmentId: String) async -> AttachmentFile? {
+        try? await controller.openAttachment(itemId: itemId, attachmentId: attachmentId)
+    }
+
+    /// A scan's pages (JPEG) as one PDF, made in memory.
+    func scannedPdf(_ pages: [Data]) -> Data? {
+        controller.scannedPdf(pages: pages)
     }
 
     // MARK: - Shared vaults
