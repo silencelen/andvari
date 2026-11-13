@@ -7,8 +7,9 @@ name: iOS UI tests
 on:
   push:
     # ios-ui, the iOS branch the suite was merged into, runs it on every push (the newest push only: the concurrency
-    # group below is per ref, and a push's inputs.ref is empty, so a newer push cancels an older run).
-    branches: [ios-uitest, ios-ui]
+    # group below is per ref, and a push's inputs.ref is empty, so a newer push cancels an older run). ios-uitest-next
+    # carries the next batch of tests until ios-ui takes it.
+    branches: [ios-uitest, ios-ui, ios-uitest-next]
   workflow_dispatch:
     inputs:
       ref:
