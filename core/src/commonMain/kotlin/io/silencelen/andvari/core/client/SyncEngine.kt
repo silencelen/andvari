@@ -807,8 +807,13 @@ class SyncEngine(
                 }
             }
             // A9 review LOW-4: a proposal is resolved only by the human ([acceptPersonalChange] after the co-holders were
-            // shown, or a reauthed re-designation); a designation arriving later never confirms it on their behalf.
-            Account.PersonalStatus.PROPOSED -> personalVaultChoices = null
+            // shown, or a reauthed re-designation); a designation arriving later never confirms it on their behalf. It is
+            // described against the designation as it stands now, though: one held at hydrate on a first sign-in was held
+            // before any account state was read.
+            Account.PersonalStatus.PROPOSED -> {
+                personalVaultChoices = null
+                account.describeProposalAgainst(designation)
+            }
             Account.PersonalStatus.WITHHELD, Account.PersonalStatus.CHANGED, Account.PersonalStatus.UNREADABLE_CACHED ->
                 personalVaultChoices = null
             // A11 (c00): the cached wrap is checked against the designation here too: withholding the wrap, or serving
