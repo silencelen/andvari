@@ -407,7 +407,7 @@ interface TabState {
    *  locked re-offers to one per REOFFER_MIN_GAP_MS (knownlogins.ts reofferDecision owns the
    *  ordering). All three are cleared when the unlock re-offer hands the pending to a live
    *  session, and none ride publicPending. */
-  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number; appSaveId?: string }) | undefined;
+  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the frame's browser-set origin, ALL its card
    *  forms' kinds in document order (Tier 2 §2) }. METADATA ONLY (never card values). `origin` is
    *  `sender.origin` ([A2]); every card offer/redemption re-derives the tab's top origin and
@@ -4896,10 +4896,10 @@ async function capturedCredential(
 /** Safari: hand the tab's pending capture to the andvari app. The pending is dropped only once the app's queue took it. */
 async function saveThroughApp(tabId: number, st: TabState, pending: NonNullable<TabState["pending"]>): Promise<Res<"resolvePendingSave">> {
   const send = nativeSender(globalThis as Parameters<typeof nativeSender>[0], SAFARI_NATIVE_APP) as unknown as Parameters<typeof queueSaveToApp>[0];
-  // One entry per capture, under an id of its own: a later capture in the same tab never replaces one the person was
-  // already told is on its way. A retry of the same pending reuses its id. (The app drops exact duplicates.)
-  pending.appSaveId ??= `c-${[...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-  const capture = { id: pending.appSaveId, site: pending.uri ?? `https://${pending.host}`, username: pending.username, password: pending.password };
+  // Every attempt is an entry under a new id (queueSaveToApp mints it), and the handler never replaces an entry: a
+  // later capture never overwrites one the person was already told is on its way. A retry after a lost answer may
+  // queue this login twice; the app keeps the newest capture of a login and drops the older.
+  const capture = { site: pending.uri ?? `https://${pending.host}`, username: pending.username, password: pending.password };
   const r = await queueSaveToApp(send, capture, Date.now());
   if (r === "queued") {
     st.pending = undefined;

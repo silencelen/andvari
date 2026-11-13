@@ -149,7 +149,8 @@ test("a page frame gets a secret only through the popup's grant, never a code, a
 
 test("each capture is queued under its own id, and the old session is retired before the app's server is adopted", () => {
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
-  assert.match(bg, /pending\.appSaveId \?\?= `c-\$\{/);
+  const viaApp = bg.slice(bg.indexOf("async function saveThroughApp("), bg.indexOf("async function resolvePendingSave("));
+  assert.ok(!viaApp.includes("id:") && !bg.includes("appSaveId"), "the worker names no entry: queueSaveToApp mints an id per attempt");
   assert.ok(!bg.includes("id: `t${tabId}-${pending.frameId}`"));
   const retire = bg.slice(bg.indexOf("async function retireOwnSession("), bg.indexOf("const ownSessionRetired"));
   const erase = retire.indexOf('await doLock("signout", seen);');

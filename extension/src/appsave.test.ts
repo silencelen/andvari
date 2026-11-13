@@ -67,19 +67,42 @@ test("queuing asks for the key, then hands over only ciphertext", async () => {
     sent.push(m);
     return m.type === "saveKey" ? { ok: true, type: "saveKey", key: keyText } : { ok: true, type: "queueSave", queued: true };
   };
-  const capture = { id: "t7-0", site: "https://shop.example", username: "me", password: "s3cret-pw" };
+  const capture = { site: "https://shop.example", username: "me", password: "s3cret-pw" };
   assert.equal(await queueSaveToApp(native, capture, 1), "queued");
   assert.deepEqual(sent.map((m) => m.type), ["saveKey", "queueSave"]);
-  assert.equal(sent[1]!.id, "t7-0");
+  assert.match(sent[1]!.id!, /^c-[0-9a-f]{32}$/, "an id minted for the capture");
   assert.ok(!JSON.stringify(sent).includes("s3cret-pw"));
 
   assert.equal(await queueSaveToApp(async () => ({ ok: true, type: "saveKey", key: null }), capture, 1), "no_account");
   assert.equal(await queueSaveToApp(async () => { throw new Error("no host"); }, capture, 1), "unavailable");
   assert.equal(await queueSaveToApp(() => new Promise(() => {}), capture, 1, 10), "unavailable", "silence");
-  assert.equal(await queueSaveToApp(native, { ...capture, id: "../x" }, 1), "refused");
+  assert.equal(await queueSaveToApp(native, capture, 1, 3000, () => "../x"), "refused");
   assert.equal(await queueSaveToApp(native, { ...capture, password: "" }, 1), "refused");
   const full = async (m: { type: string }) => (m.type === "saveKey" ? { ok: true, type: "saveKey", key: keyText } : { ok: true, type: "queueSave", queued: false });
   assert.equal(await queueSaveToApp(full, capture, 1), "refused", "the handler's queue is full");
+});
+
+test("every capture is an entry of its own: ids are never reused, and a taken id is tried again under a new one", async () => {
+  // The handler never replaces an entry; it answers a taken id with taken: true.
+  const entries = new Map<string, string>();
+  const native = async (m: { type: string; id?: string; entry?: string }) => {
+    if (m.type === "saveKey") return { ok: true, type: "saveKey", key: keyText };
+    if (entries.has(m.id!)) return { ok: true, type: "queueSave", queued: false, taken: true };
+    entries.set(m.id!, m.entry!);
+    return { ok: true, type: "queueSave", queued: true, taken: false };
+  };
+  for (const password of ["first", "second", "third"]) {
+    assert.equal(await queueSaveToApp(native, { site: "https://shop.example", username: "me", password }, 1), "queued");
+  }
+  assert.equal(entries.size, 3, "three captures, three entries");
+
+  const ids = ["c-taken", "c-taken", "c-fresh"];
+  entries.set("c-taken", "someone else's");
+  assert.equal(await queueSaveToApp(native, { site: "https://shop.example", username: "me", password: "fourth" }, 1, 3000, () => ids.shift()!), "queued");
+  assert.equal(entries.get("c-taken"), "someone else's", "the taken entry is untouched");
+  assert.ok(entries.has("c-fresh"));
+  assert.equal(await queueSaveToApp(native, { site: "https://shop.example", username: "me", password: "fifth" }, 1, 3000, () => "c-taken"), "refused", "gives up after a few taken ids");
+  assert.equal(entries.get("c-taken"), "someone else's");
 });
 
 test("only the Safari build saves through the app, and the worker does it before it would need a session", () => {

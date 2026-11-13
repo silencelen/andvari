@@ -46,8 +46,11 @@ interface SaveQueueStore {
     /** The entries, by id. */
     fun entries(): Map<String, ByteArray>
 
-    /** Add or replace entry [id] (letters, digits and dashes). Returns whether it was written. */
-    fun put(id: String, bytes: ByteArray): Boolean
+    /**
+     * Add entry [id] (letters, digits and dashes) only if no entry has that id: an entry is never replaced. Returns
+     * whether it was written; false when [id] is taken or the write failed.
+     */
+    fun add(id: String, bytes: ByteArray): Boolean
 
     fun remove(id: String)
 
@@ -59,7 +62,7 @@ interface SaveQueueStore {
         override fun publication(): ByteArray? = null
         override fun publish(bytes: ByteArray?) {}
         override fun entries(): Map<String, ByteArray> = emptyMap()
-        override fun put(id: String, bytes: ByteArray) = false
+        override fun add(id: String, bytes: ByteArray) = false
         override fun remove(id: String) {}
         override fun clear() {}
     }
@@ -78,7 +81,8 @@ class InMemorySaveQueue : SaveQueueStore {
 
     override fun entries(): Map<String, ByteArray> = LinkedHashMap(map)
 
-    override fun put(id: String, bytes: ByteArray): Boolean {
+    override fun add(id: String, bytes: ByteArray): Boolean {
+        if (id in map) return false
         map[id] = bytes
         return true
     }
@@ -133,21 +137,45 @@ object SaveQueue {
     fun decodePublication(bytes: ByteArray?): SaveKeyPublication? =
         bytes?.let { runCatching { json.decodeFromString(SaveKeyPublication.serializer(), it.decodeToString()) }.getOrNull() }?.takeIf { it.v == VERSION }
 
-    /** Seal a captured login to the published account and queue it under [id]. */
-    fun enqueue(store: SaveQueueStore, crypto: CryptoProvider, id: String, site: String, username: String, password: String, nowMs: Long, source: String): SaveQueued {
+    /** How many ids one capture tries before it gives up: a taken id is retried under a new one. */
+    const val ID_ATTEMPTS = 3
+
+    /** A new entry id: 128 bits from the crypto provider's random source (libsodium's, the system CSPRNG). */
+    fun newId(crypto: CryptoProvider): String = "s-" + crypto.randomBytes(16).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+    /**
+     * Seal a captured login to the published account and queue it as an entry of its own. Every capture gets a new id
+     * from [mintId] (tests pass their own); nothing a caller holds, such as the system's save-request session, names
+     * an entry, so one capture never replaces another. The store never replaces an entry either: a taken id is tried
+     * again under a new one, at most [ID_ATTEMPTS] times.
+     */
+    fun enqueue(
+        store: SaveQueueStore,
+        crypto: CryptoProvider,
+        site: String,
+        username: String,
+        password: String,
+        nowMs: Long,
+        source: String,
+        mintId: () -> String = { newId(crypto) },
+    ): SaveQueued {
         val key = decodePublication(store.publication()) ?: return SaveQueued.NO_ACCOUNT
-        if (!validId(id) || password.isEmpty() || password.length > MAX_FIELD_CHARS || username.length > MAX_FIELD_CHARS || site.isBlank() || site.length > MAX_SITE_CHARS) {
+        if (password.isEmpty() || password.length > MAX_FIELD_CHARS || username.length > MAX_FIELD_CHARS || site.isBlank() || site.length > MAX_SITE_CHARS) {
             return SaveQueued.REFUSED
         }
-        val existing = store.entries()
-        if (id !in existing && existing.size >= MAX_ENTRIES) return SaveQueued.REFUSED
+        if (store.entries().size >= MAX_ENTRIES) return SaveQueued.REFUSED
         val bytes = runCatching {
             val plain = json.encodeToString(CapturedLogin.serializer(), CapturedLogin(origin = key.origin, userId = key.userId, site = site, username = username, password = password, capturedAtMs = nowMs, source = source))
             val sealed = crypto.sealTo(Bytes.fromB64(key.identityPub), plain.encodeToByteArray())
             json.encodeToString(QueuedSave.serializer(), QueuedSave(origin = key.origin, userId = key.userId, sealed = Bytes.toB64(sealed))).encodeToByteArray()
         }.getOrNull() ?: return SaveQueued.REFUSED
         if (bytes.size > MAX_ENTRY_BYTES) return SaveQueued.REFUSED
-        return if (store.put(id, bytes)) SaveQueued.QUEUED else SaveQueued.REFUSED
+        repeat(ID_ATTEMPTS) {
+            val id = mintId()
+            if (!validId(id)) return SaveQueued.REFUSED
+            if (store.add(id, bytes)) return SaveQueued.QUEUED
+        }
+        return SaveQueued.REFUSED
     }
 
     /**
