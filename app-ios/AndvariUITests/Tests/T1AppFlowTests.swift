@@ -190,8 +190,14 @@ final class T1AppFlowTests: UITestCase {
             reachVault()
         }
         step("editor") {
-            app.buttons["vault.new-item"].tap()
             let newLogin = app.buttons["New login"]
+            // iOS's own "Save Password?" for the master password just typed can come up over the vault a moment after
+            // the sign-in, and then takes the tap meant for the add menu: answer it, and open the menu again.
+            for _ in 0..<3 where !newLogin.exists {
+                answerSystemAlerts()
+                app.buttons["vault.new-item"].tap()
+                _ = waitUntil(4, { newLogin.exists })
+            }
             require(newLogin, "New login in the add menu", timeout: 5)
             newLogin.tap()
             enter("Added Here", into: app.textFields["Name"], what: "the Name field")
