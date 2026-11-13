@@ -11,6 +11,9 @@ POST /control/vault-create|vault-delete|vault-restore?name=… let a test act as
 account (tools/uitest-seed `vault`), and POST /control/share-read-only?name=…&item=… as a second account that
 shares a vault read-only with it, accepted on another device (tools/uitest-seed `share`), to see what the app
 learns at its next sync. Both ports listen on loopback only and the accounts are throwaway ones.
+
+GET <page>.html?uitest-events serves the page with a passive event log at the end of its body (presses, focus
+moves with the page's user activation and focus, window focus), so a test can read what the page saw.
 """
 import functools
 import hashlib
@@ -23,11 +26,61 @@ import threading
 import time
 import urllib.parse
 
+# Listens only (capture, passive) and writes into its own line after the page's content, never over it.
+EVENTS = """<pre id="uitest-events" style="font: 12px/1.3 monospace; white-space: pre-wrap; margin: 24px 0 0">events:</pre>
+<script>
+(function () {
+  var out = document.getElementById("uitest-events");
+  var lines = [];
+  var t0 = performance.now();
+  function name(t) { return t && t.id ? "#" + t.id : t && t.tagName ? t.tagName.toLowerCase() : String(t); }
+  function log(s) {
+    lines.push(Math.round(performance.now() - t0) + " " + s);
+    if (lines.length > 16) lines.shift();
+    out.textContent = "events: " + lines.join("; ");
+  }
+  ["touchstart", "pointerdown", "mousedown", "click"].forEach(function (type) {
+    document.addEventListener(type, function (e) { log(type + " " + name(e.composedPath()[0])); }, { capture: true, passive: true });
+  });
+  document.addEventListener("focusin", function (e) {
+    var ua = navigator.userActivation;
+    log("focusin " + name(e.target) + " activation=" + (ua ? ua.isActive : "none") + " hasFocus=" + document.hasFocus());
+  }, true);
+  document.addEventListener("focusout", function (e) {
+    var t = name(e.target);
+    setTimeout(function () { log("focusout " + t + " hasFocus=" + document.hasFocus() + " now=" + name(document.activeElement)); }, 0);
+  }, true);
+  window.addEventListener("blur", function () { log("window-blur"); });
+  window.addEventListener("focus", function () { log("window-focus"); });
+})();
+</script>
+"""
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     # A connection that says nothing for this long is closed, so connections a browser opens ahead of time and then
     # abandons do not pile up, and a stalled TLS handshake ends with a line in the log instead of hanging.
     timeout = 20
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.endswith(".html") and "uitest-events" in urllib.parse.parse_qs(parsed.query, keep_blank_values=True):
+            return self.with_events(parsed.path)
+        return super().do_GET()
+
+    def with_events(self, path):
+        try:
+            with open(self.translate_path(path), "rb") as page:
+                text = page.read().decode("utf-8")
+        except OSError:
+            self.send_error(404)
+            return
+        body = (text.replace("</body>", EVENTS + "</body>", 1) if "</body>" in text else text + EVENTS).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         if self.path.startswith("/control/"):

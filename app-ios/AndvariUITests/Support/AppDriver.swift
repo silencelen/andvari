@@ -32,14 +32,22 @@ extension UITestCase {
     func waitForScreen(_ timeout: TimeInterval = 60, file: StaticString = #filePath, line: UInt = #line) -> AppScreen {
         var seen: AppScreen?
         let search = app.searchFields.firstMatch
-        if !waitUntil(timeout, {
-            seen = currentScreen()
+        let look: () -> Bool = {
+            seen = self.currentScreen()
             // A search left open (an earlier test's) hides the vault's bar, and with it every mark of the screen.
-            if seen == nil && search.exists && search.isHittable { endSearch() }
+            if seen == nil && search.exists && search.isHittable { self.endSearch() }
             return seen != nil
-        }) {
+        }
+        // A sheet an earlier test left open (it stopped halfway) hides the screen under it: start the app again, which
+        // comes up locked, rather than fail every test after it.
+        let first = min(20, timeout)
+        if waitUntil(first, look) { return seen ?? .chooseServer }
+        dumpTree(app, as: "no-screen-so-relaunched")
+        app.terminate()
+        app.launch()
+        if !waitUntil(max(timeout - first, 20), look) {
             dumpTree(app, as: "no-screen")
-            XCTFail("the app showed none of its screens within \(Int(timeout)) s", file: file, line: line)
+            XCTFail("the app showed none of its screens within \(Int(timeout)) s, nor after it was started again", file: file, line: line)
         }
         return seen ?? .chooseServer
     }
