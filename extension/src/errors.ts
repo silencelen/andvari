@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "provider_frame" | "field_changed";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -250,8 +250,14 @@ export function fillErrorCopy(code: FillFailCode | undefined): string {
 }
 
 /** A card fill that wrote nothing: the two refusals of round-5 review C1 in words, the rest as for a login fill. */
-export function cardFillErrorCopy(code: CardFillFailCode | undefined): string {
+export function cardFillErrorCopy(code: CardFillFailCode | undefined, providerHost?: string): string {
   switch (code) {
+    case "provider_frame":
+      // Round-7 review H1. Neutral: the frame's presence is the page's own claim, so the copy does not vouch that the
+      // page is a checkout; it says what andvari does.
+      return `A payment form on this page is embedded from ${providerHost ?? "another site"}. andvari doesn't fill cards into a page like that, so nothing was filled.`;
+    case "field_changed":
+      return "The card field changed after you tapped it, so nothing was filled. Tap it again, then fill.";
     case "no_focus":
       return "Tap the card number field on the page first, then fill again.";
     case "not_visible":

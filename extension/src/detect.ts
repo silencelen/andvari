@@ -418,24 +418,37 @@ function isRendered(el: HTMLElement): boolean {
 }
 
 /**
- * A field the page renders but the person cannot see is not one this extension fills (round-5 review C1: a skimmer
- * injects an invisible card form into a checkout whose real fields are in the payment provider's frame). Collected
- * only if rendered and [visibilityOf] passes its page-time rules; a card fill checks every field again, with the
- * full rules, on screen ([probeVisibility] with `fill`). Shared by login and card detection on every target.
+ * A field the page renders but the person cannot see is not one this extension fills (round-5 review C1). Detection
+ * collects only fields that pass the page-time rules ([visibilityOf] at [MIN_OPACITY_DETECT]; a select or radio drawn
+ * through a proxy is excused the opacity, size and hit rules; "off the page" means outside both the page and the
+ * field's scrolling container, so a fixed login modal inside a smaller scroller is on the page). A card fill holds each
+ * field to the full rules ([probeVisibility] with `fill`). Shared by login and card detection on every target.
+ *
+ * Round-7 review: rules like these cannot win against a script that owns the top frame, which controls rendering. The
+ * structural defence is elsewhere (paymentproviders.ts: no card fill into a page whose card fields are a provider's
+ * frames); these rules are defence in depth for first-party card forms.
  */
 function isVisible(el: HTMLElement): boolean {
-  return isRendered(el) && visibilityOf(probeVisibility(el, { onScreen: false, hitTest: false }), proxiedControl(el)) === "ok";
+  return isRendered(el) && visibilityOf(probeVisibility(el, { onScreen: false, hitTest: false }), proxiedAtDetection(el)) === "ok";
 }
 
 /**
- * A control pages routinely draw through a proxy: a radio under a styled label. Its own box may be transparent, tiny or
- * covered by the proxy while it is the one the page reads, so only the rules a proxy cannot excuse apply to it (not
- * hidden, not off the page, on screen when asked). A radio carries only the card's brand, which the number the person
- * sees already gives away. Everything else gets every rule, selects included (round-6 review H1): a card number, an
- * expiry, a security code or a password goes only into a field the person can see.
+ * At detection: a control pages routinely draw through a proxy (a select under a custom dropdown, a radio under a
+ * styled label) is collected, though its own box may be transparent, tiny or covered while it is the one the page
+ * reads. Only the rules a proxy cannot excuse apply to it (not hidden, not off the page).
  */
-export function proxiedControl(el: Element): boolean {
-  return el instanceof HTMLInputElement && el.type === "radio";
+export function proxiedAtDetection(el: Element): boolean {
+  return el instanceof HTMLSelectElement || (el instanceof HTMLInputElement && el.type === "radio");
+}
+
+/**
+ * At fill time (round-7 review, regression 2): only what a proxy routinely draws and what carries no number or code
+ * may be filled while its own box cannot be seen: a radio (the brand), and a select for the expiry month or year or
+ * the brand, in the chosen field's form. The chosen field itself is never excused: it gets every rule.
+ */
+export function proxiedAtFill(el: Element, kind: CardFieldKind): boolean {
+  if (el instanceof HTMLInputElement && el.type === "radio") return true;
+  return el instanceof HTMLSelectElement && (kind === "cardexpmonth" || kind === "cardexpyear" || kind === "cardtype");
 }
 
 /** One element's computed styles that decide whether it, and what it holds, can be seen. */
@@ -445,12 +458,12 @@ export interface StyleFacts {
   opacity: string;
   /** `filter` (fill-time read; absent at detection). */
   filter?: string;
-  /** `clip-path` (fill-time read). */
-  clipPath?: string;
-  /** The legacy `clip` (fill-time read). */
-  clip?: string;
   /** The first of `mask-image`, `-webkit-mask-image`, `-webkit-mask-box-image` that is not "none" (fill-time read). */
   mask?: string;
+  /** The box the mask is laid over (this element's), in viewport coordinates, when there is a mask. */
+  maskBox?: Box;
+  /** `mix-blend-mode` (fill-time read). */
+  blend?: string;
 }
 
 /** How a field draws what is typed into it: its text colours, background and font size. */
@@ -478,29 +491,29 @@ export interface VisibilityFacts {
   ink: InkFacts | null;
   /** The field's box, in viewport coordinates. */
   rect: Box;
-  /** The scrollable extent the field lives in, in viewport coordinates: the content of its nearest scrolling ancestor,
-   *  or the page's (round-6 review M2: a field in an inner scrolling container is on the page). */
-  extent: Box;
+  /** Where the field may lie and be on the page, in viewport coordinates: the page's extent and, when it has one, its
+   *  nearest scrolling container's content (round-6 review M2). Outside all of them is off the page. */
+  extents: ReadonlyArray<Box>;
   /** The viewport, when the field must be on screen now; null otherwise. */
   viewport: { width: number; height: number } | null;
-  /** Whether something paints over the field's centre ("other"), the field is what shows there ("self"), or it was
-   *  not tested (null: the centre is off screen, or the caller did not ask). */
+  /** Whether something paints over the field at one of its sample points ("other"), the field is what shows at all of
+   *  them ("self"), or it was not tested (null: off screen, or the caller did not ask). */
   hit: "self" | "other" | null;
 }
 
 /** Why a field is not visible, or "ok". */
-export type VisibilityVerdict = "ok" | "hidden" | "transparent" | "filtered" | "clipped" | "unreadable" | "tiny" | "offpage" | "offscreen" | "covered";
+export type VisibilityVerdict = "ok" | "hidden" | "transparent" | "filtered" | "clipped" | "blended" | "unreadable" | "tiny" | "offpage" | "offscreen" | "covered";
 
 /** The smallest box, in CSS pixels, a field a person can use is drawn in. */
 export const MIN_FIELD_PX = 8;
 /** The smallest text, in CSS pixels, a person can read what was filled in. */
 export const MIN_FONT_PX = 6;
-/** Below this combined opacity (every ancestor's, and any filter's) a field a card is filled into is too faint. */
+/** Below this combined opacity (every ancestor's, any filter's and any mask's) a field a card is filled into is too faint. */
 export const MIN_OPACITY = 0.9;
 /** What detection collects at all: anything fainter is not a field (the fill holds each field to [MIN_OPACITY]). */
 export const MIN_OPACITY_DETECT = 0.1;
-/** Text or a background fainter than this is not drawn at all. */
-const INVISIBLE_ALPHA = 0.1;
+/** Text fainter than this does not show what was filled in (round-7 review). */
+export const MIN_TEXT_ALPHA = 0.5;
 
 /** PURE: an amount of a filter function or a colour alpha ("0.5", "50%"); NaN when it is neither. */
 function amount(v: string): number {
@@ -534,6 +547,23 @@ function cssFunctions(value: string): [string, string][] | null {
     i = j + 1;
   }
   return out;
+}
+
+/** PURE: [s] split at its top-level commas (not those inside parentheses). */
+function topLevelCommas(s: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "(") depth++;
+    else if (s[i] === ")") depth--;
+    else if (s[i] === "," && depth === 0) {
+      parts.push(s.slice(from, i).trim());
+      from = i + 1;
+    }
+  }
+  parts.push(s.slice(from).trim());
+  return parts;
 }
 
 /**
@@ -583,23 +613,6 @@ export function filterOpacity(filter: string | undefined): number | null {
   return factor;
 }
 
-/** PURE: whether a computed `clip-path` leaves the box whole: none, or an inset that trims no more than its edges (rounded corners). */
-export function clipLeavesWhole(clipPath: string | undefined): boolean {
-  if (clipPath === undefined) return true;
-  const c = clipPath.trim().toLowerCase();
-  if (c === "" || c === "none") return true;
-  const m = /^inset\(([^()]*)\)(\s+[a-z-]+)?$/.exec(c);
-  if (!m) return false;
-  const lengths = m[1]!.split(/\s+round\s+/)[0]!.trim().split(/\s+/);
-  return lengths.every((l) => {
-    if (l === "0") return true;
-    const px = /^(-?[0-9]*\.?[0-9]+)px$/.exec(l);
-    if (px) return Number(px[1]) <= 4;
-    const pct = /^(-?[0-9]*\.?[0-9]+)%$/.exec(l);
-    return pct !== null && Number(pct[1]) <= 2;
-  });
-}
-
 /** PURE: a computed colour's alpha: 0 for "transparent", the "/ a" or rgba() alpha where there is one, else 1. */
 export function colorAlpha(color: string): number {
   const c = color.trim().toLowerCase();
@@ -623,16 +636,101 @@ function rgbOf(color: string): [number, number, number] | null {
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 
-/** PURE: whether what is typed into a field would show: text and background not both transparent, the text not the
+/** PURE: the colour at the start of a gradient colour stop ("rgba(0, 0, 0, 0) 40%" → "rgba(0, 0, 0, 0)"). */
+function stopColour(stop: string): { color: string; positions: string[] } {
+  const s = stop.trim();
+  let depth = 0;
+  let end = s.length;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "(") depth++;
+    else if (s[i] === ")") depth--;
+    else if (s[i] === " " && depth === 0) {
+      end = i;
+      break;
+    }
+  }
+  return { color: s.slice(0, end), positions: s.slice(end).trim().split(/\s+/).filter((p) => p !== "") };
+}
+
+/**
+ * PURE (round-7 review, regression 3): how opaque a computed mask leaves the point ([x], [y], viewport coordinates)
+ * of the element it masks, whose box is [box]: 1 for none; for one linear gradient, its alpha there, so a fade at the
+ * edge of a scrolling panel leaves a field in its opaque part visible; null when it cannot be told (an image, several
+ * layers, a corner direction, another gradient), which the rules take as hiding.
+ */
+export function maskAlphaAt(mask: string | undefined, box: Box, x: number, y: number): number | null {
+  if (mask === undefined) return 1;
+  const m = mask.trim();
+  if (m === "" || m === "none") return 1;
+  const fns = cssFunctions(m);
+  if (fns === null || fns.length !== 1 || fns[0]![0] !== "linear-gradient") return null;
+  const args = topLevelCommas(fns[0]![1]);
+  let angle = 180; // "to bottom", the default
+  const first = args[0]!.trim().toLowerCase();
+  const sides: Record<string, number> = { "to top": 0, "to right": 90, "to bottom": 180, "to left": 270 };
+  if (first.startsWith("to ")) {
+    if (!(first in sides)) return null; // a corner: not told
+    angle = sides[first]!;
+    args.shift();
+  } else {
+    const a = /^(-?[0-9]*\.?[0-9]+)(deg|rad|turn|grad)$/.exec(first);
+    if (a) {
+      const v = Number(a[1]);
+      angle = a[2] === "deg" ? v : a[2] === "rad" ? (v * 180) / Math.PI : a[2] === "turn" ? v * 360 : v * 0.9;
+      args.shift();
+    }
+  }
+  if (args.length < 2 || !(box.width > 0 && box.height > 0)) return null;
+  const rad = (angle * Math.PI) / 180;
+  const dx = Math.sin(rad);
+  const dy = -Math.cos(rad);
+  const length = Math.abs(box.width * dx) + Math.abs(box.height * dy);
+  if (!(length > 0)) return null;
+  const t = ((x - (box.left + box.width / 2)) * dx + (y - (box.top + box.height / 2)) * dy) / length + 0.5;
+  // Stops: alpha and position (a fraction of the gradient line); missing positions are spread evenly between known ones.
+  const stops: { alpha: number; at: number | null }[] = [];
+  for (const raw of args) {
+    const { color, positions } = stopColour(raw);
+    const alpha = colorAlpha(color);
+    if (positions.length === 0) stops.push({ alpha, at: null });
+    for (const p of positions) {
+      const pct = /^(-?[0-9]*\.?[0-9]+)%$/.exec(p);
+      const px = /^(-?[0-9]*\.?[0-9]+)px$/.exec(p);
+      if (!pct && !px) return null;
+      stops.push({ alpha, at: pct ? Number(pct[1]) / 100 : Number(px![1]) / length });
+    }
+  }
+  if (stops[0]!.at === null) stops[0]!.at = 0;
+  if (stops[stops.length - 1]!.at === null) stops[stops.length - 1]!.at = 1;
+  for (let i = 1; i < stops.length; i++) {
+    if (stops[i]!.at !== null) {
+      stops[i]!.at = Math.max(stops[i]!.at!, stops[i - 1]!.at ?? 0);
+      continue;
+    }
+    let j = i;
+    while (stops[j]!.at === null) j++;
+    const from = stops[i - 1]!.at!;
+    const to = stops[j]!.at!;
+    for (let k = i; k < j; k++) stops[k]!.at = from + ((to - from) * (k - i + 1)) / (j - i + 1);
+  }
+  if (t <= stops[0]!.at!) return stops[0]!.alpha;
+  for (let i = 1; i < stops.length; i++) {
+    const a = stops[i - 1]!;
+    const b = stops[i]!;
+    if (t <= b.at!) return b.at! === a.at! ? b.alpha : a.alpha + ((b.alpha - a.alpha) * (t - a.at!)) / (b.at! - a.at!);
+  }
+  return stops[stops.length - 1]!.alpha;
+}
+
+/** PURE: whether what is typed into a field would show: text at least half opaque (round-7 review), not the
  *  background's own colour, and big enough to read. */
 function inkVerdict(ink: InkFacts): VisibilityVerdict {
   const text = Math.min(colorAlpha(ink.color), colorAlpha(ink.textFill));
+  if (text < MIN_TEXT_ALPHA) return "unreadable";
   const image = ink.backgroundImage.trim() !== "" && ink.backgroundImage.trim() !== "none";
-  const back = colorAlpha(ink.background);
-  if (text < INVISIBLE_ALPHA && back < INVISIBLE_ALPHA && !image) return "transparent";
   const fg = rgbOf(ink.textFill.trim() === "" ? ink.color : ink.textFill);
   const bg = rgbOf(ink.background);
-  if (!image && fg !== null && bg !== null && text >= 0.9 && back >= 0.9 && fg.every((v, i) => Math.abs(v - bg[i]!) <= 8)) return "unreadable";
+  if (!image && fg !== null && bg !== null && text >= 0.9 && colorAlpha(ink.background) >= 0.9 && fg.every((v, i) => Math.abs(v - bg[i]!) <= 8)) return "unreadable";
   const size = /^([0-9]*\.?[0-9]+)px$/.exec(ink.fontSize.trim());
   if (!size || Number(size[1]) < MIN_FONT_PX) return "unreadable";
   return "ok";
@@ -640,35 +738,43 @@ function inkVerdict(ink: InkFacts): VisibilityVerdict {
 
 /**
  * PURE: the visibility rules, over facts the DOM gave ([probeVisibility]). Fails closed on anything unreadable.
- * [proxied]: a control a page draws through a proxy ([proxiedControl]) is not held to the opacity, filter, clip, ink,
- * size and hit rules. [minOpacity]: [MIN_OPACITY] for a fill, [MIN_OPACITY_DETECT] for what detection collects.
+ * [proxied]: a control a page draws through a proxy ([proxiedAtDetection], [proxiedAtFill]) is not held to the
+ * opacity, filter, mask, blend, ink, size and hit rules. [minOpacity]: [MIN_OPACITY] for a fill, [MIN_OPACITY_DETECT]
+ * for what detection collects. A clip (clip-path, the legacy clip, an overflow) is not judged from its value: what it
+ * removes is not hit-testable, so the sample points the hit test looks at catch it where it hides the field.
  */
 export function visibilityOf(f: VisibilityFacts, proxied = false, minOpacity = MIN_OPACITY_DETECT): VisibilityVerdict {
   if (f.chain.length === 0) return "hidden";
   if (f.chain.some((s) => s.display === "none")) return "hidden";
   const own = f.chain[0]!;
   if (own.visibility === "hidden" || own.visibility === "collapse") return "hidden";
+  const { left, top, width, height } = f.rect;
   if (!proxied) {
     let opacity = 1;
+    const cx = left + width / 2;
+    const cy = top + height / 2;
     for (const s of f.chain) {
       const o = Number.parseFloat(s.opacity);
       opacity *= Number.isFinite(o) ? Math.min(1, Math.max(0, o)) : 0; // an unreadable value is no proof of visibility
       const filtered = filterOpacity(s.filter);
       if (filtered === null) return "filtered";
       opacity *= filtered;
-      if (!clipLeavesWhole(s.clipPath) || (s.clip !== undefined && s.clip.trim() !== "" && s.clip.trim() !== "auto")) return "clipped";
-      if (s.mask !== undefined && s.mask.trim() !== "" && s.mask.trim() !== "none") return "clipped";
+      if (s.blend !== undefined && s.blend.trim() !== "" && s.blend.trim() !== "normal") return "blended";
+      if (s.mask !== undefined && s.mask.trim() !== "" && s.mask.trim() !== "none") {
+        const masked = s.maskBox === undefined ? null : maskAlphaAt(s.mask, s.maskBox, cx, cy);
+        if (masked === null) return "clipped";
+        opacity *= Math.min(1, Math.max(0, masked));
+      }
     }
     if (opacity < minOpacity) return "transparent";
     if (f.ink !== null) {
       const ink = inkVerdict(f.ink);
       if (ink !== "ok") return ink;
     }
+    if (!(width >= MIN_FIELD_PX && height >= MIN_FIELD_PX)) return "tiny";
   }
-  const { left, top, width, height } = f.rect;
-  if (!proxied && !(width >= MIN_FIELD_PX && height >= MIN_FIELD_PX)) return "tiny";
-  const e = f.extent;
-  if (left + width <= e.left || top + height <= e.top || left >= e.left + e.width || top >= e.top + e.height) return "offpage";
+  const inside = (e: Box): boolean => !(left + width <= e.left || top + height <= e.top || left >= e.left + e.width || top >= e.top + e.height);
+  if (f.extents.length === 0 || !f.extents.some(inside)) return "offpage";
   if (f.viewport !== null) {
     const cx = left + width / 2;
     const cy = top + height / 2;
@@ -690,21 +796,22 @@ function scrolls(overflow: string): boolean {
   return overflow === "auto" || overflow === "scroll" || overflow === "overlay";
 }
 
-/** The scrollable extent [el] lives in, in viewport coordinates: its nearest scrolling ancestor's content, else the page's. */
-function extentOf(el: HTMLElement, view: Window): Box {
-  let node = parentAcross(el);
+/** Where [el] may lie and be on the page, in viewport coordinates: the page's extent, and its nearest scrolling container's content. */
+function extentsOf(el: HTMLElement, view: Window): Box[] {
   const de = el.ownerDocument.documentElement;
+  const vw = view.innerWidth;
+  const vh = view.innerHeight;
+  const page: Box = { left: -view.scrollX, top: -view.scrollY, width: Math.max(de?.scrollWidth ?? 0, vw), height: Math.max(de?.scrollHeight ?? 0, vh) };
+  let node = parentAcross(el);
   for (let depth = 0; node !== null && node !== de && node !== el.ownerDocument.body && depth < MAX_STYLE_DEPTH; depth++) {
     const cs = view.getComputedStyle(node);
     if ((scrolls(cs.overflowX) && node.scrollWidth > node.clientWidth) || (scrolls(cs.overflowY) && node.scrollHeight > node.clientHeight)) {
       const r = node.getBoundingClientRect();
-      return { left: r.left + node.clientLeft - node.scrollLeft, top: r.top + node.clientTop - node.scrollTop, width: node.scrollWidth, height: node.scrollHeight };
+      return [page, { left: r.left + node.clientLeft - node.scrollLeft, top: r.top + node.clientTop - node.scrollTop, width: node.scrollWidth, height: node.scrollHeight }];
     }
     node = parentAcross(node);
   }
-  const vw = view.innerWidth;
-  const vh = view.innerHeight;
-  return { left: -view.scrollX, top: -view.scrollY, width: Math.max(de?.scrollWidth ?? 0, vw), height: Math.max(de?.scrollHeight ?? 0, vh) };
+  return [page];
 }
 
 /** What an element paints over whatever lies under it. Gathered by [paintFactsOf]. */
@@ -717,24 +824,36 @@ export interface PaintFacts {
   backdrop: string;
   /** An image, video, canvas, frame, embedded object or SVG: it paints its content. */
   replaced: boolean;
-  /** Its ::before and ::after, when they are generated. */
-  pseudo: ReadonlyArray<{ background: string; backgroundImage: string }>;
+  /** Its ::before and ::after, when they are generated: what they paint, their own opacity, and their size ("auto" or px). */
+  pseudo: ReadonlyArray<{ background: string; backgroundImage: string; opacity?: string; width?: string; height?: string }>;
 }
 
 /** How opaque an element over a field must be to hide it. */
 export const COVER_ALPHA = 0.5;
 
 /** PURE: whether an element painted over a field hides it: an opaque enough background, image, backdrop filter, or
- *  replaced content. One that paints nothing there (a floating label, a transparent overlay) does not. */
+ *  replaced content. One that paints nothing there (a transparent overlay) does not; a pseudo-element counts only at
+ *  its own opacity and size (round-7 review, regression 5: a filled text field's invisible ripple is no cover). */
 export function paintsOver(p: PaintFacts): boolean {
   const image = (v: string): boolean => v.trim() !== "" && v.trim() !== "none";
   if (!(p.opacity >= COVER_ALPHA)) return false;
   if (p.replaced || image(p.backgroundImage) || image(p.backdrop)) return true;
   if (colorAlpha(p.background) * p.opacity >= COVER_ALPHA) return true;
-  return p.pseudo.some((ps) => image(ps.backgroundImage) || colorAlpha(ps.background) * p.opacity >= COVER_ALPHA);
+  const sized = (v: string | undefined): boolean => {
+    if (v === undefined || v.trim() === "" || v.trim() === "auto") return true;
+    const px = /^([0-9]*\.?[0-9]+)px$/.exec(v.trim());
+    return px === null || Number(px[1]) >= MIN_FIELD_PX;
+  };
+  return p.pseudo.some((ps) => {
+    const o = ps.opacity === undefined ? 1 : Number.parseFloat(ps.opacity);
+    const alpha = (Number.isFinite(o) ? Math.min(1, Math.max(0, o)) : 1) * p.opacity;
+    if (!(alpha >= COVER_ALPHA) || !sized(ps.width) || !sized(ps.height)) return false;
+    return image(ps.backgroundImage) || colorAlpha(ps.background) * alpha >= COVER_ALPHA;
+  });
 }
 
 const REPLACED = new Set(["IMG", "VIDEO", "CANVAS", "IFRAME", "FRAME", "EMBED", "OBJECT", "PICTURE"]);
+const FRAMES = new Set(["IFRAME", "FRAME", "EMBED", "OBJECT"]);
 
 function paintFactsOf(at: Element): PaintFacts {
   const view = at.ownerDocument.defaultView!;
@@ -749,7 +868,7 @@ function paintFactsOf(at: Element): PaintFacts {
   const pseudo = ["::before", "::after"]
     .map((p) => view.getComputedStyle(at, p))
     .filter((ps) => ps.content !== "none" && ps.content !== "normal" && ps.content !== "")
-    .map((ps) => ({ background: ps.backgroundColor, backgroundImage: ps.backgroundImage }));
+    .map((ps) => ({ background: ps.backgroundColor, backgroundImage: ps.backgroundImage, opacity: ps.opacity, width: ps.width, height: ps.height }));
   return {
     opacity,
     background: cs.backgroundColor,
@@ -760,66 +879,81 @@ function paintFactsOf(at: Element): PaintFacts {
   };
 }
 
+const CONTROLS = "input:not([type=hidden]), select, textarea, button";
+
 /**
- * What shows at viewport point ([x], [y]) of [el]'s document: "self" when the topmost element there that paints
- * anything ([paintsOver]) is [el] or inside it, "other" otherwise, including when [el] is not there at all (clipped,
- * or under something). Elements [ignore] names (this extension's own UI) are looked through. A cover that lets the
- * pointer through (pointer-events: none) is only seen inside [revealCovers].
+ * The field's own wrapper: the outermost of its nearest few ancestors that holds no other form control. Its label,
+ * floating label and adornments live there and are part of the field (round-7 review, regressions 4 and 6).
  */
-export function whatShowsAt(el: Element, x: number, y: number, ignore: (e: Element) => boolean = () => false): "self" | "other" {
-  const root = el.getRootNode() as Document | ShadowRoot;
-  const doc = el.ownerDocument;
-  const list = typeof root.elementsFromPoint === "function" ? root.elementsFromPoint(x, y) : doc.elementsFromPoint(x, y);
-  for (const at of list) {
-    if (at === el || el.contains(at)) return "self";
-    if (ignore(at)) continue;
-    if (paintsOver(paintFactsOf(at))) return "other";
+export function fieldWrapperOf(el: Element): Element | null {
+  let wrapper: Element | null = null;
+  let node = parentAcross(el);
+  const body = el.ownerDocument.body;
+  for (let depth = 0; node !== null && node !== body && depth < 4; depth++) {
+    if (node.querySelectorAll(CONTROLS).length !== 1) break;
+    wrapper = node;
+    node = parentAcross(node);
   }
-  return "other";
+  return wrapper;
 }
 
-/** At most this many elements are looked at for covers that let the pointer through; a page past it is not checked, and nothing in it is filled. */
-export const MAX_COVER_SCAN = 20_000;
+/**
+ * Whether [at] is part of field [el]'s own presentation rather than something over it: one of its labels, or something
+ * inside its wrapper ([fieldWrapperOf]) that holds no control or frame and does not contain the field (a floating
+ * label, a brand icon, an adornment).
+ */
+export function isFieldPart(el: Element, at: Element): boolean {
+  const labels = el instanceof HTMLInputElement || el instanceof HTMLSelectElement ? [...(el.labels ?? [])] : [];
+  if (labels.some((l) => l === at || l.contains(at))) return true;
+  const wrapper = fieldWrapperOf(el);
+  if (wrapper === null || !wrapper.contains(at) || at.contains(el)) return false;
+  if (FRAMES.has(at.tagName.toUpperCase()) || at.querySelector(`${CONTROLS}, iframe, frame, embed, object`) !== null) return false;
+  return true;
+}
+
+/** Where [rect] is looked at: its centre, and halfway from it to each side (round-7 review, regression 7). */
+export function samplePoints(rect: Box): { x: number; y: number }[] {
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  return [
+    { x: cx, y: cy },
+    { x: rect.left + rect.width / 4, y: cy },
+    { x: rect.left + (rect.width * 3) / 4, y: cy },
+    { x: cx, y: rect.top + rect.height / 4 },
+    { x: cx, y: rect.top + (rect.height * 3) / 4 },
+  ];
+}
 
 /**
- * Run [fn] with every element of [scopes] that has `pointer-events: none` and whose box holds one of [points] made
- * hit-testable for the length of the call (inline `pointer-events: auto !important`), so a hit test sees a cover that
- * lets the pointer through too (round-6 review H1); each one's own style is put back exactly before this returns, and
- * nothing runs in between. Null, without calling [fn], when the scopes hold more than [MAX_COVER_SCAN] elements.
+ * What shows at each of [points] (viewport coordinates of [el]'s document): "self" when, at every one, the topmost
+ * element that paints anything ([paintsOver]) is [el], inside it, or part of it ([isFieldPart]); "other" otherwise,
+ * including where [el] is not there at all (clipped, or under something). Elements [ignore] names (this extension's
+ * own UI) are looked through. A cover that lets the pointer through (pointer-events: none) is not seen: that is the
+ * limit of these rules, and why they are defence in depth only.
  */
-export function revealCovers<T>(scopes: readonly (Document | ShadowRoot)[], points: readonly { x: number; y: number }[], fn: () => T): T | null {
-  const changed: { el: Element; style: CSSStyleDeclaration; hadAttr: boolean; value: string; priority: string }[] = [];
-  let seen = 0;
-  try {
-    for (const scope of scopes) {
-      const all = scope.querySelectorAll("*");
-      seen += all.length;
-      if (seen > MAX_COVER_SCAN) return null;
-      for (const el of all) {
-        const style = (el as HTMLElement | SVGElement).style as CSSStyleDeclaration | undefined;
-        if (style === undefined) continue;
-        const view = el.ownerDocument.defaultView;
-        if (view === null || view.getComputedStyle(el).pointerEvents !== "none") continue;
-        const r = el.getBoundingClientRect();
-        if (!points.some((p) => p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom)) continue;
-        changed.push({ el, style, hadAttr: el.hasAttribute("style"), value: style.getPropertyValue("pointer-events"), priority: style.getPropertyPriority("pointer-events") });
-        style.setProperty("pointer-events", "auto", "important");
+export function whatShowsAt(el: Element, points: readonly { x: number; y: number }[], ignore: (e: Element) => boolean = () => false): "self" | "other" {
+  const root = el.getRootNode() as Document | ShadowRoot;
+  const doc = el.ownerDocument;
+  for (const { x, y } of points) {
+    const list = typeof root.elementsFromPoint === "function" ? root.elementsFromPoint(x, y) : doc.elementsFromPoint(x, y);
+    let found = false;
+    for (const at of list) {
+      if (at === el || el.contains(at)) {
+        found = true;
+        break;
       }
+      if (ignore(at) || isFieldPart(el, at)) continue;
+      if (paintsOver(paintFactsOf(at))) return "other";
     }
-    return fn();
-  } finally {
-    for (const c of changed.reverse()) {
-      if (!c.hadAttr) c.el.removeAttribute("style");
-      else if (c.value === "") c.style.removeProperty("pointer-events");
-      else c.style.setProperty("pointer-events", c.value, c.priority);
-    }
+    if (!found) return "other";
   }
+  return "self";
 }
 
 /**
  * The [VisibilityFacts] for [el], from the live DOM. [onScreen]: the field must be on screen now. [hitTest]: what shows
- * at its centre ([whatShowsAt]) when that is on screen; a caller that wants covers which let the pointer through
- * counted calls this inside [revealCovers]. [fill]: read the fill-time styles too (filter, clip, mask, ink).
+ * at its sample points ([samplePoints], [whatShowsAt]) that are on screen, the centre at least. [fill]: read the
+ * fill-time styles too (filter, mask, blend, ink).
  */
 export function probeVisibility(el: HTMLElement, opts: { onScreen: boolean; hitTest: boolean; fill?: boolean; ignore?: (e: Element) => boolean }): VisibilityFacts {
   const doc = el.ownerDocument;
@@ -831,9 +965,12 @@ export function probeVisibility(el: HTMLElement, opts: { onScreen: boolean; hitT
     const facts: StyleFacts = { display: cs.display, visibility: cs.visibility, opacity: cs.opacity };
     if (opts.fill === true) {
       facts.filter = cs.filter;
-      facts.clipPath = cs.getPropertyValue("clip-path") || "none";
-      facts.clip = cs.getPropertyValue("clip") || "auto";
       facts.mask = [cs.getPropertyValue("mask-image"), cs.getPropertyValue("-webkit-mask-image"), cs.getPropertyValue("-webkit-mask-box-image")].find((m) => m.trim() !== "" && m.trim() !== "none") ?? "none";
+      if (facts.mask !== "none") {
+        const b = node.getBoundingClientRect();
+        facts.maskBox = { left: b.left, top: b.top, width: b.width, height: b.height };
+      }
+      facts.blend = cs.getPropertyValue("mix-blend-mode") || "normal";
     }
     chain.push(facts);
     node = parentAcross(node);
@@ -844,13 +981,25 @@ export function probeVisibility(el: HTMLElement, opts: { onScreen: boolean; hitT
     ink = { color: cs.color, textFill: cs.getPropertyValue("-webkit-text-fill-color") || cs.color, background: cs.backgroundColor, backgroundImage: cs.backgroundImage, fontSize: cs.fontSize };
   }
   const r = el.getBoundingClientRect();
+  const rect = { left: r.left, top: r.top, width: r.width, height: r.height };
   const vw = view.innerWidth;
   const vh = view.innerHeight;
   let hit: "self" | "other" | null = null;
   const cx = r.left + r.width / 2;
   const cy = r.top + r.height / 2;
-  if (opts.hitTest && cx >= 0 && cy >= 0 && cx < vw && cy < vh) hit = whatShowsAt(el, cx, cy, opts.ignore);
-  return { chain, ink, rect: { left: r.left, top: r.top, width: r.width, height: r.height }, extent: extentOf(el, view), viewport: opts.onScreen ? { width: vw, height: vh } : null, hit };
+  if (opts.hitTest && cx >= 0 && cy >= 0 && cx < vw && cy < vh) {
+    hit = whatShowsAt(el, samplePoints(rect).filter((p) => p.x >= 0 && p.y >= 0 && p.x < vw && p.y < vh), opts.ignore);
+  }
+  return { chain, ink, rect, extents: extentsOf(el, view), viewport: opts.onScreen ? { width: vw, height: vh } : null, hit };
+}
+
+/** Where [el] sits in its scrolling container's content (or the page's): unmoved by scrolling, moved by a relayout. */
+export function contentPositionOf(el: HTMLElement): Box {
+  const view = el.ownerDocument.defaultView ?? window;
+  const r = el.getBoundingClientRect();
+  const extents = extentsOf(el, view);
+  const e = extents[extents.length - 1]!;
+  return { left: r.left - e.left, top: r.top - e.top, width: r.width, height: r.height };
 }
 
 /** [U6] per-sweep-generation label cache: extraction costs textContent walks and a form-sized

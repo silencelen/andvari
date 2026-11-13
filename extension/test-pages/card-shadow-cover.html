@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: covers the hit test cannot see</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  .slot { position: relative; height: 48px; margin: 8px 0; }
+  .slot iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 6px; }
+  /* The skimmer's field sits beside the provider's frame and is hidden by covers that hit testing does not see: a
+     box-shadow spread from a pointer-events:none box, and an ::after larger than its own box. */
+  .skim { position: absolute; left: 0; top: 60px; width: 100%; height: 40px; }
+  .shade { position: absolute; left: 0; top: 56px; width: 1px; height: 1px; pointer-events: none; box-shadow: 0 0 0 400px #fff; }
+  .veil { position: absolute; left: 0; top: 56px; width: 1px; height: 1px; pointer-events: none; }
+  .veil::after { content: ""; position: absolute; left: 0; top: 0; width: 480px; height: 60px; background: #fff; }
+</style>
+</head>
+<body>
+<h1>Covers the hit test cannot see</h1>
+<p>Round-7 review H1, the cover variants: the provider's frame (Adyen's) holds the card; the page hides its own
+fields under a box-shadow spread and an oversized ::after. Open the popup: no Fill, the explainer names the Adyen
+host, and nothing lands in the hidden fields.</p>
+<div class="slot"><iframe title="card number" src="https://checkoutshopper-live.adyen.com/checkoutshopper/securedfields/card.html"></iframe></div>
+<form id="skimmer" style="position: relative; height: 120px" onsubmit="return false">
+  <input class="skim" name="cardnumber" autocomplete="cc-number" aria-label="Card number">
+  <div class="shade"></div>
+  <div class="veil"></div>
+</form>
+</body>
+</html>

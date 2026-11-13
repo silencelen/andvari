@@ -124,7 +124,9 @@ export type CardFillFailCode =
   | "unreachable"
   | "no_focus" //    no card field was chosen in the page: the fill does not guess which form is meant (round-5 C1)
   | "not_visible" // the chosen field, or the frame it is in, cannot be seen (hidden, transparent, tiny, off screen, covered)
-  | "closed_form"; // the page keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
+  | "closed_form" // the page keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
+  | "provider_frame" // a payment provider's frame takes the card on this page: its own documents are never filled (round-7 H1)
+  | "field_changed"; // the chosen field moved or restyled between the choice and the fill (round-7 H1)
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -139,6 +141,8 @@ export interface CardFillOutcome {
    *  into fields that pass the visibility rules, never into a hidden one). */
   unseenKinds?: CardFieldKind[];
   code?: CardFillFailCode;
+  /** With `provider_frame`: the provider frame's host, which the popup names. */
+  providerHost?: string;
 }
 
 /** Cut M (v2 #14): why a fill wrote NOTHING — crosses the seam as a code (the user-facing
@@ -490,6 +494,12 @@ export type Req =
       /** Round-6 review M2: the index in [forms] of the form holding the field the person chose (a press on it, or a
        *  Tab onto it), or null. A fill's grant is built from that form's kinds and sent to the frame that chose. */
       anchor?: number | null;
+      /** Round-7 review H1: the hosts of the payment providers' frames this document embeds (paymentproviders.ts).
+       *  Any of them in a tab, or card fields in a cross-origin frame, and no card is filled into that tab's own
+       *  documents. */
+      providers?: string[];
+      /** Round-7 review L7: the person chose a field again since the last report (the worker stamps the time). */
+      choseNow?: boolean;
     }
   /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
    *  literal — **no `host`, no `kinds`, no `frameId` member** ([A2]/[S7]). A page-controlled member
@@ -663,9 +673,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                *  per-frame origins vs the top origin — never page data. The popup renders
                                                *  the neutral explainer and NEVER a Fill button in this state. */
                                               crossOriginFormsOnly: boolean;
+                                              /** Round-7 review H1: a payment provider's frame takes the card on this
+                                               *  page (its host): no Fill, the explainer names it and offers copy. */
+                                              providerHost?: string;
                                             }
                                           : T extends "fillCardFromPopup"
-                                            ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; error?: string }
+                                            ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; providerHost?: string; error?: string }
                                             : T extends "revealCardForFill"
                                               ? { ok: boolean; fields?: CardFillFields; error?: string }
                                               : T extends "purgeServerData"

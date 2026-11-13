@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: blended first-party fields</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; background: #fff; }
+  label { display: block; margin: 8px 0 4px; }
+  input { font: inherit; padding: 12px; width: 100%; box-sizing: border-box; }
+  .blended { mix-blend-mode: lighten; color: #010101; background: #000; border: 0; }
+</style>
+</head>
+<body>
+<h1>Blended first-party fields</h1>
+<p>Round-7 review H1, defence in depth for a card form of the page's own (no provider frame here): fields that cannot
+be seen are not chosen, and not filled.</p>
+<ol>
+  <li>Tap the blended card number (it shows nothing of itself), open the popup, Fill: nothing is filled ("Tap the card
+  number field on the page first": the tap chose nothing).</li>
+  <li>Tap the plain card number, Fill: the plain number is filled; the blended security code is left empty and the popup
+  says it can't be seen.</li>
+</ol>
+<form onsubmit="return false">
+  <label for="n1">Card number (blended)</label><input id="n1" class="blended" name="cardnumber" autocomplete="cc-number">
+</form>
+<form onsubmit="return false">
+  <label for="n2">Card number</label><input id="n2" name="cardnumber" autocomplete="cc-number">
+  <label for="c2">Security code (blended)</label><input id="c2" class="blended" name="cvc" autocomplete="cc-csc">
+</form>
+</body>
+</html>
