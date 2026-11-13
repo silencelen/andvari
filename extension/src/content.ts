@@ -356,12 +356,17 @@ let lastCardSig: string | null = null;
  *  across [document, …shadowRoots] — §2 [U13]). Empty ⇒ every form went away and the SW clears
  *  our record. Idempotent: a stable structure never re-sends. */
 function reportCardForm(): void {
-  const forms: CardFieldKind[][] = allCardForms().map((f) => f.fields.map((x) => x.kind));
-  const sig = JSON.stringify(forms);
+  const all = allCardForms();
+  const forms: CardFieldKind[][] = all.map((f) => f.fields.map((x) => x.kind));
+  // Round-6 review M2: which of them holds the field the person chose, so the worker builds a fill's grant from that
+  // form's kinds (not the frame's richest form) and sends it to this frame.
+  const at = cardFocus === null ? -1 : all.findIndex((f) => f.fields.some((x) => x.input === cardFocus));
+  const anchor = at >= 0 ? at : null;
+  const sig = JSON.stringify(forms) + "|" + String(anchor);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
-  void safeSend({ type: "cardFormInfo", forms });
+  void safeSend({ type: "cardFormInfo", forms, anchor });
 }
 
 /** The live control → the metadata surface cardfill.ts derives against (§4). The caller-side DOM
@@ -400,7 +405,9 @@ function userActivated(): boolean {
 }
 
 function setCardFocus(next: FillableControl | null): void {
+  if (next === cardFocus) return;
   cardFocus = next;
+  reportCardForm();
 }
 
 /** A trusted focusin or click on [t]: it chooses [t] when the person put it there (a press on it, or a Tab). */
@@ -505,6 +512,15 @@ function frameChainSeen(at: { x: number; y: number }): boolean {
     point = mapped;
   }
   return true;
+}
+
+/** Whether every card form this frame found is inside a closed shadow root, where no field can be chosen (round-6 review M2). */
+function cardFormsAllClosed(): boolean {
+  const all = allCardForms();
+  return all.length > 0 && all.every((f) => {
+    const root = f.fields[0]?.input.getRootNode();
+    return root instanceof ShadowRoot && root.mode === "closed";
+  });
 }
 
 /** Drive cardfill.ts per field ref (§4/§5), CVV LAST (some checkouts validate CVV against the
@@ -659,7 +675,8 @@ async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillO
   if (typeof sig !== "string") return nothing("no_form");
   // C1 / H1: only the form holding the field the person chose, and only the fields of it that can be seen.
   const anchor = cardFocus !== null && cardFocus.isConnected ? cardFocus : null;
-  if (anchor === null) return nothing("no_focus");
+  // A card form inside a closed shadow root never gets a chosen field (round-6 review M2): said so, not "tap it".
+  if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");
   const form = cardFormHolding(anchor);
   if (!form || cardSigOf(form) !== sig) return nothing("no_form");
   if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");

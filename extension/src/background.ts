@@ -32,7 +32,7 @@ import { loginGrantRedeemable, type LoginGrant } from "./fillgrant";
 import { gateServedEnvelope } from "./servedblob";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardFieldKind } from "./detect";
-import { chooseCardTarget } from "./messages";
+import { chooseAnchoredCardTarget, chooseCardTarget } from "./messages";
 import type {
   CardFillFields,
   CardFillOutcome,
@@ -414,7 +414,7 @@ interface TabState {
    *  compares against it, so a stale record can never leak a fill across origins. Cleared with
    *  the tab (onRemoved / lock). [U14]: a persisted pre-update `{fields}` record is DISCARDED on
    *  read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
-  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][] }>;
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>;
   /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
    *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
   topOrigin?: string;
@@ -4281,7 +4281,13 @@ async function cardFormInfo(
     if (!(frameId in reg)) return { ok: true };
     delete reg[frameId];
   } else {
-    reg[frameId] = { origin: sender.origin, forms: msg.forms };
+    // M2: the form holding the field the person chose, by index; stamped with when this worker heard of it, so the
+    // frame that chose last is the one a fill goes to.
+    const a = msg.anchor;
+    const anchor = typeof a === "number" && Number.isInteger(a) && a >= 0 && a < msg.forms.length ? a : null;
+    const was = reg[frameId];
+    const anchorAt = anchor === null ? undefined : was?.anchor === anchor && was.anchorAt !== undefined ? was.anchorAt : Date.now();
+    reg[frameId] = { origin: sender.origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}) };
   }
   st.cardForms = reg;
   tabs.set(tabId, st);
@@ -4305,11 +4311,11 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  *  the tab's current top origin, with the forms themselves (chooseCardTarget's input). The
  *  Array.isArray re-check keeps [A3] fail-closed even if a pre-update record dodged the
  *  ensureLoaded [U14] discard (e.g. written by a mid-update content script). */
-function eligibleCardFrames(tabId: number, top: string): { frameId: number; forms: CardFieldKind[][] }[] {
+function eligibleCardFrames(tabId: number, top: string): { frameId: number; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }[] {
   const reg = tabs.get(tabId)?.cardForms ?? {};
   return Object.entries(reg)
     .filter(([, f]) => f.origin === top && Array.isArray(f.forms) && f.forms.length > 0)
-    .map(([fid, f]) => ({ frameId: Number(fid), forms: f.forms }));
+    .map(([fid, f]) => ({ frameId: Number(fid), forms: f.forms, anchor: f.anchor ?? null, ...(f.anchorAt !== undefined ? { anchorAt: f.anchorAt } : {}) }));
 }
 
 /** V4 (design §V4): the tab's SINGLE badge authority, so the login count and the card discovery dot
@@ -4621,10 +4627,11 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
     await delay(250);
     eligible = eligibleCardFrames(tab.id, top);
   }
-  // [U11] frame-0 preference (pinned): the top frame wins whenever it holds ANY eligible form;
-  // richest-frame/richest-form selection only ever runs below it (chooseCardTarget, pure —
-  // messages.ts). The grant freezes the chosen form's kinds + sig ([U12]/[U15]).
-  const target = chooseCardTarget(eligible);
+  // Round-6 review M2: the form holding the field the person chose, in the frame that chose it, decides the grant's
+  // kinds, not the richest form. Only when no frame reports a chosen field does [U11] pick (the top frame whenever it
+  // holds ANY eligible form; richest below it), and that frame then answers that nothing was chosen. The grant
+  // freezes the chosen form's kinds + sig ([U12]/[U15]).
+  const target = chooseAnchoredCardTarget(eligible) ?? chooseCardTarget(eligible);
   if (target === null) return { ok: false, code: "no_form", error: "no eligible card form" };
   const sig = target.kinds.join(","); // single-level, unambiguous (the nested [U13] sig is registry-side)
   cardGrants.set(tab.id, { itemId, frameId: target.frameId, origin: top, kinds: target.kinds, sig, expiresMs: Date.now() + GRANT_TTL_MS });

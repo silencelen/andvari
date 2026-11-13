@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: card form in a scrolling modal</title>
+<style>
+  html, body { height: 100%; margin: 0; overflow: hidden; font: 16px/1.4 system-ui, sans-serif; }
+  .page { padding: 16px; }
+  .modal { position: fixed; inset: 24px 12px; overflow: auto; background: #fff; border: 1px solid #999; border-radius: 12px; padding: 16px; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.3); }
+  .terms { height: 1600px; color: #555; border-bottom: 1px dashed #ccc; }
+  label { display: block; margin: 8px 0 4px; }
+  input { font: inherit; padding: 8px; width: 100%; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div class="page">The page behind the modal does not scroll (its height is the screen's).</div>
+<div class="modal" role="dialog" aria-label="Checkout">
+  <h1>Checkout</h1>
+  <p>Round-6 review M2 (b). The card form sits low in a modal that scrolls on its own, past the page's own height.
+  It must be found (the andvari badge or chip shows on it), and filled once it is scrolled into view.</p>
+  <ol>
+    <li>Scroll this modal down to the card form.</li>
+    <li>Tap the card number, then Fill a card from the andvari popup: every field is filled.</li>
+    <li>Scroll back up so the form is out of view and Fill again: nothing is written, and the popup says the field
+    can't be seen.</li>
+  </ol>
+  <div class="terms">Terms and conditions (long).</div>
+  <form onsubmit="return false">
+    <label for="cc-number">Card number</label>
+    <input id="cc-number" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+    <label for="cc-exp">Expiry (MM/YY)</label>
+    <input id="cc-exp" name="exp-date" autocomplete="cc-exp" placeholder="MM/YY">
+    <label for="cc-csc">Security code</label>
+    <input id="cc-csc" name="cvc" autocomplete="cc-csc" inputmode="numeric" maxlength="4">
+    <button type="submit">Pay</button>
+  </form>
+</div>
+</body>
+</html>

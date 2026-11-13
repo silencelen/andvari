@@ -123,7 +123,8 @@ export type CardFillFailCode =
   | "no_fields"
   | "unreachable"
   | "no_focus" //    no card field was chosen in the page: the fill does not guess which form is meant (round-5 C1)
-  | "not_visible"; // the chosen field, or the frame it is in, cannot be seen (hidden, transparent, tiny, off screen, covered)
+  | "not_visible" // the chosen field, or the frame it is in, cannot be seen (hidden, transparent, tiny, off screen, covered)
+  | "closed_form"; // the page keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -483,7 +484,13 @@ export type Req =
    *  the frame's card forms went away and its record is cleared. [U14]: this REPLACED Tier 1's
    *  `fields: CardFieldKind[]` — a design-authorized breach of the additive rule; the SW
    *  discards any persisted pre-update `{fields}` record on read (fail-closed, rescan restores). */
-  | { type: "cardFormInfo"; forms: CardFieldKind[][] }
+  | {
+      type: "cardFormInfo";
+      forms: CardFieldKind[][];
+      /** Round-6 review M2: the index in [forms] of the form holding the field the person chose (a press on it, or a
+       *  Tab onto it), or null. A fill's grant is built from that form's kinds and sent to the frame that chose. */
+      anchor?: number | null;
+    }
   /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
    *  literal — **no `host`, no `kinds`, no `frameId` member** ([A2]/[S7]). A page-controlled member
    *  would be an offer-manufacture input; the gate reads only browser-set sender fields (origin ===
@@ -765,6 +772,27 @@ export function chooseCardTarget(
     }
   }
   return chosen;
+}
+
+/**
+ * Round-6 review M2: the grant target when a frame reports the field the person chose ([anchor], an index into its
+ * forms): the frame that chose most recently ([anchorAt]), with that form's kinds, whatever form is richest elsewhere.
+ * Null when no frame has a chosen field in range; [chooseCardTarget] then picks as before, and the frame answers
+ * that nothing was chosen.
+ */
+export function chooseAnchoredCardTarget(
+  frames: ReadonlyArray<{ frameId: number; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>,
+): { frameId: number; kinds: CardFieldKind[] } | null {
+  let chosen: { frameId: number; kinds: CardFieldKind[]; at: number } | null = null;
+  for (const f of frames) {
+    const a = f.anchor;
+    if (typeof a !== "number" || !Number.isInteger(a) || a < 0 || a >= f.forms.length) continue;
+    const kinds = f.forms[a]!;
+    if (kinds.length === 0) continue;
+    const at = typeof f.anchorAt === "number" ? f.anchorAt : 0;
+    if (chosen === null || at > chosen.at) chosen = { frameId: f.frameId, kinds, at };
+  }
+  return chosen === null ? null : { frameId: chosen.frameId, kinds: chosen.kinds };
 }
 
 /** Typed sendMessage helper both UIs use. */

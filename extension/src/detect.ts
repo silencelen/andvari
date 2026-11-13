@@ -478,8 +478,9 @@ export interface VisibilityFacts {
   ink: InkFacts | null;
   /** The field's box, in viewport coordinates. */
   rect: Box;
-  /** The page's scroll offsets and scrollable extent. */
-  page: { scrollX: number; scrollY: number; width: number; height: number };
+  /** The scrollable extent the field lives in, in viewport coordinates: the content of its nearest scrolling ancestor,
+   *  or the page's (round-6 review M2: a field in an inner scrolling container is on the page). */
+  extent: Box;
   /** The viewport, when the field must be on screen now; null otherwise. */
   viewport: { width: number; height: number } | null;
   /** Whether something paints over the field's centre ("other"), the field is what shows there ("self"), or it was
@@ -666,9 +667,8 @@ export function visibilityOf(f: VisibilityFacts, proxied = false, minOpacity = M
   }
   const { left, top, width, height } = f.rect;
   if (!proxied && !(width >= MIN_FIELD_PX && height >= MIN_FIELD_PX)) return "tiny";
-  const x = left + f.page.scrollX;
-  const y = top + f.page.scrollY;
-  if (x + width <= 0 || y + height <= 0 || x >= f.page.width || y >= f.page.height) return "offpage";
+  const e = f.extent;
+  if (left + width <= e.left || top + height <= e.top || left >= e.left + e.width || top >= e.top + e.height) return "offpage";
   if (f.viewport !== null) {
     const cx = left + width / 2;
     const cy = top + height / 2;
@@ -684,6 +684,27 @@ const MAX_STYLE_DEPTH = 64;
 /** [el]'s parent, across a shadow boundary to its host. By shape, not instanceof: [el] may be another frame's (realm's). */
 function parentAcross(el: Element): Element | null {
   return el.parentElement ?? (el.getRootNode() as Partial<ShadowRoot>).host ?? null;
+}
+
+function scrolls(overflow: string): boolean {
+  return overflow === "auto" || overflow === "scroll" || overflow === "overlay";
+}
+
+/** The scrollable extent [el] lives in, in viewport coordinates: its nearest scrolling ancestor's content, else the page's. */
+function extentOf(el: HTMLElement, view: Window): Box {
+  let node = parentAcross(el);
+  const de = el.ownerDocument.documentElement;
+  for (let depth = 0; node !== null && node !== de && node !== el.ownerDocument.body && depth < MAX_STYLE_DEPTH; depth++) {
+    const cs = view.getComputedStyle(node);
+    if ((scrolls(cs.overflowX) && node.scrollWidth > node.clientWidth) || (scrolls(cs.overflowY) && node.scrollHeight > node.clientHeight)) {
+      const r = node.getBoundingClientRect();
+      return { left: r.left + node.clientLeft - node.scrollLeft, top: r.top + node.clientTop - node.scrollTop, width: node.scrollWidth, height: node.scrollHeight };
+    }
+    node = parentAcross(node);
+  }
+  const vw = view.innerWidth;
+  const vh = view.innerHeight;
+  return { left: -view.scrollX, top: -view.scrollY, width: Math.max(de?.scrollWidth ?? 0, vw), height: Math.max(de?.scrollHeight ?? 0, vh) };
 }
 
 /** What an element paints over whatever lies under it. Gathered by [paintFactsOf]. */
@@ -829,9 +850,7 @@ export function probeVisibility(el: HTMLElement, opts: { onScreen: boolean; hitT
   const cx = r.left + r.width / 2;
   const cy = r.top + r.height / 2;
   if (opts.hitTest && cx >= 0 && cy >= 0 && cx < vw && cy < vh) hit = whatShowsAt(el, cx, cy, opts.ignore);
-  const de = doc.documentElement;
-  const page = { scrollX: view.scrollX, scrollY: view.scrollY, width: Math.max(de?.scrollWidth ?? 0, vw), height: Math.max(de?.scrollHeight ?? 0, vh) };
-  return { chain, ink, rect: { left: r.left, top: r.top, width: r.width, height: r.height }, page, viewport: opts.onScreen ? { width: vw, height: vh } : null, hit };
+  return { chain, ink, rect: { left: r.left, top: r.top, width: r.width, height: r.height }, extent: extentOf(el, view), viewport: opts.onScreen ? { width: vw, height: vh } : null, hit };
 }
 
 /** [U6] per-sweep-generation label cache: extraction costs textContent walks and a form-sized
