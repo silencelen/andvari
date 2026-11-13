@@ -955,6 +955,36 @@ open class SessionControllerTest {
         assertFalse(controller.holdsTwoStepKey(), "the revoked session takes it with it")
     }
 
+    /** Round-8 review L: a key being set up goes when its time is up, whether the app is locked or not; not at every lock. */
+    @Test
+    fun aKeyBeingSetUpGoesWhenItsTimeIsUpLockedOrNot() = test {
+        unlocked()
+        twoStepServer()
+        // Locked in time, then its time runs out while still locked: gone then, not at the next unlock.
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        controller.lock()
+        assertTrue(controller.holdsTwoStepKey(), "a lock in time keeps it for the trip")
+        clocks.mono += 10 * MINUTE - 1
+        controller.tick()
+        assertTrue(controller.holdsTwoStepKey(), "not before its time")
+        clocks.mono += 1
+        controller.tick()
+        assertFalse(controller.holdsTwoStepKey(), "at its time, while locked")
+        // Unlocked with the setup screen open: the key goes at its time and the screen goes back to its start.
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(ActionResult.Ok, controller.beginTwoStep(PASSWORD))
+        assertEquals(true, controller.state.twoStep?.settingUp)
+        repeat(10) {
+            clocks.mono += MINUTE
+            controller.userActivity() // the person is there: no idle lock
+            controller.tick()
+        }
+        assertEquals(AppScreen.VAULT, controller.state.screen)
+        assertNull(controller.twoStepSetup())
+        assertEquals(false, controller.state.twoStep?.settingUp)
+        assertEquals(ActionResult.NotDone(null), controller.confirmTwoStep("123456"))
+    }
+
     @Test
     fun aRefusedCodeOrAWeakServerSaysWhyAndChangesNothing() = test {
         unlocked()

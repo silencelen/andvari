@@ -253,6 +253,7 @@ open class SessionController(
     internal fun tick() {
         if (state.screen == AppScreen.RECOVER && state.recoverVerified && !state.busy && clocks.monotonicMs() - recoverVerifiedAtMono >= RecoverCopy.IDLE_MS) recoverTimedOut()
         checkBackgroundGrace()
+        expireTwoStepKey()
         checkIdleLock()
         if (tickMs > 0) {
             sinceSyncMs += tickMs
@@ -1647,7 +1648,8 @@ open class SessionController(
      * is held while the two-step screen is open and through a trip away from the app (to add it to an authenticator,
      * which may lock the app), for at most [TWO_STEP_PENDING_MS] from when the server minted it: a lock keeps it, and
      * after the next unlock the screen comes back on its confirm step ([resumeTwoStep]). A sign-out, a server switch, an
-     * ended session, its time running out, a confirm, or closing the screen while unlocked drop it. Only the key and its
+     * ended session, its time running out (at once, locked or not: [expireTwoStepKey]), a confirm, or closing the screen
+     * while unlocked drop it. Only the key and its
      * link are kept, never the password. It never enters the state.
      */
     private class PendingTwoStep(val setup: TwoStepSetup, val mintedAtMs: Long, val owner: String)
@@ -1669,6 +1671,17 @@ open class SessionController(
             return null
         }
         return pending.setup
+    }
+
+    /**
+     * A key being set up goes when its time is up, locked or not (round-8 review L): the ticker looks every second, so it
+     * is not kept in memory past [TWO_STEP_PENDING_MS] while the app runs. A screen setting it up goes back to its start.
+     */
+    private fun expireTwoStepKey() {
+        val pending = twoStepPending ?: return
+        if (clocks.monotonicMs() - pending.mintedAtMs in 0 until TWO_STEP_PENDING_MS) return
+        twoStepPending = null
+        if (state.twoStep?.settingUp == true) update { it.copy(twoStep = it.twoStep?.copy(settingUp = false, resumed = false)) }
     }
 
     /** Back from a trip away in the middle of a setup: the two-step screen opens again on its confirm step. */
