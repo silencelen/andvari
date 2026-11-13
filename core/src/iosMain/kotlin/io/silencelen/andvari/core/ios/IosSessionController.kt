@@ -89,6 +89,7 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     seams.snapshots,
     seams.saveQueue,
     seams.appliedSaves,
+    seams.moveMemos,
 ) {
     constructor(config: IosStorageConfig) : this(IosSeams(config))
 
@@ -130,6 +131,9 @@ internal class IosSeams(
 
     /** The list of automatic saves, sealed to the account: in the app's own container, never the App Group. */
     val appliedSaves: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/applied-saves.json")
+
+    /** Moves and copies that did not finish, sealed to the account: in the app's own container, never the App Group. */
+    val moveMemos: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/move-memos.json")
 
     private companion object {
         const val ADOPTED = "ios.privateState.v1"

@@ -400,6 +400,16 @@ final class AppModel: ObservableObject {
         controller.moveTargets(itemId: itemId)
     }
 
+    /// Whether the item can leave its vault; otherwise it can only be copied out.
+    func canMoveOut(_ itemId: String) -> Bool {
+        controller.canMoveOut(itemId: itemId)
+    }
+
+    /// The move or copy sheet closed without finishing: what an unfinished try kept goes.
+    func cancelMove(_ itemId: String) {
+        controller.cancelMove(itemId: itemId)
+    }
+
     func moveOrCopyItem(_ itemId: String, to vaultId: String, move: Bool) async -> Outcome {
         await run { try await $0.moveOrCopyItem(itemId: itemId, targetVaultId: vaultId, move: move) }
     }

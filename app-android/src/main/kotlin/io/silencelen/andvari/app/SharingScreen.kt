@@ -684,12 +684,13 @@ private fun RecentlyRemovedSection(held: List<HeldVaultInfo>) {
  *  SAME gesture in the ViewModel so Retry converges (never duplicates); a denied copy or a
  *  changed source aborts with an honest message (source untouched). */
 @Composable
-internal fun MoveCopyControl(vm: AndvariViewModel, ui: UiState, item: VaultItem, targets: List<VaultInfo>) {
+internal fun MoveCopyControl(vm: AndvariViewModel, ui: UiState, item: VaultItem, targets: List<VaultInfo>, canMove: Boolean) {
     val mode = if (vm.movePickerItemId == item.itemId) vm.movePickerMode else null
     var target by rememberSaveable(item.itemId) { mutableStateOf(targets.firstOrNull()?.vaultId ?: "") }
     if (mode == null) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { vm.openMovePicker(item.itemId, "move") }) { Text("Move to vault…") }
+            // L6: an item in a vault this account only reads can be copied out, not moved (the shared rule).
+            if (canMove) TextButton(onClick = { vm.openMovePicker(item.itemId, "move") }) { Text("Move to vault…") }
             TextButton(onClick = { vm.openMovePicker(item.itemId, "copy") }) { Text("Copy to vault…") }
         }
         return

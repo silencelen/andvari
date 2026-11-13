@@ -22,6 +22,7 @@ import io.silencelen.andvari.core.client.BackupRequest
 import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
+import io.silencelen.andvari.core.app.VaultMoves
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CsvPreflight
@@ -43,10 +44,8 @@ import io.silencelen.andvari.core.client.ExportCsv
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.IncomingTransfer
-import io.silencelen.andvari.core.client.ItemChangedException
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LifecycleNotice
-import io.silencelen.andvari.core.client.MoveGesture
 import io.silencelen.andvari.core.client.PendingUpload
 import io.silencelen.andvari.core.client.Staleness
 import io.silencelen.andvari.core.client.Strength
@@ -2195,12 +2194,23 @@ class AndvariViewModel(
 
     fun clearCopiedNote() { _ui.value = _ui.value.copy(copiedNote = null, copyVaultId = null) }
 
-    // F19 gestures memoized per (item|target|mode): a RETRY of a transiently-failed
-    // move/copy reuses the SAME gesture (fresh ids were minted ONCE) so the server's
-    // mutation dedup converges instead of duplicating. Kept ONLY across a failed attempt
-    // of the same UNCHANGED item (#5): a rev change remints (a stale gesture would rebuild
-    // attachments from a stale snapshot), and Cancel/dismiss discards.
-    private val moveGestures = mutableMapOf<String, MoveGesture>()
+    // F19 moves and copies: the ONE implementation the iOS controller uses too (round-6 review L6,
+    // core VaultMoves). A RETRY of a transiently-failed move/copy reuses the SAME gesture (fresh ids
+    // were minted ONCE) so the server's mutation dedup converges instead of duplicating; a rev change
+    // remints (#5), unless the earlier try's copy is already in the target (L5: then nothing new is
+    // minted and the message says so). Kept until done or cancelled (Cancel/dismiss discards); across
+    // a lock it is kept sealed to the account in app-private storage (noBackupFilesDir), never in
+    // memory, and a sign-out or an ended session drops it.
+    private val moves = VaultMoves(VaultMoves.Store.Sealed(AppPrivateFile(File(cacheDir, "move-memos.bin"))) { account })
+
+    /** The vaults a new item, an import or a move/copy may write to (VaultMoves.writableVaults: the key held, L6). */
+    fun writableVaults(): List<VaultInfo> = VaultMoves.writableVaults(vaultInfos()) { account?.canSealUnder(it) == true }
+
+    /** Where [item] can be copied (and moved, when [canMoveOut]): the writable vaults but its own. */
+    fun moveTargets(item: VaultItem): List<VaultInfo> = VaultMoves.targets(item.vaultId, vaultInfos()) { account?.canSealUnder(it) == true }
+
+    /** Whether [item] can leave its vault (a move deletes it there); an item in a vault this account reads can only be copied. */
+    fun canMoveOut(item: VaultItem): Boolean = VaultMoves.canTakeOut(item.vaultId, vaultInfos())
 
     // The move/copy picker session lives HERE, not in the composition (#7, same convention
     // as editorOpen): completion across an Activity recreation must close the picker the
@@ -2217,7 +2227,7 @@ class AndvariViewModel(
 
     /** Picker cancel/dismiss: close it and discard the item's memoized gestures (#5). */
     fun closeMovePicker() {
-        movePickerItemId?.let { id -> moveGestures.keys.filter { it.startsWith("$id|") }.forEach { moveGestures.remove(it) } }
+        movePickerItemId?.let(moves::cancelled)
         movePickerMode = null
         movePickerItemId = null
     }
@@ -2225,24 +2235,34 @@ class AndvariViewModel(
     /** Move (copy + delete source) or copy [itemId] into [targetVaultId] (design §8). */
     fun moveOrCopyItem(itemId: String, targetVaultId: String, move: Boolean) {
         val e = engine ?: return
-        val gKey = "$itemId|$targetVaultId|$move"
         _ui.value = _ui.value.copy(busy = true, error = null, moveProgress = null)
         viewModelScope.launch {
+            var names: Triple<String, String, String>? = null // item, target vault, source vault
             try {
                 val current = e.item(itemId)
                     ?: throw ApiException(409, "vault_state_changed", "This item is no longer here — it may have been removed or its vault deleted.")
-                // #5: reuse the memo ONLY while the source content is unchanged — a
-                // different rev IS different content (mirror of copyAllToPersonal's memo).
-                val memo = moveGestures[gKey]
-                val g = if (memo != null && memo.sourceRev == current.rev) memo
-                        else e.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[gKey] = it }
+                // L6: the shared rules — a move needs the source writable; the target must be one this account can
+                // write and seal for (the key held).
+                if (move && !canMoveOut(current)) throw ApiException(403, "read_only", "You can only read this vault, so the item can be copied out, not moved.")
+                if (moveTargets(current).none { it.vaultId == targetVaultId }) throw CopyDeniedException()
+                val infos = e.vaultInfos()
+                names = Triple(current.doc.name.ifBlank { "This item" }, infos.find { it.vaultId == targetVaultId }?.name ?: "the other vault", infos.find { it.vaultId == current.vaultId }?.name ?: "its vault")
+                // #5 / L5: the memo is reused ONLY while the source content is unchanged; a changed item whose earlier
+                // try already made the copy mints nothing new.
+                val g = when (val prepared = moves.prepare(e, current, targetVaultId, move)) {
+                    is VaultMoves.Prepared.AlreadyCopied -> {
+                        _ui.value = _ui.value.copy(busy = false, error = VaultMoves.alreadyCopiedLine(names.first, names.second))
+                        return@launch
+                    }
+                    is VaultMoves.Prepared.Run -> prepared.gesture
+                }
                 // Audit H10: the gesture re-uploads the item's attachments under busy; scaled to their
                 // bytes. A timeout lands in the transient branch below: the memoized gesture
                 // survives, so Retry replays the same ids instead of duplicating.
                 runBounded(BoundedOps.attachmentMs(current.doc.attachments.sumOf { it.size })) {
                     e.runGesture(g, { done, total -> _ui.value = _ui.value.copy(moveProgress = done to total) })
                 }
-                moveGestures.remove(gKey)
+                moves.finished(itemId, targetVaultId, move)
                 val target = e.vaultInfos().find { it.vaultId == targetVaultId }?.name ?: "the other vault"
                 // Completion is VM state (#7): close the picker + notice, whatever
                 // composition is alive. A MOVE also empties the detail view via the item
@@ -2253,23 +2273,20 @@ class AndvariViewModel(
                 _ui.value = _ui.value.copy(moveProgress = null, notice = if (move) "Moved to “$target”." else "Copied to “$target”.")
             } catch (t: Throwable) {
                 _ui.value = _ui.value.copy(moveProgress = null)
-                when {
-                    t is CopyDeniedException -> {
-                        moveGestures.remove(gKey)
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                when (val failed = moves.failed(itemId, targetVaultId, move, t)) {
+                    VaultMoves.Failure.COPY_DENIED ->
                         _ui.value = _ui.value.copy(busy = false, error = "You don't have permission to add items to that vault — nothing was moved.")
+                    VaultMoves.Failure.CHANGED_AFTER_COPY, VaultMoves.Failure.ORIGINAL_KEPT -> {
+                        // L5: the copy is there; the list shows it and the message names where both are.
+                        refreshItems()
+                        val (item, target, source) = names ?: Triple("This item", "the other vault", "its vault")
+                        _ui.value = _ui.value.copy(busy = false, error = VaultMoves.bothVaultsLine(failed, item, target, source))
                     }
-                    t is ItemChangedException -> {
-                        moveGestures.remove(gKey)
-                        _ui.value = _ui.value.copy(busy = false, error = "This item changed while moving — go back, review it, and try again.")
-                    }
-                    t is ApiException && t.status == 403 -> {
-                        moveGestures.remove(gKey)
-                        fail(t)
-                    }
-                    else -> {
-                        // Transient — KEEP the gesture so Retry replays the same ids.
+                    VaultMoves.Failure.FORBIDDEN -> fail(t)
+                    // Transient — the gesture is KEPT so Retry replays the same ids.
+                    VaultMoves.Failure.TRANSIENT ->
                         _ui.value = _ui.value.copy(busy = false, error = "That didn't finish. Press Retry — it won't create a duplicate.")
-                    }
                 }
             }
         }
@@ -3145,7 +3162,7 @@ class AndvariViewModel(
         pendingCaptureAuthKey = null
         closeEditor() // the editor session (and its picked plaintext bytes) dies with the lock
         importDismiss() // the parsed CSV + plan hold every password in the file — never outlive the lock
-        moveGestures.clear() // gestures reference the dead engine's item state
+        moves.forget() // L5: an unfinished move is kept sealed for the next unlock, never in memory while locked
         movePickerMode = null
         movePickerItemId = null
         // Everything a dead session must stop showing lives in ONE place (see sessionCleared);
@@ -3203,7 +3220,7 @@ class AndvariViewModel(
             pendingCaptureAuthKey = null // password-equivalent — dies with the session
             closeEditor()
             importDismiss() // account A's plaintext CSV/plan must never resurface in account B's session
-            moveGestures.clear()
+            moves.drop() // the account is going: an unfinished move goes with it
             movePickerMode = null
             movePickerItemId = null
             session?.userId?.let {
@@ -3246,7 +3263,7 @@ class AndvariViewModel(
         pendingCaptureAuthKey = null
         closeEditor()
         importDismiss()
-        moveGestures.clear()
+        moves.drop()
         movePickerMode = null
         movePickerItemId = null
         _ui.value = _ui.value.sessionCleared(REASON_SESSION_ENDED).copy(

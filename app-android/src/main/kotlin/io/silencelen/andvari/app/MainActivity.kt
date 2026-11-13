@@ -1891,7 +1891,7 @@ private fun ImportDialogs(vm: AndvariViewModel, ui: UiState) {
             // — never reader). Read once per preview open: each vaultInfos() call decrypts
             // vault metadata, and the choice list must not shift under an open dialog.
             val vaultChoices = remember {
-                vm.vaultInfos().filter { it.type == "personal" || it.role == "owner" || it.role == "writer" }
+                vm.writableVaults() // L6: the shared rule (the key held, too)
             }
             AlertDialog(
                 onDismissRequest = { if (!ui.importBusy) vm.importDismiss() },
@@ -2265,15 +2265,14 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
                     dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
                 )
             }
-            // F19 (design §8): move/copy into another writable vault. Mirrors web — only for
-            // writers/owners of the SOURCE (a reader's delete leg would be denied anyway).
-            val moveTargets = vm.vaultInfos().filter {
-                (it.type == "personal" || it.role == "owner" || it.role == "writer") && it.vaultId != item.vaultId
-            }
-            if (moveTargets.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                MoveCopyControl(vm, ui, item, moveTargets)
-            }
+        }
+        // F19 (design §8): move/copy into another writable vault, by the shared rules (round-6 review L6,
+        // core VaultMoves): a target must be writable with its key held; a move also needs the SOURCE
+        // writable (its delete leg), so an item in a vault this account only reads is offered Copy only.
+        val moveTargets = vm.moveTargets(item)
+        if (moveTargets.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            MoveCopyControl(vm, ui, item, moveTargets, canMove = vm.canMoveOut(item))
         }
     }
 }
@@ -2303,7 +2302,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
     // never changes vault — its choice list is empty, so the picker never shows and its value stays
     // null (saveWithUploads ignores it regardless — the HAZARD is closed at both layers).
     val vaultChoices = remember(itemId) {
-        if (itemId == null) vm.vaultInfos().filter { it.type == "personal" || it.role == "owner" || it.role == "writer" }
+        if (itemId == null) vm.writableVaults() // L6: the shared rule (the key held, too)
         else emptyList()
     }
     // Default = Personal (vaultInfos() sorts personal first). rememberSaveable keeps the pick across

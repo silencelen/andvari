@@ -226,6 +226,7 @@ data class HeldVaultInfo(
 )
 
 /** One attachment of a move/copy gesture: fresh id + fresh fileKey minted at gesture time. */
+@kotlinx.serialization.Serializable
 data class GestureAttachment(
     val oldId: String,
     val newId: String,
@@ -237,7 +238,9 @@ data class GestureAttachment(
 /** A move/copy gesture (F19, design §8). Minted ONCE (fresh newItemId + per-attachment fresh
  *  fileKeys); a RETRY of the SAME gesture converges via server mutation-dedup — never a fresh
  *  gesture, which would collide-or-duplicate. [sourceRev] is the rev of the content copied,
- *  so the delete leg's baseItemRev catches a source that changed mid-move. */
+ *  so the delete leg's baseItemRev catches a source that changed mid-move. Serializable so a
+ *  try that did not finish can be kept, sealed, across a lock (round-6 review L5, VaultMoves). */
+@kotlinx.serialization.Serializable
 data class MoveGesture(
     val gestureId: String,
     val sourceItemId: String,
@@ -252,6 +255,11 @@ data class MoveGesture(
 /** F19: the target vault denied the copy — source untouched, gesture aborted (design §8). */
 class CopyDeniedException :
     ApiException(403, "copy_denied", "The copy to the target vault was denied — you may not have write access there.")
+
+/** F19: the copy was made, but the source could not be deleted (access to its vault changed): the item is in both
+ *  vaults (round-6 review L5: told apart from a copy that was never made). */
+class SourceDeleteDeniedException :
+    ApiException(403, "denied", "The source item could not be deleted — your access may have changed. The copy was made.")
 
 /** F19: the source changed since we read it — the move is aborted, nothing deleted (design §8). */
 class ItemChangedException :
@@ -2460,7 +2468,7 @@ class SyncEngine(
                     }
                     throw changed
                 }
-                "denied" -> throw ApiException(403, "denied", "The source item could not be deleted — your access may have changed. The copy was made.")
+                "denied" -> throw SourceDeleteDeniedException()
                 else -> cache.deleteItem(g.sourceItemId)
             }
         }
