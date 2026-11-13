@@ -22,7 +22,7 @@ import {
 import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { bumpLabelGeneration, contentPositionOf, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, whatShowsAt, type Box, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
+import { boxContains, boxesOverlap, bumpLabelGeneration, clipBox, contentPositionOf, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, FRAME_TAGS, isSubmitLike, labelSourcesOf, MIN_OPACITY, parentAcross, probeVisibility, proxiedAtFill, samplePoints, unionBox, visibilityOf, whatShowsAt, type Box, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { paymentProviderHost } from "./paymentproviders";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
@@ -363,44 +363,19 @@ function reportCardForm(): void {
   // form's kinds (not the frame's richest form) and sends it to this frame.
   const at = cardFocus === null ? -1 : all.findIndex((f) => f.fields.some((x) => x.input === cardFocus));
   const anchor = at >= 0 ? at : null;
-  // Round-7 review H1: the payment providers' frames this document embeds; the worker then fills no card here.
-  const providers = providerFramesHere();
   // L7: a new choice (even of the same field) is told, so the worker stamps when this frame chose last.
   const choseNow = chosenSeq !== reportedChoice;
-  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, providers, chosenSeq]);
+  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, chosenSeq]);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
   reportedChoice = chosenSeq;
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
-  void safeSend({ type: "cardFormInfo", forms, anchor, providers, choseNow });
-}
-
-/** The first payment-provider frame this document embeds ([providerFramesHere]), or null. */
-function providerFrameHost(): string | null {
-  const hosts = providerFramesHere();
-  return hosts.length > 0 ? hosts[0]! : null;
+  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow });
 }
 
 /** Bumped by every choice of a card field, so a report tells the worker a new choice was made ([reportCardForm]). */
 let chosenSeq = 0;
 let reportedChoice = 0;
-
-/**
- * The hosts of the payment providers' frames this document embeds, in this document and the shadow roots the scan
- * sees (round-7 review H1, paymentproviders.ts). An iframe is enough: on Safari this script may not run in the
- * provider's frame without the per-site permission, so the frame's own report cannot be counted on.
- */
-function providerFramesHere(): string[] {
-  const hosts = new Set<string>();
-  for (const scope of scanScopes()) {
-    for (const frame of scope.querySelectorAll("iframe, frame")) {
-      const src = (frame as HTMLIFrameElement).src;
-      const host = typeof src === "string" ? paymentProviderHost(src) : null;
-      if (host !== null) hosts.add(host);
-    }
-  }
-  return [...hosts].sort();
-}
 
 /** The live control → the metadata surface cardfill.ts derives against (§4). The caller-side DOM
  *  mappings the pure leaf must never see: `maxLength === -1` is the DOM's "undeclared" → null;
@@ -418,17 +393,23 @@ function cardTargetOf(el: FillableControl): CardTargetMeta {
  * into the form that holds it: never into "the first form with the grant's signature", which a skimmer's invisible twin
  * of the real form could be. Only the person chooses it, while the page holds the person's activation
  * (navigator.userActivation): a trusted press on that very field; or a trusted press on its label, or inside its own
- * wrapper, that focuses it in the same task (regression 6); or a Tab that moved focus to it, not prevented, from the
- * field focused when the key went down, with nothing else moving focus in between (M2-tab). A page script's
- * el.focus() fires a trusted focusin too, so a focus alone never chooses anything. At the choice the field must
- * already pass the full fill rules; its place and a digest of its styles are kept, and a fill refuses if either
+ * wrapper, that focuses it in the same task (regression 6); or a Tab that moved focus to it, not prevented once the
+ * keydown was done, from the field focused when the key went down, with nothing else moving focus in between (M2-tab,
+ * round-8 review L). A page script's el.focus() fires a trusted focusin too, so a focus alone never chooses anything.
+ * At the choice the field must already pass the full fill rules, and no frame may stand against it
+ * ([cardFillAgainst], round-8 review H); its place and a digest of its styles are kept, and a fill refuses if either
  * changed. It is let go when focus moves from it to somewhere else in this page; the page losing focus to the popup
- * keeps it.
+ * keeps it, and its place is measured again once that blur has settled.
  */
 let cardFocus: FillableControl | null = null;
 
-/** The chosen field as it was at the choice: where it sat in its scrolling container's content, and its styles. */
+/** The chosen field as it was at the choice (its place re-measured after the popup's blur): where it sat in its
+ *  scrolling container's content, and its styles. */
 let chosenAs: { place: Box; digest: string } | null = null;
+
+/** A choice the person made that the frames rule refused ([cardFillAgainst]): a fill then explains why, naming the
+ *  provider when the frame is a listed one, instead of asking for a tap. Let go with the field's focus. */
+let refusedChoice: { field: FillableControl; host: string | null } | null = null;
 
 /** The last trusted press in this document: the innermost element it landed on, when (performance.now()), and
  *  whether the task it came in is still running (cleared by the next task). */
@@ -449,25 +430,197 @@ function userActivated(): boolean {
 }
 
 /**
- * The field's styles as the fill rules read them, less what focus and scrolling change on their own (a background a
- * page sets on :focus, a masked box's place on screen): a change between the choice and the fill refuses the fill.
+ * The field's styles as the fill rules read them, less what focus, scrolling and a page's validation change on their
+ * own (a background set on :focus, a masked box's place on screen, the text colour a blur check sets, round-8 review
+ * M; the fill checks the text's alpha again anyway): a change between the choice and the fill refuses the fill.
  */
 function styleDigest(el: HTMLElement): string {
   const f = probeVisibility(el, { onScreen: false, hitTest: false, fill: true });
   const chain = f.chain.map((c) => [c.display, c.visibility, c.opacity, c.filter, c.mask, c.blend]);
-  return JSON.stringify([chain, f.ink === null ? null : [f.ink.color, f.ink.textFill, f.ink.fontSize]]);
+  return JSON.stringify([chain, f.ink === null ? null : f.ink.fontSize]);
 }
 
 function setCardFocus(next: FillableControl | null): void {
   if (next !== null) {
     chosenAs = { place: contentPositionOf(next), digest: styleDigest(next) };
     chosenSeq++;
+    refusedChoice = null;
   } else {
     chosenAs = null;
   }
   if (next === cardFocus && next === null) return;
   cardFocus = next;
   reportCardForm();
+}
+
+/** When the page's blur has settled after it lost focus to the popup, the chosen field's place is taken again. */
+const BLUR_SETTLE_MS = [150, 500] as const;
+
+/**
+ * The page lost focus with a field chosen (the popup opened): the place a fill compares against is measured again once
+ * the blur has settled, so a page whose validation moves the form on blur still fills (round-8 review M). Only the
+ * place: the styles and every fill rule are checked at the fill as before.
+ */
+function remeasureAfterBlur(): void {
+  const field = cardFocus;
+  if (field === null || filling) return;
+  for (const ms of BLUR_SETTLE_MS) {
+    setTimeout(() => {
+      if (cardFocus !== field || chosenAs === null || filling || !field.isConnected) return;
+      chosenAs = { place: contentPositionOf(field), digest: chosenAs.digest };
+    }, ms);
+  }
+}
+
+/** The most elements the frames rule walks in one document; past it, nothing is filled. */
+const FRAME_SCAN_MAX = 100_000;
+
+/** Every element of [doc], and of every shadow root under it this script can open, with no cap but [FRAME_SCAN_MAX]
+ *  (round-8 review H: the scan's caps leave roots out, and a root attached since the last sweep is in no list). Null
+ *  past the cap, or past [SHADOW_MAX_DEPTH] nested roots. */
+function everyElement(doc: Document): Element[] | null {
+  const out: Element[] = [];
+  const walk = (scope: Document | ShadowRoot, depth: number): boolean => {
+    const w = doc.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT);
+    for (let n = w.nextNode(); n !== null; n = w.nextNode()) {
+      const el = n as Element;
+      if (isOwnUiHost(el)) continue;
+      out.push(el);
+      if (out.length > FRAME_SCAN_MAX) return false;
+      const sr = shadowRootOf(el);
+      if (sr !== null && (depth >= SHADOW_MAX_DEPTH || !walk(sr, depth + 1))) return false;
+    }
+    return true;
+  };
+  return walk(doc, 1) ? out : null;
+}
+
+function boxOf(r: DOMRect): Box {
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
+}
+
+/** The host of the listed payment provider whose frame [el] is, for the explainer; null for any other frame. */
+function frameHost(el: Element): string | null {
+  const src = el.getAttribute(el.tagName.toUpperCase() === "OBJECT" ? "data" : "src");
+  if (src === null || src === "") return null;
+  try {
+    return paymentProviderHost(new URL(src, el.ownerDocument.baseURI).href);
+  } catch {
+    return null;
+  }
+}
+
+/** The frames of [frame]'s own document, when this script can read it (an about:blank or srcdoc child, where no
+ *  content script runs), with their boxes in [frame]'s document, clipped to [box], the frame's own; and theirs. */
+function framesInside(frame: Element, box: Box, depth = 0): { el: Element; box: Box }[] {
+  if (depth >= SHADOW_MAX_DEPTH) return [];
+  let inner: Document | null = null;
+  try {
+    inner = (frame as HTMLIFrameElement).contentDocument ?? null;
+  } catch {
+    inner = null;
+  }
+  if (inner === null) return [];
+  const el = frame as HTMLElement;
+  const cs = el.ownerDocument.defaultView?.getComputedStyle(el);
+  const scale = el.offsetWidth > 0 ? box.width / el.offsetWidth : 1;
+  const left = box.left + (el.clientLeft + (Number.parseFloat(cs?.paddingLeft ?? "0") || 0)) * scale;
+  const top = box.top + (el.clientTop + (Number.parseFloat(cs?.paddingTop ?? "0") || 0)) * scale;
+  const out: { el: Element; box: Box }[] = [];
+  for (const f of everyElement(inner) ?? []) {
+    if (!FRAME_TAGS.has(f.tagName.toUpperCase())) continue;
+    const r = f.getBoundingClientRect();
+    const mapped = clipBox({ left: left + r.left * scale, top: top + r.top * scale, width: r.width * scale, height: r.height * scale }, box);
+    if (mapped === null) continue;
+    out.push({ el: f, box: mapped }, ...framesInside(f, mapped, depth + 1));
+  }
+  return out;
+}
+
+/**
+ * Round-8 review H: what stands against a card fill in [doc] where the boxes [boxes] and the points [points] are (in
+ * [doc]'s viewport): a frame (iframe, frame, object or embed, any source or none) of [doc], of a shadow root this script
+ * can open, or of a child document it can read, that overlaps one of the boxes or lies under one of the points.
+ * [exclude]: the frame element the chosen field's own document is in, looked at from its parent. Null when nothing does;
+ * otherwise the listed provider whose frame it is, when it is one (the list names, it does not decide).
+ */
+function framesAgainst(doc: Document, boxes: readonly Box[], points: readonly { x: number; y: number }[], exclude: Element | null): { host: string | null } | null {
+  const all = everyElement(doc);
+  if (all === null) return { host: null };
+  const hits = (box: Box): boolean => boxes.some((b) => boxesOverlap(box, b)) || points.some((p) => boxContains(box, p));
+  for (const el of all) {
+    if (el === exclude || !FRAME_TAGS.has(el.tagName.toUpperCase())) continue;
+    const box = boxOf(el.getBoundingClientRect());
+    if (hits(box)) return { host: frameHost(el) };
+    for (const inner of framesInside(el, box)) if (hits(inner.box)) return { host: frameHost(inner.el) };
+  }
+  for (const { x, y } of points) {
+    for (const at of doc.elementsFromPoint(x, y)) {
+      if (at !== exclude && FRAME_TAGS.has(at.tagName.toUpperCase())) return { host: frameHost(at) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Round-8 review H, at the choice and again at the fill: whether a card may go into [field], of [form], as far as what
+ * lies over and under them goes. A frame against the field's box, the form's box or the field's sample points refuses
+ * it, in this document and, up the frame chain, in each parent document around this frame's place ([framesUpChain]).
+ * On Safari, where a closed shadow root hides its frames from this script but not its host, any element that overlaps
+ * the field and is neither the field, one of its ancestors, nor inside its own wrapper refuses it too. Null: nothing
+ * stands against it.
+ */
+function cardFillAgainst(field: FillableControl, form: CardForm): { host: string | null } | null {
+  const fieldBox = boxOf(field.getBoundingClientRect());
+  const formBox = unionBox(form.fields.filter((f) => f.input.isConnected).map((f) => boxOf(f.input.getBoundingClientRect()))) ?? fieldBox;
+  const points = samplePoints(fieldBox);
+  const here = framesAgainst(field.ownerDocument, [fieldBox, formBox], points, null);
+  if (here !== null) return here;
+  if (__ANDVARI_TARGET__ === "safari") {
+    const all = everyElement(field.ownerDocument);
+    if (all === null) return { host: null };
+    const ancestors = new Set<Element>();
+    for (let a = parentAcross(field); a !== null; a = parentAcross(a)) ancestors.add(a);
+    const wrapper = fieldWrapperOf(field);
+    for (const el of all) {
+      if (el === field || ancestors.has(el) || field.contains(el) || (wrapper !== null && wrapper.contains(el))) continue;
+      if (boxesOverlap(boxOf(el.getBoundingClientRect()), fieldBox)) return { host: null };
+    }
+  }
+  return framesUpChain(fieldBox);
+}
+
+/**
+ * The frames rule in each parent document, up to the top: around where this frame shows the field's box, nothing but
+ * this frame's own element may be a frame. A parent this script cannot read (another origin) is left to that frame's
+ * own check of its frame element ([frameChainSeen]).
+ */
+function framesUpChain(fieldBox: Box): { host: string | null } | null {
+  let win: Window = window;
+  let box = fieldBox;
+  for (let depth = 0; win !== win.top && depth < SHADOW_MAX_DEPTH; depth++) {
+    let frame: Element | null;
+    try {
+      frame = win.frameElement;
+    } catch {
+      frame = null;
+    }
+    const parentDoc = frame?.ownerDocument ?? null;
+    if (frame === null || parentDoc === null) return null;
+    const el = frame as HTMLElement;
+    const r = el.getBoundingClientRect();
+    const cs = parentDoc.defaultView?.getComputedStyle(el);
+    const scale = el.offsetWidth > 0 ? r.width / el.offsetWidth : 1;
+    const left = r.left + (el.clientLeft + (Number.parseFloat(cs?.paddingLeft ?? "0") || 0)) * scale;
+    const top = r.top + (el.clientTop + (Number.parseFloat(cs?.paddingTop ?? "0") || 0)) * scale;
+    const mapped = clipBox({ left: left + box.left * scale, top: top + box.top * scale, width: box.width * scale, height: box.height * scale }, boxOf(r));
+    if (mapped === null) return { host: null };
+    const against = framesAgainst(parentDoc, [mapped], samplePoints(mapped), frame);
+    if (against !== null) return against;
+    win = parentDoc.defaultView ?? win.parent;
+    box = mapped;
+  }
+  return null;
 }
 
 /** Whether [t] passes the full fill rules on its own now: what a choice and a fill both require of the chosen field. */
@@ -496,13 +649,35 @@ function chooseIfPersonPut(t: EventTarget | null, focus: FocusEvent | undefined)
   const labels = [...(t.labels ?? [])];
   const wrapper = fieldWrapperOf(t);
   const nearField = press !== null && press.sameTask && target !== null && (labels.some((l) => l === target || l.contains(target)) || (wrapper !== null && wrapper.contains(target)));
+  if (onField || nearField) {
+    chooseIfFits(t);
+    return;
+  }
   const tab = lastTab;
-  const tabbed =
-    focus !== undefined && tab !== null && now - tab.at < CHOOSE_TAB_MS && !tab.event.defaultPrevented && tab.moves === focusMoves &&
-    from !== null && from === tab.from;
-  if (!(onField || nearField || tabbed) || !userActivated() || cardFormForInput(t) === null) return;
+  const tabbed = focus !== undefined && tab !== null && now - tab.at < CHOOSE_TAB_MS && tab.moves === focusMoves && from !== null && from === tab.from;
+  if (!tabbed) return;
+  // Round-8 review L: whether the page prevented the Tab is final only once the keydown is done (a listener after this
+  // focus may still prevent it), so the Tab's choice is decided after it, if focus is still on [t] and moved nowhere else.
+  const moves = focusMoves + 1; // this focusin, counted once it has been looked at
+  setTimeout(() => {
+    if (tab.event.defaultPrevented || focusMoves !== moves || deepActiveElement() !== t) return;
+    chooseIfFits(t);
+  }, 0);
+}
+
+/** The person put [t] there: it is chosen when the page holds their activation and it passes the fill rules. */
+function chooseIfFits(t: FillableControl): void {
+  if (filling || !userActivated()) return;
+  const form = cardFormForInput(t);
+  if (form === null) return;
   // The choice is held to the same rules as the fill (round-7 review H1): a field that cannot be seen is not chosen.
   if (!chosenFieldSeen(t)) return;
+  // Nor one a frame stands against (round-8 review H); the fill then says so instead of asking for a tap.
+  const against = cardFillAgainst(t, form);
+  if (against !== null) {
+    refusedChoice = { field: t, host: against.host };
+    return;
+  }
   setCardFocus(t);
 }
 
@@ -517,12 +692,23 @@ function deepActiveElement(): Element | null {
   return a;
 }
 
-/** Focus left an element: if the chosen field no longer has it while this page still has focus, it is let go. */
+/** Focus left an element: if the chosen field no longer has it while this page still has focus, it is let go; if the
+ *  page itself lost focus (the popup opened), its place is measured again once the blur settles. */
 function noteFocusLeft(): void {
+  if (refusedChoice !== null) {
+    const refused = refusedChoice.field;
+    setTimeout(() => {
+      if (refusedChoice?.field === refused && document.hasFocus() && deepActiveElement() !== refused) refusedChoice = null;
+    }, 0);
+  }
   if (cardFocus === null || filling) return;
   setTimeout(() => {
     if (filling || cardFocus === null) return;
-    if (document.hasFocus() && deepActiveElement() !== cardFocus) setCardFocus(null);
+    if (!document.hasFocus()) {
+      remeasureAfterBlur();
+      return;
+    }
+    if (deepActiveElement() !== cardFocus) setCardFocus(null);
   }, 0);
 }
 
@@ -537,8 +723,8 @@ function cardSigOf(form: CardForm): string {
 }
 
 /**
- * The fields of [form] a card may be written into now (round-6 and round-7 review H1; defence in depth: the structural
- * defence is the payment-provider check in [fillCardIntoForm]). The chosen field must pass the full fill rules
+ * The fields of [form] a card may be written into now (round-6 and round-7 review H1; defence in depth beside the frames
+ * rule, [cardFillAgainst], which [fillCardIntoForm] runs first). The chosen field must pass the full fill rules
  * ([chosenFieldSeen]: on screen, near-full opacity over every ancestor, filter and mask, normal blending, text at least
  * half opaque, and the topmost painter at each of its sample points), sit where it sat at the choice, with the same
  * styles, and its frame must pass in its parent. Every other field passes the same rules, except that a hidden native
@@ -754,17 +940,22 @@ function applyCardFill(form: CardForm, values: CardFillFields, seen: ReadonlySet
  *  SW) refuses rather than guesses, same fail-closed law as the SW side. */
 async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillOutcome> {
   const nothing = (code: CardFillOutcome["code"]): CardFillOutcome => ({ filled: "nothing", filledKinds: [], missedKinds: [], code });
+  // Round-8 review H: a frame (or on Safari anything else) over or under the field or its form; the listed provider's
+  // host, when it is one, names it in the explainer.
+  const framed = (against: { host: string | null }): CardFillOutcome => ({ ...nothing("provider_frame"), ...(against.host !== null ? { providerHost: against.host } : {}) });
   if (typeof sig !== "string") return nothing("no_form");
-  // Round-7 review H1, the structural defence: where a payment provider's frame takes the card, the card fields are
-  // the provider's, and a field of this document is not one (a script that owns this document controls what it shows).
-  const providerHost = providerFrameHost();
-  if (providerHost !== null) return { ...nothing("provider_frame"), providerHost };
   // C1 / H1: only the form holding the field the person chose, and only the fields of it that can be seen.
   const anchor = cardFocus !== null && cardFocus.isConnected ? cardFocus : null;
-  // A card form inside a closed shadow root never gets a chosen field (round-6 review M2): said so, not "tap it".
-  if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");
+  if (anchor === null) {
+    // The person chose a field the frames rule refused: said so, not "tap it".
+    if (refusedChoice !== null && refusedChoice.field.isConnected) return framed(refusedChoice);
+    // A card form inside a closed shadow root never gets a chosen field (round-6 review M2): said so, not "tap it".
+    return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");
+  }
   const form = cardFormHolding(anchor);
   if (!form || cardSigOf(form) !== sig) return nothing("no_form");
+  const against = cardFillAgainst(anchor, form);
+  if (against !== null) return framed(against);
   const before = cardFieldsSeen(form, anchor);
   if (before === "changed") return nothing("field_changed");
   if (before === null) return nothing("not_visible");
@@ -774,8 +965,8 @@ async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillO
   // The page had a round trip to change things: look again before anything is written.
   const now = cardFormHolding(anchor);
   if (!now || cardSigOf(now) !== sig) return nothing("no_form");
-  const providerLate = providerFrameHost();
-  if (providerLate !== null) return { ...nothing("provider_frame"), providerHost: providerLate };
+  const againstLate = cardFillAgainst(anchor, now);
+  if (againstLate !== null) return framed(againstLate);
   const seen = cardFieldsSeen(now, anchor);
   if (seen === "changed") return nothing("field_changed");
   if (seen === null) return nothing("not_visible");
@@ -986,7 +1177,10 @@ async function maybeCardChip(target: EventTarget | null, viaClick = false): Prom
   // would re-walk every scope for a result the guard is about to discard.
   const now = Date.now();
   if (lastChip && lastChip.input === target && now - lastChip.t < 400) return; // focusin+click pair
-  if (cardFormForInput(target) === null) return;
+  const chipForm = cardFormForInput(target);
+  if (chipForm === null) return;
+  // Round-8 review H: no card fill where a frame stands against the field, so no offer of one.
+  if (cardFillAgainst(target, chipForm) !== null) return;
   lastChip = { input: target, t: now };
   // [K12] the gate is a round-trip, so every fact is re-checked at RENDER time, not trigger time.
   const gen = ++chipGen;

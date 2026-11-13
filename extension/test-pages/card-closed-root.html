@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a provider frame inside a closed shadow root</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  .slot { position: relative; height: 48px; margin: 8px 0; }
+  .slot pay-field { position: absolute; inset: 0; display: block; }
+  .slot input { position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 12px;
+    color: transparent; caret-color: transparent; border: 0; background: transparent; font: inherit; }
+</style>
+</head>
+<body>
+<h1>Provider frame inside a closed shadow root</h1>
+<p>Round-8 review H. Each provider frame is inside a closed shadow root, which Safari's content script cannot open;
+only the root's host element is seen. The page lays its own card fields over the hosts. Tap the card number (the tap
+lands on the overlay), open the andvari popup and Fill:</p>
+<ul>
+  <li>Nothing is filled: in Safari because the field overlaps an element that is not its own (the host); in Chrome and
+    Firefox, which open closed roots, because of the frame inside.</li>
+  <li>Nothing of the card ever lands in the overlay fields (the debug line stays empty).</li>
+</ul>
+<form id="skimmer" onsubmit="return false">
+  <div class="slot"><pay-field data-src="https://js.stripe.com/v3/elements-inner-card.html"></pay-field><input name="cardnumber" autocomplete="cc-number" aria-label="Card number"></div>
+  <div class="slot"><pay-field data-src="https://js.stripe.com/v3/elements-inner-expiry.html"></pay-field><input name="exp-date" autocomplete="cc-exp" aria-label="Expiry"></div>
+  <div class="slot"><pay-field data-src="https://js.stripe.com/v3/elements-inner-cvc.html"></pay-field><input name="cvc" autocomplete="cc-csc" aria-label="Security code"></div>
+</form>
+<p>Debug, what the overlay got: <code id="got"></code></p>
+<script>
+  customElements.define("pay-field", class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: "closed" });
+      const frame = document.createElement("iframe");
+      frame.src = this.dataset.src;
+      frame.style.cssText = "width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box;";
+      root.append(frame);
+    }
+  });
+  const got = document.getElementById("got");
+  document.getElementById("skimmer").addEventListener("input", () => {
+    got.textContent = [...document.querySelectorAll("#skimmer input")].map((e) => e.name + "=" + e.value).filter((s) => !s.endsWith("=")).join(" ");
+  });
+</script>
+</body>
+</html>

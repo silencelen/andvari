@@ -42,7 +42,7 @@ let tabHost: string | null = null;
  *  Fetched once per unlocked render — the active tab can't change while the popup is open.
  *  `crossOriginFormsOnly` (Tier 2 §6 [U21]) drives the PSP explainer; mutually exclusive with
  *  `fillable` (SW-computed), so the explainer state can never also render a Fill button. */
-let cardFill: { fillable: boolean; origin: string | null; crossOriginFormsOnly: boolean; providerHost?: string } = { fillable: false, origin: null, crossOriginFormsOnly: false };
+let cardFill: { fillable: boolean; origin: string | null; crossOriginFormsOnly: boolean } = { fillable: false, origin: null, crossOriginFormsOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
@@ -401,7 +401,7 @@ async function loadUnlocked(): Promise<void> {
   // bfcache return) — freshness without an inline wait on the popup's critical path.
   const offer = await ask({ type: "cardFillOffers" });
   cardFill = offer
-    ? { fillable: offer.fillable, origin: offer.origin, crossOriginFormsOnly: offer.crossOriginFormsOnly === true, ...(typeof offer.providerHost === "string" ? { providerHost: offer.providerHost } : {}) }
+    ? { fillable: offer.fillable, origin: offer.origin, crossOriginFormsOnly: offer.crossOriginFormsOnly === true }
     : { fillable: false, origin: null, crossOriginFormsOnly: false };
   renderCards(cards.items);
   window.setTimeout(() => {
@@ -410,7 +410,7 @@ async function loadUnlocked(): Promise<void> {
       // [U21] pinned: the re-query diffs crossOriginFormsOnly too — a late PSP-frame report
       // must surface the explainer, not just a late same-origin form the Fill button.
       if (o2 && (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || (o2.crossOriginFormsOnly === true) !== cardFill.crossOriginFormsOnly)) {
-        cardFill = { fillable: o2.fillable, origin: o2.origin, crossOriginFormsOnly: o2.crossOriginFormsOnly === true, ...(typeof o2.providerHost === "string" ? { providerHost: o2.providerHost } : {}) };
+        cardFill = { fillable: o2.fillable, origin: o2.origin, crossOriginFormsOnly: o2.crossOriginFormsOnly === true };
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
       }
@@ -988,12 +988,8 @@ function renderCards(items: CardItem[]): void {
   cardsList.hidden = items.length === 0;
   // The explainer needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
   cardsPspNote.hidden = items.length === 0 || !cardFill.crossOriginFormsOnly;
-  // Round-7 review H1: when a payment provider's frame takes the card, the explainer names its host, and in the Safari
-  // build (which copies no card number or code) points at the app.
-  if (cardFill.providerHost !== undefined) {
-    cardsPspNote.textContent = `andvari can't auto-fill payment forms embedded from another site (here, ${cardFill.providerHost}). ` +
-      (copiesLongLivedSecrets() ? "Use the copy buttons instead." : "Copy what you need from the andvari app.");
-  } else if (!copiesLongLivedSecrets()) {
+  // In the Safari build (which copies no card number or code) the explainer points at the app.
+  if (!copiesLongLivedSecrets()) {
     cardsPspNote.textContent = "andvari can't auto-fill payment forms embedded from another site. Copy what you need from the andvari app.";
   }
   cardsList.replaceChildren();

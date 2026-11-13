@@ -253,9 +253,11 @@ export function fillErrorCopy(code: FillFailCode | undefined): string {
 export function cardFillErrorCopy(code: CardFillFailCode | undefined, providerHost?: string): string {
   switch (code) {
     case "provider_frame":
-      // Round-7 review H1. Neutral: the frame's presence is the page's own claim, so the copy does not vouch that the
-      // page is a checkout; it says what andvari does.
-      return `A payment form on this page is embedded from ${providerHost ?? "another site"}. andvari doesn't fill cards into a page like that, so nothing was filled.`;
+      // Round-8 review H. Neutral: a frame's source is the page's own claim, so the copy names a listed provider's host
+      // without vouching that the page is a checkout, and otherwise says only what andvari saw and did.
+      return providerHost !== undefined
+        ? `A payment form from ${providerHost} is embedded where you tapped. andvari doesn't fill a card there, so nothing was filled.`
+        : "Something else sits over or under the card field you tapped, such as a form embedded from another page. andvari doesn't fill a card there, so nothing was filled.";
     case "field_changed":
       return "The card field changed after you tapped it, so nothing was filled. Tap it again, then fill.";
     case "no_focus":
