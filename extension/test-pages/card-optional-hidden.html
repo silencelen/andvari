@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a collapsed optional field</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  label { display: block; margin: 8px 0 4px; }
+  input { font: inherit; padding: 8px; width: 100%; box-sizing: border-box; }
+  .collapsed { height: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+<h1>Card form with a collapsed optional field</h1>
+<p>Round-6 review M2 (c). The name on the card sits in a collapsed section. Tap the card number and Fill: number,
+expiry and security code are filled, the hidden name is left empty, and the popup says the name can't be seen.</p>
+<form onsubmit="return false">
+  <label for="cc-number">Card number</label>
+  <input id="cc-number" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+  <label for="cc-exp">Expiry (MM/YY)</label>
+  <input id="cc-exp" name="exp-date" autocomplete="cc-exp" placeholder="MM/YY">
+  <label for="cc-csc">Security code</label>
+  <input id="cc-csc" name="cvc" autocomplete="cc-csc" inputmode="numeric" maxlength="4">
+  <div class="collapsed"><label for="cc-name">Name on card (optional)</label><input id="cc-name" name="ccname" autocomplete="cc-name"></div>
+  <button type="submit">Pay</button>
+</form>
+</body>
+</html>

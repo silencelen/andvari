@@ -22,7 +22,7 @@ import {
 import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, probeVisibility, proxiedControl, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
+import { bumpLabelGeneration, demoteCsc, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedControl, revealCovers, visibilityOf, whatShowsAt, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
@@ -376,15 +376,61 @@ function cardTargetOf(el: FillableControl): CardTargetMeta {
 }
 
 /**
- * The card field the person last focused in this frame (round-5 review C1). A fill goes only into the form that holds
- * it: never into "the first form with the grant's signature", which a skimmer's invisible twin of the real form could
- * be. Focusing a field (the chip shows on it) is how a person says which form they mean.
+ * The card field the person chose in this frame (round-5 review C1, round-6 review H1). A fill goes only into the form
+ * that holds it: never into "the first form with the grant's signature", which a skimmer's invisible twin of the real
+ * form could be. Only the person chooses it: a trusted press (pointer, touch or mouse) on that very field, or a Tab
+ * that lands on it, while the page holds the person's activation (navigator.userActivation). A page script's
+ * el.focus() fires a trusted focusin too, so a focus alone never chooses anything. It is let go when focus moves from
+ * it to somewhere else in this page; the page losing focus to the popup keeps it.
  */
 let cardFocus: FillableControl | null = null;
 
+/** The last trusted press in this document: the innermost element it landed on, and when (performance.now()). */
+let lastPress: { target: EventTarget | null; at: number } | null = null;
+/** When a trusted Tab keydown last moved focus (performance.now()). */
+let lastTab = Number.NEGATIVE_INFINITY;
+/** How long after a press, or a Tab, the focus it brings may choose the field. */
+const CHOOSE_PRESS_MS = 3000;
+const CHOOSE_TAB_MS = 500;
+
+/** Whether the page holds the person's transient activation now. Without the API nothing is ever chosen. */
+function userActivated(): boolean {
+  const ua = (navigator as Navigator & { userActivation?: { isActive?: boolean } }).userActivation;
+  return ua?.isActive === true;
+}
+
+function setCardFocus(next: FillableControl | null): void {
+  cardFocus = next;
+}
+
+/** A trusted focusin or click on [t]: it chooses [t] when the person put it there (a press on it, or a Tab). */
 function noteCardFocus(t: EventTarget | null): void {
-  if (!(t instanceof HTMLInputElement || t instanceof HTMLSelectElement)) return;
-  if (cardFormForInput(t) !== null) cardFocus = t;
+  if (filling) return;
+  if (!(t instanceof HTMLInputElement || t instanceof HTMLSelectElement) || proxiedControl(t)) return;
+  const now = performance.now();
+  const pressed = lastPress !== null && lastPress.target === t && now - lastPress.at < CHOOSE_PRESS_MS;
+  const tabbed = now - lastTab < CHOOSE_TAB_MS;
+  if ((pressed || tabbed) && userActivated() && cardFormForInput(t) !== null) setCardFocus(t);
+}
+
+/** The innermost element focus is on, through open and (where the browser lets this script see them) closed roots. */
+function deepActiveElement(): Element | null {
+  let a: Element | null = document.activeElement;
+  for (let depth = 0; a !== null && depth < SHADOW_MAX_DEPTH; depth++) {
+    const inner = shadowRootOf(a)?.activeElement ?? null;
+    if (inner === null) break;
+    a = inner;
+  }
+  return a;
+}
+
+/** Focus left an element: if the chosen field no longer has it while this page still has focus, it is let go. */
+function noteFocusLeft(): void {
+  if (cardFocus === null || filling) return;
+  setTimeout(() => {
+    if (filling || cardFocus === null) return;
+    if (document.hasFocus() && deepActiveElement() !== cardFocus) setCardFocus(null);
+  }, 0);
 }
 
 /** [U12] a FRESH scan (the SPA may have swapped subtrees since the popup click): the card form holding [anchor] now. */
@@ -398,16 +444,67 @@ function cardSigOf(form: CardForm): string {
 }
 
 /**
- * Whether any field of [form] is one the person cannot see (detect.ts [visibilityOf]): hidden, transparent, too small,
- * off the page, or covered at its centre. The field the fill is anchored to must also be on screen. One such field
- * refuses the whole fill: a card number is never written where the person cannot see it.
+ * The fields of [form] a card may be written into now (round-6 review H1): each on screen, at full opacity
+ * ([MIN_OPACITY] over every ancestor and filter), not clipped or masked, its text drawn, and the topmost thing that
+ * paints at its centre, including covers that let the pointer through ([revealCovers]). Null when the chosen field
+ * itself fails, when this frame's own frame element fails the same rules in its parent (or cannot be reached), or
+ * when the page is too large to check: then nothing is filled. Otherwise only the fields in the set are filled; the
+ * rest are reported missed, never written.
  */
-function cardFormNotVisible(form: CardForm, anchor: FillableControl): boolean {
-  return form.fields.some((f) => {
-    if (!f.input.isConnected) return true;
-    const facts = probeVisibility(f.input, { onScreen: f.input === anchor, hitTest: true });
-    return visibilityOf(facts, proxiedControl(f.input)) !== "ok";
-  });
+function cardFieldsSeen(form: CardForm, anchor: FillableControl): Set<FillableControl> | null {
+  const live = form.fields.filter((f) => f.input.isConnected);
+  if (!live.some((f) => f.input === anchor)) return null;
+  const centre = (el: Element): { x: number; y: number } => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  };
+  const passing = revealCovers(scanScopes(), live.map((f) => centre(f.input)), () =>
+    live.filter((f) => visibilityOf(probeVisibility(f.input, { onScreen: true, hitTest: true, fill: true, ignore: isOwnUiHost }), proxiedControl(f.input), MIN_OPACITY) === "ok"),
+  );
+  if (passing === null || !passing.some((f) => f.input === anchor)) return null;
+  if (!frameChainSeen(centre(anchor))) return null;
+  return new Set(passing.map((f) => f.input));
+}
+
+/**
+ * Whether this frame can be seen where the chosen field is ([at], in this frame's viewport): for a sub-frame, its
+ * frame element passes the fill rules in the parent document, with [at] mapped into the parent and hit-tested there,
+ * and so on up to the top. A frame element this script cannot reach (another origin) fails.
+ */
+function frameChainSeen(at: { x: number; y: number }): boolean {
+  let win: Window = window;
+  let point = at;
+  for (let depth = 0; win !== win.top; depth++) {
+    if (depth >= SHADOW_MAX_DEPTH) return false;
+    let frame: Element | null;
+    try {
+      frame = win.frameElement;
+    } catch {
+      frame = null;
+    }
+    // The parent's document is another realm: its elements fail this frame's instanceof, so it is looked at by shape.
+    const parent = frame?.ownerDocument?.defaultView ?? null;
+    if (frame === null || parent === null || typeof (frame as HTMLElement).offsetWidth !== "number") return false;
+    const el = frame as HTMLElement;
+    const r = el.getBoundingClientRect();
+    const cs = parent.getComputedStyle(el);
+    const scale = el.offsetWidth > 0 ? r.width / el.offsetWidth : 1;
+    const mapped = {
+      x: r.left + (el.clientLeft + (Number.parseFloat(cs.paddingLeft) || 0) + point.x) * scale,
+      y: r.top + (el.clientTop + (Number.parseFloat(cs.paddingTop) || 0) + point.y) * scale,
+    };
+    if (mapped.x < 0 || mapped.y < 0 || mapped.x >= parent.innerWidth || mapped.y >= parent.innerHeight) return false;
+    // The frame element's own styles, size and place, and what shows at the field's point in the parent (the frame's
+    // centre may well be off screen in a tall frame: the point is what must be on screen and not covered).
+    const ok = revealCovers([el.ownerDocument], [mapped], () => {
+      const facts = probeVisibility(el, { onScreen: false, hitTest: false, fill: true });
+      return visibilityOf({ ...facts, ink: null, hit: whatShowsAt(el, mapped.x, mapped.y) }, false, MIN_OPACITY) === "ok";
+    });
+    if (ok !== true) return false;
+    win = parent;
+    point = mapped;
+  }
+  return true;
 }
 
 /** Drive cardfill.ts per field ref (§4/§5), CVV LAST (some checkouts validate CVV against the
@@ -417,11 +514,17 @@ function cardFormNotVisible(form: CardForm, anchor: FillableControl): boolean {
  *  place (never auto-clear, it may be user-typed) and files the kind missed. [A6]: the card path
  *  NEVER feeds the capture engine / save-banner store — the values are used synchronously inside
  *  this call frame and implicitly cleared with it (pin-anchored, §11). */
-function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome {
+function applyCardFill(form: CardForm, values: CardFillFields, seen: ReadonlySet<FillableControl>): CardFillOutcome {
   const filledKinds: CardFieldKind[] = [];
   const missedKinds: CardFieldKind[] = [];
+  /** Kinds left empty because their field cannot be seen (round-6 review H1): never written, reported as missed. */
+  const unseenKinds: CardFieldKind[] = [];
   const file = (list: CardFieldKind[], kind: CardFieldKind): void => {
     if (!list.includes(kind)) list.push(kind);
+  };
+  const unseen = (kind: CardFieldKind): void => {
+    file(missedKinds, kind);
+    file(unseenKinds, kind);
   };
   let lastWritten: FillableControl | null = null;
   filling = true;
@@ -432,7 +535,10 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
     // write there → truthful miss; the fallback only ever lands for undeclared-maxLength shapes).
     const panBoxes = form.fields.flatMap((f) => (f.kind === "cardnumber" && f.input instanceof HTMLInputElement && f.input.isConnected ? [f.input] : []));
     const splitRan = panBoxes.length > 1;
-    if (splitRan) {
+    // A number split across boxes goes in whole or not at all: one box that cannot be seen keeps all of it out.
+    if (splitRan && panBoxes.some((b) => !seen.has(b))) {
+      unseen("cardnumber");
+    } else if (splitRan) {
       const chunks = splitPan(values.number, panBoxes.map((b) => (b.maxLength === -1 ? null : b.maxLength)));
       if (chunks !== null) {
         for (let i = 0; i < panBoxes.length; i++) {
@@ -471,6 +577,10 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
         file(missedKinds, kind);
         continue;
       }
+      if (!seen.has(input)) {
+        unseen(kind);
+        continue;
+      }
       const write = deriveCardWrite(kind, cardTargetOf(input), values);
       if (write === null) {
         file(missedKinds, kind);
@@ -505,6 +615,10 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
         file(missedKinds, ref.kind);
         continue;
       }
+      if (!seen.has(ref.input)) {
+        unseen(ref.kind);
+        continue;
+      }
       const idx = radioIndexFor(
         live.map((r) => ({ value: r.value, text: labelSourcesOf(r).join(" ") })),
         values.brand,
@@ -531,8 +645,9 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
   // ANY of its instances landed — "partial" must mean a whole kind is missing from the page,
   // not that one of two twins missed while its sibling filled.
   const missed = missedKinds.filter((k) => !filledKinds.includes(k));
-  if (filledKinds.length === 0) return { filled: "nothing", filledKinds, missedKinds: missed, code: "no_fields" };
-  return { filled: missed.length === 0 ? "card" : "partial", filledKinds, missedKinds: missed };
+  const unseenMissed = unseenKinds.filter((k) => missed.includes(k));
+  if (filledKinds.length === 0) return { filled: "nothing", filledKinds, missedKinds: missed, code: unseenMissed.length > 0 ? "not_visible" : "no_fields" };
+  return { filled: missed.length === 0 ? "card" : "partial", filledKinds, missedKinds: missed, ...(unseenMissed.length > 0 ? { unseenKinds: unseenMissed } : {}) };
 }
 
 /** Popup-granted card fill: redeem the one-shot grant (the SW verifies frameId + origin + live
@@ -542,20 +657,21 @@ function applyCardFill(form: CardForm, values: CardFillFields): CardFillOutcome 
 async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillOutcome> {
   const nothing = (code: CardFillOutcome["code"]): CardFillOutcome => ({ filled: "nothing", filledKinds: [], missedKinds: [], code });
   if (typeof sig !== "string") return nothing("no_form");
-  // C1: only the form holding the field the person focused, and only if every field of it can be seen.
+  // C1 / H1: only the form holding the field the person chose, and only the fields of it that can be seen.
   const anchor = cardFocus !== null && cardFocus.isConnected ? cardFocus : null;
   if (anchor === null) return nothing("no_focus");
   const form = cardFormHolding(anchor);
   if (!form || cardSigOf(form) !== sig) return nothing("no_form");
-  if (cardFormNotVisible(form, anchor)) return nothing("not_visible");
+  if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");
   const r = await safeSend({ type: "revealCardForFill", itemId });
   if (!r) return nothing("unreachable");
   if (!r.ok || !r.fields) return nothing("not_allowed");
   // The page had a round trip to change things: look again before anything is written.
   const now = cardFormHolding(anchor);
   if (!now || cardSigOf(now) !== sig) return nothing("no_form");
-  if (cardFormNotVisible(now, anchor)) return nothing("not_visible");
-  return applyCardFill(now, r.fields);
+  const seen = cardFieldsSeen(now, anchor);
+  if (seen === null) return nothing("not_visible");
+  return applyCardFill(now, r.fields, seen);
 }
 
 // ---- G2 save-card capture (design 2026-07-23 §G2 [X2-A3]) ----
@@ -1160,6 +1276,23 @@ function init(): void {
     true,
   );
 
+  // Round-6 review H1: what chooses the card field a fill goes into. A trusted press records the innermost element it
+  // landed on; a trusted Tab records when it moved focus. noteCardFocus (focusin, click) reads both, with the page's
+  // user activation. Passive: nothing here changes what the page does with the event.
+  const notePress = (e: Event): void => {
+    if (!e.isTrusted) return;
+    const t = e.composedPath()[0] ?? null;
+    lastPress = { target: t, at: performance.now() };
+  };
+  for (const type of ["pointerdown", "touchstart", "mousedown"]) document.addEventListener(type, notePress, { capture: true, passive: true });
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.isTrusted && e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey) lastTab = performance.now();
+    },
+    true,
+  );
+
   // Signup reuse alert (2026-08-22): BLUR, not input — one question per settled password, so a
   // typed value never streams to the SW keystroke by keystroke. checkPasswordReuse re-checks
   // isSignup/new-password itself, so this stays a cheap unconditional hand-off.
@@ -1222,6 +1355,7 @@ function init(): void {
       // field inside a shadow root, and a composedPath()[0] here would break the [U17] count.
       if (!e.isTrusted) return; // applyCardFill dispatches its own closing focusout — not a dismissal
       if (e.relatedTarget instanceof Element && isOwnUiHost(e.relatedTarget)) return;
+      noteFocusLeft(); // H1: the chosen card field is let go once focus is somewhere else in this page
       chipEscaped = null; // [K3] the sentinel is per-field: it dies with the focus that set it
       dismissCardChip(); // [K8] leaving the field ends the offer
       // The dropdown inherits [K8] too: a script-driven focus move (section-expand autofocus, SPA
@@ -1305,6 +1439,7 @@ function init(): void {
       recordLoginGesture(); // F01: any trusted click may be the submit gesture (a JS "Sign in" element calls requestSubmit())
       const t = e.composedPath()[0];
       if (t instanceof HTMLInputElement) maybeOpen(t); // reopen after dismissal
+      noteCardFocus(t ?? null); // a press on a card field that already had focus chooses it too (H1)
       void maybeCardChip(t ?? null, true); // [K15] REUSES `t` — a second retarget shape here would red [U17]
       const control = e.composedPath().find((n): n is Element => n instanceof Element && isSubmitLike(n));
       if (!control) return;

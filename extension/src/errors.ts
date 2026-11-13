@@ -255,7 +255,7 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined): string {
     case "no_focus":
       return "Tap the card number field on the page first, then fill again.";
     case "not_visible":
-      return "Part of this card form can't be seen on the page, so nothing was filled. Scroll to the form and try again, or fill it by hand.";
+      return "The card field you tapped can't be seen on the page, so nothing was filled. Scroll to the form and try again, or fill it by hand.";
     case "no_form":
       return "The card form on this page changed — tap its card number field and try again.";
     case "no_fields":
