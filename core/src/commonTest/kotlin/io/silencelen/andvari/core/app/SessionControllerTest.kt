@@ -969,6 +969,89 @@ open class SessionControllerTest {
         assertIs<ActionResult.Failed>(controller.restoreFromTrash(restorable))
     }
 
+    /**
+     * Round-6 review L8: a screen that reads from the server as it opens, closed before the read came back, gets
+     * nothing when it does: not the trash, an item's history, the shared vaults, or two-step sign-in. A reopen in
+     * between keeps only the newest read.
+     */
+    @Test
+    fun aScreenClosedWhileItsReadIsOutAssignsNothingWhenTheReadComesBack() = test {
+        unlockedWithAPersonalVault()
+        kotlinx.coroutines.coroutineScope {
+            val vault = reg.personalVault.vaultId
+            val deletedId = "00000000-0000-4000-8000-0000000000d1"
+            var gate = CompletableDeferred<Unit>()
+            routes["/items/deleted"] = {
+                gate.await()
+                val items = listOf(io.silencelen.andvari.core.model.DeletedItem(deletedId, vault, 5_000))
+                respond(json.encodeToString(io.silencelen.andvari.core.model.DeletedItemsResponse.serializer(), io.silencelen.andvari.core.model.DeletedItemsResponse(items)), HttpStatusCode.OK, headers)
+            }
+            val versions = mapOf(deletedId to listOf(archived(deletedId, 7, item, 4_000)), ITEM_ID to listOf(archived(ITEM_ID, 9, item.copy(login = item.login!!.copy(password = "hunter1")), 3_000)))
+            routes["/versions"] = { request ->
+                gate.await()
+                val itemId = request.url.encodedPath.removeSuffix("/versions").substringAfterLast('/')
+                val body = io.silencelen.andvari.core.model.ItemVersionsResponse(itemId, versions[itemId].orEmpty())
+                respond(json.encodeToString(io.silencelen.andvari.core.model.ItemVersionsResponse.serializer(), body), HttpStatusCode.OK, headers)
+            }
+
+            val trash = async { controller.openTrash() }
+            settle { controller.state.busy }
+            controller.closeTrash()
+            gate.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), trash.await())
+            assertNull(controller.state.trash, "the closed trash does not come back")
+            assertFalse(controller.state.busy)
+            assertEquals(ActionResult.Failed(ItemCopy.TRASH_GONE), controller.restoreFromTrash(deletedId), "nothing it read is held")
+
+            gate = CompletableDeferred()
+            val history = async { controller.openItemHistory(ITEM_ID) }
+            settle { controller.state.busy }
+            controller.closeItemHistory()
+            gate.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), history.await())
+            assertNull(controller.state.history)
+            assertNull(controller.historyPassword(ITEM_ID, 9), "no version is held")
+
+            // Reopened while the first read is out: the first one assigns nothing, the second one does.
+            gate = CompletableDeferred()
+            val first = async { controller.openTrash() }
+            settle { controller.state.busy }
+            controller.closeTrash()
+            val second = async { controller.openTrash() }
+            gate.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), first.await())
+            assertEquals(ActionResult.Ok, second.await())
+            assertEquals(listOf(deletedId), controller.state.trash?.map { it.itemId })
+            controller.closeTrash()
+
+            // The shared vaults screen: what is restorable, read after it closed, is not kept.
+            gate = CompletableDeferred()
+            routes["/vaults/deleted"] = {
+                gate.await()
+                respond("[]", HttpStatusCode.OK, headers)
+            }
+            val sharing = async { controller.openSharing() }
+            settle { controller.state.busy }
+            controller.closeSharing()
+            gate.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), sharing.await())
+            assertNull(controller.state.sharing, "the closed screen does not come back")
+
+            // Two-step sign-in: the status read after its screen closed does not bring the screen back.
+            gate = CompletableDeferred()
+            routes["/account/totp"] = {
+                gate.await()
+                respond("""{"enrolled":true,"pendingSetup":false}""", HttpStatusCode.OK, headers)
+            }
+            val twoStep = async { controller.loadTwoStep() }
+            settle { controller.state.busy }
+            controller.closeTwoStep()
+            gate.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), twoStep.await())
+            assertNull(controller.state.twoStep)
+        }
+    }
+
     @Test
     fun anItemsHistoryShowsEarlierVersionsAndRestoresOne() = test {
         unlockedWithAPersonalVault()
