@@ -26,6 +26,8 @@ import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import kotlinx.coroutines.suspendCancellableCoroutine
 import platform.CoreFoundation.CFDataRef
+import platform.CoreFoundation.CFDictionaryGetValue
+import platform.CoreFoundation.CFRetain
 import platform.CoreFoundation.CFErrorGetCode
 import platform.CoreFoundation.CFErrorRefVar
 import platform.CoreFoundation.CFRelease
@@ -37,6 +39,7 @@ import platform.Foundation.NSData
 import platform.Foundation.NSError
 import platform.Foundation.NSMakeRange
 import platform.Foundation.NSMutableData
+import platform.Foundation.NSProcessInfo
 import platform.Foundation.NSNumber
 import platform.Foundation.appendBytes
 import platform.Foundation.numberWithInt
@@ -47,6 +50,7 @@ import platform.LocalAuthentication.LAPolicyDeviceOwnerAuthenticationWithBiometr
 import platform.Security.SecAccessControlCreateWithFlags
 import platform.Security.SecItemCopyMatching
 import platform.Security.SecItemDelete
+import platform.Security.SecKeyCopyAttributes
 import platform.Security.SecKeyCopyPublicKey
 import platform.Security.SecKeyCreateDecryptedData
 import platform.Security.SecKeyCreateEncryptedData
@@ -77,6 +81,8 @@ import platform.Security.kSecPrivateKeyAttrs
 import platform.Security.kSecReturnRef
 import platform.Security.kSecUseAuthenticationContext
 import kotlin.coroutines.resume
+import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.CName
 
 /**
  * iOS quick unlock (spec 01 §8.1, design 2026-11-09): the UVK, never the password, wrapped under a Secure Enclave
@@ -126,6 +132,11 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
         // The second key exists only in a simulator build ([simulatorQuickUnlockKey]); on a device it is always null.
         val key = createKey(tag(originKey, userId)) ?: simulatorQuickUnlockKey(tag(originKey, userId), accessGroup)
             ?: return QuickEnroll.Failed(QuickUnlockCopy.NO_SECURE_HARDWARE)
+        if (!acceptable(key)) {
+            CFRelease(key)
+            wipe(originKey, userId)
+            return QuickEnroll.Failed(QuickUnlockCopy.NO_SECURE_HARDWARE)
+        }
         try {
             val publicKey = SecKeyCopyPublicKey(key) ?: return failEnroll(originKey, userId)
             val wrapped = try {
@@ -188,6 +199,12 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
                     CFRelease(key)
                     return@memScoped QuickRecover.Fallback(QuickUnlockCopy.DEVICE_FALLBACK)
                 }
+                if (!acceptable(key)) {
+                    // Outside the simulator a key that is not the Secure Enclave's is never used (round-8 review L).
+                    CFRelease(key)
+                    wipe(originKey, userId)
+                    return@memScoped QuickRecover.Wiped(QuickUnlockCopy.SET_UP_AGAIN)
+                }
                 try {
                     val error = alloc<CFErrorRefVar>()
                     val cipher: CFDataRef? = owned.retain(wrapped.toNSData())?.reinterpret()
@@ -230,6 +247,39 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
             } finally {
                 owned.release()
             }
+        }
+    }
+
+    /**
+     * Every quick-unlock blob and key this app holds, whoever's (round-8 review L): what an install must not inherit from
+     * the one before it, since the Keychain outlives an uninstall. The access group holds nothing else.
+     */
+    fun wipeAll() {
+        runCatching { blobs.deleteAll() }
+        runCatching {
+            val owned = CfOwned()
+            try {
+                SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, *owned.group(accessGroup)))
+            } finally {
+                owned.release()
+            }
+        }
+    }
+
+    /**
+     * Whether [key] may wrap or unwrap the vault key: on a device only a key in the Secure Enclave (round-8 review L), so a
+     * software key, the simulator's stand-in or any other, is refused at run time whatever was built in.
+     */
+    private fun acceptable(key: SecKeyRef): Boolean = inSimulator() || inSecureEnclave(key)
+
+    private fun inSecureEnclave(key: SecKeyRef): Boolean {
+        val attributes = SecKeyCopyAttributes(key) ?: return false
+        return try {
+            val token = CFDictionaryGetValue(attributes, kSecAttrTokenID) ?: return false
+            val name = CFBridgingRelease(CFRetain(token)) as? String
+            name != null && name == CFBridgingRelease(CFRetain(kSecAttrTokenIDSecureEnclave)) as? String
+        } finally {
+            CFRelease(attributes)
         }
     }
 
@@ -305,6 +355,21 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
 
 /**
  * The stand-in key of a simulator build, where there is no Secure Enclave, so the UI tests can exercise quick unlock.
- * Always null on a device: the device actual is one line, and the simulator's code is not compiled into it.
+ * Always null on a device: the device actual is one line, and the simulator's code is not compiled into it. A key that
+ * is not the Secure Enclave's is refused on a device at run time as well ([IosQuickUnlockKeys]).
  */
 internal expect fun simulatorQuickUnlockKey(tag: String, accessGroup: String?): SecKeyRef?
+
+/** Whether this process runs in the iOS Simulator: its environment says so, which a device's never does. */
+internal fun inSimulator(): Boolean {
+    val env = NSProcessInfo.processInfo.environment
+    return env["SIMULATOR_DEVICE_NAME"] != null || env["SIMULATOR_UDID"] != null
+}
+
+/**
+ * An exported symbol every build of the framework has. The CI check that the device framework holds no simulator key
+ * looks for it first, so a pass means it could read the framework's symbols (.github/workflows/ios-core.yml).
+ */
+@OptIn(ExperimentalNativeApi::class)
+@CName("andvari_quick_unlock_secure_enclave_only")
+fun quickUnlockSecureEnclaveOnly(): Int = 1

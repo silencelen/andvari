@@ -109,30 +109,48 @@ class IosSeamsTest {
     }
 
     /**
-     * Round-7 review L6: a reinstall (the Keychain outlives an uninstall, the private defaults do not) finds the earlier
-     * install's tokens with an empty private store: they are deleted before anything else, the app never reads the
-     * group's copy of its state, and it starts at the server screen, signed out. An install with state keeps its tokens.
+     * Round-7 review L6, round-8 review L: the first start of an install (the Keychain outlives an uninstall, the app's
+     * container and private defaults do not) deletes what an earlier install left in the Keychain, tokens and quick
+     * unlock alike, before anything else; the app never reads the group's copy of its state, and starts at the server
+     * screen, signed out. An install marker in the app's container says the first start ran; nothing is deleted while
+     * the protected data cannot be read (a launch prewarmed before the first unlock), nor once the marker is there, nor
+     * when the private store holds state (an update from a build before the marker).
      */
     @Test
-    fun aReinstallDeletesTheEarlierInstallsTokensAndStartsSignedOut() {
+    fun aReinstallDeletesTheEarlierInstallsKeychainItemsOnceAndStartsSignedOut() {
         val own = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
         val group = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val dir = NSTemporaryDirectory() + "andvari-test-" + NSUUID().UUIDString
+        val marker = "$dir/.installed"
+        val config = IosStorageConfig(own, "io.silencelen.andvari.test", null, group)
         try {
             // What the group may hold before the first start: a build's published copy, or an extension's planting.
             val shared = NSUserDefaults(suiteName = group)
             shared.setObject("https://home.example", forKey = "baseUrl")
             shared.setObject("""{"baseUrl":"https://home.example","userId":"u1","email":"u@example.com"}""", forKey = "session")
             var dropped = 0
-            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), dropStaleTokens = { dropped++ })
-            assertEquals(1, dropped, "the earlier install's tokens are deleted")
+            // A launch iOS prewarmed before the first unlock: nothing is deleted, and the first start is still to come.
+            IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { false })
+            assertEquals(0, dropped)
+            assertFalse(NSFileManager.defaultManager.fileExistsAtPath(marker))
+            // The first start proper.
+            val seams = IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { true })
+            assertEquals(1, dropped, "the earlier install's tokens and quick-unlock items are deleted")
+            assertTrue(NSFileManager.defaultManager.fileExistsAtPath(marker), "and the install is marked")
             assertNull(seams.store.baseUrl, "the server screen: nothing is taken from the group")
             assertNull(seams.store.load(), "signed out")
             assertNull(seams.store.storedIdentity())
-            // Once the app has state of its own, a later start keeps its tokens.
-            seams.store.moveOrigin("https://home.example")
-            IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), dropStaleTokens = { dropped++ })
+            // Later starts never delete anything, even with an empty private store (signed out in this install).
+            IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { true })
             assertEquals(1, dropped)
+            // An update from a build before the marker: the private store holds state, so nothing is deleted.
+            NSFileManager.defaultManager.removeItemAtPath(marker, error = null)
+            seams.store.moveOrigin("https://home.example")
+            IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { true })
+            assertEquals(1, dropped)
+            assertTrue(NSFileManager.defaultManager.fileExistsAtPath(marker))
         } finally {
+            NSFileManager.defaultManager.removeItemAtPath(dir, error = null)
             NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
             NSUserDefaults(suiteName = group).removePersistentDomainForName(group)
         }

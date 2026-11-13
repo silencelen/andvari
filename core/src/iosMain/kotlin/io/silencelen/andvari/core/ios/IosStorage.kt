@@ -144,6 +144,17 @@ internal class KeychainSecrets(private val service: String, private val accessGr
             owned.release()
         }
     }
+
+    /** Every secret under [service] (and [accessGroup]) goes, whatever its name. */
+    fun deleteAll(): Boolean {
+        val owned = CfOwned()
+        try {
+            val status = SecItemDelete(owned.dictionary(kSecClass to kSecClassGenericPassword, kSecAttrService to owned.retain(service), *owned.group(accessGroup)))
+            return status == errSecSuccess || status == errSecItemNotFound
+        } finally {
+            owned.release()
+        }
+    }
 }
 
 /**
