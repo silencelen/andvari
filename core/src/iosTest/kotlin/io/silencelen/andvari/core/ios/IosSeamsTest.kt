@@ -120,7 +120,7 @@ class IosSeamsTest {
             shared.setObject("""{"baseUrl":"https://home.example","userId":"u1","email":"u@example.com"}""", forKey = "session")
             shared.setObject("777", forKey = "ns.0123456789abcdef.policyFetchedAt")
             shared.setObject("not ours", forKey = "somethingElse")
-            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), signedIn = { true })
+            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), signedIn = { true }, dropTokens = { error("the tokens belong to this session") })
             assertEquals("https://home.example", seams.store.baseUrl)
             assertEquals("u1", seams.store.storedIdentity()?.userId)
             assertEquals(777L, seams.store.origin("0123456789abcdef").policyFetchedAt)
@@ -129,6 +129,35 @@ class IosSeamsTest {
             // A later change to the group is never adopted, at this start or the next.
             shared.setObject("https://evil.example", forKey = "baseUrl")
             assertEquals("https://home.example", IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), signedIn = { true }).store.baseUrl)
+        } finally {
+            NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
+            NSUserDefaults(suiteName = group).removePersistentDomainForName(group)
+        }
+    }
+
+    /**
+     * Round-7 review L6: a reinstall finds the earlier install's tokens in the Keychain (it outlives an uninstall) and a
+     * group an extension may have filled before this first start. Unless the group holds the session those tokens belong
+     * to, at the group's own server, the tokens go and nothing is adopted.
+     */
+    @Test
+    fun aReinstallDropsStaleTokensUnlessTheGroupHoldsTheirSession() {
+        val own = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        val group = "io.silencelen.andvari.test.${NSUUID().UUIDString}"
+        try {
+            var dropped = 0
+            // An empty group: stale tokens.
+            IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), signedIn = { true }, dropTokens = { dropped++ })
+            assertEquals(1, dropped)
+            NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
+            // A planted session at another server than the group's: stale tokens, and nothing adopted.
+            val shared = NSUserDefaults(suiteName = group)
+            shared.setObject("https://home.example", forKey = "baseUrl")
+            shared.setObject("""{"baseUrl":"https://evil.example","userId":"u2","email":"x@evil.example"}""", forKey = "session")
+            val seams = IosSeams(IosStorageConfig(own, "io.silencelen.andvari.test", null, group), signedIn = { true }, dropTokens = { dropped++ })
+            assertEquals(2, dropped)
+            assertNull(seams.store.baseUrl)
+            assertNull(seams.store.storedIdentity())
         } finally {
             NSUserDefaults(suiteName = own).removePersistentDomainForName(own)
             NSUserDefaults(suiteName = group).removePersistentDomainForName(group)

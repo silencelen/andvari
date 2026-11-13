@@ -32,6 +32,12 @@ import platform.Foundation.NSFileManager
 import platform.Foundation.NSUserDefaults
 import platform.UIKit.UIDevice
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import io.silencelen.andvari.core.client.OriginCanon
+import io.silencelen.andvari.core.client.session.SESSION_TOKENS_SECRET
 
 /** The App Group the app shares with its Safari and AutoFill extensions. */
 const val IOS_APP_GROUP: String = "group.com.silencelen.andvari"
@@ -106,11 +112,13 @@ internal class IosSeams(
      * extension can put them. Only such an install has state of its own in the group to adopt ([adoptGroupState]).
      */
     signedIn: () -> Boolean = { holdsSessionTokens(KeychainSecrets(config.keychainService, null)) },
+    /** Remove the session's tokens from the app's own Keychain group: stale ones a reinstall finds there (round-7 L6). */
+    dropTokens: () -> Unit = { KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null) },
 ) {
     private val own = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
-        runCatching { adoptGroupState(config, own, signedIn) }
+        runCatching { adoptGroupState(config, own, signedIn, dropTokens) }
     }
 
     /**
@@ -147,11 +155,20 @@ internal class IosSeams(
          * written by something else, an extension that ran first among them. A start that was cut short copies again;
          * nothing is removed from the group, which the extensions go on reading.
          */
-        fun adoptGroupState(config: IosStorageConfig, own: UserDefaultsPrefs, signedIn: () -> Boolean) {
+        fun adoptGroupState(config: IosStorageConfig, own: UserDefaultsPrefs, signedIn: () -> Boolean, dropTokens: () -> Unit) {
             val group = config.sharedSuite ?: return
             if (group == config.defaultsSuite || own.getString(ADOPTED) != null) return
+            val shared = NSUserDefaults(suiteName = group)
+            // Round-7 review L6: tokens in the Keychain with an empty private store are this install's own only when the
+            // group holds the session they belong to, as a build that kept its state there left it (a session record
+            // naming the group's own server). Otherwise they outlived an uninstall (the Keychain does; the group need
+            // not, and an extension may have filled it before this first start): they go, and nothing is adopted.
+            if (signedIn() && own.getString("baseUrl") == null && own.getString("session") == null && !groupHoldsItsSession(shared)) {
+                dropTokens()
+                own.putString(ADOPTED, "1")
+                return
+            }
             if (signedIn()) {
-                val shared = NSUserDefaults(suiteName = group)
                 val ours = shared.dictionaryRepresentation().mapNotNull { (key, value) ->
                     val name = key as? String ?: return@mapNotNull null
                     val text = value as? String ?: return@mapNotNull null
@@ -163,6 +180,15 @@ internal class IosSeams(
             }
             own.putString(ADOPTED, "1")
         }
+
+        /** Whether the group holds a session record for a user at the group's own server (what a build that kept its state there left). */
+        fun groupHoldsItsSession(shared: NSUserDefaults): Boolean = runCatching {
+            val server = shared.stringForKey("baseUrl") ?: return false
+            val session = Json.parseToJsonElement(shared.stringForKey("session") ?: return false).jsonObject
+            val sessionServer = session["baseUrl"]?.jsonPrimitive?.contentOrNull ?: return false
+            val user = session["userId"]?.jsonPrimitive?.contentOrNull
+            !user.isNullOrEmpty() && OriginCanon.canonicalOrigin(sessionServer) == OriginCanon.canonicalOrigin(server)
+        }.getOrDefault(false)
 
         /** [PrefsSessionPersistence]'s global keys. */
         val GLOBAL_KEYS = setOf("baseUrl", "pendingServer", "session", "mustChangePassword", "highWaterWallMs", "lastSyncAt")
