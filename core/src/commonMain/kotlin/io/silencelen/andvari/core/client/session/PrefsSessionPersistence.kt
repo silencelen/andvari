@@ -28,9 +28,6 @@ interface SecretStore {
 /** The name [PrefsSessionPersistence] keeps a session's tokens under in its [SecretStore]. */
 internal const val SESSION_TOKENS_SECRET = "session.tokens"
 
-/** Whether [secrets] holds a session's tokens, as [PrefsSessionPersistence] keeps them: an install that is signed in. */
-internal fun holdsSessionTokens(secrets: SecretStore): Boolean = runCatching { secrets.read(SESSION_TOKENS_SECRET) != null }.getOrDefault(false)
-
 /**
  * Preferences one process owns, with a copy published for other processes that is never read back (iOS: the app's
  * private defaults, published to the App Group for its extensions). Every read comes from [own], so nothing another
