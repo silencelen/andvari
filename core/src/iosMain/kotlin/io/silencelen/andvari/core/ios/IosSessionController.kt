@@ -24,6 +24,7 @@ import io.silencelen.andvari.core.client.session.PublishingPrefs
 import io.silencelen.andvari.core.client.session.QuickUnlockKeys
 import io.silencelen.andvari.core.client.session.SecretStore
 import io.silencelen.andvari.core.client.session.SessionPersistence
+import io.silencelen.andvari.core.client.session.holdsSessionTokens
 import io.silencelen.andvari.core.client.session.httpsOnly
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.coroutines.Dispatchers
@@ -99,11 +100,16 @@ internal class IosSeams(
     config: IosStorageConfig,
     snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath),
     savesDir: String? = config.sharedSuite?.let(::groupSavesDir),
+    /**
+     * Whether this install is already signed in: its session's tokens are in the app's own Keychain group, where no
+     * extension can put them. Only such an install has state of its own in the group to adopt ([adoptGroupState]).
+     */
+    signedIn: () -> Boolean = { holdsSessionTokens(KeychainSecrets(config.keychainService, null)) },
 ) {
     private val own = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
-        runCatching { adoptGroupState(config, own) }
+        runCatching { adoptGroupState(config, own, signedIn) }
     }
 
     /**
@@ -130,22 +136,26 @@ internal class IosSeams(
 
         /**
          * Once per install: builds before this one kept the app's state in the App Group itself, where an extension could
-         * rewrite it. That state is copied into the app's private defaults (each key only where the private store has
-         * none, the origin last, since it is what says "a layout is here"), then marked done, and from then on the group
-         * is only written. A start that was cut short copies again; nothing is removed from the group, which the
-         * extensions go on reading.
+         * rewrite it. For an install that is signed in ([signedIn]: an update of such a build), that state is copied
+         * into the app's private defaults (each key only where the private store has none, the origin last, since it is
+         * what says "a layout is here"); then this is marked done, and from then on the group is only written. A fresh
+         * install has nothing of its own in the group, so it adopts nothing (round-6 review L7): whatever is there was
+         * written by something else, an extension that ran first among them. A start that was cut short copies again;
+         * nothing is removed from the group, which the extensions go on reading.
          */
-        fun adoptGroupState(config: IosStorageConfig, own: UserDefaultsPrefs) {
+        fun adoptGroupState(config: IosStorageConfig, own: UserDefaultsPrefs, signedIn: () -> Boolean) {
             val group = config.sharedSuite ?: return
             if (group == config.defaultsSuite || own.getString(ADOPTED) != null) return
-            val shared = NSUserDefaults(suiteName = group)
-            val ours = shared.dictionaryRepresentation().mapNotNull { (key, value) ->
-                val name = key as? String ?: return@mapNotNull null
-                val text = value as? String ?: return@mapNotNull null
-                if (name.startsWith("ns.") || name in GLOBAL_KEYS) name to text else null
-            }
-            for ((name, text) in ours.sortedBy { it.first == "baseUrl" }) {
-                if (own.getString(name) == null) own.putString(name, text)
+            if (signedIn()) {
+                val shared = NSUserDefaults(suiteName = group)
+                val ours = shared.dictionaryRepresentation().mapNotNull { (key, value) ->
+                    val name = key as? String ?: return@mapNotNull null
+                    val text = value as? String ?: return@mapNotNull null
+                    if (name.startsWith("ns.") || name in GLOBAL_KEYS) name to text else null
+                }
+                for ((name, text) in ours.sortedBy { it.first == "baseUrl" }) {
+                    if (own.getString(name) == null) own.putString(name, text)
+                }
             }
             own.putString(ADOPTED, "1")
         }
