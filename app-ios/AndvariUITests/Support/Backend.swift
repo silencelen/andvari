@@ -1,18 +1,28 @@
 import CryptoKit
 import Foundation
 
-/// The job's test site doubles as a remote control for what another device of the test account does
-/// (app-ios/uitest/serve-site.py, tools/uitest-seed `vault`): the app then learns of it at its next sync.
+/// The job's test site doubles as a remote control for what other devices and other people do
+/// (app-ios/uitest/serve-site.py, tools/uitest-seed `vault` and `share`): the app then learns of it at its next sync.
 enum OtherDevice {
     /// Create, delete or restore the shared vault named [name] from another device of the account. The error text when
     /// it failed, nil when it worked.
     static func vault(_ action: String, _ name: String) -> String? {
-        // Plain http to the loopback address first; the https name (trusted in the simulator) when that is refused.
-        let origins = [Fixture.controlOrigin, Fixture.siteOrigin]
+        control("vault-" + action, ["name": name])
+    }
+
+    /// A second account shares a new vault [vault] holding the login [item] read-only with the test account, and another
+    /// device of the test account accepts it. The error text when it failed, nil when it worked.
+    static func shareReadOnly(vault: String, item: String) -> String? {
+        control("share-read-only", ["name": vault, "item": item])
+    }
+
+    private static func control(_ action: String, _ query: [String: String]) -> String? {
+        // Plain http to the loopback address first; the https name (trusted in the simulator) only when that one gave
+        // no answer at all, so an action that answered with an error is never run twice.
         var last = "not tried"
-        for origin in origins {
-            var components = URLComponents(string: origin + "/control/vault-" + action)
-            components?.queryItems = [URLQueryItem(name: "name", value: name)]
+        for origin in [Fixture.controlOrigin, Fixture.siteOrigin] {
+            var components = URLComponents(string: origin + "/control/" + action)
+            components?.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
             guard let url = components?.url else { continue }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -31,6 +41,7 @@ enum OtherDevice {
             }
             if status == 200 { return nil }
             last = "\(origin): \(status) \(text.suffix(300))"
+            if status != 0 { return last }
         }
         return last
     }
