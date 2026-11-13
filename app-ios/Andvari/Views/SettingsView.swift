@@ -14,6 +14,7 @@ struct SettingsView: View {
     /// Whether andvari is the AutoFill provider iOS uses (nil until the system has said).
     @State private var autofillOn: Bool?
     @AppStorage(Appearance.storageKey) private var appearance = Appearance.system.rawValue
+    @AppStorage(ThirdPartyKeyboards.storageKey) private var thirdPartyKeyboards = false
 
     var body: some View {
         NavigationStack {
@@ -79,6 +80,15 @@ struct SettingsView: View {
                         Text(reason)
                             .foregroundStyle(Palette.inkDim)
                     }
+                }
+                .listRowBackground(Palette.raised)
+
+                Section {
+                    Toggle("Allow third-party keyboards", isOn: $thirdPartyKeyboards)
+                } header: {
+                    Text("Keyboards")
+                } footer: {
+                    Text("Off: only Apple's keyboards type into andvari. A keyboard from another app receives everything typed with it, passwords and notes included, and need not follow andvari's settings for secret fields. Turn this on only for a keyboard you trust.")
                 }
                 .listRowBackground(Palette.raised)
 
