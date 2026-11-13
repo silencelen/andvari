@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a provider frame inside a srcdoc frame</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  .slot { position: relative; height: 48px; margin: 8px 0; }
+  .slot iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .slot input { position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 12px;
+    color: transparent; caret-color: transparent; border: 0; background: transparent; font: inherit; }
+</style>
+</head>
+<body>
+<h1>Provider frame inside a srcdoc frame</h1>
+<p>Round-8 review H. Each provider frame is inside a <code>srcdoc</code> frame, where no content script runs; the outer
+frame names no source. The page lays its own card fields over them. Tap the card number (the tap lands on the
+overlay), open the andvari popup and Fill:</p>
+<ul>
+  <li>Nothing is filled, and the popup names checkoutshopper-live.adyen.com: the frame inside the srcdoc document is
+    read from the page.</li>
+  <li>Nothing of the card ever lands in the overlay fields (the debug line stays empty).</li>
+</ul>
+<form id="skimmer" onsubmit="return false">
+  <div class="slot"><iframe title="card number" srcdoc="<style>body{margin:0}</style><iframe src='https://checkoutshopper-live.adyen.com/checkoutshopper/securedfields/test/card.html' style='width:100%;height:46px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box'></iframe>"></iframe><input name="cardnumber" autocomplete="cc-number" aria-label="Card number"></div>
+  <div class="slot"><iframe title="expiry" srcdoc="<style>body{margin:0}</style><iframe src='https://checkoutshopper-live.adyen.com/checkoutshopper/securedfields/test/expiry.html' style='width:100%;height:46px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box'></iframe>"></iframe><input name="exp-date" autocomplete="cc-exp" aria-label="Expiry"></div>
+  <div class="slot"><iframe title="security code" srcdoc="<style>body{margin:0}</style><iframe src='https://checkoutshopper-live.adyen.com/checkoutshopper/securedfields/test/cvc.html' style='width:100%;height:46px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box'></iframe>"></iframe><input name="cvc" autocomplete="cc-csc" aria-label="Security code"></div>
+</form>
+<p>Debug, what the overlay got: <code id="got"></code></p>
+<script>
+  const got = document.getElementById("got");
+  document.getElementById("skimmer").addEventListener("input", () => {
+    got.textContent = [...document.querySelectorAll("#skimmer input")].map((e) => e.name + "=" + e.value).filter((s) => !s.endsWith("=")).join(" ");
+  });
+</script>
+</body>
+</html>

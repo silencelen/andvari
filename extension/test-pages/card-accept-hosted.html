@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a form posted into a frame with no src</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  .slot { position: relative; height: 220px; margin: 8px 0; }
+  .slot iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 1px solid #ccc; border-radius: 6px; }
+  /* The skimmer's own fields laid over the hosted form, nothing of their own showing. */
+  .slot input { position: absolute; left: 0; width: 100%; height: 48px; box-sizing: border-box; padding: 12px;
+    color: transparent; caret-color: transparent; border: 0; background: transparent; font: inherit; }
+</style>
+</head>
+<body>
+<h1>Hosted payment form posted into a frame</h1>
+<p>Round-8 review H. Like Authorize.net's Accept Hosted embed, the page posts a form into an iframe that has no
+<code>src</code>, so no frame on the page names the provider. The page lays its own card fields over that frame. Tap
+the card number (the tap lands on the overlay), open the andvari popup and Fill:</p>
+<ul>
+  <li>Nothing is filled. The popup says something else sits over or under the card field (it cannot name a provider:
+    the frame has no source).</li>
+  <li>Nothing of the card ever lands in the overlay fields (the debug line stays empty).</li>
+</ul>
+<form id="token" method="post" action="https://test.authorize.net/payment/payment" target="hosted">
+  <input type="hidden" name="token" value="test-token">
+</form>
+<form id="skimmer" onsubmit="return false">
+  <div class="slot">
+    <iframe name="hosted" title="payment form"></iframe>
+    <input style="top: 16px" name="cardnumber" autocomplete="cc-number" aria-label="Card number">
+    <input style="top: 84px" name="exp-date" autocomplete="cc-exp" aria-label="Expiry">
+    <input style="top: 152px" name="cvc" autocomplete="cc-csc" aria-label="Security code">
+  </div>
+</form>
+<p>Debug, what the overlay got: <code id="got"></code></p>
+<script>
+  // The embed posts the token into the frame once the page has loaded, as Accept Hosted does.
+  addEventListener("load", () => document.getElementById("token").submit());
+  const got = document.getElementById("got");
+  document.getElementById("skimmer").addEventListener("input", () => {
+    got.textContent = [...document.querySelectorAll("#skimmer input")].map((e) => e.name + "=" + e.value).filter((s) => !s.endsWith("=")).join(" ");
+  });
+</script>
+</body>
+</html>

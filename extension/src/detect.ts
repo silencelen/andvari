@@ -788,7 +788,7 @@ export function visibilityOf(f: VisibilityFacts, proxied = false, minOpacity = M
 const MAX_STYLE_DEPTH = 64;
 
 /** [el]'s parent, across a shadow boundary to its host. By shape, not instanceof: [el] may be another frame's (realm's). */
-function parentAcross(el: Element): Element | null {
+export function parentAcross(el: Element): Element | null {
   return el.parentElement ?? (el.getRootNode() as Partial<ShadowRoot>).host ?? null;
 }
 
@@ -853,7 +853,40 @@ export function paintsOver(p: PaintFacts): boolean {
 }
 
 const REPLACED = new Set(["IMG", "VIDEO", "CANVAS", "IFRAME", "FRAME", "EMBED", "OBJECT", "PICTURE"]);
-const FRAMES = new Set(["IFRAME", "FRAME", "EMBED", "OBJECT"]);
+/** The elements that show another document or a plug-in's content: a frame, whatever its source or none (round-8 H). */
+export const FRAME_TAGS: ReadonlySet<string> = new Set(["IFRAME", "FRAME", "EMBED", "OBJECT"]);
+
+/** PURE: whether [a] and [b] share an area; boxes that only touch do not. */
+export function boxesOverlap(a: Box, b: Box): boolean {
+  const w = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
+  const h = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
+  return w > 0.5 && h > 0.5;
+}
+
+/** PURE: whether [p] lies in [b]. */
+export function boxContains(b: Box, p: { x: number; y: number }): boolean {
+  return b.width > 0 && b.height > 0 && p.x >= b.left && p.x < b.left + b.width && p.y >= b.top && p.y < b.top + b.height;
+}
+
+/** PURE: the smallest box holding every one of [boxes] that has an area; null when none has. */
+export function unionBox(boxes: readonly Box[]): Box | null {
+  const real = boxes.filter((b) => b.width > 0 && b.height > 0);
+  if (real.length === 0) return null;
+  const left = Math.min(...real.map((b) => b.left));
+  const top = Math.min(...real.map((b) => b.top));
+  const right = Math.max(...real.map((b) => b.left + b.width));
+  const bottom = Math.max(...real.map((b) => b.top + b.height));
+  return { left, top, width: right - left, height: bottom - top };
+}
+
+/** PURE: the part of [b] inside [clip], or null when none is. */
+export function clipBox(b: Box, clip: Box): Box | null {
+  const left = Math.max(b.left, clip.left);
+  const top = Math.max(b.top, clip.top);
+  const right = Math.min(b.left + b.width, clip.left + clip.width);
+  const bottom = Math.min(b.top + b.height, clip.top + clip.height);
+  return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
+}
 
 function paintFactsOf(at: Element): PaintFacts {
   const view = at.ownerDocument.defaultView!;
@@ -898,37 +931,35 @@ export function fieldWrapperOf(el: Element): Element | null {
 }
 
 /**
- * Whether [at] is part of field [el]'s own presentation rather than something over it: one of its labels, or something
- * inside its wrapper ([fieldWrapperOf]) that holds no control or frame and does not contain the field (a floating
- * label, a brand icon, an adornment).
+ * Where [rect] is looked at: its centre, halfway from it to each side (round-7 review, regression 7), and off the centre
+ * lines, each corner inset by a quarter (round-8 review L: a plus-shaped clip-path leaves the centre lines alone).
  */
-export function isFieldPart(el: Element, at: Element): boolean {
-  const labels = el instanceof HTMLInputElement || el instanceof HTMLSelectElement ? [...(el.labels ?? [])] : [];
-  if (labels.some((l) => l === at || l.contains(at))) return true;
-  const wrapper = fieldWrapperOf(el);
-  if (wrapper === null || !wrapper.contains(at) || at.contains(el)) return false;
-  if (FRAMES.has(at.tagName.toUpperCase()) || at.querySelector(`${CONTROLS}, iframe, frame, embed, object`) !== null) return false;
-  return true;
-}
-
-/** Where [rect] is looked at: its centre, and halfway from it to each side (round-7 review, regression 7). */
 export function samplePoints(rect: Box): { x: number; y: number }[] {
+  const x1 = rect.left + rect.width / 4;
   const cx = rect.left + rect.width / 2;
+  const x3 = rect.left + (rect.width * 3) / 4;
+  const y1 = rect.top + rect.height / 4;
   const cy = rect.top + rect.height / 2;
+  const y3 = rect.top + (rect.height * 3) / 4;
   return [
     { x: cx, y: cy },
-    { x: rect.left + rect.width / 4, y: cy },
-    { x: rect.left + (rect.width * 3) / 4, y: cy },
-    { x: cx, y: rect.top + rect.height / 4 },
-    { x: cx, y: rect.top + (rect.height * 3) / 4 },
+    { x: x1, y: cy },
+    { x: x3, y: cy },
+    { x: cx, y: y1 },
+    { x: cx, y: y3 },
+    { x: x1, y: y1 },
+    { x: x3, y: y1 },
+    { x: x1, y: y3 },
+    { x: x3, y: y3 },
   ];
 }
 
 /**
  * What shows at each of [points] (viewport coordinates of [el]'s document): "self" when, at every one, the topmost
- * element that paints anything ([paintsOver]) is [el], inside it, or part of it ([isFieldPart]); "other" otherwise,
- * including where [el] is not there at all (clipped, or under something). Elements [ignore] names (this extension's
- * own UI) are looked through. A cover that lets the pointer through (pointer-events: none) is not seen: that is the
+ * element that paints anything ([paintsOver]) is [el] or inside it; "other" otherwise, including where [el] is not there
+ * at all (clipped, or under something). Nothing else is excused at a sample point, not even the field's own label or
+ * adornment (round-8 review L): a part of the field may sit beside the points, never over them. Elements [ignore] names
+ * (this extension's own UI) are looked through. A cover that lets the pointer through (pointer-events: none) is not seen: that is the
  * limit of these rules, and why they are defence in depth only.
  */
 export function whatShowsAt(el: Element, points: readonly { x: number; y: number }[], ignore: (e: Element) => boolean = () => false): "self" | "other" {
@@ -942,7 +973,7 @@ export function whatShowsAt(el: Element, points: readonly { x: number; y: number
         found = true;
         break;
       }
-      if (ignore(at) || isFieldPart(el, at)) continue;
+      if (ignore(at)) continue;
       if (paintsOver(paintFactsOf(at))) return "other";
     }
     if (!found) return "other";

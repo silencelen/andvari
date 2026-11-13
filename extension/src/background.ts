@@ -414,7 +414,7 @@ interface TabState {
    *  compares against it, so a stale record can never leak a fill across origins. Cleared with
    *  the tab (onRemoved / lock). [U14]: a persisted pre-update `{fields}` record is DISCARDED on
    *  read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
-  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number; providers?: string[] }>;
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>;
   /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
    *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
   topOrigin?: string;
@@ -4274,10 +4274,7 @@ async function cardFormInfo(
   }
   const st = tabs.get(tabId) ?? {};
   const reg = st.cardForms ?? {};
-  // Round-7 review H1: the payment providers' frames this document embeds (hosts, bounded); kept even for a frame
-  // with no card form of its own, since they are what stops a fill into this tab.
-  const providers = Array.isArray(msg.providers) ? msg.providers.filter((h): h is string => typeof h === "string" && /^[a-z0-9.-]{1,253}$/.test(h)).slice(0, 8) : [];
-  if (msg.forms.length === 0 && providers.length === 0) {
+  if (msg.forms.length === 0) {
     // §7: the first-report-always-sends sentinel means every frame of every navigation files an
     // empty report — when it deletes nothing, skip the persistTabs() storage write (a
     // per-frame-per-navigation write for a no-op would dominate the SW's storage traffic).
@@ -4290,7 +4287,7 @@ async function cardFormInfo(
     const anchor = typeof a === "number" && Number.isInteger(a) && a >= 0 && a < msg.forms.length ? a : null;
     const was = reg[frameId];
     const anchorAt = anchor === null ? undefined : msg.choseNow === true || was?.anchor !== anchor || was.anchorAt === undefined ? Date.now() : was.anchorAt;
-    reg[frameId] = { origin: sender.origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}), ...(providers.length > 0 ? { providers } : {}) };
+    reg[frameId] = { origin: sender.origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}) };
   }
   st.cardForms = reg;
   tabs.set(tabId, st);
@@ -4314,27 +4311,6 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  *  the tab's current top origin, with the forms themselves (chooseCardTarget's input). The
  *  Array.isArray re-check keeps [A3] fail-closed even if a pre-update record dodged the
  *  ensureLoaded [U14] discard (e.g. written by a mid-update content script). */
-/**
- * Round-7 review H1, the structural defence: the host that makes [tabId] a page whose card fields are a payment
- * provider's, or null. Card forms in a frame of another origin than [top], or a provider's frame that any of the tab's
- * documents embeds (paymentproviders.ts), and no card is filled into the tab's own documents: a script that owns the
- * top frame controls what it shows, so a field there may be an overlay drawn to look like the provider's.
- */
-function providerBlock(tabId: number, top: string): string | null {
-  const reg = tabs.get(tabId)?.cardForms ?? {};
-  for (const f of Object.values(reg)) {
-    if (Array.isArray(f.providers) && f.providers.length > 0) return f.providers[0]!;
-    if (Array.isArray(f.forms) && f.forms.length > 0 && f.origin !== top) {
-      try {
-        return new URL(f.origin).hostname;
-      } catch {
-        return "another site";
-      }
-    }
-  }
-  return null;
-}
-
 function eligibleCardFrames(tabId: number, top: string): { frameId: number; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }[] {
   const reg = tabs.get(tabId)?.cardForms ?? {};
   return Object.entries(reg)
@@ -4477,7 +4453,6 @@ async function cardChipOffer(sender: chrome.runtime.MessageSender): Promise<Res<
     return no;
   }
   if (sender.origin !== top) return no; // a real cross-origin frame — a refusal, NOT a repair case
-  if (providerBlock(tabId, top) !== null) return no; // round-7 H1: no card fill here, so no offer of one
   const yes: Res<"cardChipOffer"> = { fillable: true, locked };
   chipOfferLast.set(tabId, { t: now, answer: yes }); // replayable for the throttle window
   return yes;
@@ -4600,9 +4575,6 @@ async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res
   if (top === null) return none;
   if (APP_VAULT !== null && !top.startsWith("https://")) return none; // Safari: never offered on a plain-http page
   broadcastRescanCardForms(tab.id);
-  // Round-7 review H1: a payment provider's frame takes the card here: never a Fill, the explainer names the host.
-  const providerHost = providerBlock(tab.id, top);
-  if (providerHost !== null) return { fillable: false, origin: null, crossOriginFormsOnly: true, providerHost };
   const eligible = eligibleCardFrames(tab.id, top).length > 0;
   // §6 [U21]: forms exist but NO frame is origin-eligible → the PSP explainer signal. Derived
   // from browser-set per-frame origins vs tab.url's top origin only — never page data; it is the
@@ -4655,9 +4627,8 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
     await delay(250);
     eligible = eligibleCardFrames(tab.id, top);
   }
-  // Round-7 review H1, the structural defence: no card into a tab whose card fields are a payment provider's frames.
-  const providerHost = providerBlock(tab.id, top);
-  if (providerHost !== null) return { ok: false, code: "provider_frame", providerHost, error: "a payment provider's frame takes the card on this page" };
+  // Round-8 review H: what lies over and under the chosen field is judged in its own frame, at the choice and at the
+  // fill ([cardFillAgainst] in content.ts), which answers provider_frame; nothing here guesses it from a frame's src.
   // Round-6 review M2: the form holding the field the person chose, in the frame that chose it, decides the grant's
   // kinds, not the richest form. Only when no frame reports a chosen field does [U11] pick (the top frame whenever it
   // holds ANY eligible form; richest below it), and that frame then answers that nothing was chosen. The grant
@@ -4712,8 +4683,6 @@ async function revealCardForFill(
   const top = await topOrigin(tabId);
   const topOk = grant.origin === top;
   if (top === null || !topOk) return { ok: false, error: "top-origin changed" };
-  // Round-7 review H1: a provider's frame that appeared since the grant was minted voids it too.
-  if (providerBlock(tabId, top) !== null) return { ok: false, error: "a payment provider's frame takes the card on this page" };
 
   // Safari: never over plain http, and only the fields this form declared are asked of the app (one card, one form).
   if (APP_VAULT !== null && !grant.origin.startsWith("https://")) return { ok: false, error: "not an https page" };

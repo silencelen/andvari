@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a first-party card form beside a PayPal button and Stripe's hidden frame</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  label { display: block; margin: 8px 0 2px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #999; border-radius: 6px; font: inherit; }
+  .paypal { margin-top: 24px; }
+  .paypal iframe { width: 100%; height: 45px; border: 0; }
+  /* Stripe.js's controller frame, styled as stripe.js styles it: across the top of the page, one pixel high, hidden. */
+  .stripe-controller { border: none !important; margin: 0 !important; padding: 0 !important; width: 1px !important;
+    min-width: 100% !important; overflow: hidden !important; display: block !important; visibility: hidden !important;
+    position: fixed !important; height: 1px !important; pointer-events: none !important; user-select: none !important;
+    top: 0; left: 0; }
+</style>
+</head>
+<body>
+<iframe class="stripe-controller" name="__privateStripeController1" title="" src="https://js.stripe.com/v3/controller-with-preconnect.html"></iframe>
+<h1>First-party card form beside other frames</h1>
+<p>Round-8 review M. The card form is the page's own. A PayPal button frame sits below it and Stripe.js's hidden
+controller frame across the top of the page; neither is over or under the form. Tap the card number, open the andvari
+popup and Fill:</p>
+<ul>
+  <li>The card is filled into all three fields.</li>
+</ul>
+<form id="checkout" onsubmit="return false">
+  <label for="cc">Card number</label><input id="cc" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+  <label for="exp">Expiry</label><input id="exp" name="exp-date" autocomplete="cc-exp" placeholder="MM / YY">
+  <label for="cvc">Security code</label><input id="cvc" name="cvc" autocomplete="cc-csc" inputmode="numeric">
+</form>
+<div class="paypal"><iframe title="PayPal" src="https://www.paypal.com/smart/buttons?style.layout=horizontal&amp;components.0=buttons"></iframe></div>
+</body>
+</html>
