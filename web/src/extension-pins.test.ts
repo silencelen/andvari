@@ -209,10 +209,14 @@ describe("Tier-1 card autofill pins ([T15]/[T9]/[T11]/§7) — structural anchor
 
   it("[A4] the card-clear onUpdated handler reads ONLY changeInfo.status and clears BOTH stores", () => {
     // Extract THE "loading" handler — its guard is its first statement, so the shipped
-    // status==="complete" listener can never anchor the match start.
+    // status==="complete" listener can never anchor the match start. Since the Safari background
+    // (2026-11) every load-time listener is registered through atLoad(label, () => …), so a
+    // registration that throws is recorded and the rest still run: the handler then ends `}));`,
+    // and the extraction accepts both shapes. The registration itself is pinned below.
     const handler =
-      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
+      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\)\)?;/)?.[0] ?? "";
     expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
+    expect(bg).toContain('atLoad("tabs.onUpdated", () => chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {\n  if (changeInfo.status !== "loading") return;');
     // A top-level navigation must void the recorded forms AND any armed grant — leaving either
     // would offer (or redeem) against the previous document's record.
     expect(handler).toContain("cardGrants.delete(tabId)");
@@ -318,18 +322,22 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
   });
 
   it("[U12] grant-sig targeting fails CLOSED — sig-match only, never an index fallback", () => {
-    // Content side: redemption re-scans and takes the FIRST current-sig match; a non-string sig
-    // (mid-update mixed-version SW) refuses rather than guesses.
-    const bySig = spanOf(ct, "function cardFormBySig(", "function applyCardFill(");
-    expect(bySig).toContain('.join(",") === sig');
-    expect(bySig).toContain("?? null");
+    // Content side. Round-5 review C1 replaced "the FIRST form with the grant's sig" (a skimmer's
+    // invisible twin of the real form could be first) with "the form holding the field the person
+    // chose": a fresh scan finds THAT form, and its sig must equal the grant's, before the card is
+    // asked for and again before it is written. A non-string sig (mid-update mixed-version SW)
+    // refuses rather than guesses.
+    const holding = spanOf(ct, "function cardFormHolding(", "function cardSigOf(");
+    expect(holding).toContain("forms.find((f) => f.fields.some((x) => x.input === anchor)) ?? null");
+    expect(spanOf(ct, "function cardSigOf(", "function cardFieldsSeen(")).toContain('form.fields.map((x) => x.kind).join(",")');
     // End the span at the G2 capture section (G2's own composedPath()[0] lives BELOW this, and is
     // not part of the fill-redemption path this pin guards) — not at maybeOpen far downstream.
     const fillEntry = spanOf(ct, "async function fillCardIntoForm(", "// ---- G2 save-card capture");
-    expect(fillEntry).toContain('typeof sig === "string" ? cardFormBySig(sig) : null');
-    expect(fillEntry).toContain('code: "no_form"');
+    expect(fillEntry).toContain('if (typeof sig !== "string") return nothing("no_form");');
+    expect(fillEntry.match(/if \(!(form|now) \|\| cardSigOf\((form|now)\) !== sig\) return nothing\("no_form"\);/g), "sig-matched before the reveal and again before the write").toHaveLength(2);
+    expect(fillEntry).not.toContain("cardFormBySig");
     // The Tier-1 shape this replaced — any positional pick — must never come back on this path.
-    for (const [name, span] of [["cardFormBySig", bySig], ["fillCardIntoForm", fillEntry]] as const) {
+    for (const [name, span] of [["cardFormHolding", holding], ["fillCardIntoForm", fillEntry]] as const) {
       expect(span, `${name} has an index fallback`).not.toMatch(/\[0\]|\.at\(|forms\[/);
     }
     // SW side ([U14]/[A3]): a malformed grant (missing kinds/sig) refuses before ANY compose.
@@ -526,7 +534,7 @@ describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1�
     // live login count is left for the destination's own pageInfo to repaint. No `.url` read (that
     // would be a `tabs`-permission bump — already pinned by [A4] above).
     const handler =
-      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
+      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\)\)?;/)?.[0] ?? "";
     expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
     expect(handler).toContain("getBadgeText({ tabId })");
     // (2026-10: the reuse warning's "!" is nav-lifetime too — it was about the page the user left.)
@@ -614,7 +622,7 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // (pre-await) and released in a `finally` so a failed hydrate can't blind the tab forever.
     expect(bg).toContain("const topOriginPendingClear = new Set<number>();");
     const handler =
-      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\);/)?.[0] ?? "";
+      bg.match(/onUpdated\.addListener\(\(tabId, changeInfo\) => \{\s*if \(changeInfo\.status !== "loading"\) return;[\s\S]*?\n\}\)\)?;/)?.[0] ?? "";
     expect(handler.length, "the status===loading card-clear handler must exist").toBeGreaterThan(0);
     expect(handler).toMatch(/cardGrants\.delete\(tabId\);[\s\S]{0,400}?topOriginPendingClear\.add\(tabId\);[\s\S]*?await ensureLoaded\(\)/);
     expect(handler).toMatch(/finally \{[\s\S]{0,400}?topOriginPendingClear\.delete\(tabId\);/);
@@ -650,7 +658,11 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // (or unlock state) would turn an elementFromPoint hit-test into a live vault-state monitor.
     // `locked` is reported separately as the copy selector, never as a presence gate.
     expect(gate, "fillable must carry no vault condition").not.toContain("session.items");
-    expect(gate).toContain("const locked = session === null;");
+    // The Safari build has no session of its own: `locked` there is the app's vault (2026-11). It
+    // stays the copy selector only — the gate reads the app's vault nowhere else.
+    expect(gate).toContain("const locked = APP_VAULT !== null ? !APP_VAULT.unlocked : session === null;");
+    expect(gate.match(/APP_VAULT\.unlocked/g), "the app's vault state feeds the copy selector only").toHaveLength(1);
+    expect(gate, "fillable must carry no app-vault condition either").not.toMatch(/APP_VAULT\.(cards?|items?|cardFields|secret)\(/);
     // [S-rate] + [S4b]: the gate is throttled, and a MISSING record repairs (never a refusal —
     // a hostile frame must not be able to retry a "no" into a "yes").
     expect(gate).toContain("CHIP_OFFER_MIN_GAP_MS");
@@ -1232,7 +1244,8 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
   it("the dispatch hands `sender` to BOTH newly-bound handlers (a dropped argument is the whole defect)", () => {
     // `fillFromPopup(msg.itemId)` and `linkUri(msg.itemId, msg.host)` were the only two effectful
     // cases in the switch that never saw who was calling.
-    expect(bg).toContain("return fillFromPopup(msg.itemId, sender);");
+    // (2026-11: the popup's confirmed other-site fill rides a third argument; the sender is still the second.)
+    expect(bg).toContain('return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null);');
     expect(bg).toContain("return linkUri(msg, sender);");
   });
 
@@ -1264,11 +1277,19 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
   });
 
   it("reveal's host gate reads the BROWSER-SET origin for tab senders, never the page-supplied msg.host", () => {
+    // The span is reveal() alone: since 2026-11 the Safari app-vault lane (appVaultHandle,
+    // appVaultReveal) sits between reveal() and the card-copy comment, and is pinned on its own below.
     const r = spanOf(bg, "function reveal(msg: Extract<", "/** Card copy egress");
-    expect(r).toContain("const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);");
+    const own = r.slice(0, r.indexOf("\n}\n") + 3);
+    expect(own).toContain("const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);");
     // The old unconditional read is the defect: a sandboxed frame has an opaque `sender.origin`
     // but a perfectly real `location.hostname`, so the two can disagree.
-    expect(r, "msg.host must never be the tab sender's identity").not.toContain("const webHost = normalizeHost(msg.host);");
+    expect(own, "msg.host must never be the tab sender's identity").not.toContain("const webHost = normalizeHost(msg.host);");
+    // The app-vault twin: msg.host is read only for the popup (no tab); a tab sender is released
+    // nothing by a host match at all, only by redeeming the popup's one-shot grant at its origin.
+    const app = spanOf(bg, "async function appVaultReveal(", "async function appVaultCode(");
+    expect(app).toMatch(/if \(tabId === undefined\) \{[\s\S]{0,200}?const webHost = normalizeHost\(msg\.host\);[\s\S]{0,400}?\} else \{[\s\S]{0,400}?loginGrantRedeemable\(grants\.get\(tabId\), msg\.itemId, sender\.origin, Date\.now\(\)\)/);
+    expect(app.match(/normalizeHost\(msg\.host\)/g), "the popup branch is the only reader of msg.host").toHaveLength(1);
   });
 
   it("[A2]/[A3] senderHost is the ONE spelling of caller identity, and fails closed", () => {
@@ -1539,7 +1560,10 @@ describe("H03 / R37 — the push MutationResult union is one union on every push
   it("the extension's SaveErrorCode carries the permanent `rejected` rung in both twins", () => {
     for (const f of ["messages.ts", "errors.ts"]) {
       // A9 review MEDIUM-1 added `no_personal_vault` (a served wrap the browser never confirmed is no capture destination).
-      expect(readFileSync(extensionSrc + f, "utf-8"), f).toMatch(/type SaveErrorCode = "locked" \| "no_personal_vault" \| "conflict" \| "rejected" \| "failed";/);
+      // 2026-11: the Safari build saves through the app, so its two outcomes of that hand-off joined the union.
+      expect(readFileSync(extensionSrc + f, "utf-8"), f).toMatch(
+        /type SaveErrorCode = "locked" \| "no_personal_vault" \| "conflict" \| "rejected" \| "failed" \| "app_no_account" \| "app_unavailable";/,
+      );
     }
   });
 });

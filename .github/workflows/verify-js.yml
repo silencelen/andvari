@@ -17,10 +17,13 @@
 # so a vector-visible crypto regression from a dependency bump does fail this workflow.
 name: verify (JS/TS)
 
+# ios-ui is the long-lived iOS branch: it carries extension and web changes for months before a PR
+# to main, and with only PR and main pushes watched it drifted unseen (8 extension pins red,
+# 2026-11-12). Its pushes run this too.
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, ios-ui]
 
 # Least privilege: this workflow reads the tree and reports a check. It never writes to the repo,
 # never uploads a SARIF, and must never need a token that could.
