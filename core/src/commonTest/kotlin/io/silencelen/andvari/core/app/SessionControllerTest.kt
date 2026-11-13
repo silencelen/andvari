@@ -1422,6 +1422,56 @@ open class SessionControllerTest {
         assertNull(controller.state.personalVault)
     }
 
+    /**
+     * A device's first sign-in to an account whose record already names the served vault (another device confirmed it):
+     * the device holds the proposal at hydrate, before any account state is read, and the notice must still say it is
+     * the same vault once the record is read, not "the server says your personal vault is X".
+     */
+    @Test
+    fun aFirstSignInWhoseAccountRecordNamesTheServedVaultSaysItIsTheSameVault() = test {
+        // The server keeps the account state it is given.
+        var stored: String? = null
+        var seq = 0L
+        routes["/account/state"] = { request ->
+            if (request.method.value == "PUT") {
+                val put = json.decodeFromString(io.silencelen.andvari.core.model.AccountStatePut.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                if (put.baseSeq != seq) {
+                    respond("""{"error":"stale_state","message":"stale"}""", HttpStatusCode.Conflict, headers)
+                } else {
+                    stored = put.sealedState
+                    seq++
+                    respond(json.encodeToString(io.silencelen.andvari.core.model.AccountStateResponse.serializer(), io.silencelen.andvari.core.model.AccountStateResponse(stored, seq)), HttpStatusCode.OK, headers)
+                }
+            } else {
+                respond(json.encodeToString(io.silencelen.andvari.core.model.AccountStateResponse.serializer(), io.silencelen.andvari.core.model.AccountStateResponse(stored, seq)), HttpStatusCode.OK, headers)
+            }
+        }
+        routes["/sync"] = { respond(EMPTY_SYNC, HttpStatusCode.OK, headers) }
+        // Another device confirmed the personal vault: the account's record names it.
+        seedSession()
+        membersAnswer()
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.personalVault?.useServedLabel != null }
+        assertEquals(ActionResult.Ok, controller.usePersonalVaultServed())
+        controller.refresh()
+        settle { stored != null }
+        controller.lock()
+        // This device, as on its first sign-in: no personal wrap of its own and no account state read yet.
+        for (state in listOf(namespaces.devices.getValue("$homeKey/${reg.userId}"))) {
+            for (k in listOf("personal.wrap", "personal.last", "acctstate.copy", "acctstate.hw")) state.set(k, null)
+        }
+        namespaces.caches.getValue("$homeKey/${reg.userId}").apply {
+            for (k in listOf("personal.wrap", "personal.last", "acctstate.copy", "acctstate.hw")) setClientState(k, null)
+        }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.personalVault?.useServedLabel != null && controller.state.personalVault?.title?.startsWith("Confirm") == true }
+        val notice = assertNotNull(controller.state.personalVault)
+        assertEquals(PersonalVaultState.PROPOSED, notice.state, "still asked once on this device")
+        assertTrue(notice.title.startsWith("Confirm your personal vault on this device"), notice.title)
+        assertNull(notice.keepLabel, "nothing to keep instead: it is the same vault")
+    }
+
     @Test
     fun usingTheServedPersonalVaultIsNotOfferedUntilItsCoHoldersWereLoaded() = test {
         unlocked() // the members lookup is unreachable in this rig

@@ -1481,6 +1481,17 @@ class Account private constructor(
     var proposedAgainstDesignation: String? = null
         private set
 
+    /**
+     * While [PersonalStatus.PROPOSED]: describe the proposal against [designation], the account state as it stands
+     * now. A proposal held at hydrate on a device's first sign-in was held before the account state was read (none
+     * is cached yet), so it named no designation and was told as "the server says your personal vault is X" even
+     * where the account's record names the same vault. This changes only what the proposal is compared against in
+     * the notice: nothing is confirmed, and the served wrap still waits for the person (A9 review LOW-4).
+     */
+    fun describeProposalAgainst(designation: String?) {
+        if (personalStatus == PersonalStatus.PROPOSED) proposedAgainstDesignation = designation
+    }
+
     /** A9 (M-2): set by [enroll] on the registering device, which designates its minted wrap at its first sync. */
     internal var personalWrapMintedHere: Boolean = false
 
