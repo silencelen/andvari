@@ -20,13 +20,14 @@ import {
   type PaintFacts,
   type VisibilityFacts,
 } from "./detect.ts";
+import { chooseAnchoredCardTarget } from "./messages.ts";
 
 const shown = { display: "block", visibility: "visible", opacity: "1" };
 const base: VisibilityFacts = {
   chain: [{ ...shown, display: "inline-block" }, shown, shown],
   ink: null,
   rect: { left: 20, top: 300, width: 240, height: 36 },
-  page: { scrollX: 0, scrollY: 0, width: 390, height: 2400 },
+  extent: { left: 0, top: 0, width: 390, height: 2400 },
   viewport: null,
   hit: null,
 };
@@ -109,7 +110,7 @@ test("what is typed must show: not transparent text on a transparent background,
   assert.equal(colorAlpha("rgb(1, 2, 3)"), 1);
 });
 
-test("too small to use, or off the page", () => {
+test("too small to use, or off the page or its scrolling container", () => {
   assert.equal(visibilityOf(facts({ rect: { left: 20, top: 300, width: 0, height: 0 } })), "tiny");
   assert.equal(visibilityOf(facts({ rect: { left: 20, top: 300, width: 240, height: MIN_FIELD_PX - 1 } })), "tiny");
   assert.equal(visibilityOf(facts({ rect: { left: -9999, top: 300, width: 240, height: 36 } })), "offpage");
@@ -117,8 +118,12 @@ test("too small to use, or off the page", () => {
   assert.equal(visibilityOf(facts({ rect: { left: 5000, top: 300, width: 240, height: 36 } })), "offpage");
   // Below the fold is still on the page: a long checkout is found before it is scrolled to.
   assert.equal(visibilityOf(facts({ rect: { left: 20, top: 1800, width: 240, height: 36 } })), "ok");
-  // Scrolled: the box is in viewport coordinates, the page in document coordinates.
-  assert.equal(visibilityOf(facts({ rect: { left: 20, top: -100, width: 240, height: 36 }, page: { ...base.page, scrollY: 600 } })), "ok");
+  // Scrolled: the box and the extent are both in viewport coordinates.
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: -100, width: 240, height: 36 }, extent: { left: 0, top: -600, width: 390, height: 2400 } })), "ok");
+  // Round-6 M2: a field low in a scrolling modal is in that container's extent, though past the page's own height.
+  const modal = { left: 0, top: 40, width: 390, height: 3000 };
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 2600, width: 240, height: 36 }, extent: modal })), "ok");
+  assert.equal(visibilityOf(facts({ rect: { left: 20, top: 3100, width: 240, height: 36 }, extent: modal })), "offpage");
 });
 
 test("at fill time every field must be on screen, and nothing may paint over its centre", () => {
@@ -152,10 +157,26 @@ test("only a radio is drawn through a proxy; a select is held to every rule (rou
   assert.equal(typeof proxiedControl, "function");
 });
 
+test("the grant follows the form holding the chosen field, in the frame that chose last (round-6 M2)", () => {
+  const number = ["cardnumber", "cardexpiry", "cardcvv"] as const;
+  const saved = ["cardcvv"] as const;
+  // The frame's richest form is the new-card one; the person chose the saved card's security code.
+  assert.deepEqual(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number], [...saved]], anchor: 1, anchorAt: 5 }]), { frameId: 0, kinds: ["cardcvv"] });
+  // A sub-frame where the person chose wins over a top frame where nobody did.
+  assert.deepEqual(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: null }, { frameId: 4, forms: [[...saved]], anchor: 0, anchorAt: 9 }]), { frameId: 4, kinds: ["cardcvv"] });
+  // The latest choice wins.
+  assert.deepEqual(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: 0, anchorAt: 9 }, { frameId: 4, forms: [[...saved]], anchor: 0, anchorAt: 5 }]), { frameId: 0, kinds: [...number] });
+  // Nothing chosen, or an index out of range: no anchored target (the old chooser picks, and the frame says so).
+  assert.equal(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]] }]), null);
+  assert.equal(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: 3, anchorAt: 1 }]), null);
+  assert.equal(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: 0.5, anchorAt: 1 }]), null);
+});
+
 // ---- wiring: detection and fill use the rules (detect.ts and content.ts need a DOM, so these pin the source) ----
 
 const detect = readFileSync(new URL("./detect.ts", import.meta.url), "utf-8");
 const content = readFileSync(new URL("./content.ts", import.meta.url), "utf-8");
+const background = readFileSync(new URL("./background.ts", import.meta.url), "utf-8");
 
 test("detection collects only fields that pass the page-time rules, for logins and cards alike", () => {
   assert.match(detect, /function isVisible\(el: HTMLElement\): boolean \{\s*return isRendered\(el\) && visibilityOf\(probeVisibility\(el, \{ onScreen: false, hitTest: false \}\), proxiedControl\(el\)\) === "ok";/);
@@ -182,7 +203,7 @@ test("only the person chooses the card field: a trusted press on it or a Tab ont
 test("a card fill writes only the fields that can be seen, of the chosen field's form, and refuses when the chosen field or its frame cannot be", () => {
   const fill = content.slice(content.indexOf("async function fillCardIntoForm("), content.indexOf("// ---- G2 save-card capture"));
   assert.ok(!content.includes("cardFormBySig"), "no more \"the first form with the grant's signature\"");
-  const focus = fill.indexOf('if (anchor === null) return nothing("no_focus");');
+  const focus = fill.indexOf('if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");');
   const before = fill.indexOf('if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");');
   const reveal = fill.indexOf('await safeSend({ type: "revealCardForFill", itemId })');
   const after = fill.indexOf('if (seen === null) return nothing("not_visible");');
@@ -193,7 +214,7 @@ test("a card fill writes only the fields that can be seen, of the chosen field's
   assert.match(seen, /probeVisibility\(f\.input, \{ onScreen: true, hitTest: true, fill: true, ignore: isOwnUiHost \}\), proxiedControl\(f\.input\), MIN_OPACITY\) === "ok"/, "every field: on screen, hit-tested, full rules");
   assert.match(seen, /if \(passing === null \|\| !passing\.some\(\(f\) => f\.input === anchor\)\) return null;/, "the chosen field must pass");
   assert.match(seen, /if \(!frameChainSeen\(centre\(anchor\)\)\) return null;/, "and the frame it is in");
-  const chain = content.slice(content.indexOf("function frameChainSeen("), content.indexOf("/** Drive cardfill.ts per field ref"));
+  const chain = content.slice(content.indexOf("function frameChainSeen("), content.indexOf("function cardFormsAllClosed("));
   assert.match(chain, /frame = win\.frameElement;/);
   assert.match(chain, /if \(frame === null \|\| parent === null/, "a frame element that cannot be reached fails");
   assert.match(chain, /visibilityOf\(\{ \.\.\.facts, ink: null, hit: whatShowsAt\(el, mapped\.x, mapped\.y\) \}, false, MIN_OPACITY\) === "ok"/);
@@ -203,8 +224,16 @@ test("a card fill writes only the fields that can be seen, of the chosen field's
   assert.match(apply, /if \(!seen\.has\(ref\.input\)\) \{\s*unseen\(ref\.kind\);/);
 });
 
+test("the worker builds the grant from the chosen form, in the frame that chose (round-6 M2)", () => {
+  assert.match(background, /const target = chooseAnchoredCardTarget\(eligible\) \?\? chooseCardTarget\(eligible\);/);
+  const info = background.slice(background.indexOf("async function cardFormInfo("), background.indexOf("function broadcastRescanCardForms("));
+  assert.match(info, /const anchor = typeof a === "number" && Number\.isInteger\(a\) && a >= 0 && a < msg\.forms\.length \? a : null;/, "an index out of range is no choice");
+  const report = content.slice(content.indexOf("function reportCardForm("), content.indexOf("function cardTargetOf("));
+  assert.match(report, /void safeSend\(\{ type: "cardFormInfo", forms, anchor \}\);/);
+  assert.match(content, /function setCardFocus\(next: FillableControl \| null\): void \{\s*if \(next === cardFocus\) return;\s*cardFocus = next;\s*reportCardForm\(\);/, "a new choice is reported at once");
+});
+
 test("the Safari lane releases no card number or security code to an extension page", () => {
-  const background = readFileSync(new URL("./background.ts", import.meta.url), "utf-8");
   const appLane = background.slice(background.indexOf('case "revealCardField": {'), background.indexOf('case "reveal":\n      return appVaultReveal(msg, sender);'));
   assert.match(appLane, /if \(msg\.field === "number" \|\| msg\.field === "cvv"\) return \{ ok: false, error: "not in this build" \}/);
   assert.ok(appLane.indexOf('msg.field === "number"') < appLane.indexOf("appVaultCard("), "refused before the app is asked");

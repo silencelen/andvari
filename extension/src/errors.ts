@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -256,6 +256,8 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined): string {
       return "Tap the card number field on the page first, then fill again.";
     case "not_visible":
       return "The card field you tapped can't be seen on the page, so nothing was filled. Scroll to the form and try again, or fill it by hand.";
+    case "closed_form":
+      return "This page keeps its card form where andvari can't tell which field you tapped, so nothing was filled. Fill it by hand.";
     case "no_form":
       return "The card form on this page changed — tap its card number field and try again.";
     case "no_fields":

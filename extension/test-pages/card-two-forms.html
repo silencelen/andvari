@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: two card forms</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  form { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin: 16px 0; }
+  label { display: block; margin: 8px 0 4px; }
+  input, select { font: inherit; padding: 8px; width: 100%; box-sizing: border-box; }
+  .note { color: #555; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>Two card forms</h1>
+<p class="note">Round-6 review M2 (a). The page has a saved-card form (security code only) and a new-card form. The fill
+must use the form of the field you tap, not the page's richest form.</p>
+<ol class="note">
+  <li>Tap the saved card's security code, then Fill a card from the andvari popup: only that security code is filled,
+  and the new-card form stays empty.</li>
+  <li>Reload. Tap the new card's number, then Fill: number, expiry, security code and name are filled; the saved-card
+  code stays empty.</li>
+</ol>
+<form id="saved" autocomplete="on" onsubmit="return false">
+  <h2>Pay with your saved card ending 4242</h2>
+  <label for="saved-cvc">Security code</label>
+  <input id="saved-cvc" name="cvc" autocomplete="cc-csc" inputmode="numeric" maxlength="4">
+  <button type="submit">Pay</button>
+</form>
+<form id="new" autocomplete="on" onsubmit="return false">
+  <h2>Or pay with a new card</h2>
+  <label for="cc-number">Card number</label>
+  <input id="cc-number" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+  <label for="cc-exp">Expiry (MM/YY)</label>
+  <input id="cc-exp" name="exp-date" autocomplete="cc-exp" placeholder="MM/YY">
+  <label for="cc-csc">Security code</label>
+  <input id="cc-csc" name="cvc" autocomplete="cc-csc" inputmode="numeric" maxlength="4">
+  <label for="cc-name">Name on card</label>
+  <input id="cc-name" name="ccname" autocomplete="cc-name">
+  <button type="submit">Pay</button>
+</form>
+</body>
+</html>

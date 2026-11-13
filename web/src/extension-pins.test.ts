@@ -311,7 +311,9 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // at grant mint (freezing the chosen form's kinds + sig — [U12]/[U15], not a live registry read).
     const ms = readFileSync(extensionSrc + "messages.ts", "utf-8");
     expect(ms).toContain("f.frameId === 0 && f.forms.length > 0");
-    expect(bg).toContain("const target = chooseCardTarget(eligible)");
+    // Round-6 review M2: the form holding the field the person chose (chooseAnchoredCardTarget) decides first; this
+    // chooser picks only when no frame reports a chosen field (that frame then answers no_focus).
+    expect(bg).toContain("const target = chooseAnchoredCardTarget(eligible) ?? chooseCardTarget(eligible)");
     expect(bg).toContain("kinds: target.kinds, sig,");
   });
 
