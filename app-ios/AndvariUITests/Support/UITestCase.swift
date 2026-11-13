@@ -222,6 +222,37 @@ class UITestCase: XCTestCase {
         field.typeText(text)
     }
 
+    /// Scroll [application]'s list until [element] sits in the middle part of the screen, clear of the bars above and
+    /// the floating search bar below: a row partly behind one of them is "hittable" and still takes no tap. A row the
+    /// list has not built yet is taken to be further down.
+    @discardableResult
+    func scrollToComfort(_ element: XCUIElement, in application: XCUIApplication? = nil, tries: Int = 12) -> Bool {
+        let application = application ?? app
+        let height = application.windows.firstMatch.frame.height
+        let at = { (y: CGFloat) in application.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: y)) }
+        for _ in 0..<tries {
+            if element.exists {
+                let frame = element.frame
+                if frame.minY > height * 0.18 && frame.maxY < height * 0.8 && element.isHittable { return true }
+                // Above the comfortable band: drag the list down; below it: drag it up. A third of a screen at a time.
+                if frame.minY <= height * 0.18 {
+                    drag(at(0.45), to: at(0.75))
+                } else {
+                    drag(at(0.7), to: at(0.4))
+                }
+            } else {
+                drag(at(0.7), to: at(0.4))
+            }
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+        return element.exists && element.isHittable
+    }
+
+    /// A slow drag that holds at its end, so the list stops where the finger does instead of coasting on.
+    private func drag(_ from: XCUICoordinate, to: XCUICoordinate) {
+        from.press(forDuration: 0.1, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.2)
+    }
+
     /// Whether [element] holds the keyboard (XCUITest's own attribute, as its tree dumps show it).
     func hasKeyboardFocus(_ element: XCUIElement) -> Bool {
         element.exists && ((element.value(forKey: "hasKeyboardFocus") as? Bool) ?? false)

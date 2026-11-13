@@ -117,9 +117,12 @@ extension UITestCase {
     /// Open an item's detail from the vault list, scrolling the list to its row.
     func openItem(_ name: String) {
         let row = vaultRow(name)
-        for _ in 0..<3 where !(row.exists && row.isHittable) { app.swipeDown() }
-        for _ in 0..<5 where !(row.exists && row.isHittable) { app.swipeUp() }
-        require(row, "the row of \(name)")
+        // From the top of the list, where the rows the test looks for are built first.
+        if !row.exists { app.swipeDown(); app.swipeDown() }
+        if !scrollToComfort(row) {
+            dumpTree(app, as: "no-row-\(name)")
+            XCTFail("the row of \(name) could not be brought on screen")
+        }
         row.tap()
         require(element("detail.username"), "the detail of \(name)")
     }
@@ -193,8 +196,10 @@ extension UITestCase {
     /// A control further down the settings sheet, scrolled to.
     func settingsControl(_ identifier: String, _ what: String) -> XCUIElement {
         let control = element(identifier)
-        for _ in 0..<6 where !(control.exists && control.isHittable) { app.swipeUp() }
-        require(control, what)
+        if !scrollToComfort(control) {
+            dumpTree(app, as: "no-settings-control")
+            XCTFail("\(what) could not be brought on screen")
+        }
         return control
     }
 
