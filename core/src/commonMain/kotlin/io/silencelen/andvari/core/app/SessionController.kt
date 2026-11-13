@@ -924,6 +924,38 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- screens that read from the server as they open ----
+
+    /**
+     * One per screen that reads from the server as it opens (the trash, an item's history, the shared vaults, two-step
+     * sign-in): every open and every close moves it on, so a read that finishes after its screen was closed, or opened
+     * again, assigns nothing (round-6 review L8). What it read is dropped there.
+     */
+    private class ScreenToken {
+        private var value = 0L
+
+        fun open(): Long = ++value
+
+        fun close() {
+            value++
+        }
+
+        fun now(): Long = value
+
+        fun still(token: Long): Boolean = value == token
+    }
+
+    private val trashScreen = ScreenToken()
+    private val historyScreen = ScreenToken()
+    private val sharingScreen = ScreenToken()
+    private val twoStepScreen = ScreenToken()
+
+    /** A read whose screen closed (or opened again) meanwhile: nothing is assigned, and the controller is idle again. */
+    private fun screenGone(): ActionResult {
+        update { it.copy(busy = false) }
+        return ActionResult.NotDone(null)
+    }
+
     // ---- trash (spec 03 §11: a deleted item is kept 30 days) ----
 
     /** The trash as last read, each deleted item with its last readable version. Held only while the trash is open. */
@@ -955,9 +987,11 @@ open class SessionController(
     @Throws(CancellationException::class)
     suspend fun openTrash(): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = trashScreen.open()
         busy()
         val deleted = runBounded(BoundedOps.FLAT_MS) { live.engine.deletedItems() }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!trashScreen.still(token)) return@action screenGone()
         trashRead = deleted.associateBy { it.itemId }
         update { it.copy(busy = false, trash = trashViews(live)) }
         ActionResult.Ok
@@ -965,6 +999,7 @@ open class SessionController(
 
     /** The trash screen closed: what was read goes. */
     fun closeTrash() {
+        trashScreen.close()
         trashRead = emptyMap()
         update { it.copy(trash = null) }
     }
@@ -1018,9 +1053,11 @@ open class SessionController(
     suspend fun openItemHistory(itemId: String): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         val item = live.engine.item(itemId) ?: return@action ActionResult.Failed(ITEM_GONE)
+        val token = historyScreen.open()
         busy()
         val versions = runBounded(BoundedOps.FLAT_MS) { live.engine.itemVersions(itemId, item.vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!historyScreen.still(token)) return@action screenGone()
         historyRead = itemId to versions
         update { it.copy(busy = false, history = historyView(live, itemId, versions)) }
         ActionResult.Ok
@@ -1028,6 +1065,7 @@ open class SessionController(
 
     /** The history closed: the versions read go. */
     fun closeItemHistory() {
+        historyScreen.close()
         historyRead = null
         update { it.copy(history = null) }
     }
@@ -1050,6 +1088,7 @@ open class SessionController(
         // An item's kind never changes: a version of another kind is not this item's.
         if (version.doc.type != item.doc.type) return@action ActionResult.Failed(ItemCopy.HISTORY_GONE)
         val doc = live.engine.versionDocForRestore(itemId, version.doc)
+        val token = historyScreen.now()
         busy()
         val outcome = saves.exclusive { live.engine.save(itemId, doc, item.vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
@@ -1058,7 +1097,7 @@ open class SessionController(
         // The history again, best effort: the version just replaced is in it once the server has the restore.
         val fresh = runCatching { runBounded(BoundedOps.FLAT_MS) { live.engine.itemVersions(itemId, item.vaultId) } }
             .onFailure { if (it is CancellationException) throw it }.getOrNull()
-        if (fresh != null && session.get() === live && historyRead?.first == itemId) {
+        if (fresh != null && session.get() === live && historyScreen.still(token) && historyRead?.first == itemId) {
             historyRead = itemId to fresh
             update { it.copy(history = historyView(live, itemId, fresh)) }
         }
@@ -1117,6 +1156,7 @@ open class SessionController(
     @Throws(CancellationException::class)
     suspend fun openSharing(): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = sharingScreen.open()
         update { it.copy(sharing = sharingView(live, copied = null)) }
         busy()
         val listed = try {
@@ -1127,12 +1167,14 @@ open class SessionController(
             return@action failure(t, HouseholdCopy::forError)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!sharingScreen.still(token)) return@action screenGone()
         deletedVaults = listed.associateBy { it.vaultId }
         update { it.copy(busy = false, sharing = sharingView(live)) }
         ActionResult.Ok
     }
 
     fun closeSharing() {
+        sharingScreen.close()
         deletedVaults = emptyMap()
         update { it.copy(sharing = null) }
     }
@@ -1270,6 +1312,7 @@ open class SessionController(
     @Throws(CancellationException::class)
     suspend fun loadTwoStep(): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = twoStepScreen.open()
         busy()
         val status = try {
             runBounded(BoundedOps.FLAT_MS) { live.api.totpStatus() }
@@ -1278,6 +1321,7 @@ open class SessionController(
             return@action failure(t, HouseholdCopy::forTotpError)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!twoStepScreen.still(token)) return@action screenGone()
         update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = twoStepPending != null)) }
         ActionResult.Ok
     }
@@ -1290,6 +1334,7 @@ open class SessionController(
     suspend fun beginTwoStep(password: String): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         if (password.isEmpty()) return@action ActionResult.NotDone(null)
+        val token = twoStepScreen.now()
         busy()
         val setup = try {
             runBounded(BoundedOps.FLAT_MS) { withContext(Dispatchers.Default) { live.api.totpSetupWithPassword(password, live.account) } }
@@ -1298,6 +1343,8 @@ open class SessionController(
             return@action failure(t, HouseholdCopy::forTotpError)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
+        // The screen closed meanwhile: the new key is not held (the server drops it unconfirmed).
+        if (!twoStepScreen.still(token)) return@action screenGone()
         twoStepPending = TwoStepSetup(setup.secretBase32, setup.otpauthUri)
         update { it.copy(busy = false, twoStep = TwoStepView(enrolled = it.twoStep?.enrolled ?: false, settingUp = true)) }
         ActionResult.Ok
@@ -1311,6 +1358,7 @@ open class SessionController(
     suspend fun confirmTwoStep(code: String): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         if (twoStepPending == null) return@action ActionResult.NotDone(null)
+        val token = twoStepScreen.now()
         busy()
         val status = try {
             runBounded(BoundedOps.FLAT_MS) { live.api.totpConfirm(code.trim()) }
@@ -1320,7 +1368,9 @@ open class SessionController(
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         twoStepPending = null
-        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = false), notice = if (status.enrolled) ItemCopy.TWO_STEP_ON else it.notice) }
+        // Confirmed on the server either way; the screen is only redrawn while it is open.
+        val open = twoStepScreen.still(token)
+        update { it.copy(busy = false, twoStep = if (open) TwoStepView(status.enrolled, settingUp = false) else it.twoStep, notice = if (status.enrolled) ItemCopy.TWO_STEP_ON else it.notice) }
         ActionResult.Ok
     }
 
@@ -1328,6 +1378,7 @@ open class SessionController(
     @Throws(CancellationException::class)
     suspend fun disableTwoStep(code: String): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = twoStepScreen.now()
         busy()
         val status = try {
             runBounded(BoundedOps.FLAT_MS) { live.api.totpDisable(code.trim()) }
@@ -1336,12 +1387,14 @@ open class SessionController(
             return@action failure(t, HouseholdCopy::forTotpError)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
-        update { it.copy(busy = false, twoStep = TwoStepView(status.enrolled, settingUp = false), notice = if (!status.enrolled) ItemCopy.TWO_STEP_OFF else it.notice) }
+        val open = twoStepScreen.still(token)
+        update { it.copy(busy = false, twoStep = if (open) TwoStepView(status.enrolled, settingUp = false) else it.twoStep, notice = if (!status.enrolled) ItemCopy.TWO_STEP_OFF else it.notice) }
         ActionResult.Ok
     }
 
     /** The two-step screen closed: a key not yet confirmed is forgotten here (the server drops it unconfirmed). */
     fun closeTwoStep() {
+        twoStepScreen.close()
         twoStepPending = null
         update { it.copy(twoStep = null) }
     }
