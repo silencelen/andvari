@@ -17,6 +17,10 @@ enum Fixture {
     static let httpOrigin = value("UITEST_HTTP_ORIGIN", "http://plainhttp-uitest.test:8081")
     static let otherOrigin = value("UITEST_OTHER_ORIGIN", "https://other-uitest.test:8443")
     static let otherHost = value("UITEST_OTHER_HOST", "other-uitest.test")
+    /// The test site's plain-http port on the loopback address, for the control requests (Backend.swift).
+    static let controlOrigin = value("UITEST_CONTROL_ORIGIN", "http://127.0.0.1:8081")
+    static let cardNumber = "4111111111111111"
+    static let cardCode = "123"
     static let secondItem = "UITest Site second"
     static let secondUser = "alice.second"
     static let secondPassword = "second-Passw0rd-site"

@@ -49,7 +49,12 @@ printf 'subjectAltName=DNS:%s,DNS:'"$UITEST_OTHER_HOST"',DNS:'"$UITEST_PROVIDER_
 openssl x509 -req -in "$WORK/site.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca.key" -CAcreateserial -days 2 \
   -extfile "$WORK/site.ext" -out "$WORK/site.pem" 2> /dev/null
 
-nohup python3 "$HERE/serve-site.py" "$HERE/site" "$UITEST_SITE_PORT" "$UITEST_HTTP_PORT" "$WORK/site.pem" "$WORK/site.key" > "$WORK/site.log" 2>&1 &
+# The pages: the suite's own, and the extension's manual test pages under /test-pages/.
+rm -rf "$WORK/site"
+mkdir -p "$WORK/site/test-pages"
+cp -R "$HERE/site/." "$WORK/site/"
+cp "$REPO"/extension/test-pages/*.html "$WORK/site/test-pages/"
+UITEST_SEED_JAR="$SEED_JAR" nohup python3 "$HERE/serve-site.py" "$WORK/site" "$UITEST_SITE_PORT" "$UITEST_HTTP_PORT" "$WORK/site.pem" "$WORK/site.key" > "$WORK/site.log" 2>&1 &
 echo $! > "$WORK/site.pid"
 for _ in $(seq 1 30); do
   curl -fsS -o /dev/null "http://127.0.0.1:$UITEST_HTTP_PORT/index.html" 2> /dev/null \
