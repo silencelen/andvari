@@ -334,7 +334,16 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // not part of the fill-redemption path this pin guards) — not at maybeOpen far downstream.
     const fillEntry = spanOf(ct, "async function fillCardIntoForm(", "// ---- G2 save-card capture");
     expect(fillEntry).toContain('if (typeof sig !== "string") return nothing("no_form");');
-    expect(fillEntry.match(/if \(!(form|now) \|\| cardSigOf\((form|now)\) !== sig\) return nothing\("no_form"\);/g), "sig-matched before the reveal and again before the write").toHaveLength(2);
+    // Round-8 review: each check tests the form it names (no "!form || cardSigOf(now)" mix-up), the first before the card
+    // is asked for and the second after it came back, before the write.
+    const sigChecks = [...fillEntry.matchAll(/if \(!(form|now) \|\| cardSigOf\(\1\) !== sig\) return nothing\("no_form"\);/g)];
+    expect(sigChecks.map((m) => m[1]), "sig-matched before the reveal and again before the write").toEqual(["form", "now"]);
+    expect(fillEntry.match(/cardSigOf\(/g), "and no other sig test").toHaveLength(2);
+    const revealAt = fillEntry.indexOf('await safeSend({ type: "revealCardForFill", itemId })');
+    expect(revealAt).toBeGreaterThan(-1);
+    expect(sigChecks[0]!.index!).toBeLessThan(revealAt);
+    expect(sigChecks[1]!.index!).toBeGreaterThan(revealAt);
+    expect(fillEntry.indexOf("const now = cardFormHolding(anchor);")).toBeGreaterThan(revealAt);
     expect(fillEntry).not.toContain("cardFormBySig");
     // The Tier-1 shape this replaced — any positional pick — must never come back on this path.
     for (const [name, span] of [["cardFormHolding", holding], ["fillCardIntoForm", fillEntry]] as const) {
@@ -1247,6 +1256,23 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
     // (2026-11: the popup's confirmed other-site fill rides a third argument; the sender is still the second.)
     expect(bg).toContain('return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null);');
     expect(bg).toContain("return linkUri(msg, sender);");
+  });
+
+  it("Safari: a login saved for another site fills only after the person confirmed THIS page's host (confirmedOtherSite)", () => {
+    const f = spanOf(bg, "async function fillFromPopup(", "// ---- S3 in-page card fill");
+    // The confirmation holds only while the active tab is still on the host it was given for.
+    expect(f).toContain("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);");
+    expect(f).toContain('if (!confirmed && (page === null || !matchLogins(uris, { webHost: page, packageName: "" }, pslResolve))) {');
+    expect(f).toContain('return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: { savedFor, page: page ?? top } };');
+    // Decided before any grant exists for the tab.
+    expect(f.indexOf("const confirmed =")).toBeGreaterThan(-1);
+    expect(f.indexOf("const confirmed =")).toBeLessThan(f.indexOf("grants.set(tab.id,"));
+    // The popup sends it only from the confirmation's own Fill button, naming the page the worker named.
+    const popup = readFileSync(extensionSrc + "popup.ts", "utf-8");
+    expect(popup).toContain('const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId } : { type: "fillFromPopup", itemId, confirmedOtherSite });');
+    expect(popup).toContain("confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);");
+    expect(popup.match(/void fillItem\(itemId, page\);/g), "one caller passes a confirmation").toHaveLength(1);
+    expect(spanOf(popup, "function confirmOtherSite(", "/** The list payload already carries the username")).toContain("void fillItem(itemId, page);");
   });
 
   it("fillFromPopup is POPUP ONLY, refused before anything else runs (its card twin's guard, verbatim)", () => {
