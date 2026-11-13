@@ -150,7 +150,8 @@ open class SessionControllerTest {
             override val deviceName = "test device"
         }
 
-        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog)
+        val moveMemoLog = InMemoryFillSnapshots()
+        val controller = SessionController(store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog)
 
         /** What an extension does with a captured login: seal it to the published key and queue it (under [id], here). */
         fun capture(id: String, site: String, username: String, password: String) = SaveQueue.enqueue(queue, crypto, site, username, password, clocks.wall, "safari") { id }
@@ -988,6 +989,114 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE), controller.moveOrCopyItem(ITEM_ID, reg.personalVault.vaultId, move = false), "not into its own vault")
         assertEquals(ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE), controller.moveOrCopyItem(ITEM_ID, elsewhere, move = true), "not into a vault this account cannot write")
         assertEquals(1, controller.state.items.count { it.itemId == ITEM_ID })
+    }
+
+    /**
+     * A move's push legs as the server answers them: the copy ([put]) and the delete of the original ([delete]); every
+     * mutation seen is kept in [pushed].
+     */
+    private fun Rig.moveServer(server: VaultServer, delete: String, pushed: MutableList<io.silencelen.andvari.core.model.Mutation>) {
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            pushed += body.mutations
+            val results = body.mutations.map { io.silencelen.andvari.core.model.MutationResult(it.mutationId, if (it.op == "put") "applied" else delete, newItemRev = if (it.op == "put") ++server.rev else null) }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(++server.rev, results)), HttpStatusCode.OK, headers)
+        }
+    }
+
+    /**
+     * Round-6 review L5: a move whose copy was made but whose original could not be removed says so, naming the copy and
+     * where it went; the unfinished try is kept, sealed, across a lock, so another try replays the same ids instead of a
+     * second copy; Cancel lets it go.
+     */
+    @Test
+    fun aMoveWhoseOriginalCouldNotBeRemovedSaysBothAreThereAndATryAfterALockMakesNoSecondCopy() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        val family = controller.moveTargets(ITEM_ID).single()
+        assertEquals("Family", family.name)
+        assertTrue(controller.canMoveOut(ITEM_ID))
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
+        moveServer(server, delete = "denied", pushed)
+        val expected = "Copied “Example” to “Family”, but the original couldn't be removed from “Personal” (your access there may have changed). It is in both vaults now."
+        assertEquals(ActionResult.Failed(expected), controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        val copy = pushed.first { it.op == "put" }
+        assertTrue(controller.state.items.any { it.itemId == copy.itemId }, "the copy is listed")
+        assertTrue(controller.state.items.any { it.itemId == ITEM_ID }, "and so is the original")
+        assertNotNull(moveMemoLog.bytes, "the unfinished try is kept, sealed")
+        assertFalse(moveMemoLog.bytes!!.decodeToString().contains(copy.itemId), "sealed at rest")
+        // A lock, then another try: the same gesture, so the same copy, never a second one.
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(ActionResult.Failed(expected), controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        assertEquals(setOf(copy.itemId), pushed.filter { it.op == "put" }.map { it.itemId }.toSet(), "one copy, whatever the tries")
+        assertEquals(setOf(copy.mutationId), pushed.filter { it.op == "put" }.map { it.mutationId }.toSet(), "replayed under the same mutation id")
+        // Cancel lets the try go: what it kept is removed.
+        controller.cancelMove(ITEM_ID)
+        assertNull(moveMemoLog.bytes)
+    }
+
+    @Test
+    fun aMovedItemThatChangedMeanwhileIsKeptAndNoSecondCopyIsMinted() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        val family = controller.moveTargets(ITEM_ID).single()
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
+        moveServer(server, delete = "conflict", pushed)
+        assertEquals(
+            ActionResult.Failed("Copied “Example” to “Family”, but it changed in “Personal” meanwhile, so the original was kept there. It is in both vaults now: review them and delete the one you don't need."),
+            controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true),
+        )
+        // The original changes (another device's edit, pulled by a sync): another try would copy a different item, and
+        // the earlier copy is there.
+        val changed = enrolled.account.encryptItem(reg.personalVault.vaultId, ITEM_ID, item.copy(login = item.login!!.copy(password = "changed-elsewhere")))
+        val row = WireItem(ITEM_ID, reg.personalVault.vaultId, server.rev + 50, 1_000, 9_000, false, false, changed.formatVersion, changed.attachmentIds, changed.blob)
+        val sync = routes.getValue("/sync")
+        routes["/sync"] = {
+            val body = io.silencelen.andvari.core.model.SyncResponse(server.rev + 60, false, server.vaults.values.toList(), server.grants.values.toList(), listOf(row), emptyList())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+        }
+        assertEquals(ActionResult.Ok, controller.refresh())
+        routes["/sync"] = sync
+        assertEquals("changed-elsewhere", controller.revealSecret(ITEM_ID, SecretField.PASSWORD))
+        moveServer(server, delete = "applied", pushed)
+        val copies = { pushed.count { it.op == "put" && it.itemId != ITEM_ID } }
+        assertEquals(
+            ActionResult.Failed("An earlier try already copied “Example” to “Family”, and it has changed since, so nothing more was done. Cancel to start over, or delete the copy you don't need."),
+            controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true),
+        )
+        assertEquals(1, copies(), "no second copy")
+        // After Cancel, a new move is the person's own choice: it goes ahead.
+        controller.cancelMove(ITEM_ID)
+        assertEquals(ActionResult.Ok, controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        assertEquals(2, copies())
+    }
+
+    /**
+     * Round-6 review L6, the rules both apps now share (VaultMoves): an item in a vault this account only reads can be
+     * copied out but not moved, and a vault whose key this device does not hold is never a target.
+     */
+    @Test
+    fun aReadersItemIsCopiedOutNotMovedAndAVaultWithoutItsKeyIsNoTarget() = test {
+        val readOnly = io.silencelen.andvari.core.client.VaultInfo("00000000-0000-4000-8000-0000000000b1", "shared", "Shared, read only", "reader")
+        val vaults = listOf(
+            io.silencelen.andvari.core.client.VaultInfo(reg.personalVault.vaultId, "personal", "Personal", null),
+            readOnly,
+            io.silencelen.andvari.core.client.VaultInfo("v-writer-nokey", "shared", "Family", "writer"),
+            io.silencelen.andvari.core.client.VaultInfo("v-owner", "shared", "Work", "owner"),
+        )
+        val holds = setOf(reg.personalVault.vaultId, readOnly.vaultId, "v-owner")
+        assertEquals(listOf(reg.personalVault.vaultId, "v-owner"), VaultMoves.writableVaults(vaults) { it in holds }.map { it.vaultId }, "no reader's vault, no vault without its key")
+        assertEquals(listOf(reg.personalVault.vaultId, "v-owner"), VaultMoves.targets(readOnly.vaultId, vaults) { it in holds }.map { it.vaultId }, "a reader's item can be copied out")
+        assertEquals(listOf("v-owner"), VaultMoves.targets(reg.personalVault.vaultId, vaults) { it in holds }.map { it.vaultId })
+        assertFalse(VaultMoves.canTakeOut(readOnly.vaultId, vaults), "but not moved: its original cannot be deleted")
+        assertTrue(VaultMoves.canTakeOut(reg.personalVault.vaultId, vaults))
+        assertTrue(VaultMoves.canTakeOut("v-writer-nokey", vaults))
+        assertFalse(VaultMoves.canTakeOut("v-unknown", vaults))
     }
 
     // ---- trash and history ----

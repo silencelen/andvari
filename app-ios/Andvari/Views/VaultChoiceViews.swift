@@ -41,10 +41,21 @@ struct VaultPickerSection: View {
 struct MoveCopySheet: View {
     let itemId: String
     let targets: [VaultChoiceView]
+    /// Whether the item can leave its vault; an item in a vault this account only reads can only be copied.
+    let canMove: Bool
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var move = true
+    @State private var move: Bool
+    /// Whether the last try finished: dismissing the sheet otherwise cancels the move (what it kept goes).
+    @State private var done = false
+
+    init(itemId: String, targets: [VaultChoiceView], canMove: Bool) {
+        self.itemId = itemId
+        self.targets = targets
+        self.canMove = canMove
+        _move = State(initialValue: canMove)
+    }
     @State private var target: String?
     @State private var working = false
     @State private var message: String?
@@ -53,15 +64,19 @@ struct MoveCopySheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Picker("What to do", selection: $move) {
-                        Text("Move").tag(true)
-                        Text("Copy").tag(false)
+                    if canMove {
+                        Picker("What to do", selection: $move) {
+                            Text("Move").tag(true)
+                            Text("Copy").tag(false)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 } footer: {
                     Text(move
                         ? "The item leaves this vault. Anyone who could see it here may still have a copy from before the move."
-                        : "A copy goes to the other vault; this one stays as it is.")
+                        : canMove
+                        ? "A copy goes to the other vault; this one stays as it is."
+                        : "You can only read this vault, so the item can be copied out, not moved. This one stays as it is.")
                 }
                 .listRowBackground(Palette.raised)
 
@@ -125,6 +140,11 @@ struct MoveCopySheet: View {
             }
             .toolbarBackground(Palette.background, for: .navigationBar)
         }
+        .onDisappear {
+            // Cancel, or dismissed after a try that did not finish: what that try kept goes (a lock is not a cancel:
+            // the controller keeps it then, sealed, for after the unlock).
+            if !done { model.cancelMove(itemId) }
+        }
     }
 
     private func run() {
@@ -135,6 +155,7 @@ struct MoveCopySheet: View {
             let outcome = await model.moveOrCopyItem(itemId, to: target, move: move)
             working = false
             if outcome == .ok {
+                done = true
                 dismiss()
             } else {
                 message = outcome.message

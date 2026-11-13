@@ -11,9 +11,6 @@ import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
-import io.silencelen.andvari.core.client.MoveGesture
-import io.silencelen.andvari.core.client.ItemChangedException
-import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.KdfReKeyCore
@@ -110,6 +107,8 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param fillSnapshots where the AutoFill extension's encrypted snapshot is kept; nothing is written by default.
  * @param saveQueue where the extensions queue captured logins for this app to import; none by default.
  * @param appliedSaveLog where the list of automatic saves is kept across a lock: app-private, never shared.
+ * @param moveMemoLog where a move or copy that did not finish is kept across a lock, sealed to the account:
+ *  app-private, never shared ([VaultMoves]).
  */
 open class SessionController(
     private val store: SessionPersistence,
@@ -125,6 +124,7 @@ open class SessionController(
     private val fillSnapshots: FillSnapshotStore = FillSnapshotStore.None,
     private val saveQueue: SaveQueueStore = SaveQueueStore.None,
     private val appliedSaveLog: FillSnapshotStore = InMemoryFillSnapshots(),
+    private val moveMemoLog: FillSnapshotStore = InMemoryFillSnapshots(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + uiContext)
     private val session = VaultSession(clocks)
@@ -1451,13 +1451,13 @@ open class SessionController(
 
     // ---- vaults: where a new item goes, and moving or copying one (design §8, F18/F19) ----
 
+    private fun vaultList(live: VaultSession.Unlocked): List<VaultInfo> = runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList())
+
     /**
      * The vaults this account can put an item in: its personal vault first, then the shared vaults it owns or writes, by
-     * name, each one it holds the key of. The rule Android's editor and its move/copy control use.
+     * name, each one it holds the key of. The one rule Android's view model uses too ([VaultMoves.writableVaults]).
      */
-    private fun writableVaults(live: VaultSession.Unlocked): List<VaultInfo> =
-        runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList())
-            .filter { (it.type == "personal" || it.role == "owner" || it.role == "writer") && live.account.canSealUnder(it.vaultId) }
+    private fun writableVaults(live: VaultSession.Unlocked): List<VaultInfo> = VaultMoves.writableVaults(vaultList(live), live.account::canSealUnder)
 
     private fun choiceOf(v: VaultInfo) = VaultChoiceView(v.vaultId, v.name, personal = v.type == "personal")
 
@@ -1477,20 +1477,35 @@ open class SessionController(
         else -> null
     }
 
-    /** The vaults [itemId] can be moved or copied to: the writable ones but its own; none if this account cannot write its vault. */
+    /**
+     * The vaults [itemId] can be copied to, and moved to when [canMoveOut]: the writable ones but its own
+     * ([VaultMoves.targets]). An item in a vault this account only reads can still be copied out.
+     */
     fun moveTargets(itemId: String): List<VaultChoiceView> = guarded({ emptyList() }) {
         val live = session.get() ?: return@guarded emptyList()
         val item = live.engine.item(itemId) ?: return@guarded emptyList()
-        if (!canWrite(live, item.vaultId)) return@guarded emptyList()
-        writableVaults(live).filter { it.vaultId != item.vaultId }.map(::choiceOf)
+        VaultMoves.targets(item.vaultId, vaultList(live), live.account::canSealUnder).map(::choiceOf)
+    }
+
+    /** Whether [itemId] can be moved out of its vault (a move deletes it there), not only copied ([VaultMoves.canTakeOut]). */
+    fun canMoveOut(itemId: String): Boolean = guarded({ false }) {
+        val live = session.get() ?: return@guarded false
+        val item = live.engine.item(itemId) ?: return@guarded false
+        VaultMoves.canTakeOut(item.vaultId, vaultList(live))
     }
 
     /**
-     * A move or copy that did not finish, by item, target and kind: kept while the item is unchanged so that Try again
-     * replays the same ids (the server's dedup then converges, never duplicates). It names new attachment keys, so it
-     * goes with the session.
+     * Moves and copies that did not finish, by item, target and kind ([VaultMoves]): kept until done or cancelled, so
+     * that Try again replays the same ids, and across a lock sealed to the account in app-private storage (they name
+     * new attachment keys, so never in memory while locked).
      */
-    private val moveGestures = HashMap<String, MoveGesture>()
+    private val moves = VaultMoves(VaultMoves.Store.Sealed(moveMemoLog) { session.get()?.account })
+
+    /** The person cancelled moving or copying [itemId]: what an unfinished try kept goes. A lock is not a cancel. */
+    fun cancelMove(itemId: String) {
+        if (session.get() == null) return
+        guarded({}) { moves.cancelled(itemId) }
+    }
 
     /**
      * Move (copy, then delete the original) or copy [itemId] into [targetVaultId], one of [moveTargets]. Attachments are
@@ -1501,39 +1516,41 @@ open class SessionController(
     suspend fun moveOrCopyItem(itemId: String, targetVaultId: String, move: Boolean): ActionResult = action {
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         val current = live.engine.item(itemId) ?: return@action ActionResult.Failed(ITEM_GONE)
-        if (!canWrite(live, current.vaultId)) return@action ActionResult.Failed(ItemCopy.READ_ONLY)
-        if (targetVaultId == current.vaultId || writableVaults(live).none { it.vaultId == targetVaultId }) {
+        val vaults = vaultList(live)
+        if (move && !VaultMoves.canTakeOut(current.vaultId, vaults)) return@action ActionResult.Failed(ItemCopy.READ_ONLY)
+        if (VaultMoves.targets(current.vaultId, vaults, live.account::canSealUnder).none { it.vaultId == targetVaultId }) {
             return@action ActionResult.Failed(ItemCopy.VAULT_NOT_WRITABLE)
         }
-        val key = "$itemId|$targetVaultId|$move"
-        val memo = moveGestures[key]
-        val gesture = if (memo != null && memo.sourceRev == current.rev) memo else live.engine.newMoveGesture(itemId, targetVaultId, move).also { moveGestures[key] = it }
+        val target = vaultName(live, targetVaultId) ?: "the other vault"
+        val source = vaultName(live, current.vaultId) ?: "its vault"
+        val name = current.doc.name.ifBlank { "This item" }
+        val gesture = when (val prepared = moves.prepare(live.engine, current, targetVaultId, move)) {
+            is VaultMoves.Prepared.AlreadyCopied -> return@action ActionResult.Failed(VaultMoves.alreadyCopiedLine(name, target))
+            is VaultMoves.Prepared.Run -> prepared.gesture
+        }
         busy()
         try {
             // Audit H10: the gesture re-uploads the item's attachments, so its bound scales with their bytes.
             saves.exclusive { runBounded(BoundedOps.attachmentMs(current.doc.attachments.sumOf { it.size })) { live.engine.runGesture(gesture) } }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            return@action when {
-                t is CopyDeniedException -> {
-                    moveGestures.remove(key)
-                    idleFailed(ItemCopy.MOVE_DENIED)
+            val failed = moves.failed(itemId, targetVaultId, move, t)
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action when (failed) {
+                VaultMoves.Failure.COPY_DENIED -> idleFailed(ItemCopy.MOVE_DENIED)
+                VaultMoves.Failure.CHANGED_AFTER_COPY, VaultMoves.Failure.ORIGINAL_KEPT -> {
+                    // The copy is there: the list shows it, and the message says where both are.
+                    update { it.copy(items = summaries(it.query)) }
+                    writeFillSnapshot()
+                    idleFailed(VaultMoves.bothVaultsLine(failed, name, target, source) ?: ItemCopy.MOVE_CHANGED)
                 }
-                t is ItemChangedException -> {
-                    moveGestures.remove(key)
-                    idleFailed(ItemCopy.MOVE_CHANGED)
-                }
-                t is ApiException && t.status == 403 -> {
-                    moveGestures.remove(key)
-                    failure(t, HouseholdCopy::forError)
-                }
-                // Anything else is transient: the gesture is kept, so Try again replays the same ids.
-                else -> idleFailed(ItemCopy.MOVE_RETRY)
+                VaultMoves.Failure.FORBIDDEN -> failure(t, HouseholdCopy::forError)
+                // Transient: the gesture is kept, so Try again replays the same ids.
+                VaultMoves.Failure.TRANSIENT -> idleFailed(ItemCopy.MOVE_RETRY)
             }
         }
-        moveGestures.remove(key)
+        moves.finished(itemId, targetVaultId, move)
         if (session.get() !== live) return@action ActionResult.NotDone(null)
-        val target = vaultName(live, targetVaultId) ?: "the other vault"
         update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), notice = if (move) "Moved to “$target”." else "Copied to “$target”.") }
         writeFillSnapshot()
         ActionResult.Ok
@@ -2116,20 +2133,24 @@ open class SessionController(
     }
 
     /** Whatever a session's screens held in memory about the vault goes with it, however the session ended. */
-    /** What a lock forgets. [keepTwoStep]: an ordinary lock keeps a key being set up for the trip it came from (L4). */
-    private fun forgetSessionViews(keepTwoStep: Boolean = false) {
+    /**
+     * What a lock forgets. [ordinaryLock]: the account stays, so a key being set up stays for the trip it came from (L4)
+     * and an unfinished move stays sealed in storage (L5); otherwise (a sign-out, a server switch, an ended session)
+     * both go.
+     */
+    private fun forgetSessionViews(ordinaryLock: Boolean = false) {
         saves.locked()
         personal.reset()
         trashRead = emptyMap()
         historyRead = null
-        moveGestures.clear()
-        if (!keepTwoStep) twoStepPending = null
+        if (ordinaryLock) moves.forget() else moves.drop()
+        if (!ordinaryLock) twoStepPending = null
         deletedVaults = emptyMap()
     }
 
     private fun lock(reason: String?) {
         session.lock()
-        forgetSessionViews(keepTwoStep = true)
+        forgetSessionViews(ordinaryLock = true)
         zeroSecrets()
         backgroundLockPending = false
         val stored = store.load()
@@ -2205,6 +2226,7 @@ open class SessionController(
 
     private companion object {
         const val SYNC_EVERY_MS = 5 * 60 * 1000L
+
 
         /** How long a key being set up is kept from when the server minted it (round-6 review L4). */
         const val TWO_STEP_PENDING_MS = 10 * 60 * 1000L
