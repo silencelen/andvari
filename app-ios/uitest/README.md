@@ -56,10 +56,10 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | Turn the Safari web extension on in Settings | Works | `T3…test07` |
 | Extension popup: Face ID once it has painted, the site's logins listed under "This site", fill, and opened again at once it lists without Face ID | Works | `T3…test08` |
 | Fill a field in an app with no website (andvari's own unlock field) | Works: the list opens with every login and the chosen password is put in the field | `T3…test09` |
-| Two changed passwords and a new login saved from Safari, each applied at the unlock after it: the list grows to "Saved 3 logins from AutoFill" and is kept across a lock; the new password and the previous one in the login; Undo, Undo all, everything as it was | Works | `T3…test10` |
+| A changed password saved from Safari: applied at the next unlock and listed, kept across a lock, the new password and the previous one in the login, Undo, everything as it was | Works | `T3…test10` |
 | The popup lists cards (masked number); the popup's root fills its sheet and a row is centred in it (within 3 points) | Works | `T3…test11` |
 | A login for another site chosen in the popup: nothing filled until a confirmation that names both sites | Works | `T3…test12` |
-| Two logins saved before the app is next unlocked both arrive | Skipped while the defect below is present (the test checks the queue and says so) | `T3…test13` |
+| Two logins saved before the app is next unlocked both arrive and are listed; Undo all takes both back | Skipped while the defect below is present (the test checks the queue and says so) | `T3…test13` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
@@ -72,6 +72,8 @@ dump; none of them loosens an assertion.
   extension queues a save under `ASSavePasswordRequest.sessionID`, which is "1" for every save on the iOS 26.5
   simulator (each save runs in a fresh extension process), and the queue's `put` replaces an entry with the same
   id. After three saves the App Group's `saves/` held only `q-s-1.json`, and the app listed only the last one.
+  The same id also makes a later save replace an earlier save's record in the "Saved … from AutoFill" list
+  even when the app was unlocked in between, so the earlier save can no longer be undone from the list.
 
 - **The personal-vault notice on a device's first sign-in** opens with "The server says your personal vault
   is Personal." even when the account's own record names the same vault, where a device that had read the
