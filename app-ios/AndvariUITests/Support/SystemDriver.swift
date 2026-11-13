@@ -217,8 +217,12 @@ extension UITestCase {
         }
         step("andvari-extension") {
             let row = settings.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
-            XCTAssertTrue(scrollToAndTap(row, in: settings, swipes: 4), "andvari is not listed under Safari's extensions")
-            Thread.sleep(forTimeInterval: 1.5)
+            let allow = settings.switches.matching(NSPredicate(format: "label CONTAINS[c] 'Allow Extension'")).firstMatch
+            // A tap while the Extensions screen is still sliding in opens nothing: tap again until it opens.
+            for _ in 0..<3 where !allow.exists {
+                XCTAssertTrue(scrollToAndTap(row, in: settings, swipes: 4), "andvari is not listed under Safari's extensions")
+                _ = waitUntil(4) { allow.exists }
+            }
             dumpTree(settings, as: "settings-andvari-extension")
         }
         var on = false
