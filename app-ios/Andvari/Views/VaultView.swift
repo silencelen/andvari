@@ -65,19 +65,19 @@ struct VaultView: View {
             .tint(Palette.goldText)
             .privacyShield()
         }
-        .sheet(isPresented: $showNewCard) {
+        .sheet(isPresented: $showNewCard, onDismiss: { model.closeAttachmentDraft() }) {
             CardEditorView(itemId: nil)
                 .environmentObject(model)
                 .tint(Palette.goldText)
                 .privacyShield()
         }
-        .sheet(isPresented: $showNewLogin) {
+        .sheet(isPresented: $showNewLogin, onDismiss: { model.closeAttachmentDraft() }) {
             LoginEditorView(itemId: nil)
                 .environmentObject(model)
                 .tint(Palette.goldText)
                 .privacyShield()
         }
-        .sheet(isPresented: $showNewNote) {
+        .sheet(isPresented: $showNewNote, onDismiss: { model.closeAttachmentDraft() }) {
             NoteEditorView(itemId: nil)
                 .environmentObject(model)
                 .tint(Palette.goldText)

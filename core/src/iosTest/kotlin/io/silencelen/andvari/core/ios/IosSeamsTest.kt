@@ -130,24 +130,28 @@ class IosSeamsTest {
             shared.setObject("""{"baseUrl":"https://home.example","userId":"u1","email":"u@example.com"}""", forKey = "session")
             var dropped = 0
             // A launch iOS prewarmed before the first unlock: nothing is deleted, and the first start is still to come.
-            IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { false })
+            IosSeams(config, dropStaleInstall = { dropped++; true }, installMarker = marker, protectedDataAvailable = { false })
             assertEquals(0, dropped)
             assertFalse(NSFileManager.defaultManager.fileExistsAtPath(marker))
+            // A delete that fails leaves no marker, so the next start tries again (round-9 review 7).
+            IosSeams(config, dropStaleInstall = { dropped++; false }, installMarker = marker, protectedDataAvailable = { true })
+            assertEquals(1, dropped)
+            assertFalse(NSFileManager.defaultManager.fileExistsAtPath(marker))
             // The first start proper.
-            val seams = IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { true })
-            assertEquals(1, dropped, "the earlier install's tokens and quick-unlock items are deleted")
+            val seams = IosSeams(config, dropStaleInstall = { dropped++; true }, installMarker = marker, protectedDataAvailable = { true })
+            assertEquals(2, dropped, "the earlier install's tokens and quick-unlock items are deleted")
             assertTrue(NSFileManager.defaultManager.fileExistsAtPath(marker), "and the install is marked")
             assertNull(seams.store.baseUrl, "the server screen: nothing is taken from the group")
             assertNull(seams.store.load(), "signed out")
             assertNull(seams.store.storedIdentity())
             // Later starts never delete anything, even with an empty private store (signed out in this install).
-            IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { true })
-            assertEquals(1, dropped)
+            IosSeams(config, dropStaleInstall = { dropped++; true }, installMarker = marker, protectedDataAvailable = { true })
+            assertEquals(2, dropped)
             // An update from a build before the marker: the private store holds state, so nothing is deleted.
             NSFileManager.defaultManager.removeItemAtPath(marker, error = null)
             seams.store.moveOrigin("https://home.example")
-            IosSeams(config, dropStaleInstall = { dropped++ }, installMarker = marker, protectedDataAvailable = { true })
-            assertEquals(1, dropped)
+            IosSeams(config, dropStaleInstall = { dropped++; true }, installMarker = marker, protectedDataAvailable = { true })
+            assertEquals(2, dropped)
             assertTrue(NSFileManager.defaultManager.fileExistsAtPath(marker))
         } finally {
             NSFileManager.defaultManager.removeItemAtPath(dir, error = null)

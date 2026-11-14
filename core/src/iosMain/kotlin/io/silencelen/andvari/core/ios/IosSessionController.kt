@@ -138,16 +138,22 @@ class AttachmentFile(val name: String, val data: NSData?, val error: String?)
  * install, and offers no Face ID that was not turned on in this one. A first start is told by an install marker in the
  * app's container, which can be seen before the first unlock after a reboot, while the private defaults cannot be read
  * then: so nothing is deleted unless the marker is absent, the protected data can be read now (not a launch iOS
- * prewarmed before the first unlock), and the private store is empty. The marker is written then, whatever was found.
+ * prewarmed before the first unlock), and the private store is empty. The marker is written once every delete
+ * succeeded or found nothing to delete (round-9 review 7), or when the private store held state; a failed delete leaves
+ * no marker, so the next start tries again.
  */
 internal class IosSeams(
     config: IosStorageConfig,
     snapshotPath: String? = config.sharedSuite?.let(::groupSnapshotPath),
     savesDir: String? = config.sharedSuite?.let(::groupSavesDir),
-    /** Remove what an earlier install left in the Keychain: the session's tokens, and every quick-unlock blob and key. */
-    dropStaleInstall: () -> Unit = {
-        KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null)
-        IosQuickUnlockKeys(KeychainSecrets("${config.keychainService}.quickunlock", config.keychainAccessGroup), config.keychainAccessGroup).wipeAll()
+    /**
+     * Remove what an earlier install left in the Keychain: the session's tokens, and every quick-unlock blob and key.
+     * True when every delete succeeded or found nothing to delete.
+     */
+    dropStaleInstall: () -> Boolean = {
+        val tokens = KeychainSecrets(config.keychainService, null).write(SESSION_TOKENS_SECRET, null)
+        val quick = IosQuickUnlockKeys(KeychainSecrets("${config.keychainService}.quickunlock", config.keychainAccessGroup), config.keychainAccessGroup).wipeAll()
+        tokens && quick
     },
     /** The install marker, in the app's own container. */
     installMarker: String = "${IosNamespaceStorage.defaultRoot()}/.installed",
@@ -158,8 +164,8 @@ internal class IosSeams(
 
     init {
         if (!NSFileManager.defaultManager.fileExistsAtPath(installMarker) && protectedDataAvailable()) {
-            if (PRIVATE_STATE_KEYS.all { own.getString(it) == null }) runCatching { dropStaleInstall() }
-            markInstalled(installMarker)
+            val clean = !PRIVATE_STATE_KEYS.all { own.getString(it) == null } || runCatching { dropStaleInstall() }.getOrDefault(false)
+            if (clean) markInstalled(installMarker)
         }
     }
 

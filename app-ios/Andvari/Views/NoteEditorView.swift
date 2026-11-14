@@ -99,10 +99,8 @@ struct NoteEditorView: View {
         .onAppear {
             load()
         }
-        .onDisappear {
-            draft = NoteDraft()
-            model.closeAttachmentDraft()
-        }
+        // Not emptied when it leaves the screen (round-9 review 4): its state goes with its sheet, whose dismissal closes
+        // the files' draft.
     }
 
     private func load() {

@@ -487,6 +487,7 @@ struct ItemDetailView: View {
     }
 
     private func editorClosed() {
+        model.closeAttachmentDraft()
         if gone {
             dismiss()
         } else {
