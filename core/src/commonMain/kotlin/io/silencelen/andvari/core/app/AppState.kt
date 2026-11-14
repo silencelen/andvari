@@ -66,6 +66,12 @@ data class AppState(
     val vaultNotices: List<VaultNoticeView>,
     /** The shared vaults screen while it is open ([SessionController.openSharing]); null otherwise. */
     val sharing: SharingView?,
+    /** One shared vault's members while their screen is open ([SessionController.openMembers]); null otherwise. */
+    val members: MembersView? = null,
+    /** A comparison of identity codes while it is open ([VerifyView]); null otherwise. */
+    val verifying: VerifyView? = null,
+    /** VAULT: shared vaults waiting for this account to verify who sent them. */
+    val invitations: List<InvitationView> = emptyList(),
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
@@ -263,6 +269,120 @@ data class RemovedVaultView(
 )
 
 data class CopyProgressView(val vaultId: String, val done: Int, val total: Int)
+
+/**
+ * One shared vault's members while its screen is open ([SessionController.openMembers]). Who is listed, their names and
+ * addresses are the server's word; whether each was verified is this device's own record (root cause A §7.2).
+ */
+data class MembersView(
+    val vaultId: String,
+    val vaultName: String,
+    /** The server lists this account as the vault's owner: it changes roles and removes members. */
+    val owner: Boolean,
+    /**
+     * This account's own record says it owns the vault, so it may add someone: an add seals the vault's key to them, and
+     * the server's word that this account is the owner is not enough for that (A6b).
+     */
+    val canAdd: Boolean,
+    /** Null until the server answered. */
+    val members: List<MemberView>?,
+    /** Someone being added, after a look-up ([SessionController.findNewMember]); null otherwise. */
+    val adding: NewMemberView?,
+)
+
+data class MemberView(
+    val userId: String,
+    /** What the server calls them. */
+    val name: String,
+    /** The address the server has for them. */
+    val email: String,
+    /** "owner", "writer" or "reader". */
+    val role: String,
+    /** The server reports their account as disabled. */
+    val disabled: Boolean,
+    /** This account. */
+    val you: Boolean,
+    /** Whether this device verified them; null for this account. */
+    val check: MemberCheck?,
+)
+
+/** What this device knows of someone's identity key. */
+enum class MemberCheck {
+    /** Verified on this device, and the server serves the key that was verified. */
+    VERIFIED,
+
+    /** Verified, but the server now serves another key for them: their code has to be checked again, in person. */
+    KEY_CHANGED,
+
+    /** Not verified on this device. */
+    NOT_VERIFIED,
+}
+
+/** Someone the owner is adding: the address typed, and what this device knows of the account the server answered with. */
+data class NewMemberView(
+    /** The address the owner typed. */
+    val email: String,
+    /** What the server calls the account it answered with: its word, never proof of who they are. */
+    val serverName: String,
+    val step: NewMemberStep,
+    /** [NewMemberStep.READY]: who was verified for this address, and when. The add seals to the key verified. */
+    val verified: VerifiedPersonView?,
+    /** [NewMemberStep.VERIFY_AGAIN] and [NewMemberStep.REFUSED]: why, in a sentence. */
+    val reason: String?,
+)
+
+/** A verification this device holds for someone (a pin), as the add confirmation shows it. */
+data class VerifiedPersonView(
+    /** The address typed when they were verified. */
+    val email: String,
+    val verifiedAtMs: Long,
+    /** The name the server gave them when they were verified. */
+    val label: String,
+    /** Their identity code as verified (32 hex), from the verified key. */
+    val code: String,
+)
+
+enum class NewMemberStep {
+    /** Not verified on this device: compare codes first ([SessionController.verifyNewMember]). */
+    VERIFY,
+
+    /** Verified before andvari recorded addresses, or the server now serves another key for them: verify again. */
+    VERIFY_AGAIN,
+
+    /** Verified for this address: choose a role and add ([SessionController.addNewMember]). */
+    READY,
+
+    /** The server answered this address with an account this device verified as someone else: never added. */
+    REFUSED,
+}
+
+/**
+ * Comparing identity codes with someone, while it is open (root cause A §7.2): together, in person or on a call the two
+ * trust, they read their code from THEIR screen and it is typed here, or their QR code is scanned. Only a match records
+ * them as verified.
+ */
+data class VerifyView(
+    /** What the server calls them: its word; the codes are the check. */
+    val serverName: String,
+    /** The address typed to find them (adding a member): recorded with the verification. Null otherwise. */
+    val email: String?,
+    /** They sent an invitation: the vault they share opens once they are verified. */
+    val invitation: Boolean,
+    /** This account's own identity code (32 hex), for them to type. */
+    val myCode: String,
+    /** This account's identity QR code payload, for them to scan. */
+    val myQr: String,
+)
+
+/**
+ * A shared vault someone wants to share with this account, from someone this device has not verified (root cause A
+ * §1.6): it stays closed until they are. Its name is not shown, since it would come from a key nobody checked.
+ */
+data class InvitationView(
+    val id: String,
+    /** What the server calls the sender, once it said; null before (or when it could not say). */
+    val from: String?,
+)
 
 /** Two-step sign-in, as the server reports it for this account. */
 data class TwoStepView(

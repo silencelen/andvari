@@ -1,10 +1,11 @@
 import AndvariCore
 import SwiftUI
 
-/// The vaults this account holds (spec 03 §10, §11): create a shared vault, open one to rename, delete or leave it,
-/// and bring back one deleted in the last 7 days. Members are added from the web app for now.
+/// The vaults this account holds (spec 03 §10, §11): create a shared vault, open one to see its members, rename, delete
+/// or leave it, and bring back one deleted in the last 7 days.
 struct SharedVaultsView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.isPresented) private var isPresented
     @State private var loading = true
     @State private var message: String?
     @State private var creating = false
@@ -34,7 +35,7 @@ struct SharedVaultsView: View {
                 } header: {
                     Text("Vaults")
                 } footer: {
-                    Text("Every item lives in exactly one vault. Everyone in a shared vault sees what is in it; only its owner manages it. Add members from the web app for now.")
+                    Text("Every item lives in exactly one vault. Everyone in a shared vault sees what is in it; only its owner manages it. Open a vault to see its members.")
                 }
                 .listRowBackground(Palette.raised)
 
@@ -123,7 +124,9 @@ struct SharedVaultsView: View {
             if outcome != .ok { message = outcome.message }
         }
         .onDisappear {
-            model.closeSharing()
+            // A vault's own screen (and its members) pushed over this list reads the list's state: it stays open until
+            // this screen itself leaves the navigation stack.
+            if !isPresented { model.closeSharing() }
         }
         .alert("New shared vault", isPresented: $creating) {
             TextField("Name", text: $newName)
@@ -235,6 +238,17 @@ struct SharedVaultDetailView: View {
         model.state.sharing?.copying
     }
 
+    private var membersLink: some View {
+        Section {
+            NavigationLink {
+                VaultMembersView(vaultId: vaultId)
+            } label: {
+                Text("Members")
+            }
+        }
+        .listRowBackground(Palette.raised)
+    }
+
     @ViewBuilder
     private func ownerSections(_ vault: SharingVaultView) -> some View {
         Section {
@@ -248,6 +262,8 @@ struct SharedVaultDetailView: View {
             Text((vault.ownershipConfirmed ? "You own this vault. " : "The server reports you as this vault's owner. ") + "Writers can add and edit items; readers can only view.")
         }
         .listRowBackground(Palette.raised)
+
+        membersLink
 
         Section {
             Text(deleteExplanation(vault))
@@ -297,6 +313,7 @@ struct SharedVaultDetailView: View {
                 .foregroundStyle(Palette.inkDim)
         }
         .listRowBackground(Palette.raised)
+        membersLink
         Section {
             Button("Leave vault…", role: .destructive) {
                 confirmLeave = true

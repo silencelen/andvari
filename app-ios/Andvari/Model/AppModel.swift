@@ -436,6 +436,76 @@ final class AppModel: ObservableObject {
         await run { try await $0.leaveSharedVault(vaultId: vaultId) }
     }
 
+    // MARK: - Members and comparing identity codes
+
+    func openMembers(_ vaultId: String) async -> Outcome {
+        await run { try await $0.openMembers(vaultId: vaultId) }
+    }
+
+    func closeMembers() {
+        controller.closeMembers()
+    }
+
+    /// Look up the account for an address typed to add someone. The server's answer is checked by comparing codes.
+    func findNewMember(_ email: String) async -> Outcome {
+        await run { try await $0.findNewMember(email: email) }
+    }
+
+    func cancelNewMember() {
+        controller.cancelNewMember()
+    }
+
+    /// "writer" or "reader".
+    func addNewMember(role: String) async -> Outcome {
+        await run { try await $0.addNewMember(role: role) }
+    }
+
+    func setMemberRole(_ userId: String, role: String) async -> Outcome {
+        await run { try await $0.setMemberRole(userId: userId, role: role) }
+    }
+
+    func removeMember(_ userId: String) async -> Outcome {
+        await run { try await $0.removeMember(userId: userId) }
+    }
+
+    /// Opens the comparison of codes ([AppState.verifying]) with a member listed on the members screen.
+    func verifyListedMember(_ userId: String) -> Outcome {
+        Outcome(controller.verifyListedMember(userId: userId))
+    }
+
+    /// Opens the comparison of codes with the person being added.
+    func verifyNewMember() -> Outcome {
+        Outcome(controller.verifyNewMember())
+    }
+
+    /// Opens the comparison of codes with whoever sent an invitation.
+    func verifyInvitation(_ id: String) async -> Outcome {
+        await run { try await $0.verifyInvitation(id: id) }
+    }
+
+    /// Their code, as they read it from their own screen.
+    func verifyWithCode(_ code: String) async -> Outcome {
+        await run { try await $0.verifyWithCode(code: code) }
+    }
+
+    /// Their identity QR code, exactly as scanned.
+    func verifyWithQr(_ payload: String) async -> Outcome {
+        await run { try await $0.verifyWithQr(payload: payload) }
+    }
+
+    func cancelVerifying() {
+        controller.cancelVerifying()
+    }
+
+    func declineInvitation(_ id: String) {
+        controller.declineInvitation(id: id)
+    }
+
+    /// This account's identity QR code payload, for someone verifying it; nil while locked.
+    func identityQr() -> String? {
+        controller.identityQr()
+    }
+
     // MARK: - Two-step sign-in
 
     func loadTwoStep() async -> Outcome {

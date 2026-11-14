@@ -3,6 +3,14 @@ package io.silencelen.andvari.core.app
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.Account
+import io.silencelen.andvari.core.client.Contact
+import io.silencelen.andvari.core.client.ContactPin
+import io.silencelen.andvari.core.client.IdentityQr
+import io.silencelen.andvari.core.client.LegacyPinReverifyRequiredException
+import io.silencelen.andvari.core.client.MemberIdentityMismatchException
+import io.silencelen.andvari.core.client.MemberNotVerifiedException
+import io.silencelen.andvari.core.client.OwnershipNotConfirmedException
+import io.silencelen.andvari.core.client.PendingInvitation
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.ClientPolicyClamps
 import io.silencelen.andvari.core.client.CardDisplay
@@ -68,7 +76,9 @@ import io.silencelen.andvari.core.client.session.sessionElsewhere
 import io.silencelen.andvari.core.client.session.signInOriginMoved
 import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.crypto.GeneratorOptions
+import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.Totp
@@ -77,6 +87,8 @@ import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import io.silencelen.andvari.core.model.RecoveryVerifyResponse
 import io.silencelen.andvari.core.model.ClientPolicy
+import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -1551,7 +1563,8 @@ open class SessionController(
 
     /** The vault list after a change: the items and the sharing screen both follow. */
     private fun publishSharing(live: VaultSession.Unlocked, notice: String? = null) {
-        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), sharing = it.sharing?.let { sharingView(live) }, notice = notice ?: it.notice) }
+        val invitations = invitationViews(live)
+        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations, sharing = it.sharing?.let { sharingView(live) }, notice = notice ?: it.notice) }
         writeFillSnapshot()
     }
 
@@ -1705,6 +1718,432 @@ open class SessionController(
         publishSharing(live, notice = "You left “${vault.name}”.")
         ActionResult.Ok
     }
+
+    // ---- the members of a shared vault (spec 03 §10; root cause A §1.5, §1.6, §7.2) ----
+    //
+    // Who the server lists, what it calls them and the key it serves for each are its word. This device trusts a key
+    // only after the person compared codes for it here ([verifyWithCode], [verifyWithQr]). An add seals the vault's key
+    // to the key verified, never to one fresh from the server; core's [SyncEngine.addVaultMember] holds that rule and
+    // refuses an add the pins contradict, whatever a screen showed.
+
+    /** The members the server listed for the open members screen. Held only while it is open. */
+    private var membersRead: List<VaultMemberSummary>? = null
+
+    /** The account a look-up answered with for the address typed to add someone. Held only while the members screen is open. */
+    private class NewMember(val vaultId: String, val email: String, val served: UserLookupResponse)
+
+    private var newMember: NewMember? = null
+
+    /** Whom an open comparison of codes is with, as the server served them, and what a match records or opens. */
+    private class VerifyTarget(val served: UserLookupResponse, val email: String?, val invitation: PendingInvitation?)
+
+    private var verifyTarget: VerifyTarget? = null
+
+    private val membersScreen = ScreenToken()
+
+    /** What the server called each invitation's sender (by grant id). Each is asked for once a session, in the background. */
+    private val invitationSenders = HashMap<String, String>()
+    private val invitationAsks = HashSet<String>()
+
+    /** The members screen for [vaultId] as this device sees it now; null when the vault is no longer a shared one held here. */
+    private fun membersView(live: VaultSession.Unlocked, vaultId: String): MembersView? {
+        val vault = vaultList(live).firstOrNull { it.vaultId == vaultId && it.type == "shared" } ?: return null
+        val owner = vault.role == "owner"
+        val rows = membersRead?.map { m ->
+            val you = m.userId == live.account.userId
+            MemberView(
+                userId = m.userId, name = m.displayName, email = m.email, role = m.role, disabled = (m.status ?: "active") != "active", you = you,
+                check = if (you) null else memberCheck(live, m.userId, m.identityPub),
+            )
+        }
+        return MembersView(
+            vaultId = vaultId, vaultName = vault.name, owner = owner,
+            canAdd = owner && runCatching { live.engine.ownsVault(vaultId) }.getOrDefault(false),
+            members = rows, adding = newMember?.takeIf { it.vaultId == vaultId }?.let { newMemberView(live, it) },
+        )
+    }
+
+    private fun memberCheck(live: VaultSession.Unlocked, userId: String, identityPub: String): MemberCheck =
+        when (runCatching { live.engine.memberPinState(userId, identityPub) }.getOrDefault(SyncEngine.MemberPinState.NEEDS_VERIFICATION)) {
+            SyncEngine.MemberPinState.PINNED -> MemberCheck.VERIFIED
+            SyncEngine.MemberPinState.KEY_CHANGED -> MemberCheck.KEY_CHANGED
+            SyncEngine.MemberPinState.NEEDS_VERIFICATION -> MemberCheck.NOT_VERIFIED
+        }
+
+    /**
+     * Where adding [n] stands, by this account's pins (A11): the server's name for them is shown as its word, and a
+     * confirmation names who was verified for the address typed, never the look-up's answer.
+     */
+    private fun newMemberView(live: VaultSession.Unlocked, n: NewMember): NewMemberView {
+        val engine = live.engine
+        val identity = engine.addMemberIdentity(n.email, n.served.userId)
+        val pinState = engine.memberPinState(n.served)
+        val (step, reason) = when {
+            identity is ContactPin.AddIdentity.Mismatch -> NewMemberStep.REFUSED to MembersCopy.mismatch(n.email, identity.pin, identity.claimedBy)
+            pinState == SyncEngine.MemberPinState.KEY_CHANGED ->
+                NewMemberStep.VERIFY_AGAIN to MembersCopy.keyChanged(n.email, engine.accountState.currentPin(n.served.userId)?.label)
+            pinState == SyncEngine.MemberPinState.NEEDS_VERIFICATION -> NewMemberStep.VERIFY to null
+            identity is ContactPin.AddIdentity.Legacy -> NewMemberStep.VERIFY_AGAIN to MembersCopy.legacy(n.email, identity.pin.label)
+            identity is ContactPin.AddIdentity.Match -> NewMemberStep.READY to null
+            else -> NewMemberStep.VERIFY to null
+        }
+        val verified = (identity as? ContactPin.AddIdentity.Match)?.pin?.takeIf { step == NewMemberStep.READY }?.let { pin ->
+            VerifiedPersonView(pin.email ?: ContactPin.normalizeEmail(n.email), pin.verifiedAt, pin.label, codeOf(live, pin.identityPub))
+        }
+        return NewMemberView(n.email, n.served.displayName, step, verified, reason)
+    }
+
+    /** The 32-hex identity code of a key (base64url); empty when the key does not decode. */
+    private fun codeOf(live: VaultSession.Unlocked, identityPub: String): String =
+        runCatching { SharedGrant.shortFingerprint(live.account.cryptoProvider(), Bytes.fromB64(identityPub)) }.getOrDefault("")
+
+    /** Open a shared vault's members ([AppState.members]): who the server lists, and whether this device verified each. */
+    @Throws(CancellationException::class)
+    suspend fun openMembers(vaultId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = membersScreen.open()
+        membersRead = null
+        newMember = null
+        dropMemberVerification()
+        val view = membersView(live, vaultId)
+        update { it.copy(members = view) }
+        if (view == null) return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
+        busy()
+        val listed = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.vaultMembers(vaultId) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            if (!membersScreen.still(token)) return@action screenGone()
+            return@action failure(t, HouseholdCopy::forError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!membersScreen.still(token)) return@action screenGone()
+        membersRead = listed
+        update { it.copy(busy = false, members = membersView(live, vaultId)) }
+        ActionResult.Ok
+    }
+
+    fun closeMembers() {
+        membersScreen.close()
+        membersRead = null
+        newMember = null
+        dropMemberVerification()
+        update { it.copy(members = null) }
+    }
+
+    /** A comparison opened from the members screen goes with it; an invitation's stays. */
+    private fun dropMemberVerification() {
+        val target = verifyTarget ?: return
+        if (target.invitation != null) return
+        verifyTarget = null
+        update { it.copy(verifying = null) }
+    }
+
+    /**
+     * The list read again after a change, best effort: the change is done whatever this read comes to. When it cannot
+     * be read, [fallback] applies the change to the list as last read.
+     */
+    private suspend fun rereadMembers(live: VaultSession.Unlocked, vaultId: String, token: Long, fallback: (List<VaultMemberSummary>) -> List<VaultMemberSummary>) {
+        val listed = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.vaultMembers(vaultId) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            null
+        }
+        if (session.get() !== live || !membersScreen.still(token)) return
+        membersRead = listed ?: membersRead?.let(fallback)
+    }
+
+    /**
+     * Look up the account for an address typed to add someone (owner). The server's answer is untrusted: adding waits
+     * for this device's verification of that account for this address ([verifyNewMember]), or uses the one it holds.
+     */
+    @Throws(CancellationException::class)
+    suspend fun findNewMember(email: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val open = state.members ?: return@action ActionResult.NotDone(null)
+        val typed = email.trim()
+        if (typed.isEmpty()) return@action ActionResult.Failed(MembersCopy.EMAIL_REQUIRED)
+        if (!open.owner) return@action ActionResult.Failed(SharingCopy.OWNER_ONLY)
+        if (!open.canAdd) return@action ActionResult.Failed(MembersCopy.OWNERSHIP_UNCONFIRMED)
+        val token = membersScreen.now()
+        newMember = null
+        dropMemberVerification()
+        update { it.copy(members = it.members?.copy(adding = null)) }
+        busy()
+        val served = try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.lookupMember(typed) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, MembersCopy::forLookup)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!membersScreen.still(token)) return@action screenGone()
+        if (served.userId == live.account.userId) return@action idleFailed(MembersCopy.THATS_YOU)
+        if (membersRead.orEmpty().any { it.userId == served.userId }) return@action idleFailed(MembersCopy.ALREADY_MEMBER)
+        newMember = NewMember(open.vaultId, typed, served)
+        update { it.copy(busy = false, members = membersView(live, open.vaultId)) }
+        ActionResult.Ok
+    }
+
+    /** Forget the person being added (the address was changed, or adding was put away). */
+    fun cancelNewMember() {
+        newMember = null
+        dropMemberVerification()
+        update { it.copy(members = it.members?.copy(adding = null)) }
+    }
+
+    /**
+     * Add the person looked up (owner) as [role], "writer" or "reader". The vault's key is sealed, with a signed grant, to
+     * the key this device verified for the address typed (core [SyncEngine.addVaultMember], which refuses an add the
+     * pins do not support). Their devices open the vault once they have verified this account too.
+     */
+    @Throws(CancellationException::class)
+    suspend fun addNewMember(role: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val n = newMember ?: return@action ActionResult.Failed(MembersCopy.LOOK_UP_AGAIN)
+        if (role !in MEMBER_ROLES) return@action ActionResult.Failed(MembersCopy.BAD_ROLE)
+        val view = newMemberView(live, n)
+        if (view.step != NewMemberStep.READY) return@action ActionResult.Failed(view.reason ?: MembersCopy.VERIFY_FIRST)
+        val who = view.verified?.email ?: n.email
+        val token = membersScreen.now()
+        busy()
+        try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.addVaultMember(n.vaultId, n.served.userId, role, n.email) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, MembersCopy::forAdd)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (newMember === n) newMember = null
+        rereadMembers(live, n.vaultId, token) { rows -> rows + VaultMemberSummary(n.served.userId, who, n.served.displayName, role, n.served.identityPub, clocks.wallMs()) }
+        val after = membersView(live, n.vaultId)
+        update { it.copy(busy = false, members = if (membersScreen.still(token)) after else it.members, notice = MembersCopy.added(who, after?.vaultName, role)) }
+        ActionResult.Ok
+    }
+
+    /** Make a member a writer or a reader (owner). Their devices follow at their next sync. */
+    @Throws(CancellationException::class)
+    suspend fun setMemberRole(userId: String, role: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val open = state.members ?: return@action ActionResult.NotDone(null)
+        if (!open.owner) return@action ActionResult.Failed(SharingCopy.OWNER_ONLY)
+        if (role !in MEMBER_ROLES) return@action ActionResult.Failed(MembersCopy.BAD_ROLE)
+        val member = membersRead?.firstOrNull { it.userId == userId } ?: return@action ActionResult.Failed(MembersCopy.MEMBER_GONE)
+        if (member.role == "owner" || member.userId == live.account.userId) return@action ActionResult.Failed(MembersCopy.OWNER_STAYS)
+        if (member.role == role) return@action ActionResult.Ok
+        val token = membersScreen.now()
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.api.setVaultMemberRole(open.vaultId, userId, role) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        rereadMembers(live, open.vaultId, token) { rows -> rows.map { if (it.userId == userId) it.copy(role = role) else it } }
+        update { it.copy(busy = false, members = if (membersScreen.still(token)) membersView(live, open.vaultId) else it.members, notice = MembersCopy.roleChanged(member.displayName, role)) }
+        ActionResult.Ok
+    }
+
+    /**
+     * Remove a member (owner), with the removal proof their devices check (core [SyncEngine.removeVaultMember]). They keep
+     * whatever they already saw: the vault's key is not changed.
+     */
+    @Throws(CancellationException::class)
+    suspend fun removeMember(userId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val open = state.members ?: return@action ActionResult.NotDone(null)
+        if (!open.owner) return@action ActionResult.Failed(SharingCopy.OWNER_ONLY)
+        val member = membersRead?.firstOrNull { it.userId == userId } ?: return@action ActionResult.Failed(MembersCopy.MEMBER_GONE)
+        if (member.role == "owner" || member.userId == live.account.userId) return@action ActionResult.Failed(MembersCopy.OWNER_STAYS)
+        val token = membersScreen.now()
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.removeVaultMember(open.vaultId, userId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        rereadMembers(live, open.vaultId, token) { rows -> rows.filterNot { it.userId == userId } }
+        val invitations = invitationViews(live)
+        update {
+            it.copy(
+                busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations,
+                members = if (membersScreen.still(token)) membersView(live, open.vaultId) else it.members,
+                notice = MembersCopy.removed(member.displayName, open.vaultName),
+            )
+        }
+        ActionResult.Ok
+    }
+
+    // ---- comparing identity codes (root cause A §7.2) ----
+
+    /** Compare codes with a member listed on the open members screen (not verified here, or their key changed). */
+    fun verifyListedMember(userId: String): ActionResult = guarded({ ActionResult.Failed(HouseholdCopy.forError(it)) }) {
+        val live = session.get() ?: return@guarded ActionResult.NotDone(null)
+        val member = membersRead?.firstOrNull { it.userId == userId } ?: return@guarded ActionResult.Failed(MembersCopy.MEMBER_GONE)
+        if (member.userId == live.account.userId) return@guarded ActionResult.Failed(MembersCopy.THATS_YOU)
+        openVerification(live, VerifyTarget(UserLookupResponse(member.userId, member.displayName, member.identityPub), email = null, invitation = null))
+    }
+
+    /** Compare codes with the person being added; the address typed to find them is recorded with the verification. */
+    fun verifyNewMember(): ActionResult = guarded({ ActionResult.Failed(HouseholdCopy.forError(it)) }) {
+        val live = session.get() ?: return@guarded ActionResult.NotDone(null)
+        val n = newMember ?: return@guarded ActionResult.Failed(MembersCopy.LOOK_UP_AGAIN)
+        val view = newMemberView(live, n)
+        when (view.step) {
+            NewMemberStep.READY -> ActionResult.NotDone(null)
+            NewMemberStep.REFUSED -> ActionResult.Failed(view.reason ?: MembersCopy.MISMATCH_ADD)
+            else -> openVerification(live, VerifyTarget(n.served, n.email, invitation = null))
+        }
+    }
+
+    /** Compare codes with whoever sent an invitation. The server says who that is; the codes check it. */
+    @Throws(CancellationException::class)
+    suspend fun verifyInvitation(id: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val invitation = live.engine.pendingInvitations().firstOrNull { it.grantIdB64 == id } ?: return@action ActionResult.Failed(MembersCopy.INVITATION_GONE)
+        busy()
+        val sender = runBounded(BoundedOps.FLAT_MS) { live.engine.invitationSender(invitation) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (sender.userId != invitation.fromUserId) return@action idleFailed(MembersCopy.SENDER_UNKNOWN)
+        invitationSenders[id] = sender.displayName
+        val invitations = invitationViews(live)
+        update { it.copy(busy = false, invitations = invitations) }
+        openVerification(live, VerifyTarget(sender, email = null, invitation = invitation))
+    }
+
+    private fun openVerification(live: VaultSession.Unlocked, target: VerifyTarget): ActionResult {
+        val view = VerifyView(
+            serverName = target.served.displayName, email = target.email?.let(ContactPin::normalizeEmail), invitation = target.invitation != null,
+            myCode = live.account.identityFingerprintShort(), myQr = live.engine.identityQrPayload(),
+        )
+        verifyTarget = target
+        update { it.copy(verifying = view) }
+        return ActionResult.Ok
+    }
+
+    /** Put the comparison away. Nothing was recorded. */
+    fun cancelVerifying() {
+        verifyTarget = null
+        update { it.copy(verifying = null) }
+    }
+
+    /**
+     * They read their code from THEIR screen and it was typed here: 32 hex, spaces and case aside. It is compared with the
+     * key the server serves for them, and only a match records them as verified (for an invitation, it also opens the
+     * vault it shares). A mismatch records nothing.
+     */
+    @Throws(CancellationException::class)
+    suspend fun verifyWithCode(code: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val target = verifyTarget ?: return@action ActionResult.NotDone(null)
+        if (code.lowercase().count { it in HEX_DIGITS } != Fingerprint.SHORT_HEX_LEN) return@action ActionResult.Failed(MembersCopy.CODE_LENGTH)
+        busy()
+        val matched = try {
+            runBounded(BoundedOps.FLAT_MS) {
+                val invitation = target.invitation
+                if (invitation != null) live.engine.acceptInvitation(invitation, code) else live.engine.verifyMemberTyped(target.served, code, target.email) != null
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, MembersCopy::forVerifySave)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!matched) {
+            val invitations = invitationViews(live)
+            update { it.copy(invitations = invitations) }
+            return@action idleFailed(if (target.invitation != null) MembersCopy.INVITATION_MISMATCH else MembersCopy.CODE_MISMATCH)
+        }
+        verified(live, target)
+    }
+
+    /**
+     * Their identity QR code was scanned: [payload] exactly as read. It must name the account being verified and match the
+     * key the server serves for it at full length; only then are they recorded as verified.
+     */
+    @Throws(CancellationException::class)
+    suspend fun verifyWithQr(payload: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val target = verifyTarget ?: return@action ActionResult.NotDone(null)
+        val parsed = IdentityQr.parse(payload) ?: return@action ActionResult.Failed(MembersCopy.QR_NOT_IDENTITY)
+        if (parsed.userId != target.served.userId) return@action ActionResult.Failed(MembersCopy.QR_OTHER_ACCOUNT)
+        busy()
+        val matched = try {
+            runBounded(BoundedOps.FLAT_MS) {
+                val invitation = target.invitation
+                if (invitation != null) live.engine.acceptInvitationQr(invitation, payload) else live.engine.verifyMemberQr(target.served, payload, target.email) != null
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return@action failure(t, MembersCopy::forVerifySave)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!matched) {
+            val invitations = invitationViews(live)
+            update { it.copy(invitations = invitations) }
+            return@action idleFailed(if (target.invitation != null) MembersCopy.INVITATION_QR_MISMATCH else MembersCopy.QR_MISMATCH)
+        }
+        verified(live, target)
+    }
+
+    /** A match: the comparison closes, and what it changed shows (the members, the person being added, or the vault an invitation shares). */
+    private fun verified(live: VaultSession.Unlocked, target: VerifyTarget): ActionResult {
+        val current = verifyTarget === target
+        if (current) verifyTarget = null
+        val invitation = target.invitation
+        if (invitation == null) {
+            update { s ->
+                s.copy(
+                    busy = false, verifying = if (current) null else s.verifying, members = s.members?.let { m -> membersView(live, m.vaultId) ?: m },
+                    notice = MembersCopy.verified(target.served.displayName),
+                )
+            }
+            return ActionResult.Ok
+        }
+        val vault = vaultList(live).firstOrNull { it.vaultId == invitation.vaultId }?.name
+        val invitations = invitationViews(live)
+        update { s ->
+            s.copy(
+                busy = false, verifying = if (current) null else s.verifying, items = summaries(s.query), vaultNotices = vaultNotices(live), invitations = invitations,
+                sharing = s.sharing?.let { sharingView(live) }, notice = MembersCopy.invitationAccepted(target.served.displayName, vault),
+            )
+        }
+        writeFillSnapshot()
+        backgroundSync() // what the vault holds comes in with the next sync; the person need not wait for it
+        return ActionResult.Ok
+    }
+
+    // ---- invitations (root cause A §1.6) ----
+
+    /** The invitations the vault screen lists. Each sender's name is asked for once, in the background. */
+    private fun invitationViews(live: VaultSession.Unlocked): List<InvitationView> {
+        val pending = runCatching { live.engine.pendingInvitations() }.getOrDefault(emptyList())
+        for (invitation in pending) if (invitation.grantIdB64 !in invitationSenders && invitationAsks.add(invitation.grantIdB64)) askSender(live, invitation)
+        return pending.map { InvitationView(it.grantIdB64, invitationSenders[it.grantIdB64]) }
+    }
+
+    private fun askSender(live: VaultSession.Unlocked, invitation: PendingInvitation) {
+        scope.launch {
+            val sender = try {
+                runBounded(BoundedOps.FLAT_MS) { live.engine.invitationSender(invitation) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                return@launch // unnamed: the person can still verify them
+            }
+            if (session.get() !== live || sender.userId != invitation.fromUserId) return@launch
+            invitationSenders[invitation.grantIdB64] = sender.displayName
+            update { s -> s.copy(invitations = s.invitations.map { if (it.id == invitation.grantIdB64) it.copy(from = sender.displayName) else it }) }
+        }
+    }
+
+    /** Hide an invitation on this device. A new one from the same person asks again. */
+    fun declineInvitation(id: String) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val invitation = live.engine.pendingInvitations().firstOrNull { it.grantIdB64 == id } ?: return@guarded
+            live.engine.declineInvitation(invitation)
+            if (verifyTarget?.invitation?.grantIdB64 == id) cancelVerifying()
+            val invitations = invitationViews(live)
+            update { it.copy(invitations = invitations) }
+        }
+    }
+
+    /** This account's identity QR code payload (`andvari-id:1:…`), over the key this device holds; null while locked. */
+    fun identityQr(): String? = guarded({ null }) { session.get()?.engine?.identityQrPayload() }
 
     // ---- two-step sign-in (spec 03 §2: a TOTP factor the server checks at sign-in) ----
 
@@ -2006,7 +2445,8 @@ open class SessionController(
             return@action failure(t, HouseholdCopy::forSyncError)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
-        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), notice = SYNCED) }
+        val invitations = invitationViews(live)
+        update { it.copy(busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations, notice = SYNCED) }
         writeFillSnapshot()
         refreshPersonalVault() // a sync can change what the server says the personal vault is
         ActionResult.Ok
@@ -2270,9 +2710,11 @@ open class SessionController(
     }
 
     private fun toVault() {
+        val invitations = session.get()?.let(::invitationViews).orEmpty()
         update {
             it.copy(
-                screen = AppScreen.VAULT, items = summaries(it.query), vaultNotices = session.get()?.let(::vaultNotices).orEmpty(), busy = false, error = null, totpRequired = false,
+                screen = AppScreen.VAULT, items = summaries(it.query), vaultNotices = session.get()?.let(::vaultNotices).orEmpty(), invitations = invitations,
+                busy = false, error = null, totpRequired = false,
                 lockReason = null, recoveryCaptureError = null, recoveryReplacedNotice = false,
             )
         }
@@ -2587,6 +3029,11 @@ open class SessionController(
         if (!ordinaryLock || (pending != null && clocks.monotonicMs() - pending.mintedAtMs !in 0 until TWO_STEP_PENDING_MS)) twoStepPending = null
         deletedVaults = emptyMap()
         earlierDropped = 0
+        membersRead = null
+        newMember = null
+        verifyTarget = null
+        invitationSenders.clear()
+        invitationAsks.clear()
     }
 
     private fun lock(reason: String?) {
@@ -2642,7 +3089,12 @@ open class SessionController(
             }
             try {
                 syncNow(live.engine)
-                if (session.get() === live) update { it.copy(syncing = false, items = summaries(it.query), vaultNotices = vaultNotices(live)) } else update { it.copy(syncing = false) }
+                if (session.get() === live) {
+                    val invitations = invitationViews(live)
+                    update { it.copy(syncing = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations) }
+                } else {
+                    update { it.copy(syncing = false) }
+                }
                 writeFillSnapshot()
                 refreshPersonalVault()
             } catch (t: Throwable) {
@@ -2663,7 +3115,7 @@ open class SessionController(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
-        attachmentDraft = null, upload = null,
+        attachmentDraft = null, upload = null, members = null, verifying = null, invitations = emptyList(),
     )
 
     private companion object {
@@ -2672,6 +3124,12 @@ open class SessionController(
 
         /** How long a key being set up is kept from when the server minted it (round-6 review L4). */
         const val TWO_STEP_PENDING_MS = 10 * 60 * 1000L
+
+        /** The roles an owner gives a member. */
+        val MEMBER_ROLES = setOf("writer", "reader")
+
+        /** What a typed identity code is counted in ([Fingerprint.matchesShort] drops everything else). */
+        const val HEX_DIGITS = "0123456789abcdef"
         const val POLICY_REFRESH_MS = 60 * 60 * 1000L
         const val LOGOUT_MS = 5_000L
 
@@ -2758,6 +3216,83 @@ internal object SharingCopy {
     const val TYPE_THE_NAME = "Type the vault's name exactly to delete it."
     const val COPY_RUNNING = "Wait for the copy into your personal vault to finish first."
     const val OWNER_CANNOT_LEAVE = "You own this vault, so you can't leave it: make someone else the owner, or delete it."
+}
+
+/** What the members screen and a comparison of identity codes say (the web app's words, where it has them). */
+internal object MembersCopy {
+    const val EMAIL_REQUIRED = "Type their email address."
+    const val THATS_YOU = "That's your own account."
+    const val ALREADY_MEMBER = "They're already in this vault."
+    const val NO_SUCH_USER = "No active account has that email."
+    const val LOOK_UP_AGAIN = "Look them up again."
+    const val BAD_ROLE = "Choose writer or reader."
+    const val MEMBER_GONE = "They're no longer listed. Open the members again."
+    const val OWNER_STAYS = "The owner can't be changed or removed here. To hand the vault over, transfer it."
+    const val OWNERSHIP_UNCONFIRMED =
+        "Before you add anyone, confirm that you own this vault: this account has no record that you created it or that it was transferred to you. Confirm it in the web app, under Shared vaults."
+    const val VERIFY_FIRST = "Verify them first: compare codes with them, in person or on a call you trust."
+    const val CODE_LENGTH = "Type all 32 characters of their code."
+    const val CODE_MISMATCH =
+        "That code doesn't match the key this server holds for them. If they read it correctly from their own screen, STOP: do not share with this account until your admin checks it."
+    const val QR_NOT_IDENTITY = "That isn't an andvari identity code."
+    const val QR_OTHER_ACCOUNT = "That QR code belongs to a different account than the one you are verifying."
+    const val QR_MISMATCH = "Their QR code doesn't match the key this server holds for them. STOP: do not share with this account until your admin checks it."
+    const val INVITATION_MISMATCH =
+        "That code doesn't match, or the invitation didn't verify. If they read it correctly from their own screen, STOP and tell your admin."
+    const val INVITATION_QR_MISMATCH = "Their QR code doesn't match, or the invitation didn't verify. STOP and tell your admin."
+    const val INVITATION_GONE = "That invitation is no longer here."
+    const val SENDER_UNKNOWN = "The server couldn't say who sent this invitation. Try again later."
+    const val SAVE_FAILED = "Couldn't save the verification. Try again."
+    const val MISMATCH_ADD = "The server answered that address with an account you verified as someone else. Don't add them: the server may be misbehaving. Tell your admin."
+    const val LEGACY_ADD = "You verified this person before andvari recorded their email. Verify them again to add them."
+
+    fun forLookup(t: Throwable): String = if (t is ApiException && t.code == "no_such_user") NO_SUCH_USER else HouseholdCopy.forError(t)
+
+    fun forAdd(t: Throwable): String = when (t) {
+        is MemberNotVerifiedException -> VERIFY_FIRST
+        is MemberIdentityMismatchException -> MISMATCH_ADD
+        is LegacyPinReverifyRequiredException -> LEGACY_ADD
+        is OwnershipNotConfirmedException -> OWNERSHIP_UNCONFIRMED
+        is ApiException -> if (t.code == "already_member") ALREADY_MEMBER else HouseholdCopy.forError(t)
+        else -> HouseholdCopy.forError(t)
+    }
+
+    /** Recording a verification (an account-state write, or the sender's key for an invitation) did not finish. */
+    fun forVerifySave(t: Throwable): String = if (t is CryptoUnavailableException) HouseholdCopy.forError(t) else SAVE_FAILED
+
+    fun keyChanged(email: String, label: String?): String =
+        "The server now holds a different identity key for the account it gives for $email than the one you verified" +
+            (label?.let { " (the name shown when you verified them: “$it”)" } ?: "") +
+            ". Don't add them until you have checked their code in person again, and tell your admin."
+
+    fun legacy(email: String, label: String): String =
+        "You verified this person before andvari recorded their email. Verify them again to add them. (The name shown when you verified them was “$label”; that name came from the server, so it can't confirm who $email is.)"
+
+    fun mismatch(email: String, pin: Contact?, claimedBy: Contact?): String = buildString {
+        if (pin != null) {
+            append("The server answered $email with an account you verified")
+            append(pin.email?.let { " at $it" } ?: " under another address")
+            append(" (the name shown when you verified them: “${pin.label}”)")
+            if (claimedBy != null) append(", but you verified a different person at $email (the name shown when you verified them: “${claimedBy.label}”)")
+            append(". ")
+        } else {
+            append("You verified a different person at $email")
+            if (claimedBy != null) append(" (the name shown when you verified them: “${claimedBy.label}”)")
+            append(", but the server answered that address with another account. ")
+        }
+        append("Don't add them: the server may be misbehaving. Tell your admin.")
+    }
+
+    fun added(email: String, vault: String?, role: String): String =
+        "Added $email to " + (vault?.let { "“$it”" } ?: "the vault") + " as a $role. If they haven't verified you yet, andvari asks them to compare codes with you before the vault opens for them."
+
+    fun roleChanged(name: String, role: String): String = "$name is now a $role."
+
+    fun removed(name: String, vault: String): String = "Removed $name from “$vault”. They keep anything they already saw: the vault's key is not changed."
+
+    fun verified(name: String): String = "Verified $name on this device."
+
+    fun invitationAccepted(name: String, vault: String?): String = "Verified $name." + (vault?.let { " “$it” is open now." } ?: "")
 }
 
 /**
