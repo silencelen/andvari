@@ -22,10 +22,17 @@ extension UITestCase {
     /// Whether [element] can be tapped, false for one caught mid-change with no frame on screen (isHittable fails the
     /// test for such an element instead of answering).
     func safelyHittable(_ element: XCUIElement) -> Bool {
-        guard element.exists else { return false }
-        let frame = element.frame
-        guard frame.width >= 1, frame.height >= 1, frame.intersects(Screen.bounds) else { return false }
+        guard onScreen(element) else { return false }
         return element.isHittable
+    }
+
+    /// Whether [element] is there with a frame on screen, from one snapshot. Unlike `frame` or `isHittable`, a snapshot
+    /// of an element that went away throws a Swift error instead of failing the test: an element that flickers (the
+    /// popup's unlock button while its own prompt is on its way) reads as not there.
+    func onScreen(_ element: XCUIElement) -> Bool {
+        guard element.exists, let snapshot = try? element.snapshot() else { return false }
+        let frame = snapshot.frame
+        return frame.width >= 1 && frame.height >= 1 && frame.intersects(Screen.bounds)
     }
 
     /// "26.2" as (26, 2).
@@ -540,7 +547,7 @@ extension UITestCase {
             // The button is the retry after a prompt that was cancelled or missed. It is also on screen for a moment
             // while the popup's own prompt is still on its way, so it is used only once it has stayed for a while,
             // and tapped where it was: a button that has just gone must not fail the test.
-            if unlock.exists && self.safelyHittable(unlock) {
+            if self.onScreen(unlock) {
                 if let since = unlockSeenSince {
                     if Date().timeIntervalSince(since) > 9 && !done() {
                         unlockSeenSince = nil

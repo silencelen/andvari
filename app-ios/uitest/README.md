@@ -88,6 +88,8 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | `?layout=code`: a security code alone in the provider's frame | Works | `T5…test05` |
 | The choice survives the keyboard's Done | Works | `T5…test06` |
 | `?layout=twice`: a second card-number frame beside the first: no Fill, the popup says the page shows more than one payment form asking for the same card detail and to copy from the app; nothing is filled | Works | `T5…test07` |
+| `?layout=lure` (round 12): the shop asks for the security code alone beside another site's rewards widget with provider frames of its own; after typing into the widget, a tap on the code and Fill: the Fill names the security code alone, the code is filled, the widget's fields keep what was typed | Works | `T5…test08` |
+| `?layout=clipped` (round 12): the card frame clipped to its postal-code row; a fill from a tap there writes none of the number, expiry or security code | Works | `T5…test09` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
