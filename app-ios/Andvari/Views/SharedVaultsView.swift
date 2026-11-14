@@ -174,8 +174,9 @@ struct SharedVaultsView: View {
     }
 }
 
-/// One shared vault: the owner renames it, copies its items into the personal vault, or deletes it (typing its name);
-/// a member leaves it.
+/// One shared vault: the owner renames it, copies its items into the personal vault, or deletes it (typing its name),
+/// and first confirms that it owns the vault when this account has no record of that; a member leaves it, or accepts a
+/// vault shared in a way andvari can't check.
 struct SharedVaultDetailView: View {
     let vaultId: String
 
@@ -263,6 +264,15 @@ struct SharedVaultDetailView: View {
         }
         .listRowBackground(Palette.raised)
 
+        if !vault.ownershipConfirmed {
+            Section {
+                OwnershipConfirmRows(vaultId: vaultId, vaultName: vault.name)
+            } header: {
+                Text("You own “\(vault.name)”?")
+            }
+            .listRowBackground(Palette.raised)
+        }
+
         membersLink
 
         Section {
@@ -306,6 +316,20 @@ struct SharedVaultDetailView: View {
 
     @ViewBuilder
     private func memberSections(_ vault: SharingVaultView) -> some View {
+        if vault.awaitingReview {
+            Section {
+                Text("This vault was shared in a way andvari can't check: it can't confirm who sent it. You can read it, but nothing is saved into it until you accept. Accept only if you expected to be in it; that is trust on first use. If you don't recognise it, leave it and tell your admin.")
+                    .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Accept") {
+                    act { await model.acceptLegacyVault(vaultId) }
+                }
+                .disabled(model.state.busy)
+            } header: {
+                Text("Not yet verified")
+            }
+            .listRowBackground(Palette.raised)
+        }
         Section {
             LabeledContent("Your role", value: vault.role ?? "member")
             Text(vault.role == "reader" ? "You can view what is in this vault." : "You can add and edit items in this vault.")

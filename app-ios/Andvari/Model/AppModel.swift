@@ -545,6 +545,34 @@ final class AppModel: ObservableObject {
         await run { try await $0.declineOwnership(vaultId: vaultId) }
     }
 
+    // MARK: - Ownership on record, and sharing again under the signed kind
+
+    /// Loads what the server reports of a vault it lists this account as owning ([AppState.ownershipClaim]).
+    func describeOwnership(_ vaultId: String) async -> Outcome {
+        await run { try await $0.describeOwnership(vaultId: vaultId) }
+    }
+
+    func cancelOwnershipClaim() {
+        controller.cancelOwnershipClaim()
+    }
+
+    /// The master password confirms it; `handedOver` when this device first got the vault as a member.
+    func confirmOwnership(password: String, handedOver: Bool) async -> Outcome {
+        await run { try await $0.confirmOwnership(password: password, handedOver: handedOver) }
+    }
+
+    /// Share the open vault again with a member on the older kind of sharing, to the key verified for them here.
+    func reshareWithMember(_ userId: String) async -> Outcome {
+        await run { try await $0.reshareWithMember(userId: userId) }
+    }
+
+    // MARK: - Shared vaults awaiting review
+
+    /// Trust on first use: the vault's key as the server delivered it is vouched for, and the vault opens for saving.
+    func acceptLegacyVault(_ vaultId: String) async -> Outcome {
+        await run { try await $0.acceptLegacyVault(vaultId: vaultId) }
+    }
+
     // MARK: - Two-step sign-in
 
     func loadTwoStep() async -> Outcome {

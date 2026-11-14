@@ -6,8 +6,8 @@ import VisionKit
 
 /// One shared vault's members (spec 03 §10): who the server lists, and whether this device verified each of them by
 /// comparing identity codes (root cause A §7.2). The owner adds someone once codes were compared with them, changes a
-/// member's role, removes members and offers to make a member the owner (spec 03 §11); anyone else sees the list and can
-/// verify the people in it.
+/// member's role, removes members, offers to make a member the owner (spec 03 §11) and shares the vault again with
+/// members still on the older kind of sharing (§8.2 step 4); anyone else sees the list and can verify the people in it.
 struct VaultMembersView: View {
     let vaultId: String
 
@@ -18,6 +18,7 @@ struct VaultMembersView: View {
     @State private var role = "writer"
     @State private var removing: MemberView?
     @State private var handingOver: MemberView?
+    @State private var resharing: LegacyGrantView?
 
     var body: some View {
         Form {
@@ -26,7 +27,18 @@ struct VaultMembersView: View {
                 if let offer = members.offer {
                     offerSection(offer, vaultName: members.vaultName)
                 }
-                if members.owner {
+                if members.owner && !members.canAdd {
+                    Section {
+                        OwnershipConfirmRows(vaultId: members.vaultId, vaultName: members.vaultName)
+                    } header: {
+                        Text("You own “\(members.vaultName)”?")
+                    }
+                    .listRowBackground(Palette.raised)
+                }
+                if members.canAdd && !members.legacy.isEmpty {
+                    legacySection(members)
+                }
+                if members.canAdd {
                     addSection(members)
                 }
             } else if loading {
@@ -75,6 +87,13 @@ struct VaultMembersView: View {
         } message: { _ in
             Text("Nothing changes until they accept in their app, within 14 days, and you can cancel until then. Afterwards they manage the vault's members, and only they can rename, hand over or delete it; you stay in it as a writer.")
         }
+        .confirmationDialog("Share “\(members?.vaultName ?? "")” again with the person you verified as “\(resharing.map(Self.verifiedName) ?? "")”?", isPresented: reshareAsked, titleVisibility: .visible, presenting: resharing) { row in
+            Button("Share again") {
+                act { await model.reshareWithMember(row.userId) }
+            }
+        } message: { _ in
+            Text("They get the vault's key again under the signed kind of sharing, signed by you and sealed to the key you verified for them. Only confirm if you shared this vault with them: the list itself comes from the server.")
+        }
     }
 
     private var members: MembersView? {
@@ -96,6 +115,14 @@ struct VaultMembersView: View {
 
     private var handOverAsked: Binding<Bool> {
         Binding(get: { handingOver != nil }, set: { if !$0 { handingOver = nil } })
+    }
+
+    private var reshareAsked: Binding<Bool> {
+        Binding(get: { resharing != nil }, set: { if !$0 { resharing = nil } })
+    }
+
+    private static func verifiedName(_ row: LegacyGrantView) -> String {
+        row.verifiedLabel ?? row.name
     }
 
     // MARK: - The list
@@ -242,38 +269,76 @@ struct VaultMembersView: View {
     @ViewBuilder
     private func addSection(_ members: MembersView) -> some View {
         Section {
-            if members.canAdd {
-                TextField("Their email", text: $email)
-                    .keyboardType(.emailAddress)
-                    .textContentType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit(lookUp)
-                    .onChange(of: email) {
-                        // Another address: the person found for the last one is forgotten.
-                        if model.state.members?.adding != nil { model.cancelNewMember() }
-                    }
-                    .accessibilityIdentifier(AccessID.field("Member email"))
-                Button("Look up", action: lookUp)
-                    .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty || model.state.busy)
-                if let adding = members.adding {
-                    addingRows(adding, vaultName: members.vaultName)
+            TextField("Their email", text: $email)
+                .keyboardType(.emailAddress)
+                .textContentType(.emailAddress)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .onSubmit(lookUp)
+                .onChange(of: email) {
+                    // Another address: the person found for the last one is forgotten.
+                    if model.state.members?.adding != nil { model.cancelNewMember() }
                 }
-            } else {
-                Text("Before you add anyone, confirm that you own this vault: this account has no record that you created it or that it was transferred to you. Confirm it in the web app, under Shared vaults.")
-                    .font(.footnote)
-                    .foregroundStyle(Palette.inkDim)
-                    .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier(AccessID.field("Member email"))
+            Button("Look up", action: lookUp)
+                .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty || model.state.busy)
+            if let adding = members.adding {
+                addingRows(adding, vaultName: members.vaultName)
             }
         } header: {
             Text("Add a member")
         } footer: {
-            if members.canAdd {
-                Text("You compare codes with each person once, in person or on a call you trust, not once per vault. The vault's key is sealed to the key you verified, never to one the server sends.")
-            }
+            Text("You compare codes with each person once, in person or on a call you trust, not once per vault. The vault's key is sealed to the key you verified, never to one the server sends.")
         }
         .listRowBackground(Palette.raised)
+    }
+
+    // MARK: - Sharing again under the signed kind
+
+    private func legacySection(_ members: MembersView) -> some View {
+        Section {
+            ForEach(members.legacy, id: \.userId) { row in
+                legacyRow(row, vaultName: members.vaultName)
+            }
+        } header: {
+            Text("Older kind of sharing")
+        } footer: {
+            Text("The server lists these members as still on an older kind of sharing that andvari can't check. Share the vault with them again under the signed kind, one person at a time, and only with people you shared it with: the list itself comes from the server.")
+        }
+        .listRowBackground(Palette.raised)
+    }
+
+    /// Kotlin enums arrive as classes with one static member per entry, so they are compared, never switched over.
+    @ViewBuilder
+    private func legacyRow(_ row: LegacyGrantView, vaultName: String) -> some View {
+        if row.check == MemberCheck.verified, let label = row.verifiedLabel {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("“\(label)”")
+                    .foregroundStyle(Palette.ink)
+                Text("The name shown when you verified them. The server now calls them \(row.name), \(row.email)." + (row.sharedAtMs.map { " You shared this vault with them on \(day($0.int64Value))." } ?? ""))
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Share again…") {
+                    resharing = row
+                }
+                .font(.footnote)
+                .buttonStyle(.borderless)
+                .disabled(model.state.busy)
+            }
+            .padding(.vertical, 2)
+        } else if row.check == MemberCheck.keyChanged {
+            Text("\(row.name): the server now has a different key for them than the one you verified. Don't share again until you have checked their code together, in person, in the list above.")
+                .font(.footnote)
+                .foregroundStyle(Palette.danger)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text("Verify \(row.name) (\(row.email)) first, in the list above. Then you can share “\(vaultName)” with them again here.")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     @ViewBuilder
@@ -843,6 +908,157 @@ struct InvitationRow: View {
 
     private var sender: String {
         invitation.from.map { "\($0) (as the server names them)" } ?? "Someone"
+    }
+}
+
+// MARK: - Shared vaults awaiting review
+
+/// A shared vault this account reads only through an older kind of sharing andvari can't check (root cause A §8.2): it
+/// can't confirm who sent it, so nothing is saved into it until the person accepts it (trust on first use) or leaves it.
+struct LegacyReviewRow: View {
+    let review: LegacyReviewView
+
+    @EnvironmentObject private var model: AppModel
+    @State private var message: String?
+    @State private var leaving = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("“\(name)”")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.ink)
+            Text("Not yet verified · \(items) · \(owner)")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 20) {
+                Button("Accept") {
+                    run { await model.acceptLegacyVault(review.vaultId) }
+                }
+                .font(.subheadline.weight(.semibold))
+                Button("Leave…", role: .destructive) {
+                    leaving = true
+                }
+                .font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.state.busy)
+            if let message {
+                InlineMessage(text: message)
+            }
+        }
+        .padding(.vertical, 4)
+        .confirmationDialog("Leave “\(name)”?", isPresented: $leaving, titleVisibility: .visible) {
+            Button("Leave vault", role: .destructive) {
+                run { await model.leaveSharedVault(review.vaultId) }
+            }
+        } message: {
+            Text("You'll lose access on all your devices. The items stay with the owner and other members; only the owner can add you back.")
+        }
+    }
+
+    private var name: String {
+        review.name ?? "Unnamed vault"
+    }
+
+    private var items: String {
+        review.itemCount == 1 ? "1 item" : "\(review.itemCount) items"
+    }
+
+    private var owner: String {
+        review.owner.map { "owner \($0), as the server names them" } ?? "owner not known yet"
+    }
+
+    private func run(_ action: @escaping () async -> Outcome) {
+        message = nil
+        Task {
+            let outcome = await action()
+            if outcome != .ok { message = outcome.message }
+        }
+    }
+}
+
+// MARK: - Ownership on record
+
+/// "You own <vault>?" (A6b): the server lists this account as the vault's owner, but the account's own record doesn't say
+/// so, and the server's word alone never lets this device add anyone or sign anything for the vault. What the server
+/// reports is shown first; the master password, checked on this device, confirms it. Rows for a Form section.
+struct OwnershipConfirmRows: View {
+    let vaultId: String
+    let vaultName: String
+
+    @EnvironmentObject private var model: AppModel
+    @State private var password = ""
+    @State private var handedOver = false
+    @State private var message: String?
+
+    var body: some View {
+        if let claim = model.state.ownershipClaim, claim.vaultId == vaultId {
+            Text("Only confirm if you created “\(claim.vaultName)”, or its owner handed it over to you.")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(claim.lines, id: \.self) { line in
+                Text(line)
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if claim.receivedAsMember {
+                Toggle(isOn: $handedOver) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Its owner handed this vault over to me")
+                            .font(.footnote)
+                        Text("This device first got this vault as a member.")
+                            .font(.caption)
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                }
+            }
+            SecureField("Master password (required)", text: $password)
+                .textContentType(.password)
+                .font(.subheadline)
+            HStack(spacing: 20) {
+                Button("Confirm") {
+                    confirm(claim)
+                }
+                .font(.subheadline.weight(.semibold))
+                .disabled(model.state.busy || password.isEmpty || (claim.receivedAsMember && !handedOver))
+                Button("Cancel") {
+                    password = ""
+                    handedOver = false
+                    message = nil
+                    model.cancelOwnershipClaim()
+                }
+                .font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+        } else {
+            Text("The server reports you as this vault's owner, but this account has no record that you created it or that its owner handed it over to you. Confirm it only if one of those is true; otherwise, tell your admin.")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Confirm I own “\(vaultName)”…") {
+                message = nil
+                Task {
+                    let outcome = await model.describeOwnership(vaultId)
+                    if outcome != .ok { message = outcome.message }
+                }
+            }
+            .disabled(model.state.busy)
+        }
+        if let message {
+            InlineMessage(text: message)
+        }
+    }
+
+    private func confirm(_ claim: OwnershipClaimView) {
+        let typed = password
+        let handed = claim.receivedAsMember && handedOver
+        password = ""
+        message = nil
+        Task {
+            let outcome = await model.confirmOwnership(password: typed, handedOver: handed)
+            if outcome == .ok { handedOver = false } else { message = outcome.message }
+        }
     }
 }
 

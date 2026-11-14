@@ -730,6 +730,9 @@ open class SessionControllerTest {
         val roles = mutableListOf<Triple<String, String, String>>()
         val removals = mutableListOf<Triple<String, String, io.silencelen.andvari.core.model.VaultMemberRemoveRequest>>()
 
+        /** Grants an owner signed again for a member on the older kind of sharing (`PUT /vaults/{id}/members/{userId}/grant`). */
+        val reissues = mutableListOf<Triple<String, String, io.silencelen.andvari.core.model.GrantReissueRequest>>()
+
         /** Ownership offers made (`POST /vaults/{id}/transfer`), offers taken back or declined (`DELETE`), and accepts. */
         val offers = mutableListOf<Pair<String, io.silencelen.andvari.core.model.TransferOfferRequest>>()
         val withdrawn = mutableListOf<String>()
@@ -771,9 +774,16 @@ open class SessionControllerTest {
                     }
                 }
                 prefixRoutes["/api/v1/vaults/"] = { request ->
-                    // /api/v1/vaults/{vaultId}/members/{userId}: a role (PUT) or a removal (DELETE).
+                    // /api/v1/vaults/{vaultId}/members/{userId}: a role (PUT) or a removal (DELETE); /grant after it, a re-issue.
                     val parts = request.url.encodedPath.removePrefix("/api/v1/vaults/").split('/')
-                    if (parts.size != 3 || parts[1] != "members") {
+                    if (parts.size == 4 && parts[1] == "members" && parts[3] == "grant") {
+                        val (vaultId, _, userId) = parts
+                        val body = (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()
+                        reissues += Triple(vaultId, userId, json.decodeFromString(io.silencelen.andvari.core.model.GrantReissueRequest.serializer(), body))
+                        val rows = members.getValue(vaultId)
+                        for (i in rows.indices) if (rows[i].userId == userId) rows[i] = rows[i].copy(legacyGrant = false)
+                        respond("""{"rev":${++rev}}""", HttpStatusCode.OK, headers)
+                    } else if (parts.size != 3 || parts[1] != "members") {
                         respond("""{"error":"not_found","message":"no"}""", HttpStatusCode.NotFound, headers)
                     } else {
                         val (vaultId, _, userId) = parts
@@ -1336,6 +1346,152 @@ open class SessionControllerTest {
         controller.lock()
         assertNull(controller.state.household)
         assertNull(controller.state.verifying)
+    }
+
+    /**
+     * A vault shared the older way (a v1 seal nobody signed, root cause A §8.2): readable but read only, listed for review
+     * with the owner the server names, on the vault screen and under Shared vaults. Accepting it (trust on first use) makes
+     * it writable and stores this account's own wrap of its key; leaving another one ends it.
+     */
+    @Test
+    fun aVaultSharedTheOlderWayIsReadOnlyUntilItIsAcceptedOrLeft() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        val wraps = mutableListOf<String>()
+        routes["/grant/self-wrap"] = { request ->
+            wraps += request.url.encodedPath.removeSuffix("/grant/self-wrap").substringAfterLast('/')
+            respond("""{"rev":${++server.rev}}""", HttpStatusCode.OK, headers)
+        }
+        routes["/leave"] = { request ->
+            val vaultId = request.url.encodedPath.removeSuffix("/leave").substringAfterLast('/')
+            server.vaults.remove(vaultId)
+            server.grants.remove(vaultId)
+            server.removed += vaultId
+            respond("""{"rev":${++server.rev}}""", HttpStatusCode.OK, headers)
+        }
+        fun owner(email: String, name: String): io.silencelen.andvari.core.client.EnrollResult {
+            val e = Account.enroll("invite", email, name, PASSWORD, KdfParams(ops = 1, memBytes = 8192), null, null, "device", crypto)
+            server.identities[e.request.userId] = io.silencelen.andvari.core.model.UserLookupResponse(e.request.userId, name, e.request.identityPub)
+            return e
+        }
+        fun shareTheOlderWay(from: io.silencelen.andvari.core.client.EnrollResult, name: String): String {
+            val shared = from.account.buildCreateSharedVault(name)
+            val seal = from.account.wrapVkForMember(Bytes.fromB64(reg.identityPub), shared.vaultId)
+            server.vaults[shared.vaultId] = WireVault(shared.vaultId, "shared", ++server.rev, shared.request.metaBlob, 2_000)
+            server.grants[shared.vaultId] = io.silencelen.andvari.core.model.WireGrant(shared.vaultId, reg.userId, "writer", "", server.rev, seal, null)
+            server.members[shared.vaultId] = mutableListOf(
+                io.silencelen.andvari.core.model.VaultMemberSummary(from.request.userId, from.request.email, from.request.displayName, "owner", from.request.identityPub, 1_000),
+                io.silencelen.andvari.core.model.VaultMemberSummary(reg.userId, EMAIL, "u", "writer", reg.identityPub, 2_000),
+            )
+            return shared.vaultId
+        }
+        val olga = owner("olga@example.com", "Olga")
+        val cabin = shareTheOlderWay(olga, "Cabin")
+        val boat = shareTheOlderWay(owner("pat@example.com", "Pat"), "Boat")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(listOf("Boat", "Cabin"), controller.state.legacyReviews.map { it.name }, "readable, so named; listed for review")
+        settle { controller.state.legacyReviews.all { it.owner != null } } // the owners the server names, asked for in the background
+        assertEquals("Olga", controller.state.legacyReviews.single { it.vaultId == cabin }.owner)
+        assertTrue(controller.vaultsForNewItems().none { it.vaultId == cabin || it.vaultId == boat }, "nothing is saved into them yet")
+        assertTrue(wraps.isEmpty(), "no wrap of a key nobody vouched for")
+        assertEquals(ActionResult.Ok, controller.openSharing())
+        assertEquals(setOf(cabin, boat), assertNotNull(controller.state.sharing).vaults.filter { it.awaitingReview }.map { it.vaultId }.toSet())
+
+        assertEquals(ActionResult.Failed(MembersCopy.REVIEW_GONE), controller.acceptLegacyVault(reg.personalVault.vaultId))
+        assertEquals(ActionResult.Ok, controller.acceptLegacyVault(cabin))
+        assertEquals(MembersCopy.reviewAccepted("Cabin"), controller.state.notice)
+        assertEquals(listOf(boat), controller.state.legacyReviews.map { it.vaultId })
+        assertTrue(controller.vaultsForNewItems().any { it.vaultId == cabin }, "a writer can put items in it now")
+        assertEquals(listOf(cabin), wraps, "this account's own wrap of the key it vouched for")
+        assertFalse(assertNotNull(controller.state.sharing).vaults.single { it.vaultId == cabin }.awaitingReview)
+        assertEquals(ActionResult.Failed(MembersCopy.REVIEW_GONE), controller.acceptLegacyVault(cabin), "accepted once")
+
+        assertEquals(ActionResult.Ok, controller.leaveSharedVault(boat))
+        assertTrue(controller.state.legacyReviews.isEmpty())
+        assertTrue(assertNotNull(controller.state.sharing).vaults.none { it.vaultId == boat })
+        controller.lock()
+        assertTrue(controller.state.legacyReviews.isEmpty())
+    }
+
+    /**
+     * A vault the server says this account owns, made before andvari kept its own record of that (A6b): nothing is added
+     * or signed until the person confirms "You own <vault>?" with their master password, after seeing what the server
+     * reports. Then the members still on the older kind of sharing can be shared with again, each only once verified here,
+     * signed by this account.
+     */
+    @Test
+    fun anOwnerConfirmsOwnershipWithTheMasterPasswordThenSharesAgainUnderTheSignedKind() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        twoStepServer() // the account's keys as the server serves them, at the KDF floor: what the password is checked against
+        val bea = server.person("bea@example.com", "Bea")
+        val made = enrolled.account.buildCreateSharedVault("Garage")
+        val garage = made.vaultId
+        server.vaults[garage] = WireVault(garage, "shared", ++server.rev, made.request.metaBlob, 2_000)
+        server.grants[garage] = io.silencelen.andvari.core.model.WireGrant(garage, reg.userId, "owner", made.request.wrappedVk, server.rev)
+        server.members[garage] = mutableListOf(
+            io.silencelen.andvari.core.model.VaultMemberSummary(reg.userId, EMAIL, "u", "owner", reg.identityPub, 2_000),
+            bea.row("writer").copy(legacyGrant = true),
+        )
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.openSharing())
+        val listed = assertNotNull(controller.state.sharing).vaults.single { it.vaultId == garage }
+        assertEquals("owner", listed.role)
+        assertFalse(listed.ownershipConfirmed, "the server's word only")
+
+        assertEquals(ActionResult.Ok, controller.openMembers(garage))
+        val before = assertNotNull(controller.state.members)
+        assertTrue(before.owner)
+        assertFalse(before.canAdd)
+        assertTrue(before.legacy.isEmpty(), "nothing offered for re-sharing while ownership is unconfirmed")
+        assertEquals(ActionResult.Failed(MembersCopy.OWNERSHIP_UNCONFIRMED), controller.reshareWithMember(bea.userId))
+
+        assertEquals(ActionResult.NotDone(null), controller.confirmOwnership(PASSWORD, false), "nothing described yet")
+        assertEquals(ActionResult.Ok, controller.describeOwnership(garage))
+        val claim = assertNotNull(controller.state.ownershipClaim)
+        assertEquals("Garage", claim.vaultName)
+        assertFalse(claim.receivedAsMember)
+        assertEquals(
+            listOf("Created by u ($EMAIL); never handed over (as the server reports it).", "Also in this vault: Bea (bea@example.com), writer (as the server reports it)."),
+            claim.lines,
+        )
+        controller.cancelOwnershipClaim()
+        assertNull(controller.state.ownershipClaim)
+        assertEquals(ActionResult.NotDone(null), controller.confirmOwnership(PASSWORD, false), "cancelled")
+
+        assertEquals(ActionResult.Ok, controller.describeOwnership(garage))
+        assertEquals(ActionResult.Failed(MembersCopy.PASSWORD_REQUIRED), controller.confirmOwnership("", false))
+        assertEquals(ActionResult.Failed(HouseholdCopy.REAUTH_FAILED), controller.confirmOwnership("not it", false))
+        assertNotNull(controller.state.ownershipClaim, "still open after a wrong password")
+        assertFalse(assertNotNull(controller.state.sharing).vaults.single { it.vaultId == garage }.ownershipConfirmed)
+        assertEquals(ActionResult.Ok, controller.confirmOwnership(PASSWORD, false))
+        assertNull(controller.state.ownershipClaim)
+        assertEquals(MembersCopy.ownershipConfirmed("Garage"), controller.state.notice)
+        assertTrue(assertNotNull(controller.state.sharing).vaults.single { it.vaultId == garage }.ownershipConfirmed)
+        val owned = assertNotNull(controller.state.members)
+        assertTrue(owned.canAdd)
+
+        // The members still on the older kind of sharing: Bea, not verified on this device yet.
+        val row = owned.legacy.single()
+        assertEquals(bea.userId, row.userId)
+        assertEquals(MemberCheck.NOT_VERIFIED, row.check)
+        assertNull(row.verifiedLabel)
+        assertEquals(ActionResult.Failed(MembersCopy.VERIFY_FIRST), controller.reshareWithMember(bea.userId))
+        assertTrue(server.reissues.isEmpty())
+        assertEquals(ActionResult.Ok, controller.verifyListedMember(bea.userId))
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(bea.code))
+        val verified = assertNotNull(controller.state.members).legacy.single()
+        assertEquals(MemberCheck.VERIFIED, verified.check)
+        assertEquals("Bea", verified.verifiedLabel)
+
+        assertEquals(ActionResult.Ok, controller.reshareWithMember(bea.userId))
+        val (vaultId, userId, request) = server.reissues.single()
+        assertEquals(garage to bea.userId, vaultId to userId)
+        assertTrue(request.signedGrant.isNotEmpty())
+        assertTrue(assertNotNull(controller.state.members).legacy.isEmpty(), "shared again: off the list")
+        assertEquals(MembersCopy.reshared("Garage", "Bea"), controller.state.notice)
+        assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.reshareWithMember(bea.userId), "once")
+        controller.closeMembers()
     }
 
     /** Nothing the members screen or a comparison of codes held outlives a lock, or a screen closed while its read was out. */

@@ -76,6 +76,10 @@ data class AppState(
     val invitations: List<InvitationView> = emptyList(),
     /** VAULT: offers to make this account the owner of a shared vault, each verified under that vault's key (spec 03 §11). */
     val ownershipOffers: List<OwnershipOfferView> = emptyList(),
+    /** VAULT: shared vaults readable only through an older kind of sharing nobody vouched for: read only until reviewed. */
+    val legacyReviews: List<LegacyReviewView> = emptyList(),
+    /** "You own <vault>?" while it is open ([SessionController.describeOwnership]); null otherwise. */
+    val ownershipClaim: OwnershipClaimView? = null,
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
@@ -259,6 +263,8 @@ data class SharingVaultView(
     val ownershipConfirmed: Boolean,
     val itemCount: Int,
     val attachmentCount: Int,
+    /** Readable only through an older kind of sharing nobody vouched for ([LegacyReviewView]): nothing is saved into it yet. */
+    val awaitingReview: Boolean = false,
 )
 
 data class DeletedVaultView(val vaultId: String, val name: String, val deletedAtMs: Long, val purgeAtMs: Long)
@@ -294,6 +300,53 @@ data class MembersView(
     val adding: NewMemberView?,
     /** The owner's offer to make a member the owner, while it waits for their answer ([SessionController.offerOwnership]). */
     val offer: OwnerOfferView? = null,
+    /** Members the server lists as still on the older kind of sharing, for the owner to share with again ([LegacyGrantView]). */
+    val legacy: List<LegacyGrantView> = emptyList(),
+)
+
+/**
+ * A member the server lists as still on the older kind of sharing (root cause A §8.2 step 4): their devices hold the
+ * vault's key only from a seal nobody signed. The owner shares the vault with them again under the signed kind, one
+ * person at a time, and only ever to the key this device verified for them. The list itself is the server's word.
+ */
+data class LegacyGrantView(
+    val userId: String,
+    /** What the server calls them. */
+    val name: String,
+    /** The address the server has for them. */
+    val email: String,
+    /** Whether this device verified them, now. */
+    val check: MemberCheck,
+    /** The name shown when this device verified them; null unless [check] is [MemberCheck.VERIFIED]. */
+    val verifiedLabel: String?,
+    /** When this account's own record says it shared the vault with them before (it decides nothing); null without one. */
+    val sharedAtMs: Long?,
+)
+
+/**
+ * A shared vault this account reads only through an older kind of sharing andvari cannot check (root cause A §8.2): it
+ * cannot confirm who sent it, so nothing is saved into it until the person accepts it (trust on first use) or leaves it.
+ */
+data class LegacyReviewView(
+    val vaultId: String,
+    /** Its name, read with the key the server delivered; null when that does not read. */
+    val name: String?,
+    val itemCount: Int,
+    /** What the server calls the vault's owner, once it said; null before (or when it could not say). */
+    val owner: String?,
+)
+
+/**
+ * "You own <vault>?" (A6b): the server lists this account as a vault's owner, but the account's own record does not say
+ * so. What the server reports of the vault is shown first; the master password, checked on this device, confirms it.
+ */
+data class OwnershipClaimView(
+    val vaultId: String,
+    val vaultName: String,
+    /** What the server reports: how the vault came to this account, and who else holds it. */
+    val lines: List<String>,
+    /** This device first received the vault as a member: the person also confirms that its owner handed it over. */
+    val receivedAsMember: Boolean,
 )
 
 /**
