@@ -1,17 +1,20 @@
-// node --test. Round-5 review C1, round-6 review H1/M2, round-7 review H1, round-8 review H and their regressions: a
-// card number goes only into a field the person chose and can see, of the form that field is in, and never where a
-// frame (any source, or none) lies over or under that field or its form (the frames rule, content.ts cardFillAgainst;
-// paymentproviders.ts only names the provider in the explainer). The visibility rules are defence in depth for
-// first-party card forms. The rules are pure (detect.ts visibilityOf and its helpers); the DOM probe that feeds them and
-// the fill path's use of them are pinned below.
+// node --test. The card-fill threat model (docs/design/2026-11-09-ios-app.md, "Card fill threat model") and the rules
+// that enforce it: case c, no card into a page whose card entry is a provider's frame (a cross-origin frame with card
+// fields, or a provider's card-entry frame anywhere: paymentproviders.ts); case a, only the field the person chose and
+// can see, with no frame (any source, or none) over or under it or its form; case b, only the chosen form's kinds,
+// only into its fields that pass. The rules are pure where they can be (detect.ts visibilityOf and its helpers); the
+// DOM probe that feeds them and the fill path's use of them are pinned below.
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  axisAligned,
   boxContains,
   boxesOverlap,
+  canHostShadow,
   clipBox,
   colorAlpha,
+  extensionFrameSrc,
   filterOpacity,
   maskAlphaAt,
   MIN_FIELD_PX,
@@ -160,10 +163,36 @@ test("at fill time every field must be on screen, and nothing may paint over any
   const points = samplePoints({ left: 0, top: 0, width: 200, height: 40 });
   assert.deepEqual(
     points,
-    [{ x: 100, y: 20 }, { x: 50, y: 20 }, { x: 150, y: 20 }, { x: 100, y: 10 }, { x: 100, y: 30 }, { x: 50, y: 10 }, { x: 150, y: 10 }, { x: 50, y: 30 }, { x: 150, y: 30 }],
+    [
+      { x: 100, y: 20 },
+      { x: 50, y: 20, offCentre: true },
+      { x: 150, y: 20, offCentre: true },
+      { x: 100, y: 10, offCentre: true },
+      { x: 100, y: 30, offCentre: true },
+      { x: 50, y: 10, offCentre: true },
+      { x: 150, y: 10, offCentre: true },
+      { x: 50, y: 30, offCentre: true },
+      { x: 150, y: 30, offCentre: true },
+    ],
     "the centre, halfway to each side, and each corner inset by a quarter (round-8: a plus-shaped clip leaves the centre lines alone)",
   );
   assert.ok(points.filter((p) => p.x !== 100 && p.y !== 20).length === 4, "four points off both centre lines");
+  assert.equal(points.filter((p) => p.offCentre !== true).length, 1, "only the centre excuses nothing");
+});
+
+test("the frames rule passes over a browser extension's page, maps only axis-aligned frames; Safari excuses no shadow host (round-9)", () => {
+  assert.ok(extensionFrameSrc("chrome-extension://abcdefghijklmnop/menu.html"));
+  assert.ok(extensionFrameSrc("moz-extension://1234/menu.html") && extensionFrameSrc("safari-web-extension://ABCD/menu.html"));
+  assert.ok(!extensionFrameSrc("https://js.stripe.com/v3/elements-inner-card-0.html") && !extensionFrameSrc("") && !extensionFrameSrc("about:blank"));
+  assert.ok(axisAligned("none") && axisAligned("matrix(1, 0, 0, 1, 12, 40)") && axisAligned("matrix(0.5, 0, 0, 2, 0, 0)"));
+  assert.ok(axisAligned("matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 0, 1)"), "translateZ(0) and the like");
+  assert.ok(!axisAligned("matrix(-1, 0, 0, -1, 0, 0)"), "a half turn");
+  assert.ok(!axisAligned("matrix(0.7071, 0.7071, -0.7071, 0.7071, 0, 0)"), "a rotation");
+  assert.ok(!axisAligned("matrix(1, 0, 0.5, 1, 0, 0)"), "a skew");
+  assert.ok(!axisAligned("matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -0.002, 0, 0, 0, 1)"), "a perspective");
+  assert.ok(!axisAligned("rotate(10deg)") && !axisAligned("matrix(1, 0, 0, 1, x, 0)"), "anything not read is refused");
+  for (const tag of ["div", "SPAN", "p", "section", "x-card-field"]) assert.ok(canHostShadow(tag), tag);
+  for (const tag of ["label", "IMG", "svg", "input", "button", "i", "b"]) assert.ok(!canHostShadow(tag), tag);
 });
 
 test("the frames rule's geometry: an area shared, a point inside, the boxes of a form, a frame's child clipped to it (round-8 H)", () => {
@@ -230,12 +259,12 @@ test("detection collects only fields that pass the page-time rules; selects and 
   assert.ok(!detect.includes("revealCovers") && !detect.includes("MAX_COVER_SCAN"), "no global scan of the page (regression 7)");
 });
 
-test("the hit test looks at several points, and nothing but the field itself is excused at them (round-8 L)", () => {
+test("the hit test looks at nine points: the field itself at the centre; elsewhere a label, image or SVG icon too (round-9)", () => {
   const shows = detect.slice(detect.indexOf("export function whatShowsAt("), detect.indexOf("export function probeVisibility("));
-  assert.match(shows, /for \(const \{ x, y \} of points\)/);
+  assert.match(shows, /for \(const \{ x, y, offCentre \} of points\)/);
   assert.match(shows, /if \(at === el \|\| el\.contains\(at\)\) \{\s*found = true;/);
-  assert.match(shows, /if \(ignore\(at\)\) continue;\s*if \(paintsOver\(paintFactsOf\(at\)\)\) return "other";/, "only this extension's own UI is looked through");
-  assert.ok(!detect.includes("isFieldPart"), "a label or a wrapper's part over a sample point is a cover like any other");
+  assert.match(shows, /if \(ignore\(at\) \|\| \(offCentre === true && excusedOffCentre\(at\)\)\) continue;\s*if \(paintsOver\(paintFactsOf\(at\)\)\) return "other";/, "this extension's own UI, and away from the centre a label, image or SVG icon");
+  assert.ok(!detect.includes("isFieldPart"), "nothing else of a wrapper is excused");
   assert.match(detect, /if \(node\.querySelectorAll\(CONTROLS\)\.length !== 1\) break;/, "a wrapper holds no other control");
 });
 
@@ -291,15 +320,22 @@ test("a card fill: never where a frame is against the chosen field or its form; 
   // the field's box, the form's box or the field's sample points; up the frame chain too; on Safari, any overlap.
   const against = content.slice(content.indexOf("function framesAgainst("), content.indexOf("/** Whether [t] passes the full fill rules"));
   assert.match(against, /const all = everyElement\(doc\);\s*if \(all === null\) return \{ host: null \};/, "a page too large to walk is refused, never half-walked");
-  assert.match(against, /if \(el === exclude \|\| !FRAME_TAGS\.has\(el\.tagName\.toUpperCase\(\)\)\) continue;/);
-  assert.match(against, /const hits = \(box: Box\): boolean => boxes\.some\(\(b\) => boxesOverlap\(box, b\)\) \|\| points\.some\(\(p\) => boxContains\(box, p\)\);/);
+  assert.match(against, /if \(el === exclude \|\| !FRAME_TAGS\.has\(el\.tagName\.toUpperCase\(\)\) \|\| extensionFrameSrc\(frameSrc\(el\)\)\) continue;/, "any frame but a browser extension's page");
+  assert.match(against, /const onFields = \(box: Box\): boolean => area\.fields\.some\(\(b\) => boxesOverlap\(box, b\)\) \|\| underPoint\(box\);/);
+  assert.match(against, /const hits = fixedOnScreen\(el\) \? onFields : \(b: Box\): boolean => onFields\(b\) \|\| \(area\.form !== null && boxesOverlap\(b, area\.form\)\);/, "a frame fixed on screen only against the fields' own boxes");
   assert.match(against, /for \(const inner of framesInside\(el, box\)\) if \(hits\(inner\.box\)\) return \{ host: frameHost\(inner\.el\) \};/, "and the frames of child documents it can read");
-  assert.match(against, /for \(const at of doc\.elementsFromPoint\(x, y\)\) \{\s*if \(at !== exclude && FRAME_TAGS\.has\(at\.tagName\.toUpperCase\(\)\)\) return \{ host: frameHost\(at\) \};/, "and what lies under the sample points");
-  assert.match(against, /const here = framesAgainst\(field\.ownerDocument, \[fieldBox, formBox\], points, null\);/);
+  assert.match(against, /for \(const at of doc\.elementsFromPoint\(x, y\)\) \{\s*if \(at !== exclude && FRAME_TAGS\.has\(at\.tagName\.toUpperCase\(\)\) && !extensionFrameSrc\(frameSrc\(at\)\)\) return \{ host: frameHost\(at\) \};/, "and what lies under the sample points");
+  assert.match(against, /const area: CardArea = \{ fields: \[fieldBox, \.\.\.fields\], form: unionBox\(fields\) \?\? fieldBox \};/);
+  assert.match(against, /const here = framesAgainst\(field\.ownerDocument, area, points, null\);/);
   assert.match(against, /if \(__ANDVARI_TARGET__ === "safari"\) \{/);
-  assert.match(against, /if \(el === field \|\| ancestors\.has\(el\) \|\| field\.contains\(el\) \|\| \(wrapper !== null && wrapper\.contains\(el\)\)\) continue;\s*if \(boxesOverlap\(boxOf\(el\.getBoundingClientRect\(\)\), fieldBox\)\) return \{ host: null \};/, "Safari: a closed root's host over the field");
+  assert.match(against, /if \(el === field \|\| ancestors\.has\(el\) \|\| field\.contains\(el\)\) continue;\s*if \(wrapper !== null && wrapper\.contains\(el\) && !canHostShadow\(el\.tagName\)\) continue;\s*if \(boxesOverlap\(boxOf\(el\.getBoundingClientRect\(\)\), fieldBox\)\) return \{ host: null \};/, "Safari: a closed root's host over the field; only a wrapper's element that cannot host a root is excused");
   assert.match(against, /return framesUpChain\(fieldBox\);/);
-  assert.match(against, /const against = framesAgainst\(parentDoc, \[mapped\], samplePoints\(mapped\), frame\);/, "in each parent, around this frame's place");
+  assert.match(against, /const map = frameContentMapping\(frame as HTMLElement, r\);\s*if \(map === null\) return \{ host: null \};/, "a frame that cannot be mapped refuses");
+  assert.match(against, /const against = framesAgainst\(parentDoc, \{ fields: \[mapped\], form: mapped \}, samplePoints\(mapped\), frame\);/, "in each parent, around this frame's place");
+  const mapping = content.slice(content.indexOf("function frameContentMapping("), content.indexOf("/** The frames of [frame]'s own document"));
+  assert.match(mapping, /if \(!axisAligned\(view\.getComputedStyle\(a\)\.transform\)\) return null;/, "a rotation, skew or perspective anywhere around the frame");
+  const chainSeen = content.slice(content.indexOf("function frameChainSeen("), content.indexOf("/** Whether every card form this frame found"));
+  assert.match(chainSeen, /const map = frameContentMapping\(el, boxOf\(el\.getBoundingClientRect\(\)\)\);\s*if \(map === null\) return false;/);
   const walk = content.slice(content.indexOf("function everyElement("), content.indexOf("function boxOf("));
   assert.match(walk, /if \(out\.length > FRAME_SCAN_MAX\) return false;/);
   assert.match(walk, /const sr = shadowRootOf\(el\);/, "every root it can open, not the scan's capped list");
@@ -322,14 +358,25 @@ test("a card fill: never where a frame is against the chosen field or its form; 
   assert.match(content, /if \(cardFillAgainst\(target, chipForm\) !== null\) return;/);
 });
 
-test("the worker: no gate on frames' sources; the grant from the chosen form; the explainer names a listed provider", () => {
-  assert.ok(!background.includes("providerBlock") && !background.includes("providers"), "round-8 H: the worker never guesses from a frame's src");
+test("the worker: no card where the card is taken in a provider's frame (case c); the grant from the chosen form", () => {
+  const entry = background.slice(background.indexOf("function providerCardEntry("), background.indexOf("function eligibleCardFrames("));
+  assert.match(entry, /if \(Array\.isArray\(f\.providers\) && f\.providers\.length > 0\) return f\.providers\[0\]!;/, "a provider's card-entry frame anywhere in the tab");
+  assert.match(entry, /if \(Array\.isArray\(f\.forms\) && f\.forms\.length > 0 && f\.origin !== top\)/, "card fields in a frame of another origin");
+  assert.match(background, /if \(providerCardEntry\(tabId, top\) !== null\) return no; \/\/ threat model case c/, "no chip");
+  assert.match(background, /const providerHost = providerCardEntry\(tab\.id, top\);\s*if \(providerHost !== null\) return \{ fillable: false, origin: null, crossOriginFormsOnly: true, providerHost \};/, "cardFillOffers: the explainer, never Fill");
+  assert.match(background, /const providerHost = providerCardEntry\(tab\.id, top\);\s*if \(providerHost !== null\) return \{ ok: false, code: "provider_frame", providerHost,/, "fillCardFromPopup");
+  assert.match(background, /if \(providerCardEntry\(tabId, top\) !== null\) return \{ ok: false, error: "a payment provider's frame takes the card on this page" \};/, "and none at the redemption");
+  const report = content.slice(content.indexOf("function reportCardForm("), content.indexOf("/** Bumped by every choice"));
+  assert.match(report, /const providers = providerCardFramesHere\(\);/);
+  assert.match(report, /void safeSend\(\{ type: "cardFormInfo", forms, anchor, providers, choseNow \}\);/);
+  const here = content.slice(content.indexOf("function providerCardFramesHere("), content.indexOf("function cardEntryHost("));
+  assert.match(here, /const all = everyElement\(document\) \?\? \[\];/, "the whole document, every root it can open, hidden frames too");
+  assert.match(here, /for \(const inner of framesInside\(el, boxOf\(el\.getBoundingClientRect\(\)\)\)\)/, "and child documents it can read");
+  assert.match(here, /const target = el\.getAttribute\("target"\);\s*if \(target === null \|\| !named\.has\(target\)\) continue;/, "and a frame a form posts a provider's card entry into");
   assert.match(background, /const target = chooseAnchoredCardTarget\(eligible\) \?\? chooseCardTarget\(eligible\);/);
   const info = background.slice(background.indexOf("async function cardFormInfo("), background.indexOf("function broadcastRescanCardForms("));
   assert.match(info, /const anchor = typeof a === "number" && Number\.isInteger\(a\) && a >= 0 && a < msg\.forms\.length \? a : null;/, "an index out of range is no choice");
   assert.match(info, /msg\.choseNow === true \|\| was\?\.anchor !== anchor \|\| was\.anchorAt === undefined \? Date\.now\(\) : was\.anchorAt/, "L7: every choice is stamped");
-  const report = content.slice(content.indexOf("function reportCardForm("), content.indexOf("/** Bumped by every choice"));
-  assert.match(report, /void safeSend\(\{ type: "cardFormInfo", forms, anchor, choseNow \}\);/);
 });
 
 test("the Safari lane releases no card number or security code to an extension page", () => {

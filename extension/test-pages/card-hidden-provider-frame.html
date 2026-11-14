@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a hidden provider card frame beside a first-party form</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  label { display: block; margin: 8px 0 2px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #999; border-radius: 6px; font: inherit; }
+  .stash { position: absolute; left: -9999px; width: 0; height: 0; border: 0; }
+</style>
+</head>
+<body>
+<h1>Hidden provider card frame</h1>
+<p>Card-fill threat model, case c. The page embeds Stripe's card-entry frame, zero-size and off screen, and shows a
+card form of its own. A page whose card entry is a provider's frame never needs andvari to fill one of its own, so
+nothing is filled here. Open the andvari popup:</p>
+<ul>
+  <li>No Fill button on the cards: the explainer names js.stripe.com and points to copying (in Safari: from the app).</li>
+</ul>
+<iframe class="stash" title="" src="https://js.stripe.com/v3/elements-inner-card-0123456789abcdef0123456789abcdef.html#componentName=card"></iframe>
+<form id="checkout" onsubmit="return false">
+  <label for="cc">Card number</label><input id="cc" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+  <label for="exp">Expiry</label><input id="exp" name="exp-date" autocomplete="cc-exp" placeholder="MM / YY">
+  <label for="cvc">Security code</label><input id="cvc" name="cvc" autocomplete="cc-csc" inputmode="numeric">
+</form>
+</body>
+</html>

@@ -934,7 +934,7 @@ export function fieldWrapperOf(el: Element): Element | null {
  * Where [rect] is looked at: its centre, halfway from it to each side (round-7 review, regression 7), and off the centre
  * lines, each corner inset by a quarter (round-8 review L: a plus-shaped clip-path leaves the centre lines alone).
  */
-export function samplePoints(rect: Box): { x: number; y: number }[] {
+export function samplePoints(rect: Box): SamplePoint[] {
   const x1 = rect.left + rect.width / 4;
   const cx = rect.left + rect.width / 2;
   const x3 = rect.left + (rect.width * 3) / 4;
@@ -943,29 +943,80 @@ export function samplePoints(rect: Box): { x: number; y: number }[] {
   const y3 = rect.top + (rect.height * 3) / 4;
   return [
     { x: cx, y: cy },
-    { x: x1, y: cy },
-    { x: x3, y: cy },
-    { x: cx, y: y1 },
-    { x: cx, y: y3 },
-    { x: x1, y: y1 },
-    { x: x3, y: y1 },
-    { x: x1, y: y3 },
-    { x: x3, y: y3 },
+    { x: x1, y: cy, offCentre: true },
+    { x: x3, y: cy, offCentre: true },
+    { x: cx, y: y1, offCentre: true },
+    { x: cx, y: y3, offCentre: true },
+    { x: x1, y: y1, offCentre: true },
+    { x: x3, y: y1, offCentre: true },
+    { x: x1, y: y3, offCentre: true },
+    { x: x3, y: y3, offCentre: true },
   ];
+}
+
+/** A point a field is looked at ([samplePoints]); [offCentre]: any but its centre. */
+export interface SamplePoint {
+  x: number;
+  y: number;
+  offCentre?: boolean;
+}
+
+/**
+ * What a field may show over itself at a point other than its centre (card-fill threat model, round-9): a label (a
+ * floated one), an image or an SVG icon (a brand mark in a narrow security-code field). The centre excuses nothing:
+ * there the field itself must show.
+ */
+export function excusedOffCentre(at: Element): boolean {
+  const tag = at.tagName.toUpperCase();
+  return tag === "LABEL" || tag === "IMG" || tag === "SVG" || (at as Element & { ownerSVGElement?: unknown }).ownerSVGElement != null;
+}
+
+/**
+ * Elements that can host a shadow root (DOM Standard, attachShadow): a custom element, or one of these. In Safari a
+ * closed root's content is out of this script's sight, so such an element is never excused as part of a field.
+ */
+const SHADOW_HOSTS = new Set(["ARTICLE", "ASIDE", "BLOCKQUOTE", "BODY", "DIV", "FOOTER", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "MAIN", "NAV", "P", "SECTION", "SPAN"]);
+
+/** PURE (by tag): whether [tagName] names an element that can host a shadow root. */
+export function canHostShadow(tagName: string): boolean {
+  return tagName.includes("-") || SHADOW_HOSTS.has(tagName.toUpperCase());
+}
+
+/** PURE: whether [src] is a page of a browser extension (another password manager's menu, say), never a site's frame. */
+export function extensionFrameSrc(src: string): boolean {
+  return /^(chrome|moz|safari-web|safari|ms-browser)-extension:/i.test(src.trim());
+}
+
+/**
+ * PURE: whether a computed `transform` keeps a box axis-aligned (none, a translation, or a scale with no rotation or
+ * skew), so a point and a box can be mapped through it by its bounding box. Anything else (a rotation, a skew, a
+ * perspective) is refused where a frame's content must be mapped into its parent.
+ */
+export function axisAligned(transform: string): boolean {
+  const t = transform.trim();
+  if (t === "" || t === "none") return true;
+  const m = /^matrix(3d)?\(([^)]*)\)$/.exec(t);
+  if (m === null) return false;
+  const v = m[2]!.split(",").map((x) => Number.parseFloat(x));
+  if (v.some((x) => !Number.isFinite(x))) return false;
+  if (m[1] === undefined) return v.length === 6 && v[1] === 0 && v[2] === 0 && v[0]! > 0 && v[3]! > 0;
+  // matrix3d, column-major: only a scale and a translation, no perspective.
+  return v.length === 16 && v[0]! > 0 && v[5]! > 0 && v[10]! > 0 && v[15] === 1 &&
+    [1, 2, 3, 4, 6, 7, 8, 9, 11].every((i) => v[i] === 0);
 }
 
 /**
  * What shows at each of [points] (viewport coordinates of [el]'s document): "self" when, at every one, the topmost
  * element that paints anything ([paintsOver]) is [el] or inside it; "other" otherwise, including where [el] is not there
- * at all (clipped, or under something). Nothing else is excused at a sample point, not even the field's own label or
- * adornment (round-8 review L): a part of the field may sit beside the points, never over them. Elements [ignore] names
- * (this extension's own UI) are looked through. A cover that lets the pointer through (pointer-events: none) is not seen: that is the
+ * at all (clipped, or under something). At the centre nothing else is excused, not even the field's own label or
+ * adornment; at every other point a label, an image or an SVG icon is ([excusedOffCentre]: a floated label, a brand
+ * mark in a narrow field). Elements [ignore] names (this extension's own UI) are looked through. A cover that lets the pointer through (pointer-events: none) is not seen: that is the
  * limit of these rules, and why they are defence in depth only.
  */
-export function whatShowsAt(el: Element, points: readonly { x: number; y: number }[], ignore: (e: Element) => boolean = () => false): "self" | "other" {
+export function whatShowsAt(el: Element, points: readonly SamplePoint[], ignore: (e: Element) => boolean = () => false): "self" | "other" {
   const root = el.getRootNode() as Document | ShadowRoot;
   const doc = el.ownerDocument;
-  for (const { x, y } of points) {
+  for (const { x, y, offCentre } of points) {
     const list = typeof root.elementsFromPoint === "function" ? root.elementsFromPoint(x, y) : doc.elementsFromPoint(x, y);
     let found = false;
     for (const at of list) {
@@ -973,7 +1024,7 @@ export function whatShowsAt(el: Element, points: readonly { x: number; y: number
         found = true;
         break;
       }
-      if (ignore(at)) continue;
+      if (ignore(at) || (offCentre === true && excusedOffCentre(at))) continue;
       if (paintsOver(paintFactsOf(at))) return "other";
     }
     if (!found) return "other";

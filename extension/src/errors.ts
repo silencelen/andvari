@@ -256,7 +256,7 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined, providerHo
       // Round-8 review H. Neutral: a frame's source is the page's own claim, so the copy names a listed provider's host
       // without vouching that the page is a checkout, and otherwise says only what andvari saw and did.
       return providerHost !== undefined
-        ? `A payment form from ${providerHost} is embedded where you tapped. andvari doesn't fill a card there, so nothing was filled.`
+        ? `This page takes the card in a payment form from ${providerHost}. andvari doesn't fill a card into the page itself there, so nothing was filled.`
         : "Something else sits over or under the card field you tapped, such as a form embedded from another page. andvari doesn't fill a card there, so nothing was filled.";
     case "field_changed":
       return "The card field changed after you tapped it, so nothing was filled. Tap it again, then fill.";
