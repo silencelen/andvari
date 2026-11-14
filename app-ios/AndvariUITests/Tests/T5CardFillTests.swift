@@ -105,20 +105,27 @@ final class T5CardFillTests: UITestCase {
         }
     }
 
-    /// ?layout=split: one provider frame per field. A tap on the number, then Fill: each sibling frame receives its own
-    /// field, the number, the expiry and the security code.
-    func test04_SplitProviderFramesFillEachItsOwn() {
+    /// ?layout=split: one provider frame per field. A fill reaches only the frames the person chose in (round 11): a
+    /// tap on the number alone, then Fill, fills the number alone; a tap in each frame, then one Fill, fills all three.
+    func test04_SplitProviderFramesFillWhereTapped() {
         requireProviderReachable()
         let number = providerField("Card number")
         let expiry = providerField("Expiry")
         let code = providerField("Security code")
-        step("number-tapped-and-filled") {
+        step("number-alone-tapped-and-filled") {
             openInSafari(checkout("split"), heading: "Checkout")
             tapAndFill(number, "the card number frame", reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
+            Thread.sleep(forTimeInterval: 2)
+            XCTAssertEqual(digits(expiry), "", "the expiry frame, not tapped, was filled. The frames saw: \(pageEvents())")
+            XCTAssertEqual(digits(code), "", "the security code frame, not tapped, was filled. The frames saw: \(pageEvents())")
         }
-        step("each-sibling-its-own-field") {
-            XCTAssertTrue(waitUntil(10) { Fixture.cardExpiryDigits.contains(self.digits(expiry)) }, "the expiry frame holds \(text(expiry)). The frames saw: \(pageEvents())")
-            XCTAssertTrue(waitUntil(10) { self.digits(code) == Fixture.cardCode }, "the security code frame holds \(text(code)). The frames saw: \(pageEvents())")
+        step("each-frame-tapped-then-one-fill") {
+            openInSafari(checkout("split"), heading: "Checkout")
+            tapField(number)
+            tapField(expiry)
+            tapAndFill(code, "the split provider's frames", reach: .addressBar) {
+                self.digits(number) == Fixture.cardNumber && Fixture.cardExpiryDigits.contains(self.digits(expiry)) && self.digits(code) == Fixture.cardCode
+            }
             XCTAssertEqual(text(shopNameOnCard), "", "the shop's own name-on-card field was filled")
         }
     }
@@ -147,30 +154,34 @@ final class T5CardFillTests: UITestCase {
         }
     }
 
-    /// ?layout=twice: a second card-number frame beside the first. Two candidates for one field kind: a fill guesses
-    /// between them never, so nothing is filled anywhere.
-    func test07_SecondFrameOfAKindIsRefused() throws {
-        if Fixture.siblingRule == "frame-tree" {
-            try skip("Waits for the sibling rule coming on ios-ui (2026-11-14): split-field frames matched by location.ancestorOrigins with exactly one frame per field kind, two candidates for a kind refused. The extension built here still finds siblings by the frame tree (webNavigation in its manifest), where each frame of a kind receives it.")
-        }
+    /// ?layout=twice: a second card-number frame beside the first. Two provider frames ask for the same card detail, so
+    /// the popup offers no Fill, says why, and copies instead (round 11); nothing is filled anywhere.
+    func test07_SecondFrameOfAKindIsRefused() {
         requireProviderReachable()
         let numbers = safari.webViews.textFields.matching(NSPredicate(format: "label == 'Card number'"))
         let expiry = providerField("Expiry")
         let code = providerField("Security code")
-        let anyFilled = { !self.digits(numbers.element(boundBy: 0)).isEmpty || !self.digits(numbers.element(boundBy: 1)).isEmpty || !self.digits(expiry).isEmpty || !self.digits(code).isEmpty }
-        step("first-number-tapped-and-fill-tried") {
+        let fill = fillButton()
+        let doubled = popupSays("more than one payment form asking for the same card detail")
+        step("first-number-tapped-and-popup-opened") {
             openInSafari(checkout("twice"), heading: "Checkout")
             XCTAssertTrue(waitUntil(15) { numbers.count == 2 }, "the page shows \(numbers.count) card-number frames, not two")
-            let first = numbers.element(boundBy: 0)
-            tapField(first)
-            let fill = fillButton()
-            XCTAssertTrue(openPopup(until: { fill.exists }, reach: .addressBar), "the popup offers no Fill into \(Fixture.providerOrigin). It says: \(popupWords())")
-            scrollToComfort(fill, in: safari)
-            tapWhereItIs(fill, in: safari)
-            _ = matchFaceUntil(15, anyFilled)
-            let words = popupWords()
+            tapField(numbers.element(boundBy: 0))
+            if !openPopup(until: { doubled.exists || fill.exists }, reach: .addressBar) {
+                XCTFail("the popup showed neither a Fill nor why it fills none. It says: \(popupWords())")
+                return
+            }
+            XCTAssertFalse(fill.exists, "the popup offers a Fill with two card-number frames on the page")
+            XCTAssertTrue(doubled.exists, "the popup does not say why it fills none. It says: \(popupWords())")
+            XCTAssertTrue(doubled.exists && doubled.label.contains(copyFromApp), "the line does not say to copy from the app: \(doubled.exists ? doubled.label : "")")
             closePopup()
-            XCTAssertFalse(anyFilled(), "a field was filled with two card-number frames on the page. The popup says: \(words). The frames saw: \(pageEvents())")
+        }
+        step("nothing-filled") {
+            for index in 0..<numbers.count {
+                XCTAssertEqual(digits(numbers.element(boundBy: index)), "", "card-number frame \(index + 1) was filled")
+            }
+            XCTAssertEqual(digits(expiry), "", "the expiry frame was filled")
+            XCTAssertEqual(digits(code), "", "the security code frame was filled")
         }
     }
 
