@@ -28,7 +28,7 @@ jobs:
   uitest:
     name: UI tests on the iOS simulator
     runs-on: macos-26
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -151,10 +151,16 @@ jobs:
       - name: Run the UI tests
         run: |
           . app-ios/uitest/env.sh
+          # How the built extension finds a split-field provider's sibling frames: by the frame tree (webNavigation in its
+          # manifest) or by each frame's location.ancestorOrigins. The test of a second frame of one kind waits for the
+          # second.
+          if grep -q '"webNavigation"' app-ios/AndvariSafari/web/manifest.json; then sibling_rule=frame-tree; else sibling_rule=ancestor-origins; fi
+          echo "sibling rule: $sibling_rule"
           set +e
           # TEST_RUNNER_X reaches the test runner as X. The runner is a simulator process and writes its
           # screenshots and summary straight into out/.
           env TEST_RUNNER_UITEST_OUT_DIR="$PWD/out" \
+              TEST_RUNNER_UITEST_SIBLING_RULE="$sibling_rule" \
               TEST_RUNNER_UITEST_SERVER_ORIGIN="$UITEST_SERVER_ORIGIN" \
               TEST_RUNNER_UITEST_EMAIL="$UITEST_EMAIL" \
               TEST_RUNNER_UITEST_PASSWORD="$UITEST_PASSWORD" \

@@ -272,6 +272,58 @@ extension UITestCase {
         XCTAssertTrue(enableSafariExtension(), "the Safari extension could not be turned on")
     }
 
+    /// Settings > Apps > Safari > Extensions > andvari > Other Websites: Allow, as a person lets the extension run on
+    /// every website (what the popup asks for when a payment provider's frame is one Safari keeps it out of). Each
+    /// screen on the way is a step of [test]'s. True when the row reads Allow at the end.
+    @discardableResult
+    func allowExtensionOnEveryWebsite() -> Bool {
+        if SystemState.everyWebsiteAllowed { return true }
+        let settings = settingsApp
+        let other = settings.cells["Other Websites"]
+        step("settings-andvari-websites") {
+            settings.terminate()
+            settings.launch()
+            XCTAssertTrue(scrollToAndTap(labelled("Apps", in: settings), in: settings), "Settings has no Apps row")
+            Thread.sleep(forTimeInterval: 1.5)
+            let search = settings.searchFields.firstMatch
+            if search.exists {
+                search.tap()
+                search.typeText("Safari")
+                Thread.sleep(forTimeInterval: 1.5)
+            }
+            let row = settings.cells.matching(NSPredicate(format: "label BEGINSWITH 'Safari'")).firstMatch
+            XCTAssertTrue(scrollToAndTap(row.exists ? row : labelled("Safari", in: settings), in: settings, swipes: 12), "Settings > Apps has no Safari row")
+            Thread.sleep(forTimeInterval: 1.5)
+            XCTAssertTrue(scrollToAndTap(labelled("Extensions", in: settings), in: settings, swipes: 10), "Safari's settings have no Extensions row")
+            Thread.sleep(forTimeInterval: 1.5)
+            let entry = settings.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+            // A tap while the Extensions screen is still sliding in opens nothing: tap again until it opens.
+            for _ in 0..<3 where !other.exists {
+                XCTAssertTrue(scrollToAndTap(entry, in: settings, swipes: 4), "andvari is not listed under Safari's extensions")
+                _ = waitUntil(4) { other.exists }
+            }
+            dumpTree(settings, as: "settings-andvari-websites")
+        }
+        var allowed = false
+        step("every-website-allowed") {
+            XCTAssertTrue(scrollToAndTap(other, in: settings, swipes: 6), "andvari's settings have no Other Websites row")
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpTree(settings, as: "settings-other-websites")
+            XCTAssertTrue(scrollToAndTap(labelled("Allow", in: settings), in: settings, swipes: 4), "Other Websites offers no Allow")
+            Thread.sleep(forTimeInterval: 1)
+            // iOS may ask to confirm a permission this wide.
+            let confirm = settings.alerts.buttons.matching(NSPredicate(format: "label == 'Allow' OR label == 'OK'")).firstMatch
+            if confirm.exists { confirm.tap() }
+            settings.navigationBars.buttons.firstMatch.tap()
+            allowed = waitUntil(8) { other.exists && other.label.hasSuffix("Allow") }
+            dumpTree(settings, as: "settings-every-website-allowed")
+            XCTAssertTrue(allowed, "Other Websites does not read Allow: \(other.exists ? other.label : "no row")")
+        }
+        settings.terminate()
+        SystemState.everyWebsiteAllowed = allowed
+        return allowed
+    }
+
     /// Bring the app forward and unlock it: the app applies what the extensions queued at an unlock.
     func applySavesNow() {
         bringAppForward()
@@ -306,7 +358,17 @@ extension UITestCase {
     /// nine minutes before the test is told, with Safari's tree.
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
-        let shown = { browser.webViews.staticTexts[heading].exists }
+        openInSafari(url, until: { browser.webViews.staticTexts[heading].exists })
+    }
+
+    /// As openInSafari(_:heading:), for a page known by a line that contains [text].
+    func openInSafari(_ url: String, containing text: String) {
+        let line = safari.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+        openInSafari(url, until: { line.exists })
+    }
+
+    private func openInSafari(_ url: String, until shown: @escaping () -> Bool) {
+        let browser = safari
         let deadline = Date().addingTimeInterval(9 * 60)
         var attempt = 0
         while true {
@@ -684,4 +746,5 @@ enum SystemState {
     static var queueSnapshots: [[String]] = []
     static var providerEnabled = false
     static var extensionEnabled = false
+    static var everyWebsiteAllowed = false
 }

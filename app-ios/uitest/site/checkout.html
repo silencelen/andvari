@@ -18,7 +18,10 @@ iframe { display: block; width: 100%; border: 1px solid #888; margin-top: 16px; 
      2026-11-14), never into the shop's own fields: the name on card here stays empty after a fill.
      ?layout=card (the default): one provider frame holding the number, the expiry and the security code.
      ?layout=split: one provider frame per field, siblings under this page.
-     ?layout=code: a security code alone (a saved card's re-authentication). -->
+     ?layout=code: a security code alone (a saved card's re-authentication).
+     ?layout=twice: the split layout with a second card-number frame beside the first: two candidates for one field
+     kind, which no fill may guess between.
+     With uitest-events in the query, each frame gets the test site's event log too (serve-site.py). -->
 <form method="post" action="submitted">
 <label for="email">Email</label>
 <input id="email" name="email" type="email" autocomplete="email" autocapitalize="none" aria-label="Email">
@@ -35,11 +38,14 @@ const layouts = {
   card: [["card.html", "Card details", 330]],
   split: [["field.html?kind=number", "Card number", 110], ["field.html?kind=expiry", "Expiry date", 110], ["field.html?kind=code", "Security code", 110]],
   code: [["field.html?kind=code", "Security code", 110]],
+  twice: [["field.html?kind=number", "Card number", 110], ["field.html?kind=number", "Card number again", 110], ["field.html?kind=expiry", "Expiry date", 110], ["field.html?kind=code", "Security code", 110]],
 };
+const query = new URLSearchParams(location.search);
+const events = query.has("uitest-events");
 const box = document.getElementById("provider");
-for (const [path, title, height] of layouts[new URLSearchParams(location.search).get("layout") || "card"] || []) {
+for (const [path, title, height] of layouts[query.get("layout") || "card"] || []) {
   const frame = document.createElement("iframe");
-  frame.src = provider + "/pay/" + path;
+  frame.src = provider + "/pay/" + path + (events ? (path.includes("?") ? "&" : "?") + "uitest-events" : "");
   frame.title = title;
   frame.height = String(height);
   box.append(frame);

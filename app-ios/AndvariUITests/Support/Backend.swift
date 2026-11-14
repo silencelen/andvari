@@ -47,6 +47,26 @@ enum OtherDevice {
     }
 }
 
+/// What the job's test site serves.
+enum TestSite {
+    /// The card test pages (extension/test-pages/card-*.html, copied under /test-pages/ by start-backend.sh), read from
+    /// the site's own listing of that folder, so a page added to the extension is tested without a list kept here.
+    static func cardPages() -> [String] {
+        guard let url = URL(string: Fixture.controlOrigin + "/test-pages/") else { return [] }
+        let done = DispatchSemaphore(value: 0)
+        var listing = ""
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            listing = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 30)
+        guard let pattern = try? NSRegularExpression(pattern: "href=\"(card-[A-Za-z0-9-]+\\.html)\"") else { return [] }
+        let matches = pattern.matches(in: listing, range: NSRange(listing.startIndex..., in: listing))
+        let names = matches.compactMap { Range($0.range(at: 1), in: listing).map { String(listing[$0]) } }
+        return Array(Set(names)).sorted()
+    }
+}
+
 /// RFC 6238 codes (SHA-1, 6 digits, 30 seconds) for a base32 key, as an authenticator app shows them.
 enum Authenticator {
     static func code(base32 key: String, at date: Date = Date()) -> String? {

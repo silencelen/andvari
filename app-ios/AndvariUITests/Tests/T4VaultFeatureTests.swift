@@ -1,13 +1,12 @@
 import XCTest
 
 /// What landed in the app after the first suite: the trash, item history, moving and copying between vaults, lifecycle
-/// notices, a vault this account only reads, the extension's card test pages (extension/test-pages/), two-step
-/// sign-in, and what the simulator cannot show. Runs after T3, so AutoFill, the Safari extension and Face ID are
-/// already on. Two-step sign-in comes last: the other-device steps before it sign in without a code. Each test that
-/// works in the app starts it again, so a sheet an earlier test left open cannot stand in its way.
+/// notices, a vault this account only reads, the third-party keyboard switch and two-step sign-in. Runs after T3, so
+/// AutoFill, the Safari extension and Face ID are already on. Two-step sign-in comes last: the other-device steps before
+/// it sign in without a code. Each test starts the app again, so a sheet an earlier test left open cannot stand in its
+/// way. Card fill is T5's.
 final class T4VaultFeatureTests: UITestCase {
     private let stamp = Int(Date().timeIntervalSince1970) % 100000
-
 
     /// Delete a login, find it in the trash, restore it; delete it again and delete it forever.
     func test01_TrashRestoreAndDeleteForever() {
@@ -223,66 +222,10 @@ final class T4VaultFeatureTests: UITestCase {
         }
     }
 
-    /// card-skimmer.html: an invisible card form the page's script focused. Fill refuses with nothing tapped and
-    /// with only the visible email tapped, and the skimmer's own debug line stays empty.
-    func test06_CardSkimmerPageGetsNothing() {
-        step("provider-and-extension-on") {
-            requireAutoFillProvider()
-            requireSafariExtension()
-        }
-        step("page") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-skimmer.html", heading: "Checkout")
-        }
-        // The popup's words, never the page's: the page's own instructions quote the start of the same sentence.
-        let tapFirst = popupSays("Tap the card number field on the page first, then fill again.")
-        step("refused-with-nothing-tapped") {
-            XCTAssertTrue(fillCardFromPopup(until: { tapFirst.exists }), "the popup did not refuse a card fill with nothing tapped. It says: \(popupWords())")
-        }
-        step("refused-with-the-email-tapped") {
-            closePopup()
-            let byLabel = safari.webViews.textFields["Email"]
-            let email = byLabel.exists ? byLabel : safari.webViews.textFields.firstMatch
-            require(email, "the page's email field")
-            email.tap()
-            XCTAssertTrue(fillCardFromPopup(until: { tapFirst.exists }), "the popup did not refuse a card fill with only the email tapped. It says: \(popupWords())")
-        }
-        step("skimmer-got-nothing") {
-            closePopup()
-            let got = safari.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS 'cardnumber=' OR label CONTAINS 'cvc=' OR label CONTAINS 'exp-month=' OR label CONTAINS 'ccname=' OR label CONTAINS 'postal='")).firstMatch
-            XCTAssertFalse(got.exists, "the skimmer form received: \(got.exists ? got.label : "")")
-        }
-    }
-
-    /// Card fill is being rebuilt so that a card is released only to a payment provider's card-entry document (provider
-    /// frames, hosted checkout pages); a merchant page gets none and the popup offers to copy from the app (owner
-    /// 2026-11-14). These four tests of in-page fill on merchant pages wait for that design and are written again for
-    /// it. test06 stays: a merchant page must still refuse.
-    private static let cardFillRebuilt = "card fill being rebuilt to provider frames only (owner 2026-11-14)"
-
-    /// A card filled on a merchant page with the popup reached while the keyboard is up.
-    func test07_CardFillWithTheKeyboardUp() throws {
-        try skip(Self.cardFillRebuilt)
-    }
-
-    /// The same with the keyboard closed first by its Done.
-    func test08_CardFillAfterTheKeyboardsDone() throws {
-        try skip(Self.cardFillRebuilt)
-    }
-
-    /// card-two-forms.html: only the form of the field tapped is filled.
-    func test09_CardTwoFormsFillsOnlyTheTappedForm() throws {
-        try skip(Self.cardFillRebuilt)
-    }
-
-    /// card-inner-scroll.html: filled once scrolled into view, refused once scrolled away.
-    func test10_CardInnerScrollFillsOnceInView() throws {
-        try skip(Self.cardFillRebuilt)
-    }
-
     /// Settings has the switch for other apps' keyboards, off by default. Whether a third-party keyboard is then kept out
     /// cannot be shown: the simulator has none installed, and the suite would have to ship a keyboard extension in an
     /// app of its own to add one.
-    func test11_ThirdPartyKeyboardSwitch() throws {
+    func test06_ThirdPartyKeyboardSwitch() throws {
         step("switch-off-by-default") {
             freshVault()
             openSettings()
@@ -297,7 +240,7 @@ final class T4VaultFeatureTests: UITestCase {
 
     /// Two-step setup survives a trip to another app: the app locks on the way out, and after the unlock it opens the
     /// confirm step again with the same key. The code an authenticator would show then turns it on; a later one off.
-    func test12_TwoStepSetupSurvivesATripAway() {
+    func test07_TwoStepSetupSurvivesATripAway() {
         step("vault") {
             freshVault()
         }
@@ -502,42 +445,5 @@ final class T4VaultFeatureTests: UITestCase {
         let row = app.cells.containing(NSPredicate(format: "label == %@", notice.label)).firstMatch
         row.buttons["Dismiss"].tap()
         XCTAssertTrue(waitUntil(10) { !notice.exists }, "the notice stayed after Dismiss")
-    }
-
-    /// A line of the popup's own (its message strip), never of the page under it.
-    private func popupSays(_ text: String) -> XCUIElement {
-        popupWebView.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
-    }
-
-    /// What the popup says about a fill or its lock, for a failure message.
-    private func popupWords() -> String {
-        guard popupWebView.exists else { return "nothing: the popup is closed" }
-        let texts = popupWebView.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'fill' OR label CONTAINS[c] 'tap' OR label CONTAINS[c] 'lock' OR label CONTAINS[c] 'seen'"))
-        var lines: [String] = []
-        for index in 0..<min(texts.count, 10) {
-            let line = texts.element(boundBy: index).label
-            if !lines.contains(line) { lines.append(line) }
-        }
-        return lines.isEmpty ? "nothing about the fill" : lines.joined(separator: " | ")
-    }
-
-    /// Open the popup, unlocked, and tap Fill on the seeded card's row, answering the Face ID the app's handler asks
-    /// before it releases the card, until [outcome] holds. The popup's unlock lasts 90 s (APP_VAULT_LIFETIME_MS in
-    /// extension/src/appvault.ts): a Fill that meets its end finds the unlock screen instead, and is tried once more.
-    @discardableResult
-    private func fillCardFromPopup(until outcome: @escaping () -> Bool, reach: PopupReach = .keyboardDone) -> Bool {
-        let fill = safari.webViews.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fill this card'")).firstMatch
-        let unlock = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Unlock with'")).firstMatch
-        for attempt in 1...2 {
-            if !openPopup(until: { fill.exists }, reach: reach) {
-                XCTFail("the popup offered no card to fill. It says: \(popupDetails())")
-                return false
-            }
-            scrollToComfort(fill, in: safari)
-            tapWhereItIs(fill, in: safari)
-            if matchFaceUntil(20, outcome) { return true }
-            if attempt == 2 || !unlock.exists { break }
-        }
-        return outcome()
     }
 }
