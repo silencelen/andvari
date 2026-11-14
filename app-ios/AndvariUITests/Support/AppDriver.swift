@@ -195,6 +195,8 @@ extension UITestCase {
     func confirmPersonalVaultIfAsked() {
         guard waitUntil(4, { self.personalVaultNotice.exists }) else { return }
         require(usePersonalVaultButton, "the notice's Use button", timeout: 20)
+        // iOS can offer to save the password just typed, over the notice: that is answered first.
+        _ = waitUntil(10) { self.safelyHittable(self.usePersonalVaultButton) }
         usePersonalVaultButton.tap()
         if !waitUntil(15, { !self.personalVaultNotice.exists }) {
             dumpTree(app, as: "personal-vault-still-asked")
