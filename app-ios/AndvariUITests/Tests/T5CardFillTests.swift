@@ -114,7 +114,10 @@ final class T5CardFillTests: UITestCase {
         let code = providerField("Security code")
         step("number-alone-tapped-and-filled") {
             openInSafari(checkout("split"), heading: "Checkout")
-            tapAndFill(number, "the card number frame", reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
+            tapAndFill(number, "the card number frame", reach: .addressBar, checkLabel: { label in
+                XCTAssertTrue(label.contains("card number"), "the Fill does not name the card number: \(label)")
+                XCTAssertFalse(label.contains("expiry") || label.contains("security code"), "the Fill names a detail of a frame not tapped: \(label)")
+            }) { self.digits(number) == Fixture.cardNumber }
             Thread.sleep(forTimeInterval: 2)
             XCTAssertEqual(digits(expiry), "", "the expiry frame, not tapped, was filled. The frames saw: \(pageEvents())")
             XCTAssertEqual(digits(code), "", "the security code frame, not tapped, was filled. The frames saw: \(pageEvents())")
@@ -185,6 +188,62 @@ final class T5CardFillTests: UITestCase {
         }
     }
 
+    /// ?layout=lure (round 12): the shop asks for the security code alone, beside another site's "rewards" widget that
+    /// mounts provider frames of its own. What the person typed there never joins the code's fill: the Fill names the
+    /// security code alone, and the widget's fields keep what was typed.
+    func test08_LureWidgetFieldsNeverJoinTheFill() {
+        requireProviderReachable()
+        // field.html labels its input by kind: the widget's frames are the page's only number and expiry.
+        let rewardsNumber = providerField("Card number")
+        let rewardsExpiry = providerField("Expiry")
+        let code = providerField("Security code")
+        step("typed-into-the-rewards-widget") {
+            openInSafari(checkout("lure"), heading: "Checkout")
+            typeDigits("5555", into: rewardsNumber, what: "the rewards number")
+            typeDigits("0101", into: rewardsExpiry, what: "the rewards expiry")
+        }
+        step("code-tapped-and-filled") {
+            tapAndFill(code, "the shop's security code", reach: .addressBar, checkLabel: { label in
+                XCTAssertTrue(label.contains("security code"), "the Fill does not name the security code: \(label)")
+                XCTAssertFalse(label.contains("card number") || label.contains("expiry"), "the Fill would write the rewards widget's fields: \(label)")
+            }) { self.digits(code) == Fixture.cardCode }
+        }
+        step("rewards-fields-as-typed") {
+            XCTAssertEqual(digits(rewardsNumber), "5555", "the rewards number was overwritten. The frames saw: \(pageEvents())")
+            XCTAssertEqual(digits(rewardsExpiry), "0101", "the rewards expiry was overwritten. The frames saw: \(pageEvents())")
+        }
+    }
+
+    /// ?layout=clipped (round 12): the page clips the card frame to its postal-code row. A fill from a tap there writes no
+    /// detail that does not show: the number, expiry and security code stay empty.
+    func test09_ClippedFrameWritesNothingHidden() {
+        requireProviderReachable()
+        let postal = providerField("Postal code")
+        let number = providerField("Card number")
+        let expiry = providerField("Expiry")
+        let code = providerField("Security code")
+        let anyHiddenFilled = { !self.digits(number).isEmpty || !self.digits(expiry).isEmpty || !self.digits(code).isEmpty }
+        step("postal-tapped-and-fill-tried") {
+            openInSafari(checkout("clipped"), heading: "Checkout")
+            require(postal, "the postal code, the clipped frame's one visible field")
+            tapField(postal)
+            let fill = fillButton()
+            let line = popupSays(copyFromApp)
+            if !openPopup(until: { fill.exists || line.exists }, reach: .addressBar) {
+                XCTFail("the popup showed neither a Fill nor a line. It says: \(popupWords())")
+                return
+            }
+            if fill.exists {
+                scrollToComfort(fill, in: safari)
+                tapWhereItIs(fill, in: safari)
+                _ = matchFaceUntil(15, anyHiddenFilled)
+            }
+            let words = popupWords()
+            closePopup()
+            XCTAssertFalse(anyHiddenFilled(), "a detail the page clips away was written. The popup says: \(words). The frames saw: \(pageEvents())")
+        }
+    }
+
     // MARK: - Helpers
 
     private func checkout(_ layout: String) -> String {
@@ -214,8 +273,10 @@ final class T5CardFillTests: UITestCase {
         text(field).filter(\.isNumber)
     }
 
+    /// The card row's Fill into the provider's origin. Since round 12 it names the details it writes once a field is
+    /// chosen ("Fill this card's card number, expiry date, security code into …").
     private func fillButton() -> XCUIElement {
-        safari.webViews.buttons["Fill this card into \(Fixture.providerOrigin)"]
+        safari.webViews.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fill this card' AND label ENDSWITH %@", "into " + Fixture.providerOrigin)).firstMatch
     }
 
     /// The provider's frames are reachable once Safari lets the extension run on every website (test02 does it).
@@ -252,6 +313,18 @@ final class T5CardFillTests: UITestCase {
         return out.isEmpty ? "no event log" : out.joined(separator: " || ")
     }
 
+    /// Type [digits] into a page field, as a person types something else there: pressed until it has the keyboard.
+    private func typeDigits(_ digits: String, into field: XCUIElement, what: String) {
+        require(field, what)
+        tapField(field)
+        if !hasKeyboardFocus(field) {
+            XCTFail("\(what) never took the keyboard")
+            return
+        }
+        field.typeText(digits)
+        XCTAssertTrue(waitUntil(5) { self.digits(field) == digits }, "\(what) holds \(text(field)) after typing \(digits)")
+    }
+
     /// Press [field] (again when Safari took a tap as nothing): a press is what chooses a card field; a focus alone never
     /// does.
     private func tapField(_ field: XCUIElement) {
@@ -266,7 +339,7 @@ final class T5CardFillTests: UITestCase {
     /// field has the keyboard, answering the Face ID the app's handler asks before it releases the card, until [filled].
     /// The popup's unlock lasts 90 s (APP_VAULT_LIFETIME_MS): a Fill that meets its end finds the unlock screen, and is
     /// tried once more. The popup is closed after; a fill that did not come fails with what the popup and frames saw.
-    private func tapAndFill(_ field: XCUIElement, _ what: String, reach: PopupReach, until filled: @escaping () -> Bool) {
+    private func tapAndFill(_ field: XCUIElement, _ what: String, reach: PopupReach, checkLabel: ((String) -> Void)? = nil, until filled: @escaping () -> Bool) {
         require(field, what)
         tapField(field)
         shot("field-tapped")
@@ -280,6 +353,7 @@ final class T5CardFillTests: UITestCase {
                 return
             }
             scrollToComfort(fill, in: safari)
+            if let checkLabel, fill.exists { checkLabel(fill.label) }
             tapWhereItIs(fill, in: safari)
             if matchFaceUntil(20, { filled() || tapFirst.exists }) && filled() { break }
             if tapFirst.exists && !followed {

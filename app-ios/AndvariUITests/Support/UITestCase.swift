@@ -175,8 +175,9 @@ class UITestCase: XCTestCase {
     /// Tap where [element] is now, without failing the test if it went away in the meantime (a retry button that
     /// the thing it retries has just replaced). The tap lands on the app's own coordinates.
     func tapWhereItIs(_ element: XCUIElement, in application: XCUIApplication) {
-        guard element.exists else { return }
-        let frame = element.frame
+        // A snapshot, not `frame`: an element gone since `exists` throws here instead of failing the test.
+        guard element.exists, let snapshot = try? element.snapshot() else { return }
+        let frame = snapshot.frame
         guard !frame.isEmpty else { return }
         application.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
     }
