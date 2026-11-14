@@ -42,6 +42,31 @@ class SecretStreamAndMiscTest {
         assertFailsWith<CryptoException> { crypto.secretstreamDecrypt(key, enc.header, corrupt) }
     }
 
+    /**
+     * Round-10 review 6: a chunk that does not open, or a final tag out of place, leaves none of the chunks opened before
+     * it: both providers open a stream through [StreamChunks.open], which wipes them.
+     */
+    @Test
+    fun aStreamThatFailsLateLeavesNoEarlierChunkOpen() {
+        val handed = mutableListOf<ByteArray>()
+        assertFailsWith<CryptoException> {
+            StreamChunks.open(3, { 8 }) { i, into ->
+                handed += into
+                into.fill(0x5A)
+                if (i == 2) throw CryptoException("secretstream truncated or trailing data (final-tag mismatch)")
+            }
+        }
+        assertEquals(3, handed.size)
+        assertTrue(handed.all { chunk -> chunk.all { it == 0.toByte() } }, "every chunk opened before the failure is wiped")
+        val opened = StreamChunks.open(2, { it + 1 }) { i, into -> into.fill(i.toByte()) }
+        assertContentEquals(listOf(byteArrayOf(0), byteArrayOf(1, 1)).flatMap { it.toList() }, opened.flatMap { it.toList() }, "a stream that opens is handed back whole")
+        // And through a provider: the last chunk corrupted, the first one opened, the call still fails.
+        val key = crypto.randomBytes(32)
+        val enc = crypto.secretstreamEncrypt(key, listOf(crypto.randomBytes(100), crypto.randomBytes(100)))
+        val corrupt = enc.chunks.mapIndexed { i, c -> if (i == 1) c.copyOf().also { it[10] = (it[10].toInt() xor 1).toByte() } else c }
+        assertFailsWith<CryptoException> { crypto.secretstreamDecrypt(key, enc.header, corrupt) }
+    }
+
     @Test
     fun hibpParsing() {
         val hash = Hibp.sha1UpperHex(crypto, "password123")

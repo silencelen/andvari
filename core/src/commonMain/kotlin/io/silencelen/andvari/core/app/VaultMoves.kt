@@ -47,20 +47,51 @@ class VaultMoves(private val store: Store = Store.Memory()) {
          * Kept in [file] (app-private storage), sealed to the signed-in account ([account], null while locked) with a MAC
          * only it can make ([Account.sealLocalRecord]): a lock leaves nothing of it in memory, and only that account
          * opens it or writes one it accepts. Nothing is read or written while locked; an empty save removes the file
-         * whatever the state.
+         * whatever the state. A record this version cannot read is never dropped unsaid ([dropped] counts it).
          */
-        class Sealed(private val file: FillSnapshotStore, private val account: () -> Account?) : Store {
+        class Sealed(
+            private val file: FillSnapshotStore,
+            private val dropped: (Int) -> Unit = {},
+            private val account: () -> Account?,
+        ) : Store {
             override fun load(): Map<String, Kept> {
                 val owner = account() ?: return emptyMap()
                 val sealed = file.read() ?: return emptyMap()
-                // A memo that is not this account's own (its MAC does not hold, round-9 review 2) is dropped unread.
-                val plain = runCatching { owner.openLocalRecord(RECORD, sealed) }.getOrNull() ?: return emptyMap()
+                // A memo that is not this account's own (its MAC does not hold, round-9 review 2) is never replayed.
+                val plain = runCatching { owner.openLocalRecord(RECORD, sealed) }.getOrNull() ?: return carriedOver(owner, sealed)
                 return try {
-                    runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrDefault(emptyMap())
+                    decode(plain) ?: emptyMap()
                 } finally {
                     plain.fill(0)
                 }
             }
+
+            /**
+             * A record this version cannot read (round-10 review 3). One an earlier version wrote, a sealed box without the
+             * MAC that any co-member could have made, keeps its gestures marked [Kept.unverified]: never replayed, they only
+             * stop a second copy being made while theirs is in the target ([prepare]). Anything else is removed and counted.
+             */
+            private fun carriedOver(owner: Account, sealed: ByteArray): Map<String, Kept> {
+                val plain = runCatching { owner.openQueuedSave(sealed) }.getOrNull()
+                val earlier = plain?.let { p ->
+                    try {
+                        decode(p)
+                    } finally {
+                        p.fill(0)
+                    }
+                }
+                if (earlier == null) {
+                    file.delete()
+                    dropped(1)
+                    return emptyMap()
+                }
+                val marked = earlier.mapValues { it.value.copy(unverified = true) }
+                save(marked)
+                return marked
+            }
+
+            private fun decode(plain: ByteArray): Map<String, Kept>? =
+                runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrNull()
 
             override fun save(memos: Map<String, Kept>) {
                 if (memos.isEmpty()) {
@@ -96,17 +127,23 @@ class VaultMoves(private val store: Store = Store.Memory()) {
         }
     }
 
-    /** A kept gesture, and whether its copy was seen in the target (a try that failed after the copy was made). */
+    /**
+     * A kept gesture, whether its copy was seen in the target (a try that failed after the copy was made), and whether it
+     * came from a record an earlier version wrote ([unverified], round-10 review 3): such a gesture is never replayed.
+     */
     @Serializable
-    data class Kept(val gesture: MoveGesture, val copySeen: Boolean = false)
+    data class Kept(val gesture: MoveGesture, val copySeen: Boolean = false, val unverified: Boolean = false)
 
     /** What to do for a move or copy the person asked for. */
     sealed class Prepared {
         /** Run this gesture: the one an earlier try kept while the item is unchanged, or a new one. */
         class Run(val gesture: MoveGesture) : Prepared()
 
-        /** An earlier try already copied the item into the target, and the item changed since: nothing new is minted. */
-        class AlreadyCopied(val copyItemId: String) : Prepared()
+        /**
+         * An earlier try already copied the item into the target, and the item changed since ([changedSince]), or the try
+         * was kept by an earlier version (which is never replayed): nothing new is minted.
+         */
+        class AlreadyCopied(val copyItemId: String, val changedSince: Boolean = true) : Prepared()
     }
 
     /** How a gesture that threw ended, and what became of its memo. */
@@ -161,6 +198,15 @@ class VaultMoves(private val store: Store = Store.Memory()) {
             }
         }
         // Here a kept gesture's copy is in the target.
+        if (kept != null && kept.unverified) {
+            // Kept by an earlier version (round-10 review 3): its copy is there, so no second one is made, and its ids
+            // are never replayed (its record could have been written by anyone). The person is told; Cancel starts over.
+            if (!kept.copySeen) {
+                memos[k] = kept.copy(copySeen = true)
+                persist()
+            }
+            return Prepared.AlreadyCopied(kept.gesture.newItemId, changedSince = kept.gesture.sourceRev != item.rev)
+        }
         if (kept != null && kept.gesture.sourceRev == item.rev) return Prepared.Run(kept.gesture)
         if (kept != null) {
             if (!kept.copySeen) {
@@ -173,6 +219,11 @@ class VaultMoves(private val store: Store = Store.Memory()) {
         memos[k] = Kept(fresh)
         persist()
         return Prepared.Run(fresh)
+    }
+
+    /** Read what was kept now (at an unlock): a record this version cannot read is then said at once, not at the next move. */
+    fun check() {
+        memos()
     }
 
     /** The move or copy is done: its gesture goes. */
@@ -248,8 +299,12 @@ class VaultMoves(private val store: Store = Store.Memory()) {
             else -> null
         }
 
-        /** What a try says when an earlier try's copy is already in the target and the item changed since. */
-        fun alreadyCopiedLine(item: String, target: String): String =
-            "An earlier try already copied “$item” to “$target”, and it has changed since, so nothing more was done. Cancel to start over, or delete the copy you don't need."
+        /** What a try says when an earlier try's copy is already in the target and the item changed since ([changedSince]). */
+        fun alreadyCopiedLine(item: String, target: String, changedSince: Boolean = true): String =
+            if (changedSince) {
+                "An earlier try already copied “$item” to “$target”, and it has changed since, so nothing more was done. Cancel to start over, or delete the copy you don't need."
+            } else {
+                "An earlier try already copied “$item” to “$target”, so nothing more was done. Delete the copy you don't need, or Cancel to start over."
+            }
     }
 }

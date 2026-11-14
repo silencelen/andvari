@@ -33,6 +33,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.Dispatchers
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
+import platform.Foundation.NSURLRequestReloadIgnoringLocalCacheData
 import platform.UIKit.UIApplication
 import platform.UIKit.UIDevice
 import kotlin.coroutines.cancellation.CancellationException
@@ -297,9 +298,20 @@ internal class AppGroupServerShare(suite: String) : ServerShare {
     override fun publish(origin: String?) = prefs.putString(IOS_APP_SERVER_KEY, origin)
 }
 
-/** The Darwin engine, https only (loopback excepted), tagged "ios" for the server's version pins (spec 03 §1). */
+/**
+ * The Darwin engine, https only (loopback excepted), tagged "ios" for the server's version pins (spec 03 §1). No response
+ * is kept on disk (round-10 review 8): the system's URL cache lives in Library/Caches, and the only copy of the vault
+ * this app keeps is its own, sealed, where the policy allows one.
+ */
 internal object IosHttpClients : HttpClients {
-    override fun create(): HttpClient = HttpClient(Darwin).httpsOnly(IOS_CLEARTEXT_EXEMPT_HOSTS)
+    override fun create(): HttpClient = HttpClient(Darwin) {
+        engine {
+            configureSession {
+                this.URLCache = null
+                this.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData
+            }
+        }
+    }.httpsOnly(IOS_CLEARTEXT_EXEMPT_HOSTS)
 
     override val wirePlatform: String = "ios"
 

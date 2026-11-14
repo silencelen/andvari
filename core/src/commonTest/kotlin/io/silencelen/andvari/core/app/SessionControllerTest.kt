@@ -1440,6 +1440,159 @@ open class SessionControllerTest {
         assertEquals(AttachmentCopy.filesOnly("Example"), controller.state.notice)
     }
 
+    /**
+     * Round-10 review 5: a kept save is judged against the item as the server has it after a pull, not a cache an offline
+     * unlock left as it was. Here the unlock's own pull fails, the kept save's pull then brings another device's newer
+     * edit, and only the save's new file goes onto it: the file the save took off stays, as the notice says.
+     */
+    @Test
+    fun aKeptSaveIsJudgedAfterAPullAndKeepsTheFilesItTookOffWhenOnlyItsFilesGo() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(ITEM_ID)
+        assertEquals(ActionResult.Ok, controller.addAttachment("old.pdf", ByteArray(300) { 1 }))
+        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "hunter2", listOf("https://login.example.com/x"), "", "", false)))
+        controller.closeAttachmentDraft()
+        val old = assertNotNull(controller.itemDetail(ITEM_ID)).attachments.single().id
+        // Another item is saved after it, so the server's counter is past the revision the other device's edit gets below.
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Other", "", false)))
+        // An edit takes that file off and adds another; a lock cuts its save short.
+        controller.openAttachmentDraft(ITEM_ID)
+        controller.removeAttachment(old)
+        assertEquals(ActionResult.Ok, controller.addAttachment("new.pdf", ByteArray(400) { 2 }))
+        val new = assertNotNull(controller.state.attachmentDraft).added.single().id
+        files.gate = CompletableDeferred()
+        files.started = CompletableDeferred()
+        kotlinx.coroutines.coroutineScope {
+            val save = async { controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "pw-in-the-kept-save", listOf("https://login.example.com/x"), "", "", false)) }
+            withTimeout(10_000) { assertNotNull(files.started).await() }
+            controller.lock()
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        files.gate = null
+        // Another device changed the login meanwhile. The unlock's own pull fails; the next one brings that edit.
+        val cached = assertNotNull(namespaces.caches.getValue("$homeKey/${reg.userId}").getItem(ITEM_ID))
+        val elsewhere = cached.doc.copy(login = cached.doc.login!!.copy(password = "pw-elsewhere"))
+        val sealedElsewhere = enrolled.account.encryptItem(reg.personalVault.vaultId, ITEM_ID, elsewhere)
+        val newer = WireItem(ITEM_ID, reg.personalVault.vaultId, cached.rev + 1, 1_000, 9_000, false, false, sealedElsewhere.formatVersion, listOf(old), sealedElsewhere.blob)
+        val sync = routes.getValue("/sync")
+        var pulls = 0
+        routes["/sync"] = { request ->
+            when (++pulls) {
+                1 -> throw IOException("unreachable")
+                2 -> {
+                    val body = io.silencelen.andvari.core.model.SyncResponse(newer.rev, false, emptyList(), emptyList(), listOf(newer), emptyList())
+                    respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+                }
+                else -> sync(request)
+            }
+        }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null && controller.state.upload == null }
+        assertTrue(pulls >= 2, "the kept save pulled before it decided")
+        assertEquals("pw-elsewhere", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "the newer edit stands")
+        assertEquals(listOf(old, new), controller.itemDetail(ITEM_ID)?.attachments?.map { it.id }, "the new file is added; the one the save took off stays")
+        assertEquals(AttachmentCopy.filesOnly("Example", removalsNotKept = true), controller.state.notice)
+        assertTrue(assertNotNull(controller.state.notice).endsWith("the files it took off are still in the item."))
+    }
+
+    /**
+     * Round-10 review 2: a policy that forbids keeping data, seen while locked (the probe at launch or on the way back),
+     * takes the kept saves off the disk without opening them: the sealed record and the files move into memory as they
+     * are. Nothing is swept or deleted unseen; the next unlock opens them, and says they are kept in memory now.
+     */
+    @Test
+    fun aForbiddingPolicySeenWhileLockedMovesKeptSavesIntoMemoryUnopened() = test {
+        val log = InMemoryFillSnapshots()
+        val blobs = InMemoryBlobs()
+        val saves = PendingSaves(log, blobs) { true }
+        val doc = ItemDoc(type = "note", name = "Lease")
+        assertTrue(saves.keep(enrolled.account, PendingSave("p-1", null, "n-1", "v", 0, doc, listOf("f-1"))))
+        assertTrue(saves.putBlob("f-1", byteArrayOf(1, 2, 3)))
+        assertTrue(saves.putBlob("f-orphan", byteArrayOf(9)))
+        assertEquals(0, saves.leaveDisk(null), "locked: nothing can be opened, so nothing is counted yet")
+        assertNull(log.bytes, "the disk is emptied")
+        assertTrue(blobs.ids().isEmpty())
+        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"), "the files are in memory, encrypted as they were")
+        saves.sweep(enrolled.account, emptySet())
+        assertNotNull(saves.blob("f-orphan"), "nothing is swept before the unlock opens the record that names them")
+        val found = saves.unlocked(enrolled.account)
+        assertEquals(1, found.movedToMemory)
+        assertEquals(0, found.unreadable)
+        assertEquals(listOf("p-1"), saves.load(enrolled.account).map { it.id })
+        saves.sweep(enrolled.account, emptySet())
+        assertNull(saves.blob("f-orphan"), "an orphan goes once the record is open")
+        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"))
+        assertEquals(0, saves.unlocked(enrolled.account).movedToMemory, "said once")
+        // A sign-out while one is held takes it too.
+        assertTrue(saves.keep(enrolled.account, PendingSave("p-2", null, "n-2", "v", 0, doc, emptyList())))
+        saves.leaveDisk(null)
+        saves.dropAll()
+        assertEquals(0, saves.unlocked(enrolled.account).movedToMemory)
+    }
+
+    /** The same through the app: the probe on the way back finds the policy forbidding, and the unlock says what it kept. */
+    @Test
+    fun aKeptSaveOutlivesAForbiddingPolicySeenWhileLockedAndTheUnlockSaysSo() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(null)
+        assertEquals(ActionResult.Ok, controller.addAttachment("scan.pdf", ByteArray(5_000) { 3 }))
+        val fileId = assertNotNull(controller.state.attachmentDraft).added.single().id
+        files.gate = CompletableDeferred()
+        files.started = CompletableDeferred()
+        kotlinx.coroutines.coroutineScope {
+            val save = async { controller.saveLogin(null, LoginInput("Bank", "me", "pw", listOf("https://bank.example"), "", "", false)) }
+            withTimeout(10_000) { assertNotNull(files.started).await() }
+            controller.lock()
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        files.gate = null
+        assertNotNull(pendingLog.bytes)
+        routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(offlineCacheAllowed = false)), HttpStatusCode.OK, headers) }
+        clocks.wall += 2 * 60 * MINUTE // the policy read last is stale
+        controller.onForeground()
+        settle { pendingLog.bytes == null }
+        assertTrue(pendingFiles.ids().isEmpty(), "nothing is left on disk")
+        // The forbidding policy took the cached keys with it: they come from the server now.
+        twoStepServer()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.items.any { it.name == "Bank" } && controller.state.upload == null && pendingFiles.ids().isEmpty() }
+        assertTrue(seen.any { it.notice == AttachmentCopy.KEPT_IN_MEMORY }, "the unlock said the save is kept only in memory now")
+        val bank = controller.state.items.single { it.name == "Bank" }
+        assertEquals(listOf(fileId), controller.itemDetail(bank.itemId)?.attachments?.map { it.id }, "finished, with its file, under its id")
+    }
+
+    /**
+     * Round-10 review 3: what an earlier version kept on this device, in records without this version's MAC, is not
+     * dropped unsaid: one notice counts it (two saves with files, an entry of the list of automatic saves, and a kept
+     * move that cannot be read at all).
+     */
+    @Test
+    fun whatAnEarlierVersionKeptIsCountedInOneNoticeAtTheUnlock() = test {
+        seedSession()
+        fun earlier(plain: String) = crypto.sealTo(enrolled.account.identityPub, plain.encodeToByteArray())
+        val doc = ItemDoc(type = "note", name = "Lease")
+        val two = listOf(PendingSave("p-1", null, "n-1", "v", 0, doc, emptyList()), PendingSave("p-2", null, "n-2", "v", 0, doc, emptyList()))
+        pendingLog.write(earlier(json.encodeToString(kotlinx.serialization.builtins.ListSerializer(PendingSave.serializer()), two)))
+        appliedLog.write("[\"${Bytes.toB64(earlier("{}"))}\"]".encodeToByteArray())
+        moveMemoLog.write(byteArrayOf(1, 2, 3))
+        controller.startAndLand()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.notice == AttachmentCopy.earlierRecords(4) }
+        assertNull(pendingLog.bytes, "removed, and said")
+        assertNull(appliedLog.bytes)
+        assertNull(moveMemoLog.bytes)
+        assertTrue(assertNotNull(controller.state.notice).startsWith("4 things an earlier version of andvari kept on this device"))
+        // Said once: the next unlock finds nothing more.
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        delay(100)
+        assertNotEquals(AttachmentCopy.earlierRecords(4), controller.state.notice)
+    }
+
     /** Round-9 review 1: a file is listed and opened under a name that is safe to show and to offer to Files. */
     @Test
     fun aFilesNameFromAnotherClientIsMadeSafeEverywhereItIsShown() = test {
@@ -1685,6 +1838,40 @@ open class SessionControllerTest {
         controller.cancelMove(ITEM_ID)
         assertEquals(ActionResult.Ok, controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
         assertEquals(2, copies())
+    }
+
+    /**
+     * Round-10 review 3: a move an earlier version kept (its record has no MAC, so anyone who could write the file could
+     * have written it) is never replayed. While its copy is in the target, no second copy is made and the person is told;
+     * Cancel starts over. The record is carried over in this version's form, marked.
+     */
+    @Test
+    fun aMoveAnEarlierVersionKeptIsNeverReplayedAndMakesNoSecondCopy() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        val family = controller.moveTargets(ITEM_ID).single()
+        val pushed = mutableListOf<io.silencelen.andvari.core.model.Mutation>()
+        moveServer(server, delete = "denied", pushed)
+        assertIs<ActionResult.Failed>(controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true))
+        val copy = pushed.single { it.op == "put" }.itemId
+        // The same kept move, as an earlier version wrote it: a sealed box without the MAC.
+        val plain = assertNotNull(enrolled.account.openLocalRecord("move-memos", assertNotNull(moveMemoLog.bytes)))
+        moveMemoLog.write(crypto.sealTo(enrolled.account.identityPub, plain))
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertNotNull(enrolled.account.openLocalRecord("move-memos", assertNotNull(moveMemoLog.bytes)), "carried over in this version's form")
+        moveServer(server, delete = "applied", pushed)
+        val before = pushed.size
+        assertEquals(
+            ActionResult.Failed("An earlier try already copied “Example” to “Family”, so nothing more was done. Delete the copy you don't need, or Cancel to start over."),
+            controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true),
+        )
+        assertEquals(before, pushed.size, "nothing replayed: no second copy, and the original stays")
+        assertTrue(controller.state.items.any { it.itemId == ITEM_ID } && controller.state.items.any { it.itemId == copy })
+        controller.cancelMove(ITEM_ID)
+        assertEquals(ActionResult.Ok, controller.moveOrCopyItem(ITEM_ID, family.vaultId, move = true), "a new move is the person's own choice")
     }
 
     /**

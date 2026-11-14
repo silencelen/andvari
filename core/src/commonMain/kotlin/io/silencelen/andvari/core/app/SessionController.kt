@@ -206,6 +206,7 @@ open class SessionController(
             update { it.copy(items = summaries(it.query)) }
             writeFillSnapshot()
         },
+        dropped = { droppedEarlier(it) },
     )
 
     /** Saves with new files, kept until they are done: on disk while the origin's policy allows an offline cache, else in memory. */
@@ -1360,8 +1361,11 @@ open class SessionController(
     private fun landed(live: VaultSession.Unlocked, p: PendingSave): Boolean =
         live.engine.item(p.newItemId)?.doc?.attachments?.map { it.id }?.containsAll(p.newFiles) == true
 
-    /** How a kept save was finished: the save's outcome, and whether only its files went onto the item as it is now. */
-    private class Finished(val outcome: SaveOutcome, val filesOnly: Boolean)
+    /**
+     * How a kept save was finished: the save's outcome, whether only its new files went onto the item as it is now, and
+     * whether files it took off are still in the item because of that.
+     */
+    private class Finished(val outcome: SaveOutcome, val filesOnly: Boolean, val removalsNotKept: Boolean = false)
 
     /**
      * Send a kept save's new files, then the item that names them; the save is let go once the server has the item.
@@ -1370,8 +1374,10 @@ open class SessionController(
      * The editor's own save ([resumed] false) goes from the revision it was edited from, so someone else's change made
      * meanwhile is kept as a conflict copy, never overwritten; edits of this device still waiting to be sent are in the
      * document it was built from, so they are folded into it. A save finished later ([resumed]) is older than what may
-     * have happened since (round-9 review 3): when the item's revision moved, or an edit of it waits to be sent, only
-     * its files go onto the item as it is now, and nothing else of the older save overwrites a newer edit.
+     * have happened since (round-9 review 3), and is judged against the item as the server has it after a pull
+     * ([resumePendingSaves], round-10 review 5): when the item's revision moved, or an edit of it waits to be sent, only
+     * its new files are added to the item as it is now. Nothing else of the older save is applied, the files it took off
+     * included (they stay, and the notice says so).
      */
     private suspend fun finishPendingSave(live: VaultSession.Unlocked, p: PendingSave, resumed: Boolean): Finished? {
         val refs = p.doc.attachments.associateBy { it.id }
@@ -1397,8 +1403,9 @@ open class SessionController(
                 val waiting = p.itemId != null && live.engine.hasPendingSync(p.itemId)
                 val finished = if (resumed && current != null && (current.rev != p.baseRev || waiting)) {
                     val added = p.doc.attachments.filter { it.id in p.newFiles }
-                    val files = current.doc.attachments.filter { it.id !in p.removedFiles && it.id !in p.newFiles } + added
-                    Finished(live.engine.saveWithUploads(p.itemId, current.doc.copy(attachments = files), emptyList(), p.vaultId), filesOnly = true)
+                    val files = current.doc.attachments.filter { it.id !in p.newFiles } + added
+                    val removalsNotKept = current.doc.attachments.any { it.id in p.removedFiles }
+                    Finished(live.engine.saveWithUploads(p.itemId, current.doc.copy(attachments = files), emptyList(), p.vaultId), filesOnly = true, removalsNotKept = removalsNotKept)
                 } else {
                     val outcome = live.engine.saveWithUploads(
                         p.itemId, p.doc, emptyList(), p.vaultId,
@@ -1423,6 +1430,12 @@ open class SessionController(
     private fun resumePendingSaves() {
         val live = session.get() ?: return
         if (resuming?.isActive == true) return
+        // What a policy probe took off the disk while locked is opened now, and what an earlier version left is counted:
+        // either is said (round-10 reviews 2 and 3).
+        runCatching { pendingSaves.unlocked(live.account) }.getOrNull()?.let { found ->
+            if (found.movedToMemory > 0) update { it.copy(notice = AttachmentCopy.KEPT_IN_MEMORY) }
+            droppedEarlier(found.unreadable)
+        }
         val kept = runCatching {
             pendingSaves.sweep(live.account, draft?.added?.mapTo(HashSet()) { it.id }.orEmpty())
             pendingSaves.load(live.account)
@@ -1430,14 +1443,24 @@ open class SessionController(
         if (kept.isEmpty()) return
         resuming = scope.launch {
             var done = 0
-            val filesOnly = mutableListOf<String>()
+            val filesOnly = mutableListOf<Pair<String, Boolean>>()
             try {
+                // Pull first, then decide (round-10 review 5): whether a kept save landed, or its item changed since, is
+                // judged against the server's copy, not a cache an offline unlock left as it was. No pull, nothing is
+                // decided: the saves stay kept for the next unlock.
+                try {
+                    runBounded(BoundedOps.FLAT_MS) { syncNow(live.engine) }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    if (session.get() === live) update { it.copy(notice = AttachmentCopy.savedLater(kept.first().doc.name.ifBlank { "An item" })) }
+                    return@launch
+                }
                 for (p in kept) {
                     if (session.get() !== live) return@launch
                     if (draft?.keptId == p.id) continue // its editor is open: its own Save finishes it
                     try {
                         val finished = finishPendingSave(live, p, resumed = true) ?: return@launch
-                        if (finished.filesOnly) filesOnly += p.doc.name.ifBlank { "An item" }
+                        if (finished.filesOnly) filesOnly += p.doc.name.ifBlank { "An item" } to finished.removalsNotKept
                         done++
                     } catch (t: Throwable) {
                         if (t is CancellationException) throw t
@@ -1456,7 +1479,7 @@ open class SessionController(
             }
             if (done > 0 && session.get() === live) {
                 val said = when {
-                    filesOnly.isNotEmpty() -> AttachmentCopy.filesOnly(filesOnly.first())
+                    filesOnly.isNotEmpty() -> AttachmentCopy.filesOnly(filesOnly.first().first, filesOnly.first().second)
                     done == 1 -> AttachmentCopy.KEPT_SAVE_DONE
                     else -> "$done ${AttachmentCopy.KEPT_SAVES_DONE}"
                 }
@@ -1464,6 +1487,16 @@ open class SessionController(
                 writeFillSnapshot()
             }
         }
+    }
+
+    /** What an earlier version kept on this device and this one could not carry over, counted since the unlock: one notice. */
+    private var earlierDropped = 0
+
+    /** [count] more things an earlier version kept could not be carried over (round-10 review 3): the notice says how many. */
+    private fun droppedEarlier(count: Int) {
+        if (count <= 0) return
+        earlierDropped += count
+        update { it.copy(notice = AttachmentCopy.earlierRecords(earlierDropped)) }
     }
 
     /** A kept save the server refuses for good: an item gone or moved, a vault this account may no longer write, too large. */
@@ -1884,7 +1917,7 @@ open class SessionController(
      * that Try again replays the same ids, and across a lock sealed to the account in app-private storage (they name
      * new attachment keys, so never in memory while locked).
      */
-    private val moves = VaultMoves(VaultMoves.Store.Sealed(moveMemoLog) { session.get()?.account })
+    private val moves = VaultMoves(VaultMoves.Store.Sealed(moveMemoLog, ::droppedEarlier) { session.get()?.account })
 
     /** The person cancelled moving or copying [itemId]: what an unfinished try kept goes. A lock is not a cancel. */
     fun cancelMove(itemId: String) {
@@ -1916,7 +1949,7 @@ open class SessionController(
             // A kept try could not be checked against the target (offline): nothing is replayed unchecked.
             return@action idleFailed(ItemCopy.MOVE_RETRY)
         }) {
-            is VaultMoves.Prepared.AlreadyCopied -> return@action ActionResult.Failed(VaultMoves.alreadyCopiedLine(name, target))
+            is VaultMoves.Prepared.AlreadyCopied -> return@action ActionResult.Failed(VaultMoves.alreadyCopiedLine(name, target, prepared.changedSince))
             is VaultMoves.Prepared.Run -> prepared.gesture
         }
         busy()
@@ -2249,6 +2282,7 @@ open class SessionController(
         refreshSaveQueue()
         refreshPersonalVault()
         resumeTwoStep()
+        runCatching { moves.check() } // a kept move this version cannot read is said now, not at the next move
         resumePendingSaves()
     }
 
@@ -2443,7 +2477,7 @@ open class SessionController(
         when (first) {
             FirstSync.Done -> {}
             // A notice about captured logins that were removed is not replaced by the weaker "offline" one.
-            FirstSync.Offline -> update { if (it.notice == SAVES_UNREADABLE) it else it.copy(notice = OFFLINE) }
+            FirstSync.Offline -> update { if (it.notice == SAVES_UNREADABLE || earlierDropped > 0) it else it.copy(notice = OFFLINE) }
             FirstSync.UpgradeRequired -> update { it.copy(busy = false, screen = AppScreen.UPGRADE_REQUIRED, upgradeMessage = UPGRADE_REQUIRED) }
             is FirstSync.Failed -> update { it.copy(error = first.message) }
         }
@@ -2551,6 +2585,7 @@ open class SessionController(
         val pending = twoStepPending
         if (!ordinaryLock || (pending != null && clocks.monotonicMs() - pending.mintedAtMs !in 0 until TWO_STEP_PENDING_MS)) twoStepPending = null
         deletedVaults = emptyMap()
+        earlierDropped = 0
     }
 
     private fun lock(reason: String?) {

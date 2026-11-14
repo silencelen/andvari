@@ -23,6 +23,29 @@ class KeyPairBytes(val publicKey: ByteArray, val privateKey: ByteArray)
 
 class SecretStreamResult(val header: ByteArray, val chunks: List<ByteArray>)
 
+/** Opening a secretstream's chunks, as both providers do it (round-10 review 6). */
+internal object StreamChunks {
+    /**
+     * The [count] chunks of a stream opened in order: [pull] fills chunk i's plaintext into the array it is given (of
+     * [sizeOf] bytes) and throws when it does not open or its tag is out of place. Every chunk opened before one that
+     * fails is wiped, so a later chunk, or the final tag, cannot leave earlier plaintext behind.
+     */
+    inline fun open(count: Int, sizeOf: (Int) -> Int, pull: (Int, ByteArray) -> Unit): List<ByteArray> {
+        val out = ArrayList<ByteArray>(count)
+        try {
+            for (i in 0 until count) {
+                val message = ByteArray(sizeOf(i))
+                out += message
+                pull(i, message)
+            }
+        } catch (t: Throwable) {
+            out.forEach { it.fill(0) }
+            throw t
+        }
+        return out
+    }
+}
+
 /**
  * Platform gateway to libsodium plus the two platform hash primitives the spec
  * needs that libsodium does not ship (HMAC-SHA-1 for TOTP, SHA-1 for HIBP).

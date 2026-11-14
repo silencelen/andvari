@@ -44,6 +44,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.silencelen.andvari.core.app.AttachmentRules
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.BackupPreflight
 import io.silencelen.andvari.core.client.DecryptedItemVersion
@@ -2713,7 +2714,7 @@ private fun Detail(state: DesktopState, item: VaultItem, vaultBadge: String?, on
                     if (state.downloadingAttachmentId == ref.id) {
                         Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                             CircularProgressIndicator(
-                                Modifier.size(18.dp).semantics { contentDescription = "saving ${ref.name}"; stateDescription = "working" },
+                                Modifier.size(18.dp).semantics { contentDescription = "saving ${AttachmentRules.safeFileName(ref.name)}"; stateDescription = "working" },
                                 strokeWidth = 2.dp,
                             )
                         }
@@ -3125,7 +3126,7 @@ private fun AttachmentLine(ref: AttachmentRef, action: @Composable () -> Unit) {
         Icon(Icons.Default.AttachFile, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
-            Text(ref.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+            Text(AttachmentRules.safeFileName(ref.name), style = MaterialTheme.typography.bodyMedium, maxLines = 1) // round-10 review 1
             Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         action()

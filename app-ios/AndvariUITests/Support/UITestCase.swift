@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 
 /// What the tests need to know about the job's backend. The workflow passes these as TEST_RUNNER_ variables; the
@@ -27,6 +28,12 @@ enum Fixture {
     static let sitePassword = "alice-Passw0rd-site"
     static let httpItem = "UITest Plain HTTP"
     static let seededNames = ["UITest Site", "UITest Site second", "UITest Plain HTTP", "Example Mail", "No Address", "UITest Note", "UITest Card"]
+
+    /// The first 16 hex digits of a value's SHA-256: how the test site's page shows what a form submitted
+    /// (app-ios/uitest/serve-site.py), so a test compares it with the seeded value without the page showing the value.
+    static func digest(_ value: String) -> String {
+        String(SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16))
+    }
 }
 
 /// A test is a list of named steps. Every step ends with a screenshot, kept in the result bundle and written as

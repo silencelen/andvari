@@ -70,30 +70,90 @@ object AttachmentRules {
     const val FALLBACK_NAME = "File"
 
     /**
-     * A file's name as this app shows it and offers it to Files (round-9 review 1). A name is whatever the person or
-     * client that added the file wrote, a co-member's included, so it is never trusted as a path: the last part after
-     * any `/` or `\`, without control, format or bidirectional characters (a right-to-left override can make a name
-     * that ends in "exe" read as one that ends in "jpg"), without leading dots or spaces (no "..", no hidden file), `:`
-     * made a hyphen, at most [MAX_NAME_CHARS] characters with its extension kept, and [FALLBACK_NAME] when nothing is
-     * left.
+     * A file's name as every app shows it and offers it to a save dialog or Files (round-9 review 1, round-10 reviews 1
+     * and 4; Android and the desktop app use it too). A name is whatever the person or client that added the file
+     * wrote, a co-member's included, so it is never trusted as a path or as text that shows what it is: the last part
+     * after any `/` or `\`, read by code point, without anything that does not show as itself ([hidden]: control,
+     * format and bidirectional characters, so a right-to-left override cannot make a name that ends in "exe" read as one
+     * that ends in "pdf"; surrogates, private-use and unassigned characters, line and paragraph separators, tags,
+     * variation selectors, fillers and blanks), every run of spaces one space, no leading dots or spaces (no "..", no
+     * hidden file) and no trailing ones, `:` made a hyphen, and at most [MAX_NAME_CHARS] code points with its extension
+     * kept. A name that was only an extension keeps it after [FALLBACK_NAME] (".pdf" is "File.pdf"), and a name that
+     * leaves nothing is [FALLBACK_NAME].
      */
     fun safeFileName(raw: String): String {
         val last = raw.substringAfterLast('/').substringAfterLast('\\')
-        val clean = buildString {
-            for (c in last) {
-                when {
-                    c.code < 0x20 || c.code in 0x7F..0x9F -> {}
-                    c.code in 0x200B..0x200F || c.code in 0x2028..0x202E || c.code in 0x2060..0x206F || c.code == 0xFEFF || c.code == 0x061C || c.code == 0x00AD -> {}
-                    c == ':' -> append('-')
-                    else -> append(c)
-                }
+        val points = ArrayList<Int>(last.length)
+        var i = 0
+        while (i < last.length) {
+            val c = last[i]
+            val cp = if (c.isHighSurrogate() && i + 1 < last.length && last[i + 1].isLowSurrogate()) {
+                (0x10000 + ((c.code - 0xD800) shl 10) + (last[i + 1].code - 0xDC00)).also { i += 2 }
+            } else {
+                c.code.also { i += 1 }
             }
-        }.trimEnd().trimStart(' ', '.').trimEnd('.', ' ')
-        if (clean.isEmpty()) return FALLBACK_NAME
-        if (clean.length <= MAX_NAME_CHARS) return clean
-        val dot = clean.lastIndexOf('.')
-        val ext = if (dot > 0 && clean.length - dot <= 16) clean.substring(dot) else ""
-        return clean.take(MAX_NAME_CHARS - ext.length).trimEnd().trimEnd('.', ' ') + ext
+            when {
+                hidden(cp) -> {}
+                isSpace(cp) -> if (points.isNotEmpty() && points.last() != SPACE) points += SPACE
+                cp == ':'.code -> points += '-'.code
+                else -> points += cp
+            }
+        }
+        var start = 0
+        while (start < points.size && (points[start] == SPACE || points[start] == DOT)) start++
+        var end = points.size
+        while (end > start && (points[end - 1] == SPACE || points[end - 1] == DOT)) end--
+        var name: List<Int> = points.subList(start, end)
+        if (name.isEmpty()) return FALLBACK_NAME
+        // Only an extension (".pdf"): it stays one, after the fallback name, rather than becoming the name ("pdf").
+        if (points.subList(0, start).contains(DOT) && DOT !in name) name = codePoints("$FALLBACK_NAME.") + name
+        if (name.size > MAX_NAME_CHARS) {
+            val dot = name.lastIndexOf(DOT)
+            val ext = if (dot > 0 && name.size - dot <= 16) name.subList(dot, name.size) else emptyList()
+            var head = name.subList(0, MAX_NAME_CHARS - ext.size)
+            while (head.isNotEmpty() && (head.last() == SPACE || head.last() == DOT)) head = head.subList(0, head.size - 1)
+            name = head + ext
+        }
+        return buildString { for (cp in name) appendPoint(cp) }
+    }
+
+    private const val SPACE = 0x20
+    private const val DOT = 0x2E
+
+    /**
+     * A code point that does not show as itself in a name: control (Cc), format (Cf, bidirectional controls among them),
+     * surrogate (Cs), private-use (Co) and unassigned characters, line and paragraph separators (Zl, Zp), tags
+     * (U+E0000 to U+E007F), variation selectors, the Hangul fillers, the blank Braille pattern, and the combining marks
+     * that draw nothing. Outside the Basic Multilingual Plane, where the platform has no character table, the format and
+     * private-use ranges are listed.
+     */
+    private fun hidden(cp: Int): Boolean = when {
+        cp < 0x20 || cp in 0x7F..0x9F -> true
+        cp in 0xD800..0xDFFF -> true
+        cp in 0xE000..0xF8FF || cp >= 0xF0000 -> true
+        cp == 0x2028 || cp == 0x2029 -> true
+        cp in 0xE0000..0xE007F -> true
+        cp in 0xFE00..0xFE0F || cp in 0xE0100..0xE01EF || cp in 0x180B..0x180F -> true
+        cp == 0x115F || cp == 0x1160 || cp == 0x3164 || cp == 0xFFA0 -> true
+        cp == 0x2800 -> true
+        cp == 0x034F || cp == 0x17B4 || cp == 0x17B5 -> true
+        cp == 0x110BD || cp == 0x110CD || cp in 0x13430..0x1343F || cp in 0x1BCA0..0x1BCA3 || cp in 0x1D173..0x1D17A -> true
+        cp <= 0xFFFF -> cp.toChar().category.let { it == CharCategory.FORMAT || it == CharCategory.UNASSIGNED }
+        else -> false
+    }
+
+    /** A space of any width (Zs): it becomes one plain space. */
+    private fun isSpace(cp: Int): Boolean = cp == SPACE || (cp <= 0xFFFF && cp.toChar().category == CharCategory.SPACE_SEPARATOR)
+
+    private fun codePoints(s: String): List<Int> = s.map { it.code }
+
+    private fun StringBuilder.appendPoint(cp: Int) {
+        if (cp < 0x10000) {
+            append(cp.toChar())
+        } else {
+            append((0xD800 + ((cp - 0x10000) shr 10)).toChar())
+            append((0xDC00 + ((cp - 0x10000) and 0x3FF)).toChar())
+        }
     }
 
     /** Why a file of [size] bytes cannot join files that come to [held] bytes, or null when it can. */
@@ -118,8 +178,18 @@ internal object AttachmentCopy {
 
     fun savedLater(name: String) = "“$name” has not been saved with its files yet. andvari tries again the next time you unlock."
 
-    fun filesOnly(name: String) =
-        "“$name” was changed after a save with files was cut short: its files were added to it as it is now, and any other change in that save was not kept."
+    fun filesOnly(name: String, removalsNotKept: Boolean = false) =
+        "“$name” was changed after a save with files was cut short: the files it added were added to it as it is now, and nothing else of that save was kept" +
+            (if (removalsNotKept) ": the files it took off are still in the item." else ".")
+
+    /**
+     * Round-10 review 3: what an earlier version of andvari kept on this device and this one could not carry over (its
+     * records were not protected the way this version's are), counted, in one notice.
+     */
+    fun earlierRecords(count: Int) =
+        (if (count == 1) "One thing an earlier version of andvari kept on this device" else "$count things an earlier version of andvari kept on this device") +
+            " (a save with files that was cut short, a move that did not finish, or an entry in the list of automatic saves) could not be carried over to this version, so " +
+            (if (count == 1) "it was" else "they were") + " removed. Check that your recent changes are there, and make again any that are missing."
 
     const val KEPT_IN_MEMORY =
         "This server no longer allows keeping data on this device, so a save with files that was cut short is kept only while andvari stays open."
@@ -190,11 +260,11 @@ class InMemoryBlobs : BlobStore {
 
 /**
  * The kept saves ([PendingSave]) and their files. A kept save is sealed to the signed-in account with a MAC only it can
- * make ([Account.sealLocalRecord], round-9 review 2), so one written by anyone else is dropped unread. It is kept on
- * disk ([disk], [diskBlobs]) when the origin's policy allows an offline cache ([durable], read when it is kept), and
- * only in memory otherwise, as the save queue is (design 2026-11-09, "Saving"). Both are read, so a save kept before
- * the policy changed is still found with its files ([leaveDisk] moves the disk's into memory when it forbids them).
- * The lists are read and written only while unlocked; an empty list removes its log.
+ * make ([Account.sealLocalRecord], round-9 review 2), so one written by anyone else is never read. It is kept on disk
+ * ([disk], [diskBlobs]) when the origin's policy allows an offline cache ([durable], read when it is kept), and only in
+ * memory otherwise, as the save queue is (design 2026-11-09, "Saving"). Both are read, so a save kept before the policy
+ * changed is still found with its files ([leaveDisk] moves the disk's into memory when it forbids them, locked or not).
+ * The lists are read and written only while unlocked, after [unlocked] has run; an empty list removes its log.
  */
 internal class PendingSaves(private val disk: FillSnapshotStore, private val diskBlobs: BlobStore, private val durable: () -> Boolean) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -202,14 +272,67 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
     private val memoryLog = InMemoryFillSnapshots()
     private val memoryBlobs = InMemoryBlobs()
 
-    private fun read(log: FillSnapshotStore, account: Account): List<PendingSave> {
-        val record = log.read() ?: return emptyList()
-        val plain = runCatching { account.openLocalRecord(RECORD, record) }.getOrNull() ?: return emptyList()
+    /** Sealed records taken off the disk while locked ([leaveDisk]): opaque until the next unlock opens them ([unlocked]). */
+    private val held = ArrayList<ByteArray>()
+
+    /** The saves [record] holds, when this account wrote it for kept saves; null otherwise. */
+    private fun open(account: Account, record: ByteArray): List<PendingSave>? {
+        val plain = runCatching { account.openLocalRecord(RECORD, record) }.getOrNull() ?: return null
         return try {
-            runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrDefault(emptyList())
+            runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrNull()
         } finally {
             plain.fill(0)
         }
+    }
+
+    private fun read(log: FillSnapshotStore, account: Account): List<PendingSave> {
+        val record = log.read() ?: return emptyList()
+        return open(account, record).orEmpty()
+    }
+
+    /**
+     * How many saves a record this version cannot read held, to say so (round-10 review 3): one an earlier version wrote
+     * (a sealed box without the MAC) is opened only to count them, and nothing in it is used; anything else counts as one.
+     */
+    private fun countUnreadable(account: Account, record: ByteArray): Int {
+        val plain = runCatching { account.openQueuedSave(record) }.getOrNull() ?: return 1
+        return try {
+            runCatching { json.decodeFromString(serializer, plain.decodeToString()).size }.getOrNull()?.coerceAtLeast(1) ?: 1
+        } finally {
+            plain.fill(0)
+        }
+    }
+
+    /** What an unlock found ([unlocked]): saves moved into memory while locked, and saves in records that could not be read. */
+    class Found(val movedToMemory: Int, val unreadable: Int)
+
+    /**
+     * At an unlock, before anything reads the kept saves: the records taken off the disk while locked (a policy that
+     * forbids keeping data, round-10 review 2) are opened and join the ones in memory, and a record on disk this version
+     * cannot read (an earlier version's, round-10 review 3) is removed. Both are counted, for the notices that say so:
+     * nothing kept goes unsaid.
+     */
+    fun unlocked(account: Account): Found {
+        var moved = 0
+        var unreadable = 0
+        val records = held.toList()
+        held.clear()
+        for (record in records) {
+            val saves = open(account, record)
+            if (saves == null) {
+                unreadable += countUnreadable(account, record)
+            } else if (saves.isNotEmpty()) {
+                val kept = read(memoryLog, account).filter { m -> saves.none { it.id == m.id } }
+                if (write(memoryLog, account, kept + saves)) moved += saves.size else unreadable += saves.size
+            }
+            record.fill(0)
+        }
+        val onDisk = runCatching { disk.read() }.getOrNull()
+        if (onDisk != null && open(account, onDisk) == null) {
+            unreadable += countUnreadable(account, onDisk)
+            runCatching { disk.delete() }
+        }
+        return Found(moved, unreadable)
     }
 
     private fun write(log: FillSnapshotStore, account: Account, saves: List<PendingSave>): Boolean {
@@ -262,14 +385,18 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
 
     /** The files no kept save names and [inUse] does not hold (an editor the app was closed in left them): they go. */
     fun sweep(account: Account, inUse: Set<String>) {
+        if (held.isNotEmpty()) return // their files are named by records not opened yet ([unlocked] first)
         val named = load(account).flatMapTo(HashSet()) { it.newFiles }
         for (store in listOf(memoryBlobs, diskBlobs)) store.ids().filter { it !in named && it !in inUse }.forEach { store.delete(it) }
     }
 
     /**
-     * The policy no longer allows keeping data on this device (round-9 review 8): what is kept on disk goes, the saves
-     * of [account] (when it is unlocked) moved into memory first with their files, so they are still finished while the
-     * app runs. How many were moved, for the notice that says so.
+     * The policy no longer allows keeping data on this device (round-9 review 8): what is kept on disk goes, moved into
+     * memory first, so the saves are still finished while the app runs. Unlocked, the saves of [account] are moved with
+     * their files, and how many is returned for the notice that says so. Locked ([account] null, a policy probe at
+     * launch or on return, round-10 review 2), nothing can be opened and nothing is deleted unseen: the sealed record
+     * and every file, encrypted as they are, move into memory as opaque bytes, and the next unlock opens them and says
+     * so ([unlocked]).
      */
     fun leaveDisk(account: Account?): Int {
         var moved = 0
@@ -285,6 +412,14 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
                 val kept = read(memoryLog, account).filter { m -> onDisk.none { it.id == m.id } }
                 if (write(memoryLog, account, kept + onDisk)) moved = onDisk.size
             }
+        } else {
+            runCatching { disk.read() }.getOrNull()?.let { held += it }
+            for (id in runCatching { diskBlobs.ids() }.getOrDefault(emptyList())) {
+                runCatching { diskBlobs.get(id) }.getOrNull()?.let { bytes ->
+                    memoryBlobs.put(id, bytes)
+                    bytes.fill(0)
+                }
+            }
         }
         runCatching { disk.delete() }
         runCatching { diskBlobs.clear() }
@@ -297,6 +432,8 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
         runCatching { diskBlobs.clear() }
         memoryLog.delete()
         memoryBlobs.clear()
+        held.forEach { it.fill(0) }
+        held.clear()
     }
 
     companion object {
