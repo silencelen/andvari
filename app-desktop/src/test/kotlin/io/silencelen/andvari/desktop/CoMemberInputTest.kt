@@ -58,8 +58,26 @@ class CoMemberInputTest {
         }
         assertEquals("report.pdf", SaveTarget.defaultName("report.pdf"), "an ordinary name is left alone")
         assertEquals("_CON.txt", SaveTarget.defaultName("CON.txt"), "a Windows device name is defused")
-        assertEquals("attachment", SaveTarget.defaultName(""))
+        assertEquals("File", SaveTarget.defaultName(""), "the name every app shows for a name that leaves nothing")
         assertTrue(SaveTarget.defaultName("x".repeat(10_000)).length <= SaveTarget.MAX_NAME_CHARS)
+    }
+
+    /**
+     * Round-10 review 1: the dialog is pre-filled with the name every app shows (core AttachmentRules.safeFileName),
+     * then Windows' rules, so a right-to-left override cannot make "invoice<RLO>fdp.exe" read as "invoiceexe.pdf", and
+     * the attachment list shows that same name.
+     */
+    @Test
+    fun theSaveDialogDefault_showsWhatTheFileIs() {
+        assertEquals("invoicefdp.exe", SaveTarget.defaultName("invoice\u202Efdp.exe"))
+        assertEquals("ab.pdf", SaveTarget.defaultName("a\u2066\uDB40\uDC41\u3164b.pdf"), "isolates, tags and fillers go too")
+        assertEquals("File.pdf", SaveTarget.defaultName(".pdf"), "only an extension keeps it")
+        assertEquals("a_b.pdf", SaveTarget.defaultName("a?b.pdf"), "then Windows' reserved characters")
+        assertEquals("_CON.pdf", SaveTarget.defaultName("\u202ECON.pdf"), "and its device names, after what does not show is gone")
+        val ui = listOf(java.io.File("src/main/kotlin/io/silencelen/andvari/desktop/Ui.kt"), java.io.File("app-desktop/src/main/kotlin/io/silencelen/andvari/desktop/Ui.kt"))
+            .first { it.isFile }.readText()
+        assertFalse(ui.contains("Text(ref.name"), "an attachment's name is shown as AttachmentRules.safeFileName has it")
+        assertTrue(ui.contains("Text(AttachmentRules.safeFileName(ref.name)"))
     }
 
     @Test

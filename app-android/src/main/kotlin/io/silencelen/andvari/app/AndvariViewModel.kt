@@ -2251,7 +2251,9 @@ class AndvariViewModel(
                 // try already made the copy mints nothing new.
                 val g = when (val prepared = moves.prepare(e, current, targetVaultId, move) { runBounded(BoundedOps.FLAT_MS) { e.sync() } }) {
                     is VaultMoves.Prepared.AlreadyCopied -> {
-                        _ui.value = _ui.value.copy(busy = false, error = VaultMoves.alreadyCopiedLine(names.first, names.second))
+                        // Also a gesture an earlier version kept (round-10 review 3): its copy is in the target, so no
+                        // second copy is made, and its ids are never replayed.
+                        _ui.value = _ui.value.copy(busy = false, error = VaultMoves.alreadyCopiedLine(names.first, names.second, prepared.changedSince))
                         return@launch
                     }
                     is VaultMoves.Prepared.Run -> prepared.gesture
@@ -2747,7 +2749,7 @@ class AndvariViewModel(
                     val plain = runBounded(BoundedOps.attachmentMs(ref.size)) { engine!!.downloadAttachment(ref) } // H10
                     try { write(plain) } finally { plain.fill(0) }
                 }
-                _ui.value = _ui.value.copy(busy = false, notice = "Saved ${ref.name}")
+                _ui.value = _ui.value.copy(busy = false, notice = "Saved ${io.silencelen.andvari.core.app.AttachmentRules.safeFileName(ref.name)}")
             } catch (t: Throwable) {
                 fail(t)
             }

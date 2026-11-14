@@ -128,18 +128,22 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
         require(key.size == SecretStream.KEYBYTES) { "secretstream key must be ${SecretStream.KEYBYTES} bytes" }
         val state = SecretStream.State()
         val header = ByteArray(SecretStream.HEADERBYTES)
-        if (!ls.cryptoSecretStreamInitPush(state, header, key)) {
-            throw CryptoException("secretstream init_push failed")
-        }
-        val out = chunks.mapIndexed { i, chunk ->
-            val tag = if (i == chunks.lastIndex) SecretStream.TAG_FINAL else SecretStream.TAG_MESSAGE
-            val cipher = ByteArray(chunk.size + SecretStream.ABYTES)
-            if (!ls.cryptoSecretStreamPush(state, cipher, chunk, chunk.size.toLong(), tag)) {
-                throw CryptoException("secretstream push failed at chunk $i")
+        try {
+            if (!ls.cryptoSecretStreamInitPush(state, header, key)) {
+                throw CryptoException("secretstream init_push failed")
             }
-            cipher
+            val out = chunks.mapIndexed { i, chunk ->
+                val tag = if (i == chunks.lastIndex) SecretStream.TAG_FINAL else SecretStream.TAG_MESSAGE
+                val cipher = ByteArray(chunk.size + SecretStream.ABYTES)
+                if (!ls.cryptoSecretStreamPush(state, cipher, chunk, chunk.size.toLong(), tag)) {
+                    throw CryptoException("secretstream push failed at chunk $i")
+                }
+                cipher
+            }
+            return SecretStreamResult(header, out)
+        } finally {
+            wipe(state)
         }
-        return SecretStreamResult(header, out)
     }
 
     override fun secretstreamDecrypt(key: ByteArray, header: ByteArray, chunks: List<ByteArray>): List<ByteArray> {
@@ -150,21 +154,36 @@ internal class LazySodiumCryptoProvider(private val ls: LazySodium) : CryptoProv
         if (key.size != SecretStream.KEYBYTES) throw CryptoException("secretstream key must be ${SecretStream.KEYBYTES} bytes")
         if (header.size != SecretStream.HEADERBYTES) throw CryptoException("secretstream header must be ${SecretStream.HEADERBYTES} bytes")
         val state = SecretStream.State()
-        if (!ls.cryptoSecretStreamInitPull(state, header, key)) {
-            throw CryptoException("secretstream init_pull failed (bad header)")
-        }
-        val tag = ByteArray(1)
-        return chunks.mapIndexed { i, cipher ->
-            if (cipher.size < SecretStream.ABYTES) throw CryptoException("secretstream chunk $i too short")
-            val message = ByteArray(cipher.size - SecretStream.ABYTES)
-            if (!ls.cryptoSecretStreamPull(state, message, tag, cipher, cipher.size.toLong())) {
-                throw CryptoException("secretstream pull failed at chunk $i (corrupt or reordered)")
+        // Round-10 review 6 (the iOS provider's twin): the state is key material, wiped however the stream ends, and a
+        // chunk that fails leaves none of the chunks opened before it.
+        try {
+            if (!ls.cryptoSecretStreamInitPull(state, header, key)) {
+                throw CryptoException("secretstream init_pull failed (bad header)")
             }
-            val isLast = i == chunks.lastIndex
-            val isFinal = tag[0] == SecretStream.TAG_FINAL
-            if (isLast != isFinal) throw CryptoException("secretstream truncated or trailing data (final-tag mismatch)")
-            message
+            val tag = ByteArray(1)
+            return StreamChunks.open(chunks.size, { i ->
+                if (chunks[i].size < SecretStream.ABYTES) throw CryptoException("secretstream chunk $i too short")
+                chunks[i].size - SecretStream.ABYTES
+            }) { i, message ->
+                val cipher = chunks[i]
+                if (!ls.cryptoSecretStreamPull(state, message, tag, cipher, cipher.size.toLong())) {
+                    throw CryptoException("secretstream pull failed at chunk $i (corrupt or reordered)")
+                }
+                val isLast = i == chunks.lastIndex
+                val isFinal = tag[0] == SecretStream.TAG_FINAL
+                if (isLast != isFinal) throw CryptoException("secretstream truncated or trailing data (final-tag mismatch)")
+            }
+        } finally {
+            wipe(state)
         }
+    }
+
+    /** A stream's state, in the JVM's copy and in native memory. */
+    private fun wipe(state: SecretStream.State) {
+        state.k.fill(0)
+        state.nonce.fill(0)
+        state._pad.fill(0)
+        runCatching { state.write() }
     }
 
     // Ed25519 crypto_sign_verify_detached (H2 update channel + root cause A SignedStatement).

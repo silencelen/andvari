@@ -68,6 +68,8 @@ internal class SaveImporter(
     private val publish: (pending: List<PendingSaveView>, applied: List<AppliedSaveView>, unreadable: Boolean) -> Unit,
     /** The vault was written: refresh the list and whatever mirrors it. */
     private val wrote: () -> Unit,
+    /** Entries of the list an earlier version wrote, which this one cannot read, were removed: how many (round-10 review 3). */
+    private val dropped: (Int) -> Unit = {},
 ) {
     val enabled: Boolean get() = queue !== SaveQueueStore.None
 
@@ -560,13 +562,29 @@ internal class SaveImporter(
         // Before the holds were kept, the file was the list of sealed records alone.
         val stored = runCatching { json.decodeFromString(Stored.serializer(), text) }.getOrNull()
             ?: runCatching { Stored(json.decodeFromString(ListSerializer(String.serializer()), text)) }.getOrNull() ?: return
+        var unreadable = 0
         for (entry in stored.records.take(MAX_LISTED)) {
-            // A record that is not this account's own (its MAC does not hold, round-9 review 2) is dropped unread.
-            val plain = runCatching { live.account.openLocalRecord(APPLIED_RECORD, Bytes.fromB64(entry)) }.getOrNull() ?: continue
-            val record = runCatching { json.decodeFromString(AppliedRecord.serializer(), plain.decodeToString()) }.getOrNull() ?: continue
+            // A record that is not this account's own (its MAC does not hold, round-9 review 2) is never read: one an
+            // earlier version wrote among them. It is removed below, and counted (round-10 review 3).
+            val plain = runCatching { live.account.openLocalRecord(APPLIED_RECORD, Bytes.fromB64(entry)) }.getOrNull()
+            val record = plain?.let { p ->
+                try {
+                    runCatching { json.decodeFromString(AppliedRecord.serializer(), p.decodeToString()) }.getOrNull()
+                } finally {
+                    p.fill(0)
+                }
+            }
+            if (record == null) {
+                unreadable++
+                continue
+            }
             applied[record.id] = record
         }
         held += stored.held.take(MAX_LISTED)
+        if (unreadable > 0) {
+            storeApplied(live, Persist.VERIFIED) // the list as it can be read; an empty one removes the file
+            dropped(unreadable)
+        }
     }
 
     /**

@@ -28,7 +28,7 @@ class ItemAttachmentsTest {
         assertEquals("File", safe("../.."))
         assertEquals("File", safe("   "))
         assertEquals("File", safe(""))
-        assertEquals("hidden", safe(".hidden"), "never a hidden file")
+        assertEquals("File.hidden", safe(".hidden"), "never a hidden file")
         assertEquals("report.pdf", safe("report.pdf..  "), "nor trailing dots")
         assertEquals("photogpj.exe", safe("photo\u202Egpj.exe"), "a right-to-left override goes, so the real extension shows")
         assertEquals("abc.pdf", safe("a\u0000b\nc\u200B.pdf"), "control and zero-width characters go")
@@ -39,6 +39,38 @@ class ItemAttachmentsTest {
         assertEquals(AttachmentRules.MAX_NAME_CHARS, long.length)
         assertTrue(long.endsWith(".pdf"), "a long name keeps its extension")
         assertEquals(AttachmentRules.MAX_NAME_CHARS, safe("b".repeat(500)).length)
+    }
+
+    /**
+     * Round-10 review 4: a name is read by code point, and nothing that does not show as itself is kept: format and
+     * bidirectional characters (outside the Basic Multilingual Plane too), surrogates without a partner, private-use
+     * characters, line and paragraph separators, tags, variation selectors, the Hangul fillers and the blank Braille
+     * pattern. Runs of spaces of any width are one space; a name that was only an extension keeps it after "File".
+     */
+    @Test
+    fun aNameKeepsNothingThatDoesNotShowAsItself() {
+        val safe = AttachmentRules::safeFileName
+        assertEquals("invoicefdp.exe", safe("invoice\u202Efdp.exe"), "the desktop example: the override goes, the real extension shows")
+        assertEquals("ab.pdf", safe("a\u2066\u2069\u200Db.pdf"), "isolates and joiners")
+        assertEquals("ab.pdf", safe("a\uDB40\uDC41\uDB40\uDC7Fb.pdf"), "tag characters (U+E0041, U+E007F)")
+        assertEquals("ab.pdf", safe("a\uDB40\uDD00b.pdf"), "a variation selector outside the Basic Multilingual Plane (U+E0100)")
+        assertEquals("ab.pdf", safe("a\uFE0F\u180Bb.pdf"), "variation selectors")
+        assertEquals("ab.pdf", safe("a\u115F\u1160\u3164\uFFA0b.pdf"), "the Hangul fillers")
+        assertEquals("ab.pdf", safe("a\u2800b.pdf"), "the blank Braille pattern")
+        assertEquals("ab.pdf", safe("a\u2028\u2029b.pdf"), "line and paragraph separators")
+        assertEquals("ab.pdf", safe("a\uE000\uDB80\uDC00b.pdf"), "private-use characters (U+E000, U+F0000)")
+        assertEquals("ab.pdf", safe("a\uD800b\uDC00.pdf"), "surrogates without a partner")
+        assertEquals("ab.pdf", safe("a\uD834\uDD73b.pdf"), "a format character outside the Basic Multilingual Plane (U+1D173)")
+        assertEquals("a b c.pdf", safe("a\u00A0\u00A0b \u3000\u2009 c.pdf"), "a run of spaces of any width is one space")
+        assertEquals("a b.pdf", safe("a \u200B b.pdf"), "spaces either side of something dropped are still one")
+        assertEquals("File.pdf", safe(".pdf"), "only an extension: not a name called pdf")
+        assertEquals("File.pdf", safe("\u202E..pdf"))
+        assertEquals("File", safe("\u202E\uFE0F\u2800"), "nothing that shows")
+        assertEquals("\uD83D\uDCC4 report.pdf", safe("\uD83D\uDCC4 report.pdf"), "characters outside the Basic Multilingual Plane that show stay")
+        val emoji = safe("\uD83D\uDCC4".repeat(300) + ".pdf")
+        assertEquals((AttachmentRules.MAX_NAME_CHARS - 4) * 2 + 4, emoji.length, "the limit counts code points, and a pair is never split")
+        assertTrue(emoji.endsWith(".pdf"))
+        assertTrue(emoji.dropLast(4).chunked(2).all { it == "\uD83D\uDCC4" })
     }
 
     @Test

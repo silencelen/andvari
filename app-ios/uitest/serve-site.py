@@ -3,10 +3,12 @@
 
 usage: serve-site.py <dir> <https port> <http port> <cert.pem> <key.pem>
 
-A POST is answered with a page that says what was submitted (field names, and a one-time code), so a
-form submission navigates like a real sign-in and the browser's save offer has something to follow.
+A POST is answered with a page that says what was submitted (field names, a digest of each value, and a
+one-time code), so a form submission navigates like a real sign-in, the browser's save offer has something
+to follow, and a test can check what was submitted without the page showing a value.
 """
 import functools
+import hashlib
 import http.server
 import ssl
 import sys
@@ -24,12 +26,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         names = ", ".join(sorted(fields)) or "nothing"
+        # Each value as the first 16 hex digits of its SHA-256: a test compares them with its fixture (Fixture.digest),
+        # and the page never shows a value itself.
+        digests = ", ".join(
+            "%s=%s" % (name, hashlib.sha256(values[0].encode("utf-8")).hexdigest()[:16]) for name, values in sorted(fields.items())
+        ) or "nothing"
         # A one-time code is spent once it is submitted, so the page may show it; nothing else is echoed.
         code = (fields.get("code") or [""])[0]
         shown = "<p id=code>Code: %s</p>" % code if code.isdigit() and len(code) <= 8 else ""
         body = (
             "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-            "<title>Submitted</title><h1 id=done>Submitted</h1><p id=fields>Fields: %s</p>%s" % (names, shown)
+            "<title>Submitted</title><h1 id=done>Submitted</h1><p id=fields>Fields: %s</p><p id=digest>Digest: %s</p>%s"
+            % (names, digests, shown)
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")

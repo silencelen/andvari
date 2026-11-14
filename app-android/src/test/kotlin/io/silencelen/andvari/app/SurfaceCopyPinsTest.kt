@@ -285,4 +285,21 @@ class SurfaceCopyPinsTest {
     // it, as a STRONGER one: core's KdfReKeyCoreTest records the live arrays through a
     // CryptoProvider and asserts they really are zero afterwards. The phone's remaining duty is the
     // wiring, pinned in KdfReKeyAdapterTest.
+
+    // ---- round-10 review 1 ----
+
+    /**
+     * An attachment's name is whatever the client that added it wrote, a co-member's included: the list shows it, and
+     * the save dialog (SAF CreateDocument) is offered it, only as core AttachmentRules.safeFileName has it, so a
+     * right-to-left override cannot make "invoice<RLO>fdp.exe" read as "invoiceexe.pdf".
+     */
+    @Test
+    fun attachmentNamesAreShownAndOfferedOnlyAsSafeFileNames() {
+        assertFalse(mainActivity.contains("Text(ref.name"), "a raw attachment name is rendered")
+        assertFalse(mainActivity.contains("saver.launch(ref.name)"), "a raw attachment name is offered to the save dialog")
+        assertEquals(2, Regex("""Text\(AttachmentRules\.safeFileName\(ref\.name\)""").findAll(mainActivity).count(), "the item's list and the editor's list")
+        assertTrue(mainActivity.contains("saver.launch(AttachmentRules.safeFileName(ref.name))"))
+        assertFalse(viewModel.contains("notice = \"Saved \${ref.name}\""), "nor in the notice after a save")
+        assertEquals("invoicefdp.exe", io.silencelen.andvari.core.app.AttachmentRules.safeFileName("invoice\u202Efdp.exe"))
+    }
 }

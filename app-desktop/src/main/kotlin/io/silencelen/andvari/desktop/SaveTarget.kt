@@ -1,5 +1,6 @@
 package io.silencelen.andvari.desktop
 
+import io.silencelen.andvari.core.app.AttachmentRules
 import java.io.File
 
 /** Shown when a Save destination would leave the chosen folder ([SaveTarget.resolve]). */
@@ -21,11 +22,14 @@ object SaveTarget {
     private const val RESERVED = "/\\:*?\"<>|"
     private val DEVICE_NAMES = Regex("^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\\..*)?$", RegexOption.IGNORE_CASE)
 
-    /** A bare file name safe to pre-fill: no separator, drive or stream colon, control character,
-     *  leading dot, trailing dot/space, or Windows device name; never empty, never over the cap. */
+    /** A bare file name safe to pre-fill: the name every app shows ([AttachmentRules.safeFileName]: the last part of a
+     *  path, nothing that does not show as itself, bidirectional overrides included; round-10 review 1), then
+     *  Windows' rules: no reserved character, drive or stream colon, control character, leading dot, trailing
+     *  dot/space, or device name; never empty, never over the cap. */
     fun defaultName(raw: String): String {
-        var name = buildString(raw.length) {
-            for (c in raw) append(if (c in RESERVED || c.code < 0x20 || c.code == 0x7F) '_' else c)
+        val shown = AttachmentRules.safeFileName(raw)
+        var name = buildString(shown.length) {
+            for (c in shown) append(if (c in RESERVED || c.code < 0x20 || c.code == 0x7F) '_' else c)
         }
         name = name.trimStart('.', ' ').trimEnd('.', ' ')
         if (name.length > MAX_NAME_CHARS) {

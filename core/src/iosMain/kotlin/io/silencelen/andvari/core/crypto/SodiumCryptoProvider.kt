@@ -167,41 +167,52 @@ internal class SodiumCryptoProvider : CryptoProvider {
         val state = alloc<crypto_secretstream_xchacha20poly1305_state>()
         val header = ByteArray(STREAM_HEADER)
         val init = header.u { h -> key.u { k -> crypto_secretstream_xchacha20poly1305_init_push(state.ptr, h, k) } }
-        if (init != 0) throw CryptoException("secretstream init_push failed")
-        val out = chunks.mapIndexed { i, chunk ->
-            val tag = if (i == chunks.lastIndex) TAG_FINAL else TAG_MESSAGE
-            val cipher = ByteArray(chunk.size + STREAM_TAG)
-            val rc = cipher.u { c ->
-                chunk.u { m ->
-                    crypto_secretstream_xchacha20poly1305_push(state.ptr, c, null, m, chunk.size.toULong(), null, 0u, tag.toUByte())
+        try {
+            if (init != 0) throw CryptoException("secretstream init_push failed")
+            val out = chunks.mapIndexed { i, chunk ->
+                val tag = if (i == chunks.lastIndex) TAG_FINAL else TAG_MESSAGE
+                val cipher = ByteArray(chunk.size + STREAM_TAG)
+                val rc = cipher.u { c ->
+                    chunk.u { m ->
+                        crypto_secretstream_xchacha20poly1305_push(state.ptr, c, null, m, chunk.size.toULong(), null, 0u, tag.toUByte())
+                    }
                 }
+                if (rc != 0) throw CryptoException("secretstream push failed at chunk $i")
+                cipher
             }
-            if (rc != 0) throw CryptoException("secretstream push failed at chunk $i")
-            cipher
+            SecretStreamResult(header, out)
+        } finally {
+            sodium_memzero(state.ptr, sizeOf<crypto_secretstream_xchacha20poly1305_state>().convert())
         }
-        SecretStreamResult(header, out)
     }
 
     override fun secretstreamDecrypt(key: ByteArray, header: ByteArray, chunks: List<ByteArray>): List<ByteArray> = memScoped {
         if (key.size != STREAM_KEY) throw CryptoException("secretstream key must be $STREAM_KEY bytes")
         if (header.size != STREAM_HEADER) throw CryptoException("secretstream header must be $STREAM_HEADER bytes")
         val state = alloc<crypto_secretstream_xchacha20poly1305_state>()
-        val init = header.u { h -> key.u { k -> crypto_secretstream_xchacha20poly1305_init_pull(state.ptr, h, k) } }
-        if (init != 0) throw CryptoException("secretstream init_pull failed (bad header)")
-        val tag = alloc<UByteVar>()
-        chunks.mapIndexed { i, cipher ->
-            if (cipher.size < STREAM_TAG) throw CryptoException("secretstream chunk $i too short")
-            val message = ByteArray(cipher.size - STREAM_TAG)
-            val rc = message.u { m ->
-                cipher.u { c ->
-                    crypto_secretstream_xchacha20poly1305_pull(state.ptr, m, null, tag.ptr, c, cipher.size.toULong(), null, 0u)
+        // Round-10 review 6: the stream's state is key material; it is wiped however the stream ends.
+        try {
+            val init = header.u { h -> key.u { k -> crypto_secretstream_xchacha20poly1305_init_pull(state.ptr, h, k) } }
+            if (init != 0) throw CryptoException("secretstream init_pull failed (bad header)")
+            val tag = alloc<UByteVar>()
+            // A later chunk that fails, or a final tag out of place, leaves none of the chunks opened before it.
+            StreamChunks.open(chunks.size, { i ->
+                if (chunks[i].size < STREAM_TAG) throw CryptoException("secretstream chunk $i too short")
+                chunks[i].size - STREAM_TAG
+            }) { i, message ->
+                val cipher = chunks[i]
+                val rc = message.u { m ->
+                    cipher.u { c ->
+                        crypto_secretstream_xchacha20poly1305_pull(state.ptr, m, null, tag.ptr, c, cipher.size.toULong(), null, 0u)
+                    }
                 }
+                if (rc != 0) throw CryptoException("secretstream pull failed at chunk $i (corrupt or reordered)")
+                val isLast = i == chunks.lastIndex
+                val isFinal = tag.value == TAG_FINAL
+                if (isLast != isFinal) throw CryptoException("secretstream truncated or trailing data (final-tag mismatch)")
             }
-            if (rc != 0) throw CryptoException("secretstream pull failed at chunk $i (corrupt or reordered)")
-            val isLast = i == chunks.lastIndex
-            val isFinal = tag.value == TAG_FINAL
-            if (isLast != isFinal) throw CryptoException("secretstream truncated or trailing data (final-tag mismatch)")
-            message
+        } finally {
+            sodium_memzero(state.ptr, sizeOf<crypto_secretstream_xchacha20poly1305_state>().convert())
         }
     }
 

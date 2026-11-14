@@ -1,5 +1,6 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.app.AttachmentRules
 import io.silencelen.andvari.core.client.session.*
 import android.content.ClipData
 import android.content.ClipDescription
@@ -2232,7 +2233,7 @@ private fun ItemDetail(vm: AndvariViewModel, ui: UiState, item: VaultItem, onEdi
             Text("Attachments", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(4.dp))
             doc.attachments.forEach { ref ->
-                AttachmentRow(ref, enabled = !ui.busy) { pendingDownload = ref; ExternalExcursion.begin(); saver.launch(ref.name) }
+                AttachmentRow(ref, enabled = !ui.busy) { pendingDownload = ref; ExternalExcursion.begin(); saver.launch(AttachmentRules.safeFileName(ref.name)) }
                 Spacer(Modifier.height(8.dp))
             }
         }
@@ -2284,7 +2285,7 @@ private fun AttachmentRow(ref: AttachmentRef, enabled: Boolean, onClick: () -> U
             Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(ref.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
+                Text(AttachmentRules.safeFileName(ref.name), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12; round-10 review 1
                 Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(Icons.Default.FileDownload, "download", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2531,7 +2532,7 @@ private fun ItemEditor(vm: AndvariViewModel, ui: UiState, itemId: String?, initi
                 Icon(Icons.Default.AttachFile, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(ref.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
+                    Text(AttachmentRules.safeFileName(ref.name), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12; round-10 review 1
                     Text(humanSize(ref.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 TextButton(

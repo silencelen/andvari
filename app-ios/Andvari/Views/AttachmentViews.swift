@@ -198,23 +198,32 @@ struct MemoryFile: FileDocument {
 /// pages there. It is emptied at launch, when an export ends, after a scan, when the app leaves the foreground and when
 /// the vault locks; and what is created there is protected until the device is next unlocked (round-9 review 5).
 enum TemporaryFiles {
+    /// Empties the temporary folder and Caches (round-10 review 8): whatever an export, a scan or the system's pickers
+    /// staged there goes, at launch, on leaving the app, on a lock, and after each export and scan. The system's own
+    /// app-switcher snapshots stay (the privacy cover is what they show); the app keeps nothing of its own in either
+    /// folder, and its HTTP client writes no cache.
     static func clear() {
         let fm = FileManager.default
-        let dir = fm.temporaryDirectory
-        for url in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
-            try? fm.removeItem(at: url)
+        for dir in folders(fm) {
+            for url in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where url.lastPathComponent != "Snapshots" {
+                try? fm.removeItem(at: url)
+            }
         }
+    }
+
+    private static func folders(_ fm: FileManager) -> [URL] {
+        var dirs = [fm.temporaryDirectory]
+        if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            dirs.append(caches)
+        }
+        return dirs
     }
 
     /// Files created in the temporary folder and in Caches inherit the folder's protection: complete, readable only
     /// while the device is unlocked.
     static func protect() {
         let fm = FileManager.default
-        var dirs = [fm.temporaryDirectory]
-        if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            dirs.append(caches)
-        }
-        for dir in dirs {
+        for dir in folders(fm) {
             try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: dir.path)
         }
     }

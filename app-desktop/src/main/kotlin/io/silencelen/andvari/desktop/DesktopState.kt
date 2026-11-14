@@ -3004,7 +3004,7 @@ class DesktopState(
             downloadingAttachmentId = null // op()'s catch owns the error surface; the spinner must not outlive the attempt
         }
         busy = false
-        notice = "Saved ${ref.name} to ${dest.absolutePath}"
+        notice = "Saved ${io.silencelen.andvari.core.app.AttachmentRules.safeFileName(ref.name)} to ${dest.absolutePath}"
     }
 
     // ---- settings / server TOTP ----
