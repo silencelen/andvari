@@ -78,15 +78,15 @@ jobs:
         run: ./gradlew --no-daemon --stacktrace -Dorg.gradle.jvmargs=-Xmx5g :core:compileKotlinIosArm64 :core:linkReleaseFrameworkIosArm64
 
       # The UI tests' stand-in for the Secure Enclave key exists only in the simulator target's source set
-      # (core/src/iosSimulatorArm64Main), which exports andvari_simulator_software_quick_unlock_key. The device framework
-      # the app links must not contain it (a device also refuses any key that is not the Secure Enclave's at run time).
+      # (core/src/iosSimulatorArm64Main), whose public class SimulatorSoftwareQuickUnlockKey marks it. The device framework
+      # the app links must not contain that source set: its generated header, what Swift can call, must not declare the
+      # class. The real guard is at run time: a device refuses any quick-unlock key that is not the Secure Enclave's.
       - name: No simulator quick-unlock key in the device framework
         run: |
-          F=core/build/bin/iosArm64/releaseFramework/AndvariCore.framework/AndvariCore
-          nm -gU "$F" > framework-symbols.txt
-          # A symbol every build exports, so a pass means the check could read the framework's symbols.
-          grep -q 'andvari_quick_unlock_secure_enclave_only$' framework-symbols.txt || { echo "the framework's symbols could not be read"; exit 1; }
-          if grep -q 'andvari_simulator_software_quick_unlock_key$' framework-symbols.txt; then
+          H=core/build/bin/iosArm64/releaseFramework/AndvariCore.framework/Headers/AndvariCore.h
+          # A class every build declares, so a pass means the check could read the header.
+          grep -q 'swift_name("QuickUnlockSecureEnclaveOnly")' "$H" || { echo "the framework's header could not be read"; exit 1; }
+          if grep -q 'swift_name("SimulatorSoftwareQuickUnlockKey")' "$H"; then
             echo "the simulator-only quick-unlock key is in the device framework"; exit 1
           fi
 
