@@ -1,6 +1,11 @@
 import CryptoKit
 import XCTest
 
+/// The screen, in the coordinates every element's frame uses: read once.
+enum Screen {
+    static let bounds = XCUIApplication(bundleIdentifier: "com.apple.springboard").frame
+}
+
 /// How Safari's page menu (the way to andvari's popup) is reached while a page field has the keyboard.
 enum PopupReach {
     /// Close the keyboard with its Done first. That takes the focus from the field while the page keeps it.
@@ -19,7 +24,7 @@ extension UITestCase {
     func safelyHittable(_ element: XCUIElement) -> Bool {
         guard element.exists else { return false }
         let frame = element.frame
-        guard frame.width >= 1, frame.height >= 1, frame.intersects(springboard.frame) else { return false }
+        guard frame.width >= 1, frame.height >= 1, frame.intersects(Screen.bounds) else { return false }
         return element.isHittable
     }
 
@@ -48,14 +53,14 @@ extension UITestCase {
     @discardableResult
     func scrollToAndTap(_ element: XCUIElement, in application: XCUIApplication, swipes: Int = 8) -> Bool {
         for _ in 0..<swipes {
-            if element.exists && element.isHittable {
+            if self.safelyHittable(element) {
                 element.tap()
                 return true
             }
             application.swipeUp()
             Thread.sleep(forTimeInterval: 0.4)
         }
-        if element.exists && element.isHittable {
+        if self.safelyHittable(element) {
             element.tap()
             return true
         }
@@ -310,7 +315,7 @@ extension UITestCase {
             if waitUntil(15, shown) { break }
             closeSafariTips()
             let address = browser.textFields["TabBarItemTitle"]
-            if address.exists && address.isHittable {
+            if self.safelyHittable(address) {
                 address.tap()
                 Thread.sleep(forTimeInterval: 1)
                 browser.typeText(url + "\n")
@@ -446,7 +451,7 @@ extension UITestCase {
         }
         menu.tap()
         let entry = safari.cells["andvari"]
-        if !waitUntil(8, { entry.exists && entry.isHittable }) {
+        if !waitUntil(8, { self.safelyHittable(entry) }) {
             dumpTree(safari, as: "no-andvari-in-page-menu")
             XCTFail("andvari is not in Safari's page menu")
             return false
@@ -457,7 +462,7 @@ extension UITestCase {
         var unlockSeenSince: Date?
         let check: () -> Bool = {
             // Safari asks, per site, whether the extension may see it; the popup waits behind that.
-            if allow.exists && allow.isHittable {
+            if self.safelyHittable(allow) {
                 self.tapWhereItIs(allow, in: self.safari)
                 return false
             }
@@ -541,7 +546,7 @@ extension UITestCase {
     /// attach a debugger to a Safari extension on iOS, in the simulator's CI even less.
     func popupDetails() -> String {
         let details = safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label == 'Details'")).firstMatch
-        if details.exists && details.isHittable {
+        if self.safelyHittable(details) {
             details.tap()
             Thread.sleep(forTimeInterval: 4)
         }
@@ -563,7 +568,7 @@ extension UITestCase {
     /// Safari's first-run tips are popovers that take every tap until they are closed.
     func closeSafariTips() {
         let tip = safari.buttons["xmark.circle.fill"]
-        if tip.exists && tip.isHittable {
+        if self.safelyHittable(tip) {
             tip.tap()
             Thread.sleep(forTimeInterval: 1)
         }
@@ -618,7 +623,7 @@ extension UITestCase {
             for index in 0..<min(matches.count, 8) {
                 let candidate = matches.element(boundBy: index)
                 // The page's own fields carry the word too ("Username"); what iOS offers sits in the lower half.
-                if candidate.exists && candidate.isHittable && candidate.frame.minY > application.frame.height * 0.45 {
+                if self.safelyHittable(candidate) && candidate.frame.minY > application.frame.height * 0.45 {
                     return candidate
                 }
             }

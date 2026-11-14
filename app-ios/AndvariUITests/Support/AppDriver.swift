@@ -35,7 +35,7 @@ extension UITestCase {
         let look: () -> Bool = {
             seen = self.currentScreen()
             // A search left open (an earlier test's) hides the vault's bar, and with it every mark of the screen.
-            if seen == nil && search.exists && search.isHittable { self.endSearch() }
+            if seen == nil && self.safelyHittable(search) { self.endSearch() }
             return seen != nil
         }
         // A sheet an earlier test left open (it stopped halfway) hides the screen under it: start the app again, which
@@ -153,7 +153,7 @@ extension UITestCase {
     /// and the vault's bar stays hidden.
     func endSearch() {
         let close = app.buttons.matching(NSPredicate(format: "label == 'close' OR label == 'Close' OR label == 'Cancel'")).firstMatch
-        if close.exists && close.isHittable {
+        if self.safelyHittable(close) {
             close.tap()
         } else {
             let keyboardDone = app.keyboards.buttons.matching(NSPredicate(format: "label == 'search' OR label == 'Search' OR label == 'done' OR label == 'Done'")).firstMatch
@@ -228,7 +228,7 @@ extension UITestCase {
     func confirmSignOut() {
         // The confirmation repeats the title of the button that raised it; the dialog's own has no identifier.
         let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign out' AND identifier == ''")).firstMatch
-        if !waitUntil(8, { confirm.exists && confirm.isHittable }) {
+        if !waitUntil(8, { self.safelyHittable(confirm) }) {
             dumpTree(app, as: "no-sign-out-confirmation")
             XCTFail("the sign-out confirmation did not appear")
         }

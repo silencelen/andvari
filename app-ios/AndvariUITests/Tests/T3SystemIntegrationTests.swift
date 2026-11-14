@@ -59,7 +59,7 @@ final class T3SystemIntegrationTests: UITestCase {
         }
         step("filled") {
             // A first-run tip of Safari's can take the first tap; the offer is then still there.
-            if fillOfferButton.exists && fillOfferButton.isHittable {
+            if self.safelyHittable(fillOfferButton) {
                 fillOfferButton.tap()
             }
             // Safari may submit the form the moment it fills it: the test site's page then shows a digest of each field
@@ -283,7 +283,7 @@ final class T3SystemIntegrationTests: UITestCase {
             // The screen asks for a face by itself, which makes it busy; the system's sheet only offers Cancel once a
             // face has failed. Wait for that prompt first, so the test does not type under it.
             _ = waitUntil(6) { !self.element("unlock.sign-out").isEnabled || self.faceIDCancel != nil }
-            let refused = refuseFaceID(until: { self.faceIDCancel == nil && self.element("unlock.sign-out").isEnabled && self.masterPasswordField.isHittable })
+            let refused = refuseFaceID(until: { self.faceIDCancel == nil && self.element("unlock.sign-out").isEnabled && self.safelyHittable(self.masterPasswordField) })
             XCTAssertTrue(refused, "the Face ID prompt is still up")
         }
         step("field-focused") {
@@ -356,7 +356,7 @@ final class T3SystemIntegrationTests: UITestCase {
             XCTAssertTrue(waitUntil(5) { self.app.staticTexts[Fixture.secondPassword].exists }, "the previous password shown is not the seeded one")
             app.navigationBars.buttons.firstMatch.tap()
             // The list keeps its place; the saved logins are at its top.
-            for _ in 0..<4 where !(anyList.exists && anyList.isHittable) { app.swipeDown() }
+            for _ in 0..<4 where !(self.safelyHittable(anyList)) { app.swipeDown() }
             require(anyList, "the saved list", timeout: 10)
         }
         step("undone") {
@@ -395,7 +395,7 @@ final class T3SystemIntegrationTests: UITestCase {
                 return
             }
             XCTAssertTrue(popupHeading("Cards").exists, "the popup has no Cards heading")
-            for _ in 0..<3 where !(card.exists && card.isHittable) { popupWebView.swipeUp() }
+            for _ in 0..<3 where !(self.safelyHittable(card)) { popupWebView.swipeUp() }
             XCTAssertTrue(card.exists, "the popup does not list the seeded card")
             XCTAssertTrue(safari.webViews.staticTexts["Visa ••1111"].exists, "the card's row does not show its masked number")
         }

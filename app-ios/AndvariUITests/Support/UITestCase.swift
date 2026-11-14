@@ -219,7 +219,7 @@ class UITestCase: XCTestCase {
     func enter(_ text: String, into field: XCUIElement, what: String, file: StaticString = #filePath, line: UInt = #line) {
         require(field, what, file: file, line: line)
         // On a slow runner the field exists before it can be touched (a sheet still arriving, the cover still leaving).
-        _ = waitUntil(15) { field.isHittable }
+        _ = waitUntil(15) { self.safelyHittable(field) }
         // The keyboard takes a moment to belong to the field, longer the first time a simulator shows one; a tap
         // that lands while something else still has the focus is tried again.
         for _ in 0..<3 {
@@ -244,7 +244,7 @@ class UITestCase: XCTestCase {
         for _ in 0..<tries {
             if element.exists {
                 let frame = element.frame
-                if frame.minY > height * 0.18 && frame.maxY < height * 0.8 && element.isHittable { return true }
+                if frame.minY > height * 0.18 && frame.maxY < height * 0.8 && safelyHittable(element) { return true }
                 // Above the comfortable band: drag the list down; below it: drag it up. A third of a screen at a time.
                 if frame.minY <= height * 0.18 {
                     drag(at(0.45), to: at(0.75))
@@ -256,7 +256,7 @@ class UITestCase: XCTestCase {
             }
             Thread.sleep(forTimeInterval: 0.6)
         }
-        return element.exists && element.isHittable
+        return self.safelyHittable(element)
     }
 
     /// A slow drag that holds at its end, so the list stops where the finger does instead of coasting on.
