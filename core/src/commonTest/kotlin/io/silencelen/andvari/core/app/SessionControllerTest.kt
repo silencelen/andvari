@@ -1230,6 +1230,19 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
         settle { pendingLog.bytes == null && controller.state.items.any { it.name == "Third" } }
 
+        // Away past the grace while suspended (no ticker runs): coming back lands the lock, never voids it (round-9 review 6).
+        savingBlocked("Fifth") { save ->
+            assertTrue(controller.onBackground())
+            clocks.mono += AttachmentRules.BACKGROUND_GRACE_MS
+            controller.onForeground()
+            assertEquals(AppScreen.UNLOCK, controller.state.screen)
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        files.gate = null
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null && controller.state.items.any { it.name == "Fifth" } }
+
         // Back within the grace: nothing locks, and the save goes on.
         savingBlocked("Fourth") { save ->
             assertTrue(controller.onBackground())
@@ -1358,12 +1371,16 @@ open class SessionControllerTest {
         durable = false
         assertTrue(saves.keep(enrolled.account, PendingSave("p-2", null, "n-2", "v", 0, doc, listOf("f-2"))))
         assertTrue(saves.putBlob("f-2", byteArrayOf(4)))
-        assertEquals(listOf("p-2"), saves.load(enrolled.account).map { it.id }, "only in memory otherwise")
+        assertEquals(listOf("p-1", "p-2"), saves.load(enrolled.account).map { it.id }, "only in memory otherwise; one kept before stays found")
+        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"), "with its file, wherever the policy put it (round-9 review 8)")
         assertEquals(listOf("f-1"), blobs.ids())
-        saves.dropDurable()
+        // The policy forbids it: what was on disk moves into memory, files and all, and the disk is emptied.
+        assertEquals(1, saves.leaveDisk(enrolled.account))
         assertNull(log.bytes)
         assertTrue(blobs.ids().isEmpty())
-        assertEquals(listOf("p-2"), saves.load(enrolled.account).map { it.id }, "what is in memory stays while the account does")
+        assertEquals(setOf("p-1", "p-2"), saves.load(enrolled.account).map { it.id }.toSet(), "what is in memory stays while the account does")
+        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"))
+        saves.forget(enrolled.account, "p-1")
         saves.forget(enrolled.account, "p-2")
         assertNull(saves.blob("f-2"), "a save let go takes its files")
         assertTrue(saves.keep(enrolled.account, PendingSave("p-3", null, "n-3", "v", 0, doc, listOf("f-3"))))
@@ -1379,6 +1396,64 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.signOut())
         assertNull(pendingLog.bytes, "a sign-out takes what was kept")
         assertTrue(pendingFiles.ids().isEmpty())
+    }
+
+    /**
+     * Round-9 review 3: a kept save finished after an edit made since (offline, still waiting to be sent, or already
+     * synced) only adds its files to the item as it is now: the newer password survives, nothing becomes a conflict copy.
+     */
+    @Test
+    fun aKeptSaveFinishedAfterANewerEditAddsOnlyItsFiles() = test {
+        unlockedWithAPersonalVault()
+        val files = fileServer()
+        controller.openAttachmentDraft(ITEM_ID)
+        assertEquals(ActionResult.Ok, controller.addAttachment("scan.pdf", ByteArray(900) { 7 }))
+        val fileId = assertNotNull(controller.state.attachmentDraft).added.single().id
+        files.gate = CompletableDeferred()
+        files.started = CompletableDeferred()
+        kotlinx.coroutines.coroutineScope {
+            val save = async { controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "pw-in-the-kept-save", listOf("https://login.example.com/x"), "", "", false)) }
+            withTimeout(10_000) { assertNotNull(files.started).await() }
+            controller.lock()
+            assertNotNull(files.gate).complete(Unit)
+            assertEquals(ActionResult.NotDone(null), save.await())
+        }
+        files.gate = null
+        assertNotNull(pendingLog.bytes, "the save with its file is kept")
+        // Offline at the next unlock: the kept save cannot go, and the person edits the login meanwhile.
+        files.fail = true
+        val online = routes.getValue("/sync/push")
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { controller.state.notice?.contains("has not been saved with its files yet") == true }
+        assertEquals(ActionResult.Ok, controller.saveLogin(ITEM_ID, LoginInput("Example", "fam", "pw-newer", listOf("https://login.example.com/x"), "", "", false)))
+        assertEquals(HouseholdCopy.SAVE_OFFLINE, controller.state.notice, "queued, to be sent later")
+        // Back online: the next unlock finishes the kept save.
+        files.fail = false
+        routes["/sync/push"] = online
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        settle { pendingLog.bytes == null && controller.state.upload == null }
+        assertEquals("pw-newer", controller.revealSecret(ITEM_ID, SecretField.PASSWORD), "the newer edit stands")
+        assertEquals(listOf(fileId), controller.itemDetail(ITEM_ID)?.attachments?.map { it.id }, "and the file is on it")
+        assertTrue(controller.state.items.none { it.name.contains("conflict") }, "no conflict copy")
+        assertEquals(AttachmentCopy.filesOnly("Example"), controller.state.notice)
+    }
+
+    /** Round-9 review 1: a file is listed and opened under a name that is safe to show and to offer to Files. */
+    @Test
+    fun aFilesNameFromAnotherClientIsMadeSafeEverywhereItIsShown() = test {
+        unlockedWithAPersonalVault()
+        val evil = io.silencelen.andvari.core.client.AttachmentRef("00000000-0000-4000-8000-0000000000f3", "../../Library/Preferences/x\u202Egpj.plist", 10, "k")
+        val doc = ItemDoc(type = "note", name = "Shared", attachments = listOf(evil))
+        val upload = enrolled.account.encryptItem(reg.personalVault.vaultId, NOTE_ID, doc)
+        namespaces.caches.getValue("$homeKey/${reg.userId}").upsertItem(WireItem(NOTE_ID, reg.personalVault.vaultId, 1, 1_000, 2_000, false, false, upload.formatVersion, emptyList(), upload.blob), null)
+        controller.lock()
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(listOf("xgpj.plist"), controller.itemDetail(NOTE_ID)?.attachments?.map { it.name }, "the detail")
+        controller.openAttachmentDraft(NOTE_ID)
+        assertEquals(listOf("xgpj.plist"), controller.state.attachmentDraft?.kept?.map { it.name }, "the editor")
+        assertEquals("xgpj.plist", controller.readAttachment(NOTE_ID, evil.id).name, "and what a preview and Save to Files get")
     }
 
     // ---- lifecycle notices ----
@@ -2206,7 +2281,8 @@ open class SessionControllerTest {
     private fun Rig.storedSaveRecord(id: String, site: String, itemId: String, password: String, intent: Boolean, queueId: String? = null) {
         val entry = queueId?.let { ""","queueId":"$it"""" } ?: ""
         val record = """{"id":"$id","site":"$site","username":"me","itemId":"$itemId","replacedName":null,"password":"$password","keptOld":false,"appliedAtMs":${clocks.wall},"intent":$intent$entry}"""
-        val sealedRecord = Bytes.toB64(crypto.sealTo(enrolled.account.identityPub, record.encodeToByteArray()))
+        // As the app itself writes it: sealed to the account, with the MAC only it can make (round-9 review 2).
+        val sealedRecord = Bytes.toB64(enrolled.account.sealLocalRecord(SaveImporter.APPLIED_RECORD, record.encodeToByteArray()))
         appliedLog.write("""["$sealedRecord"]""".encodeToByteArray())
     }
 
