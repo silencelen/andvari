@@ -25,6 +25,8 @@ That downloads the run's artifact and prints one line per test. The directory th
 | Test site, another site | `https://other-uitest.test:8443` | The same pages under another registrable domain and the same certificate, for a fill that crosses sites. |
 | Test site, plain http | `http://plainhttp-uitest.test:8081` | The same pages under another registrable domain, for the rule that an http page is only offered a login saved as http. |
 | Simulator | newest installed iOS, a new device per run | `boot-simulator.sh` |
+| Another device, a second account | `POST /control/…` on the test site | `vault-create`, `vault-delete` and `vault-restore` (`?name=`) sign in as another device of the account and change one of its shared vaults (`tools/uitest-seed vault`). `share-read-only` (`?name=&item=`) has a second account, enrolled with an invite the test account mints as the server's admin, share a vault holding one login read-only with the account, and another device of the account accept it by typing the sharer's identity code (`tools/uitest-seed share`). The app learns of either at its next sync. |
+| Page event log | `<page>.html?uitest-events` | The test site adds a passive log after the page's content: presses, focus moves with the page's user activation and focus, and window focus. The card tests read it to say what the page saw. |
 
 The account's email and master password are in `env.sh`. They are fixtures for a server that lives for one job.
 
@@ -68,11 +70,26 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | The popup lists cards (masked number); the popup's root fills its sheet and a row is centred in it (within 3 points) | Works | `T3…test11` |
 | A login for another site chosen in the popup: nothing filled until a confirmation that names both sites | Works | `T3…test12` |
 | Two logins saved before the app is next unlocked both arrive and are listed; Undo all takes both back | Works since the save-id fix (below); the test checks the queue and skips with the reason if two saves ever share an entry again | `T3…test13` |
+| Delete a login, restore it from the trash; delete it again and delete it forever | Works | `T4…test01` |
+| Change a login's password, then restore the earlier version from its history | Works | `T4…test02` |
+| Create a shared vault; copy a login into it (both stay) and move another (it leaves Personal) | Works | `T4…test03` |
+| A shared vault deleted, then restored, on another device: a notice for each after a sync, gone when dismissed | Works | `T4…test04` |
+| A login in a vault the account only reads: no Edit, "Copy to another vault…" and no Move; the copy in Personal can be edited | Works. A second account shares the vault read-only and another device of this account accepts it; the app takes it at a sync, through the account's own wrap of the vault key, with no invitation screen of its own | `T4…test05` |
+| card-skimmer.html: Fill refuses with nothing tapped and with only the email tapped; the hidden form receives nothing | Works | `T4…test06` |
+| A card filled from the popup in the default (Compact) tab layout, the popup reached with the keyboard still up: a tap on the address Safari's bar shrank to above it brings the page menu back | Worked with ios-ui up to 034b9684; refused since 3ef56e8b (regression, below) | `T4…test07` |
+| The same with the keyboard closed first by its Done | Skipped: app defect (below) | `T4…test08` |
+| card-two-forms.html: the new card's number fills only its own form; the saved card's security code alone fills only that code | The first worked with ios-ui up to 034b9684 and is refused since 3ef56e8b (regression, below); the second is skipped with a finding (below) | `T4…test09` |
+| card-inner-scroll.html: filled once scrolled into view; scrolled away again, nothing is written and the popup says the field can't be seen | Worked with ios-ui up to 034b9684; refused since 3ef56e8b (regression, below) | `T4…test10` |
+| The third-party keyboard switch | Present and off by default. Whether such a keyboard is kept out is skipped: the simulator has none, and the suite would need an app of its own to add one | `T4…test11` |
+| Two-step setup survives a trip to the Settings app (the same key at the confirm step after the unlock); the authenticator's code turns it on, a later one off | Works | `T4…test12` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
-store of suggestions has caught up. Each helper retries a bounded number of times and then fails with a tree
-dump; none of them loosens an assertion.
+store of suggestions has caught up. The simulator also has spells of several minutes in which every TLS connection
+from Safari to the test site fails ("bad certificate format" in the simulator's log after a stall of about 20
+seconds, "certificate unknown" alerts in the site's log) and then passes again, so a page is tried for up to nine
+minutes. Each helper retries a bounded number of times and then fails with a tree dump; none of them loosens an
+assertion.
 
 ### Findings the tests show
 
@@ -84,7 +101,33 @@ dump; none of them loosens an assertion.
   The same id also makes a later save replace an earlier save's record in the "Saved … from AutoFill" list
   even when the app was unlocked in between, so the earlier save can no longer be undone from the list.
 
-- **The personal-vault notice on a device's first sign-in** opens with "The server says your personal vault
+- **Since 3ef56e8b no card is filled into a page without frames** (found 2026-11-13, a regression). On
+  card-two-forms.html, which has no frame, object or embed, the popup answers Fill with "Something else sits
+  over or under the card field you tapped, such as a form embedded from another page. andvari doesn't fill a
+  card there, so nothing was filled." The same test filled the card on ios-ui 034b9684 and is refused on
+  094c92ae; the field was pressed, chosen and still had the focus (the page's event log and Safari's tree show
+  it). With no frame on the page, the likely source is the Safari branch of `cardFillAgainst`
+  (`extension/src/content.ts`), which refuses for any element overlapping the field other than the field, its
+  ancestors and its wrapper.
+
+- **A card cannot be filled from the popup once the keyboard is closed with its Done** (found 2026-11-13). In
+  the Compact and Bottom tab layouts Safari's page menu, the way to the popup, is behind the keyboard while a
+  page field has it. Done blurs the field while the page keeps its focus (the page's event log:
+  `focusout #cc-number hasFocus=true now=body`), and the content script lets the chosen field go when focus
+  moves elsewhere in the page (`noteFocusLeft`, `extension/src/content.ts`), so Fill then says "Tap the card
+  number field on the page first, then fill again." and fills nothing. Reaching the menu by a tap on the
+  shrunk address keeps the field (T4 test07), but Done is the keyboard's own way to close it.
+
+- **A form holding only a security code is never filled** (found 2026-11-13). card-two-forms.html expects a
+  tap on the saved card's security code, then Fill, to fill only that code. `buildCardForm`
+  (`extension/src/detect.ts`) makes a card form only where there is a card-number field, so that field is
+  never chosen, and Fill says "Tap the card number field on the page first, then fill again." The extension
+  or the page needs to change. On the same page the saved card's code has the focus about a second after the
+  page loads, without a press (the event log shows `activation=false`); the extension rightly does not take
+  that as a choice.
+
+- **The personal-vault notice on a device's first sign-in** (found 2026-11-12, fixed on ios-ui by d6ff8074;
+  the test still accepts both sentences) opened with "The server says your personal vault
   is Personal." even when the account's own record names the same vault, where a device that had read the
   record says "Confirm your personal vault on this device: Personal." Reproduced on the JVM with the core's
   own classes: a new device that runs `hydrate()` before its first `sync()` holds the proposal against "no
@@ -97,9 +140,12 @@ dump; none of them loosens an assertion.
 The simulator has no Secure Enclave: `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` returns no
 key there, and the app said "This device can't hold a quick-unlock key." So a simulator build falls back to a
 software P-256 key under the same tag and access group (`core/src/iosSimulatorArm64Main`). That source set
-is compiled only for the simulator target; the device target's counterpart is one line that returns null, and
-`ios-core.yml` fails if the simulator's code is found in the device framework. The cost: in these tests the
-key is not hardware-bound, needs no passcode, and survives a change of enrolled faces.
+is compiled only for the simulator target; the device target's counterpart is one line that returns null, and on
+a device a quick-unlock key that is not the Secure Enclave's is refused at run time, when it is made and when it
+is used. `ios-core.yml` requires the device framework's header to declare `QuickUnlockSecureEnclaveOnly` and not
+`SimulatorSoftwareQuickUnlockKey`; `ios-uitest.yml` requires the simulator build's header to declare the
+latter. The cost: in these tests the key is not hardware-bound, needs no passcode, and survives a change of
+enrolled faces.
 
 ### What this can never tell us
 
