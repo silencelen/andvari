@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a card form in a rotated same-origin frame</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  .turn { transform: rotate(180deg); }
+  iframe { width: 100%; height: 260px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<h1>Card form in a rotated frame</h1>
+<p>Card-fill threat model, case a. The card form is in a same-origin frame turned upside down, so where its fields
+show cannot be worked out from the frame's box. Tap the card number in the frame, open the andvari popup and Fill:</p>
+<ul>
+  <li>Nothing is filled: the popup says the card field can't be seen.</li>
+</ul>
+<div class="turn"><iframe title="checkout" src="card-first-party-beside-frames.html"></iframe></div>
+</body>
+</html>

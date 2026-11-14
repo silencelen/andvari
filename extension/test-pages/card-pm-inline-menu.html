@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: another password manager's menu over the card form</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  label { display: block; margin: 8px 0 2px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #999; border-radius: 6px; font: inherit; }
+  .slot { position: relative; }
+  /* What another password manager injects: its own extension page, in a frame over the field it offers to fill. */
+  .other-pm { position: absolute; left: 8px; right: 8px; top: 22px; height: 30px; border: 0; z-index: -1; }
+</style>
+</head>
+<body>
+<h1>Another password manager's menu</h1>
+<p>Card-fill threat model, a false positive to avoid. Another password manager puts its menu, a page of its own
+extension, in a frame under the card number field. The frame is not the page's. Tap the card number, open the andvari
+popup and Fill:</p>
+<ul>
+  <li>The card is filled into all three fields.</li>
+</ul>
+<form id="checkout" onsubmit="return false">
+  <div class="slot">
+    <label for="cc">Card number</label><input id="cc" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+    <iframe class="other-pm" title="Other password manager" src="chrome-extension://abcdefghijklmnopabcdefghijklmnop/menu.html"></iframe>
+  </div>
+  <label for="exp">Expiry</label><input id="exp" name="exp-date" autocomplete="cc-exp" placeholder="MM / YY">
+  <label for="cvc">Security code</label><input id="cvc" name="cvc" autocomplete="cc-csc" inputmode="numeric">
+</form>
+</body>
+</html>

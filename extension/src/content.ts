@@ -22,8 +22,8 @@ import {
 import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { boxContains, boxesOverlap, bumpLabelGeneration, clipBox, contentPositionOf, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, FRAME_TAGS, isSubmitLike, labelSourcesOf, MIN_OPACITY, parentAcross, probeVisibility, proxiedAtFill, samplePoints, unionBox, visibilityOf, whatShowsAt, type Box, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
-import { paymentProviderHost } from "./paymentproviders";
+import { axisAligned, boxContains, boxesOverlap, bumpLabelGeneration, canHostShadow, clipBox, contentPositionOf, demoteCsc, extensionFrameSrc, fieldWrapperOf, findCardForms, findLoginForms, FRAME_TAGS, isSubmitLike, labelSourcesOf, MIN_OPACITY, parentAcross, probeVisibility, proxiedAtFill, samplePoints, unionBox, visibilityOf, whatShowsAt, type Box, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm, type SamplePoint } from "./detect";
+import { paymentProviderCardFrame, paymentProviderHost } from "./paymentproviders";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
@@ -363,14 +363,58 @@ function reportCardForm(): void {
   // form's kinds (not the frame's richest form) and sends it to this frame.
   const at = cardFocus === null ? -1 : all.findIndex((f) => f.fields.some((x) => x.input === cardFocus));
   const anchor = at >= 0 ? at : null;
+  // Threat model case c: the providers' card-entry frames this document embeds; the worker then fills no card here.
+  const providers = providerCardFramesHere();
   // L7: a new choice (even of the same field) is told, so the worker stamps when this frame chose last.
   const choseNow = chosenSeq !== reportedChoice;
-  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, chosenSeq]);
+  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, providers, chosenSeq]);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
   reportedChoice = chosenSeq;
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
-  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow });
+  void safeSend({ type: "cardFormInfo", forms, anchor, providers, choseNow });
+}
+
+/**
+ * Card-fill threat model, case c: the hosts of the payment providers' card-entry frames this document embeds, anywhere
+ * (every shadow root this script can open, every child document it can read), hidden or zero-size alike; and of the
+ * frames a form posts a provider's card entry into (Accept Hosted posts into a frame with no src). A provider's
+ * buttons and controller frames do not count (paymentproviders.ts).
+ */
+function providerCardFramesHere(): string[] {
+  const hosts = new Set<string>();
+  const all = everyElement(document) ?? [];
+  const named = new Set<string>();
+  for (const el of all) {
+    if (!FRAME_TAGS.has(el.tagName.toUpperCase())) continue;
+    const host = cardEntryHost(frameSrc(el), el);
+    if (host !== null) hosts.add(host);
+    const name = el.getAttribute("name");
+    if (name !== null && name !== "") named.add(name);
+    for (const inner of framesInside(el, boxOf(el.getBoundingClientRect()))) {
+      const h = cardEntryHost(frameSrc(inner.el), inner.el);
+      if (h !== null) hosts.add(h);
+    }
+  }
+  for (const el of all) {
+    if (el.tagName.toUpperCase() !== "FORM") continue;
+    const target = el.getAttribute("target");
+    if (target === null || !named.has(target)) continue;
+    const h = cardEntryHost(el.getAttribute("action") ?? "", el);
+    if (h !== null) hosts.add(h);
+  }
+  return [...hosts].sort();
+}
+
+/** The host of [url] (resolved against [el]'s document) when it is a provider's card-entry frame; null otherwise. The
+ *  frame's name goes with it, where a provider puts the field there. */
+function cardEntryHost(url: string, el: Element): string | null {
+  if (url === "") return null;
+  try {
+    return paymentProviderCardFrame(new URL(url, el.ownerDocument.baseURI).href, el.getAttribute("name"));
+  } catch {
+    return null;
+  }
 }
 
 /** Bumped by every choice of a card field, so a report tells the worker a new choice was made ([reportCardForm]). */
@@ -510,8 +554,31 @@ function frameHost(el: Element): string | null {
   }
 }
 
+/**
+ * How [el]'s box in its parent's viewport maps the frame's own content: the top-left of its content box and the scale
+ * on each axis; null when it, or anything around it in the parent document, is rotated, skewed or put in perspective
+ * (the card-fill threat model, round-9: such a frame's content cannot be placed by its bounding box, so it is refused).
+ */
+function frameContentMapping(el: HTMLElement, box: Box): { left: number; top: number; sx: number; sy: number } | null {
+  const view = el.ownerDocument.defaultView;
+  if (!view) return null;
+  for (let a: Element | null = el, depth = 0; a !== null && depth < 64; a = parentAcross(a), depth++) {
+    if (!axisAligned(view.getComputedStyle(a).transform)) return null;
+  }
+  const cs = view.getComputedStyle(el);
+  const sx = el.offsetWidth > 0 ? box.width / el.offsetWidth : 1;
+  const sy = el.offsetHeight > 0 ? box.height / el.offsetHeight : 1;
+  return {
+    left: box.left + (el.clientLeft + (Number.parseFloat(cs.paddingLeft) || 0)) * sx,
+    top: box.top + (el.clientTop + (Number.parseFloat(cs.paddingTop) || 0)) * sy,
+    sx,
+    sy,
+  };
+}
+
 /** The frames of [frame]'s own document, when this script can read it (an about:blank or srcdoc child, where no
- *  content script runs), with their boxes in [frame]'s document, clipped to [box], the frame's own; and theirs. */
+ *  content script runs), with their boxes in [frame]'s document, clipped to [box], the frame's own; and theirs. Inside a
+ *  frame that cannot be mapped ([frameContentMapping]) each counts as the whole of it. */
 function framesInside(frame: Element, box: Box, depth = 0): { el: Element; box: Box }[] {
   if (depth >= SHADOW_MAX_DEPTH) return [];
   let inner: Document | null = null;
@@ -521,60 +588,82 @@ function framesInside(frame: Element, box: Box, depth = 0): { el: Element; box: 
     inner = null;
   }
   if (inner === null) return [];
-  const el = frame as HTMLElement;
-  const cs = el.ownerDocument.defaultView?.getComputedStyle(el);
-  const scale = el.offsetWidth > 0 ? box.width / el.offsetWidth : 1;
-  const left = box.left + (el.clientLeft + (Number.parseFloat(cs?.paddingLeft ?? "0") || 0)) * scale;
-  const top = box.top + (el.clientTop + (Number.parseFloat(cs?.paddingTop ?? "0") || 0)) * scale;
+  const map = frameContentMapping(frame as HTMLElement, box);
   const out: { el: Element; box: Box }[] = [];
   for (const f of everyElement(inner) ?? []) {
-    if (!FRAME_TAGS.has(f.tagName.toUpperCase())) continue;
+    if (!FRAME_TAGS.has(f.tagName.toUpperCase()) || extensionFrameSrc(frameSrc(f))) continue;
     const r = f.getBoundingClientRect();
-    const mapped = clipBox({ left: left + r.left * scale, top: top + r.top * scale, width: r.width * scale, height: r.height * scale }, box);
+    const mapped = map === null ? box : clipBox({ left: map.left + r.left * map.sx, top: map.top + r.top * map.sy, width: r.width * map.sx, height: r.height * map.sy }, box);
     if (mapped === null) continue;
     out.push({ el: f, box: mapped }, ...framesInside(f, mapped, depth + 1));
   }
   return out;
 }
 
+/** What a frame element loads, as written: an iframe's or embed's src, an object's data. */
+function frameSrc(el: Element): string {
+  return el.getAttribute(el.tagName.toUpperCase() === "OBJECT" ? "data" : "src") ?? "";
+}
+
+/** Whether [el], or anything around it in its document, stays where it is on screen while the page scrolls. */
+function fixedOnScreen(el: Element): boolean {
+  const view = el.ownerDocument.defaultView;
+  if (!view) return false;
+  for (let a: Element | null = el, depth = 0; a !== null && depth < 64; a = parentAcross(a), depth++) {
+    if (view.getComputedStyle(a).position === "fixed") return true;
+  }
+  return false;
+}
+
+/** Where a card goes, as the frames rule looks at it: each field's own box, and the box around the whole form. */
+interface CardArea {
+  fields: readonly Box[];
+  form: Box | null;
+}
+
 /**
- * Round-8 review H: what stands against a card fill in [doc] where the boxes [boxes] and the points [points] are (in
- * [doc]'s viewport): a frame (iframe, frame, object or embed, any source or none) of [doc], of a shadow root this script
- * can open, or of a child document it can read, that overlaps one of the boxes or lies under one of the points.
- * [exclude]: the frame element the chosen field's own document is in, looked at from its parent. Null when nothing does;
- * otherwise the listed provider whose frame it is, when it is one (the list names, it does not decide).
+ * The frames rule (card-fill threat model, case a): what stands against a card fill in [doc] where [area] and the
+ * points [points] are (in [doc]'s viewport). A frame (iframe, frame, object or embed, any source or none) of [doc], of a
+ * shadow root this script can open, or of a child document it can read, refuses it when it lies under one of the
+ * points or overlaps a field's box or the form's box; a frame fixed on screen (a chat launcher, a captcha badge)
+ * only by the fields' own boxes and the points. A frame of a browser extension (another password manager's menu) is
+ * not the page's and is passed over. [exclude]: the frame element the chosen field's document is in, looked at from
+ * its parent. Null when nothing stands against it; otherwise the listed provider whose frame it is, when it is one.
  */
-function framesAgainst(doc: Document, boxes: readonly Box[], points: readonly { x: number; y: number }[], exclude: Element | null): { host: string | null } | null {
+function framesAgainst(doc: Document, area: CardArea, points: readonly SamplePoint[], exclude: Element | null): { host: string | null } | null {
   const all = everyElement(doc);
   if (all === null) return { host: null };
-  const hits = (box: Box): boolean => boxes.some((b) => boxesOverlap(box, b)) || points.some((p) => boxContains(box, p));
+  const underPoint = (box: Box): boolean => points.some((p) => boxContains(box, p));
+  const onFields = (box: Box): boolean => area.fields.some((b) => boxesOverlap(box, b)) || underPoint(box);
   for (const el of all) {
-    if (el === exclude || !FRAME_TAGS.has(el.tagName.toUpperCase())) continue;
+    if (el === exclude || !FRAME_TAGS.has(el.tagName.toUpperCase()) || extensionFrameSrc(frameSrc(el))) continue;
     const box = boxOf(el.getBoundingClientRect());
+    const hits = fixedOnScreen(el) ? onFields : (b: Box): boolean => onFields(b) || (area.form !== null && boxesOverlap(b, area.form));
     if (hits(box)) return { host: frameHost(el) };
     for (const inner of framesInside(el, box)) if (hits(inner.box)) return { host: frameHost(inner.el) };
   }
   for (const { x, y } of points) {
     for (const at of doc.elementsFromPoint(x, y)) {
-      if (at !== exclude && FRAME_TAGS.has(at.tagName.toUpperCase())) return { host: frameHost(at) };
+      if (at !== exclude && FRAME_TAGS.has(at.tagName.toUpperCase()) && !extensionFrameSrc(frameSrc(at))) return { host: frameHost(at) };
     }
   }
   return null;
 }
 
 /**
- * Round-8 review H, at the choice and again at the fill: whether a card may go into [field], of [form], as far as what
- * lies over and under them goes. A frame against the field's box, the form's box or the field's sample points refuses
- * it, in this document and, up the frame chain, in each parent document around this frame's place ([framesUpChain]).
- * On Safari, where a closed shadow root hides its frames from this script but not its host, any element that overlaps
- * the field and is neither the field, one of its ancestors, nor inside its own wrapper refuses it too. Null: nothing
- * stands against it.
+ * The card-fill threat model's case a, at the choice and again at the fill: whether a card may go into [field], of
+ * [form], as far as what lies over and under them goes. The frames rule ([framesAgainst]) in this document and, up the
+ * frame chain, in each parent document around this frame's place ([framesUpChain]). In Safari, where a closed shadow
+ * root hides its frames from this script but not its host, any element that overlaps the field and is neither the
+ * field, one of its ancestors, nor an element of its own wrapper that cannot host a shadow root, refuses it too. Null:
+ * nothing stands against it.
  */
 function cardFillAgainst(field: FillableControl, form: CardForm): { host: string | null } | null {
   const fieldBox = boxOf(field.getBoundingClientRect());
-  const formBox = unionBox(form.fields.filter((f) => f.input.isConnected).map((f) => boxOf(f.input.getBoundingClientRect()))) ?? fieldBox;
+  const fields = form.fields.filter((f) => f.input.isConnected).map((f) => boxOf(f.input.getBoundingClientRect()));
+  const area: CardArea = { fields: [fieldBox, ...fields], form: unionBox(fields) ?? fieldBox };
   const points = samplePoints(fieldBox);
-  const here = framesAgainst(field.ownerDocument, [fieldBox, formBox], points, null);
+  const here = framesAgainst(field.ownerDocument, area, points, null);
   if (here !== null) return here;
   if (__ANDVARI_TARGET__ === "safari") {
     const all = everyElement(field.ownerDocument);
@@ -583,7 +672,8 @@ function cardFillAgainst(field: FillableControl, form: CardForm): { host: string
     for (let a = parentAcross(field); a !== null; a = parentAcross(a)) ancestors.add(a);
     const wrapper = fieldWrapperOf(field);
     for (const el of all) {
-      if (el === field || ancestors.has(el) || field.contains(el) || (wrapper !== null && wrapper.contains(el))) continue;
+      if (el === field || ancestors.has(el) || field.contains(el)) continue;
+      if (wrapper !== null && wrapper.contains(el) && !canHostShadow(el.tagName)) continue;
       if (boxesOverlap(boxOf(el.getBoundingClientRect()), fieldBox)) return { host: null };
     }
   }
@@ -592,8 +682,9 @@ function cardFillAgainst(field: FillableControl, form: CardForm): { host: string
 
 /**
  * The frames rule in each parent document, up to the top: around where this frame shows the field's box, nothing but
- * this frame's own element may be a frame. A parent this script cannot read (another origin) is left to that frame's
- * own check of its frame element ([frameChainSeen]).
+ * this frame's own element may be a frame. A frame that is rotated, skewed or in perspective in its parent cannot be
+ * mapped, and refuses ([frameContentMapping]). A parent this script cannot read (another origin) is left to that
+ * frame's own check of its frame element ([frameChainSeen]).
  */
 function framesUpChain(fieldBox: Box): { host: string | null } | null {
   let win: Window = window;
@@ -607,15 +698,12 @@ function framesUpChain(fieldBox: Box): { host: string | null } | null {
     }
     const parentDoc = frame?.ownerDocument ?? null;
     if (frame === null || parentDoc === null) return null;
-    const el = frame as HTMLElement;
-    const r = el.getBoundingClientRect();
-    const cs = parentDoc.defaultView?.getComputedStyle(el);
-    const scale = el.offsetWidth > 0 ? r.width / el.offsetWidth : 1;
-    const left = r.left + (el.clientLeft + (Number.parseFloat(cs?.paddingLeft ?? "0") || 0)) * scale;
-    const top = r.top + (el.clientTop + (Number.parseFloat(cs?.paddingTop ?? "0") || 0)) * scale;
-    const mapped = clipBox({ left: left + box.left * scale, top: top + box.top * scale, width: box.width * scale, height: box.height * scale }, boxOf(r));
+    const r = boxOf(frame.getBoundingClientRect());
+    const map = frameContentMapping(frame as HTMLElement, r);
+    if (map === null) return { host: null };
+    const mapped = clipBox({ left: map.left + box.left * map.sx, top: map.top + box.top * map.sy, width: box.width * map.sx, height: box.height * map.sy }, r);
     if (mapped === null) return { host: null };
-    const against = framesAgainst(parentDoc, [mapped], samplePoints(mapped), frame);
+    const against = framesAgainst(parentDoc, { fields: [mapped], form: mapped }, samplePoints(mapped), frame);
     if (against !== null) return against;
     win = parentDoc.defaultView ?? win.parent;
     box = mapped;
@@ -764,13 +852,10 @@ function frameChainSeen(at: { x: number; y: number }): boolean {
     const parent = frame?.ownerDocument?.defaultView ?? null;
     if (frame === null || parent === null || typeof (frame as HTMLElement).offsetWidth !== "number") return false;
     const el = frame as HTMLElement;
-    const r = el.getBoundingClientRect();
-    const cs = parent.getComputedStyle(el);
-    const scale = el.offsetWidth > 0 ? r.width / el.offsetWidth : 1;
-    const mapped = {
-      x: r.left + (el.clientLeft + (Number.parseFloat(cs.paddingLeft) || 0) + point.x) * scale,
-      y: r.top + (el.clientTop + (Number.parseFloat(cs.paddingTop) || 0) + point.y) * scale,
-    };
+    // A frame rotated, skewed or in perspective in its parent cannot be placed by its box: refused (round-9).
+    const map = frameContentMapping(el, boxOf(el.getBoundingClientRect()));
+    if (map === null) return false;
+    const mapped = { x: map.left + point.x * map.sx, y: map.top + point.y * map.sy };
     if (mapped.x < 0 || mapped.y < 0 || mapped.x >= parent.innerWidth || mapped.y >= parent.innerHeight) return false;
     // The frame element's own styles, size and place, and what shows at the field's point in the parent (the frame's
     // centre may well be off screen in a tall frame: the point is what must be on screen and not covered).

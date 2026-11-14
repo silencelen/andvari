@@ -8,7 +8,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { paymentProviderHost } from "./paymentproviders.ts";
+import { paymentProviderCardFrame, paymentProviderHost } from "./paymentproviders.ts";
 
 const page = (name: string): string => readFileSync(new URL(`../test-pages/${name}`, import.meta.url), "utf-8");
 const frames = (html: string): string[] => [...html.matchAll(/<iframe[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1]!);
@@ -64,4 +64,35 @@ test("round-8 M: a first-party form beside a PayPal button and Stripe.js's hidde
   assert.match(html, /<div class="paypal"><iframe title="PayPal" src="https:\/\/www\.paypal\.com\/smart\/buttons/, "a PayPal button frame below the form");
   assert.ok(html.indexOf('<form id="checkout"') < html.indexOf('<div class="paypal">') && html.indexOf("</form>") < html.indexOf('<div class="paypal">'), "outside the form, after it");
   assert.ok(!html.includes("color: transparent"), "the page's own fields, shown");
+});
+
+test("the threat model's case c: a provider's hidden card-entry frame beside a first-party form stops the fill", () => {
+  const html = page("card-hidden-provider-frame.html");
+  const srcs = frames(html);
+  assert.equal(srcs.length, 1);
+  assert.equal(paymentProviderCardFrame(srcs[0]!), "js.stripe.com", "a card-entry frame by host and path");
+  assert.match(html, /\.stash \{ position: absolute; left: -9999px; width: 0; height: 0; border: 0; \}/, "zero-size and off screen");
+  assert.ok(!html.includes("color: transparent"), "the page's own form is shown: only case c stops it");
+});
+
+test("the threat model's case a: a card form in a frame that cannot be mapped (rotated) is not filled", () => {
+  const html = page("card-rotated-frame.html");
+  assert.match(html, /\.turn \{ transform: rotate\(180deg\); \}/);
+  assert.match(html, /<div class="turn"><iframe title="checkout" src="card-first-party-beside-frames\.html"><\/iframe><\/div>/, "a same-origin frame, so the content script runs in it");
+});
+
+test("round-9 false positives: frames and marks the page shows beside or over a first-party form, which must fill", () => {
+  const menu = page("card-pm-inline-menu.html");
+  assert.deepEqual(frames(menu), ["chrome-extension://abcdefghijklmnopabcdefghijklmnop/menu.html"], "another password manager's own page");
+  const fixed = page("card-fixed-widgets.html");
+  assert.match(fixed, /\.badge \{ position: fixed;/);
+  assert.match(fixed, /\.chat \{ position: fixed;/);
+  for (const src of frames(fixed)) assert.equal(paymentProviderCardFrame(src), null, src);
+  assert.match(fixed, /const gap = \(exp\.right \+ cvc\.left\) \/ 2;/, "between the two fields, over neither");
+  const icons = page("card-narrow-cvc-icon.html");
+  assert.match(icons, /\.field label \{ position: absolute; left: 6px; top: 2px; padding: 0 4px; font-size: 11px; background: #fff;/, "a floated label on an opaque chip");
+  assert.match(icons, /\.narrow img, \.narrow svg \{ position: absolute; right: 4px; top: 6px; width: 30px; height: 30px; \}/, "a brand mark in the narrow field");
+  assert.match(icons, /\.narrow \{ width: 96px; \}/);
+  const beside = page("card-first-party-beside-frames.html");
+  for (const src of frames(beside)) assert.equal(paymentProviderCardFrame(src), null, `${src}: a button or controller frame is not card entry`);
 });

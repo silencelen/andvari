@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: a captcha badge and a chat launcher fixed beside the card form</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 16px; max-width: 480px; }
+  label { display: block; margin: 8px 0 2px; }
+  input { box-sizing: border-box; padding: 10px; border: 1px solid #999; border-radius: 6px; font: inherit; }
+  #cc { width: 100%; }
+  .row { display: flex; justify-content: space-between; }
+  .row div { width: 30%; }
+  .row input { width: 100%; }
+  /* A reCAPTCHA badge and a chat launcher, fixed on screen, as such widgets are. The script below puts each in the gap
+     between the expiry and the security code: inside the box around the card form, over none of its fields. */
+  .badge { position: fixed; width: 120px; height: 40px; border: 0; background: #eef; }
+  .chat { position: fixed; width: 48px; height: 48px; border: 0; border-radius: 24px; background: #fee; }
+</style>
+</head>
+<body>
+<h1>Fixed widgets beside the card form</h1>
+<p>Card-fill threat model, a false positive to avoid. A captcha badge and a chat launcher, both frames fixed on
+screen, sit inside the box around the card form but over none of its fields. Without scrolling, tap the card number,
+open the andvari popup and Fill:</p>
+<ul>
+  <li>The card is filled into all three fields.</li>
+</ul>
+<form id="checkout" onsubmit="return false">
+  <label for="cc">Card number</label><input id="cc" name="cardnumber" autocomplete="cc-number" inputmode="numeric">
+  <div class="row">
+    <div><label for="exp">Expiry</label><input id="exp" name="exp-date" autocomplete="cc-exp" placeholder="MM / YY"></div>
+    <div><label for="cvc">Security code</label><input id="cvc" name="cvc" autocomplete="cc-csc" inputmode="numeric"></div>
+  </div>
+</form>
+<iframe class="badge" title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?ar=1&amp;k=test&amp;size=invisible"></iframe>
+<iframe class="chat" title="Chat" src="https://widget.intercom.io/widget/test"></iframe>
+<script>
+  // Between the two fields of the second row, level with them: inside the form's box, over neither field.
+  const exp = document.getElementById("exp").getBoundingClientRect();
+  const cvc = document.getElementById("cvc").getBoundingClientRect();
+  const gap = (exp.right + cvc.left) / 2;
+  const badge = document.querySelector(".badge");
+  badge.style.left = (gap - 60) + "px";
+  badge.style.top = (exp.top - 24) + "px";
+  const chat = document.querySelector(".chat");
+  chat.style.left = (gap - 24) + "px";
+  chat.style.top = (exp.top + 14) + "px";
+</script>
+</body>
+</html>

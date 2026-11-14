@@ -494,6 +494,10 @@ export type Req =
       /** Round-6 review M2: the index in [forms] of the form holding the field the person chose (a press on it, or a
        *  Tab onto it), or null. A fill's grant is built from that form's kinds and sent to the frame that chose. */
       anchor?: number | null;
+      /** Card-fill threat model, case c: the hosts of the payment providers' card-entry frames this document embeds
+       *  (paymentproviders.ts), hidden or not. Any of them in a tab, or card fields in a cross-origin frame, and no
+       *  card is filled into that tab's top frame or its same-origin frames. */
+      providers?: string[];
       /** Round-7 review L7: the person chose a field again since the last report (the worker stamps the time). */
       choseNow?: boolean;
     }
@@ -669,6 +673,9 @@ export type Res<T extends Req["type"]> = T extends "status"
                                                *  per-frame origins vs the top origin — never page data. The popup renders
                                                *  the neutral explainer and NEVER a Fill button in this state. */
                                               crossOriginFormsOnly: boolean;
+                                              /** Threat model case c: the card is taken in a provider's frame here
+                                               *  (its host): no Fill, the explainer names it and offers copy. */
+                                              providerHost?: string;
                                             }
                                           : T extends "fillCardFromPopup"
                                             ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; providerHost?: string; error?: string }
