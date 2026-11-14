@@ -1289,6 +1289,55 @@ open class SessionControllerTest {
         assertTrue(controller.state.ownershipOffers.isEmpty())
     }
 
+    /**
+     * The people this account verified (Android's "Household members you've verified"): listed from the account's own
+     * record, verified by looking someone up and comparing codes with them, and taken off again. Nothing is recorded on a
+     * mismatch, and a lock forgets the open list.
+     */
+    @Test
+    fun thePeopleThisAccountVerifiedAreListedVerifiedAndRemoved() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        val bea = server.person("bea@example.com", "Bea")
+        assertEquals(ActionResult.Ok, controller.openHousehold())
+        val empty = assertNotNull(controller.state.household)
+        assertTrue(empty.contacts.isEmpty())
+        assertNull(empty.warning)
+
+        assertEquals(ActionResult.Failed(MembersCopy.EMAIL_REQUIRED), controller.findHouseholdMember(" "))
+        assertEquals(ActionResult.Failed(MembersCopy.NO_SUCH_USER), controller.findHouseholdMember("nobody@example.com"))
+        server.accounts[EMAIL] = io.silencelen.andvari.core.model.UserLookupResponse(reg.userId, "u", reg.identityPub)
+        assertEquals(ActionResult.Failed(MembersCopy.THATS_YOU), controller.findHouseholdMember(EMAIL))
+        assertEquals(ActionResult.Ok, controller.findHouseholdMember(" bea@example.com "))
+        val ceremony = assertNotNull(controller.state.verifying)
+        assertEquals("bea@example.com", ceremony.email)
+        assertFalse(ceremony.invitation)
+        assertEquals(ActionResult.Failed(MembersCopy.CODE_MISMATCH), controller.verifyWithCode("0".repeat(32)))
+        assertTrue(assertNotNull(controller.state.household).contacts.isEmpty(), "a mismatch records nothing")
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(bea.code))
+        assertNull(controller.state.verifying)
+        val listed = assertNotNull(controller.state.household).contacts.single()
+        assertEquals(bea.userId, listed.userId)
+        assertEquals("bea@example.com", listed.email, "the address typed to find her")
+        assertEquals("Bea", listed.label)
+        assertEquals(io.silencelen.andvari.core.client.Contact.METHOD_TYPED, listed.method)
+        assertTrue(listed.confirmedHere, "verified on this device")
+        assertEquals("Verified Bea on this device.", controller.state.notice)
+
+        assertEquals(ActionResult.Ok, controller.removeContact(bea.userId))
+        assertTrue(assertNotNull(controller.state.household).contacts.isEmpty())
+        assertTrue(assertNotNull(controller.state.notice).startsWith("Removed bea@example.com from the people you verified."))
+        assertEquals(ActionResult.Failed(MembersCopy.CONTACT_GONE), controller.removeContact(bea.userId))
+
+        // Verified by her QR code this time; a lock forgets the open list.
+        assertEquals(ActionResult.Ok, controller.findHouseholdMember("bea@example.com"))
+        assertEquals(ActionResult.Ok, controller.verifyWithQr(bea.qr))
+        assertEquals("qr", assertNotNull(controller.state.household).contacts.single().method)
+        controller.lock()
+        assertNull(controller.state.household)
+        assertNull(controller.state.verifying)
+    }
+
     /** Nothing the members screen or a comparison of codes held outlives a lock, or a screen closed while its read was out. */
     @Test
     fun aLockOrAClosedScreenForgetsTheMembersAndAnOpenComparison() = test {

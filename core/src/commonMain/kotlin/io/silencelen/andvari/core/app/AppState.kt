@@ -70,6 +70,8 @@ data class AppState(
     val members: MembersView? = null,
     /** A comparison of identity codes while it is open ([VerifyView]); null otherwise. */
     val verifying: VerifyView? = null,
+    /** The people this account verified, while their screen is open ([SessionController.openHousehold]); null otherwise. */
+    val household: HouseholdView? = null,
     /** VAULT: shared vaults waiting for this account to verify who sent them. */
     val invitations: List<InvitationView> = emptyList(),
     /** VAULT: offers to make this account the owner of a shared vault, each verified under that vault's key (spec 03 §11). */
@@ -292,6 +294,30 @@ data class MembersView(
     val adding: NewMemberView?,
     /** The owner's offer to make a member the owner, while it waits for their answer ([SessionController.offerOwnership]). */
     val offer: OwnerOfferView? = null,
+)
+
+/**
+ * The people this account verified by comparing identity codes with them (root cause A §7.2): the account's own record,
+ * kept for it on the server sealed so only it can read it, and the same on all its devices.
+ */
+data class HouseholdView(
+    /** By the address typed to find them, else the name shown when they were verified. */
+    val contacts: List<ContactView>,
+    /** What was wrong with the copy of the record the server sent last (an older one, or one this account did not write). */
+    val warning: String?,
+)
+
+data class ContactView(
+    val userId: String,
+    /** The address typed to find them when they were verified; null when none was typed. */
+    val email: String?,
+    /** The name shown when they were verified. */
+    val label: String,
+    /** How: "qr", "typed" or "enrol". */
+    val method: String,
+    val verifiedAtMs: Long,
+    /** Verified on this device. One verified on another device counts here once verified here too. */
+    val confirmedHere: Boolean,
 )
 
 /** An offer this account made to hand a vault over: to whom (the server's name for them), and until when. */

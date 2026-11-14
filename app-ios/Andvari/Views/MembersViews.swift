@@ -81,10 +81,11 @@ struct VaultMembersView: View {
         model.state.members.flatMap { $0.vaultId == vaultId ? $0 : nil }
     }
 
-    /// The comparison of codes this screen opened (an invitation's is shown from the vault screen).
+    /// The comparison of codes this screen opened (an invitation's is shown from the vault screen, and one for the people
+    /// you verified from theirs).
     private var verifying: Binding<Bool> {
         Binding(
-            get: { model.state.verifying.map { !$0.invitation } ?? false },
+            get: { members != nil && model.state.household == nil && (model.state.verifying.map { !$0.invitation } ?? false) },
             set: { if !$0 { model.cancelVerifying() } }
         )
     }
@@ -341,6 +342,174 @@ struct VaultMembersView: View {
 
     private func day(_ ms: Int64) -> String {
         Date(timeIntervalSince1970: TimeInterval(ms) / 1000).formatted(date: .abbreviated, time: .omitted)
+    }
+
+    private func act(then done: @escaping () -> Void = {}, _ action: @escaping () async -> Outcome) {
+        message = nil
+        Task {
+            let outcome = await action()
+            if outcome == .ok { done() } else { message = outcome.message }
+        }
+    }
+}
+
+// MARK: - The people you verified
+
+/// The people this account verified by comparing identity codes with them (root cause A §7.2): the account's own record,
+/// the same on all its devices. Someone verified here counts for sharing both ways; taking them off asks for the codes
+/// again before anything new is shared with them or accepted from them.
+struct VerifiedPeopleView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var loading = true
+    @State private var message: String?
+    @State private var email = ""
+    @State private var removing: ContactView?
+
+    var body: some View {
+        Form {
+            if let household = model.state.household {
+                if let warning = household.warning {
+                    Section {
+                        Text(warning)
+                            .font(.footnote)
+                            .foregroundStyle(Palette.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .listRowBackground(Palette.raised)
+                }
+                Section {
+                    if household.contacts.isEmpty {
+                        Text("Nobody yet.")
+                            .foregroundStyle(Palette.inkDim)
+                    }
+                    ForEach(household.contacts, id: \.userId) { contact in
+                        contactRow(contact)
+                    }
+                } header: {
+                    Text("People you verified")
+                } footer: {
+                    Text("Each of you does this once with the other, not once per vault. andvari never trusts a key just because the server sent it.")
+                }
+                .listRowBackground(Palette.raised)
+                Section {
+                    TextField("Their email", text: $email)
+                        .keyboardType(.emailAddress)
+                        .textContentType(.emailAddress)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                        .onSubmit(lookUp)
+                        .accessibilityIdentifier(AccessID.field("Person email"))
+                    Button("Look up and verify", action: lookUp)
+                        .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty || model.state.busy)
+                } header: {
+                    Text("Verify someone")
+                } footer: {
+                    Text("Do it together, in person or on a call you trust: they read the identity code from their own screen and you type it, or you scan their QR code.")
+                }
+                .listRowBackground(Palette.raised)
+            } else if loading {
+                Section {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                }
+                .listRowBackground(Color.clear)
+            }
+            if let message {
+                Section {
+                    InlineMessage(text: message)
+                }
+                .listRowBackground(Color.clear)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Palette.background)
+        .navigationTitle("People you verified")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            let outcome = await model.openHousehold()
+            loading = false
+            if outcome != .ok { message = outcome.message }
+        }
+        .onDisappear {
+            model.closeHousehold()
+        }
+        .sheet(isPresented: verifying) {
+            VerifySheet()
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
+        }
+        .confirmationDialog("Remove \(removing.map(Self.who) ?? "")?", isPresented: removeAsked, titleVisibility: .visible, presenting: removing) { contact in
+            Button("Remove", role: .destructive) {
+                act { await model.removeContact(contact.userId) }
+            }
+        } message: { _ in
+            Text("Vaults already shared with them stay as they are. To share with them again, or to accept a vault from them, compare codes again.")
+        }
+    }
+
+    private var verifying: Binding<Bool> {
+        Binding(
+            get: { model.state.household != nil && (model.state.verifying.map { !$0.invitation } ?? false) },
+            set: { if !$0 { model.cancelVerifying() } }
+        )
+    }
+
+    private var removeAsked: Binding<Bool> {
+        Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })
+    }
+
+    private func contactRow(_ contact: ContactView) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Self.who(contact))
+                        .foregroundStyle(Palette.ink)
+                    Text("The name shown when you verified them: “\(contact.label)”. \(Self.method(contact.method)), \(day(contact.verifiedAtMs)).")
+                        .font(.footnote)
+                        .foregroundStyle(Palette.inkDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Button("Remove") {
+                    removing = contact
+                }
+                .font(.footnote)
+                .buttonStyle(.borderless)
+                .disabled(model.state.busy)
+            }
+            if !contact.confirmedHere {
+                Text("Verified on another of your devices. Compare codes again on this one before it counts here.")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private static func who(_ contact: ContactView) -> String {
+        contact.email ?? contact.label
+    }
+
+    private static func method(_ method: String) -> String {
+        switch method {
+        case "qr": return "By QR code"
+        case "typed": return "By typed code"
+        case "enrol": return "At enrolment, in person"
+        default: return "Verified"
+        }
+    }
+
+    private func day(_ ms: Int64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(ms) / 1000).formatted(date: .abbreviated, time: .omitted)
+    }
+
+    private func lookUp() {
+        let typed = email
+        guard !typed.trimmingCharacters(in: .whitespaces).isEmpty, !model.state.busy else { return }
+        act(then: { email = "" }) { await model.findHouseholdMember(typed) }
     }
 
     private func act(then done: @escaping () -> Void = {}, _ action: @escaping () async -> Outcome) {

@@ -25,6 +25,7 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.KdfPolicyViolationException
 import io.silencelen.andvari.core.client.KdfReKeyCore
 import io.silencelen.andvari.core.client.LoginData
+import io.silencelen.andvari.core.client.AccountStateSync
 import io.silencelen.andvari.core.client.NoPersonalVaultException
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.OriginProbeFence
@@ -2188,7 +2189,7 @@ open class SessionController(
             update { s ->
                 s.copy(
                     busy = false, verifying = if (current) null else s.verifying, members = s.members?.let { m -> membersView(live, m.vaultId) ?: m },
-                    notice = MembersCopy.verified(target.served.displayName),
+                    household = s.household?.let { householdView(live) }, notice = MembersCopy.verified(target.served.displayName),
                 )
             }
             return ActionResult.Ok
@@ -2204,6 +2205,92 @@ open class SessionController(
         writeFillSnapshot()
         backgroundSync() // what the vault holds comes in with the next sync; the person need not wait for it
         return ActionResult.Ok
+    }
+
+    // ---- the people this account verified (root cause A §7.2; Android's "Household members you've verified") ----
+
+    private val householdScreen = ScreenToken()
+
+    /**
+     * Open the list of the people this account verified ([AppState.household]): the account's own record, read again from
+     * the server (sealed so only this account can read it) and merged with this device's copy.
+     */
+    @Throws(CancellationException::class)
+    suspend fun openHousehold(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = householdScreen.open()
+        update { it.copy(household = householdView(live)) }
+        busy()
+        try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.accountState.refresh() }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            if (!householdScreen.still(token)) return@action screenGone()
+            return@action failure(t, HouseholdCopy::forError) // this device's copy stays listed
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!householdScreen.still(token)) return@action screenGone()
+        update { it.copy(busy = false, household = householdView(live)) }
+        ActionResult.Ok
+    }
+
+    fun closeHousehold() {
+        householdScreen.close()
+        update { it.copy(household = null) }
+    }
+
+    private fun householdView(live: VaultSession.Unlocked): HouseholdView {
+        val record = live.engine.accountState
+        val warning = when (record.anomaly) {
+            AccountStateSync.Anomaly.ROLLBACK -> MembersCopy.RECORD_ROLLED_BACK
+            AccountStateSync.Anomaly.UNREADABLE -> MembersCopy.RECORD_UNREADABLE
+            null -> null
+        }
+        val contacts = record.contacts().filter { it.userId != live.account.userId }.sortedWith(compareBy({ (it.email ?: it.label).lowercase() }, { it.userId })).map {
+            ContactView(it.userId, it.email, it.label, it.method, it.verifiedAt, confirmedHere = record.isCurrent(it))
+        }
+        return HouseholdView(contacts, warning)
+    }
+
+    /** Look up the account for an address typed to verify someone; the codes are compared next ([AppState.verifying]). */
+    @Throws(CancellationException::class)
+    suspend fun findHouseholdMember(email: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val typed = email.trim()
+        if (typed.isEmpty()) return@action ActionResult.Failed(MembersCopy.EMAIL_REQUIRED)
+        busy()
+        val served = try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.lookupMember(typed) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action failure(t, MembersCopy::forLookup)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (served.userId == live.account.userId) return@action idleFailed(MembersCopy.THATS_YOU)
+        update { it.copy(busy = false) }
+        openVerification(live, VerifyTarget(served, typed, invitation = null))
+    }
+
+    /**
+     * Take someone off the people this account verified, on all its devices: shared vaults from them are invitations
+     * again, and adding them to a vault asks for the codes again. Vaults already shared stay as they are.
+     */
+    @Throws(CancellationException::class)
+    suspend fun removeContact(userId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val contact = live.engine.accountState.contacts().firstOrNull { it.userId == userId } ?: return@action ActionResult.Failed(MembersCopy.CONTACT_GONE)
+        busy()
+        runBounded(BoundedOps.FLAT_MS) { live.engine.unpinMember(userId) }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        update {
+            it.copy(
+                busy = false, household = it.household?.let { householdView(live) }, members = it.members?.let { m -> membersView(live, m.vaultId) ?: m },
+                notice = MembersCopy.contactRemoved(contact.email ?: contact.label),
+            )
+        }
+        ActionResult.Ok
     }
 
     // ---- invitations (root cause A §1.6) ----
@@ -3219,7 +3306,7 @@ open class SessionController(
         items = emptyList(), query = "", syncing = false, busy = false, error = null, notice = null, totpRequired = false,
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
-        attachmentDraft = null, upload = null, members = null, verifying = null, invitations = emptyList(), ownershipOffers = emptyList(),
+        attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
     )
 
     private companion object {
@@ -3338,6 +3425,9 @@ internal object MembersCopy {
     const val OFFER_PENDING = "An offer to hand this vault over is already waiting. Cancel it first."
     const val OFFER_CANCELLED = "Offer cancelled. You still own the vault."
     const val OFFER_GONE = "That offer is no longer waiting."
+    const val CONTACT_GONE = "They're no longer on your list."
+    const val RECORD_ROLLED_BACK = "The server sent an older copy of the people you verified. Your newer copy was kept. If this keeps happening, tell your admin."
+    const val RECORD_UNREADABLE = "The server sent a list of verified people this account did not write. It was ignored. Tell your admin."
     const val OWNERSHIP_UNCONFIRMED_TRANSFER =
         "Before you hand this vault over, confirm that you own it: this account has no record that you created it or that it was transferred to you. Confirm it in the web app, under Shared vaults."
     const val OWNERSHIP_UNCONFIRMED =
@@ -3408,6 +3498,8 @@ internal object MembersCopy {
     fun ownershipAccepted(vault: String): String = "You own “$vault” now: you manage its members, and only you can rename, hand over or delete it."
 
     fun ownershipDeclined(vault: String): String = "Declined. “$vault” stays with its owner."
+
+    fun contactRemoved(who: String): String = "Removed $who from the people you verified. Compare codes with them again before you share with them."
 
     fun verified(name: String): String = "Verified $name on this device."
 
