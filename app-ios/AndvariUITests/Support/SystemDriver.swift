@@ -300,13 +300,18 @@ extension UITestCase {
 
     /// Open [url] in a fresh Safari and wait for the page's heading. A Safari that has just started sometimes comes
     /// up on its start page and drops the address it was opened with, or leaves a load pending; so it is started
-    /// first, the address is typed when opening it did not take, and Safari is started again halfway. Four tries in
-    /// all, then the test is told, with Safari's tree.
+    /// first, the address is typed when opening it did not take, and Safari is started again every other try. The
+    /// simulator also has spells of several minutes in which every TLS connection to the test site fails ("bad
+    /// certificate format" in its log, after a stall of about 20 s) and then passes again; so the tries go on for up to
+    /// nine minutes before the test is told, with Safari's tree.
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
         let shown = { browser.webViews.staticTexts[heading].exists }
-        for attempt in 1...4 {
-            if attempt == 1 || attempt == 3 {
+        let deadline = Date().addingTimeInterval(9 * 60)
+        var attempt = 0
+        while true {
+            attempt += 1
+            if attempt % 2 == 1 {
                 browser.terminate()
                 browser.launch()
                 _ = waitUntil(20) { browser.textFields["TabBarItemTitle"].exists || browser.buttons["TabBarItemTitle"].exists || browser.otherElements["TabBarItemTitle"].exists }
@@ -321,11 +326,13 @@ extension UITestCase {
                 browser.typeText(url + "\n")
                 if waitUntil(20, shown) { break }
             }
-            if attempt == 4 {
+            if Date() > deadline {
                 dumpTree(browser, as: "safari-no-page")
-                XCTFail("Safari did not show \(url) in four tries")
+                XCTFail("Safari did not show \(url) in \(attempt) tries over nine minutes")
+                break
             }
-            Thread.sleep(forTimeInterval: 5)
+            if attempt == 4 { dumpTree(browser, as: "safari-no-page-yet") }
+            Thread.sleep(forTimeInterval: attempt < 4 ? 5 : 15)
         }
         // The page is there; give Safari's own first-run tips a moment to appear, and close them.
         Thread.sleep(forTimeInterval: 1.5)
