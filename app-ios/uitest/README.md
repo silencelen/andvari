@@ -76,10 +76,10 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | A shared vault deleted, then restored, on another device: a notice for each after a sync, gone when dismissed | Works | `T4…test04` |
 | A login in a vault the account only reads: no Edit, "Copy to another vault…" and no Move; the copy in Personal can be edited | Works. A second account shares the vault read-only and another device of this account accepts it; the app takes it at a sync, through the account's own wrap of the vault key, with no invitation screen of its own | `T4…test05` |
 | card-skimmer.html: Fill refuses with nothing tapped and with only the email tapped; the hidden form receives nothing | Works | `T4…test06` |
-| A card filled from the popup in the default (Compact) tab layout, the popup reached with the keyboard still up: a tap on the address Safari's bar shrank to above it brings the page menu back | Worked with ios-ui up to 034b9684; refused since 3ef56e8b (regression, below) | `T4…test07` |
-| The same with the keyboard closed first by its Done | Skipped: app defect (below) | `T4…test08` |
-| card-two-forms.html: the new card's number fills only its own form; the saved card's security code alone fills only that code | The first worked with ios-ui up to 034b9684 and is refused since 3ef56e8b (regression, below); the second is skipped with a finding (below) | `T4…test09` |
-| card-inner-scroll.html: filled once scrolled into view; scrolled away again, nothing is written and the popup says the field can't be seen | Worked with ios-ui up to 034b9684; refused since 3ef56e8b (regression, below) | `T4…test10` |
+| A card filled from the popup into a merchant page, the popup reached with the keyboard still up (a tap on the address Safari's bar shrank to) | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test07` |
+| The same with the keyboard closed first by its Done | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test08` |
+| card-two-forms.html: only the form of the field tapped is filled | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test09` |
+| card-inner-scroll.html: filled once scrolled into view, refused once scrolled away | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test10` |
 | The third-party keyboard switch | Present and off by default. Whether such a keyboard is kept out is skipped: the simulator has none, and the suite would need an app of its own to add one | `T4…test11` |
 | Two-step setup survives a trip to the Settings app (the same key at the confirm step after the unlock); the authenticator's code turns it on, a later one off | Works | `T4…test12` |
 
@@ -101,30 +101,16 @@ assertion.
   The same id also makes a later save replace an earlier save's record in the "Saved … from AutoFill" list
   even when the app was unlocked in between, so the earlier save can no longer be undone from the list.
 
-- **Since 3ef56e8b no card is filled into a page without frames** (found 2026-11-13, a regression). On
-  card-two-forms.html, which has no frame, object or embed, the popup answers Fill with "Something else sits
-  over or under the card field you tapped, such as a form embedded from another page. andvari doesn't fill a
-  card there, so nothing was filled." The same test filled the card on ios-ui 034b9684 and is refused on
-  094c92ae; the field was pressed, chosen and still had the focus (the page's event log and Safari's tree show
-  it). With no frame on the page, the likely source is the Safari branch of `cardFillAgainst`
-  (`extension/src/content.ts`), which refuses for any element overlapping the field other than the field, its
-  ancestors and its wrapper.
-
-- **A card cannot be filled from the popup once the keyboard is closed with its Done** (found 2026-11-13). In
-  the Compact and Bottom tab layouts Safari's page menu, the way to the popup, is behind the keyboard while a
-  page field has it. Done blurs the field while the page keeps its focus (the page's event log:
-  `focusout #cc-number hasFocus=true now=body`), and the content script lets the chosen field go when focus
-  moves elsewhere in the page (`noteFocusLeft`, `extension/src/content.ts`), so Fill then says "Tap the card
-  number field on the page first, then fill again." and fills nothing. Reaching the menu by a tap on the
-  shrunk address keeps the field (T4 test07), but Done is the keyboard's own way to close it.
-
-- **A form holding only a security code is never filled** (found 2026-11-13). card-two-forms.html expects a
-  tap on the saved card's security code, then Fill, to fill only that code. `buildCardForm`
-  (`extension/src/detect.ts`) makes a card form only where there is a card-number field, so that field is
-  never chosen, and Fill says "Tap the card number field on the page first, then fill again." The extension
-  or the page needs to change. On the same page the saved card's code has the focus about a second after the
-  page loads, without a press (the event log shows `activation=false`); the extension rightly does not take
-  that as a choice.
+- **Card fill into merchant pages** (found 2026-11-13, overtaken by the owner's redesign of 2026-11-14: a card
+  is to be released only to a payment provider's card-entry document, and a merchant page gets none, with the
+  popup offering to copy from the app). Three findings from the tests of the earlier design, kept for the new
+  one: since 3ef56e8b a page with no frame (card-two-forms.html) was refused as having "Something else … over
+  or under the card field you tapped"; closing the keyboard with its Done, the keyboard's own way to bring
+  Safari's page menu back in the Compact and Bottom layouts, blurred the tapped field while the page kept its
+  focus (event log: `focusout #cc-number hasFocus=true now=body`), so the field was let go and Fill asked for a
+  tap; and a form holding only a security code was never a card form (`buildCardForm` wants a card number),
+  though card-two-forms.html expects that code filled. The page event log (`?uitest-events`) and both ways of
+  reaching the popup (`PopupReach`) stay for the new design's tests.
 
 - **The personal-vault notice on a device's first sign-in** (found 2026-11-12, fixed on ios-ui by d6ff8074;
   the test still accepts both sentences) opened with "The server says your personal vault
