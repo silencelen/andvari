@@ -1,0 +1,636 @@
+import AndvariCore
+import AVFoundation
+import CoreImage.CIFilterBuiltins
+import SwiftUI
+import VisionKit
+
+/// One shared vault's members (spec 03 §10): who the server lists, and whether this device verified each of them by
+/// comparing identity codes (root cause A §7.2). The owner adds someone once codes were compared with them, changes a
+/// member's role and removes members; anyone else sees the list and can verify the people in it.
+struct VaultMembersView: View {
+    let vaultId: String
+
+    @EnvironmentObject private var model: AppModel
+    @State private var loading = true
+    @State private var message: String?
+    @State private var email = ""
+    @State private var role = "writer"
+    @State private var removing: MemberView?
+
+    var body: some View {
+        Form {
+            if let members {
+                listSection(members)
+                if members.owner {
+                    addSection(members)
+                }
+            } else if loading {
+                Section {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                }
+                .listRowBackground(Color.clear)
+            }
+            if let message {
+                Section {
+                    InlineMessage(text: message)
+                }
+                .listRowBackground(Color.clear)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(Palette.background)
+        .navigationTitle("Members")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            let outcome = await model.openMembers(vaultId)
+            loading = false
+            if outcome != .ok { message = outcome.message }
+        }
+        .onDisappear {
+            model.closeMembers()
+        }
+        .sheet(isPresented: verifying) {
+            VerifySheet()
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
+        }
+        .confirmationDialog("Remove \(removing?.name ?? "")?", isPresented: removeAsked, titleVisibility: .visible, presenting: removing) { member in
+            Button("Remove \(member.name)", role: .destructive) {
+                act { await model.removeMember(member.userId) }
+            }
+        } message: { _ in
+            Text("They lose access to this vault on all their devices. What they already saw they may have kept: the vault's key is not changed, so change any password that matters at its website too.")
+        }
+    }
+
+    private var members: MembersView? {
+        model.state.members.flatMap { $0.vaultId == vaultId ? $0 : nil }
+    }
+
+    /// The comparison of codes this screen opened (an invitation's is shown from the vault screen).
+    private var verifying: Binding<Bool> {
+        Binding(
+            get: { model.state.verifying.map { !$0.invitation } ?? false },
+            set: { if !$0 { model.cancelVerifying() } }
+        )
+    }
+
+    private var removeAsked: Binding<Bool> {
+        Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })
+    }
+
+    // MARK: - The list
+
+    private func listSection(_ members: MembersView) -> some View {
+        Section {
+            if let rows = members.members {
+                ForEach(rows, id: \.userId) { member in
+                    memberRow(member, managed: members.owner && member.role != "owner" && !member.you)
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+            }
+        } header: {
+            Text("In “\(members.vaultName)”")
+        } footer: {
+            Text(
+                (members.owner
+                    ? "Writers can add and edit items; readers can only view. "
+                    : "Only the vault's owner can add, remove or change who has access. ")
+                    + "Names and addresses are what the server reports. Verify each person once, by comparing codes with them: andvari never trusts a key just because the server sent it."
+            )
+        }
+        .listRowBackground(Palette.raised)
+    }
+
+    private func memberRow(_ member: MemberView, managed: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(member.you ? "\(member.name) (you)" : member.name)
+                        .foregroundStyle(Palette.ink)
+                    Text(member.email)
+                        .font(.footnote)
+                        .foregroundStyle(Palette.inkDim)
+                }
+                Spacer(minLength: 8)
+                if managed {
+                    Menu {
+                        Picker("Role", selection: roleBinding(member)) {
+                            Text("Writer: adds and edits items").tag("writer")
+                            Text("Reader: only views").tag("reader")
+                        }
+                        Divider()
+                        Button("Remove from vault…", role: .destructive) {
+                            removing = member
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(member.role)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2)
+                        }
+                        .font(.footnote)
+                    }
+                    .disabled(model.state.busy)
+                    .accessibilityLabel("\(member.name), \(member.role)")
+                    .accessibilityHint("Change their role, or remove them")
+                } else {
+                    Text(member.role)
+                        .font(.footnote)
+                        .foregroundStyle(Palette.inkDim)
+                }
+            }
+            if member.disabled {
+                Text("The server reports this account as disabled.")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.danger)
+            }
+            checkLine(member)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// Kotlin enums arrive as classes with one static member per entry, so they are compared, never switched over.
+    @ViewBuilder
+    private func checkLine(_ member: MemberView) -> some View {
+        if member.check == MemberCheck.verified {
+            Label("Verified on this device", systemImage: "checkmark.seal")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+        } else if member.check == MemberCheck.keyChanged {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("The server now has a different key for them than the one you verified. Check their code again, together, in person. If they did not change devices or reset their account, tell your admin.")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Verify again…") {
+                    open(model.verifyListedMember(member.userId))
+                }
+                .font(.footnote)
+                .buttonStyle(.borderless)
+                .disabled(model.state.busy)
+            }
+        } else if member.check == MemberCheck.notVerified {
+            Button("Verify…") {
+                open(model.verifyListedMember(member.userId))
+            }
+            .font(.footnote)
+            .buttonStyle(.borderless)
+            .disabled(model.state.busy)
+        }
+    }
+
+    private func roleBinding(_ member: MemberView) -> Binding<String> {
+        Binding(
+            get: { member.role },
+            set: { chosen in
+                guard chosen != member.role else { return }
+                act { await model.setMemberRole(member.userId, role: chosen) }
+            }
+        )
+    }
+
+    // MARK: - Adding someone
+
+    @ViewBuilder
+    private func addSection(_ members: MembersView) -> some View {
+        Section {
+            if members.canAdd {
+                TextField("Their email", text: $email)
+                    .keyboardType(.emailAddress)
+                    .textContentType(.emailAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .onSubmit(lookUp)
+                    .onChange(of: email) {
+                        // Another address: the person found for the last one is forgotten.
+                        if model.state.members?.adding != nil { model.cancelNewMember() }
+                    }
+                    .accessibilityIdentifier(AccessID.field("Member email"))
+                Button("Look up", action: lookUp)
+                    .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty || model.state.busy)
+                if let adding = members.adding {
+                    addingRows(adding, vaultName: members.vaultName)
+                }
+            } else {
+                Text("Before you add anyone, confirm that you own this vault: this account has no record that you created it or that it was transferred to you. Confirm it in the web app, under Shared vaults.")
+                    .font(.footnote)
+                    .foregroundStyle(Palette.inkDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Add a member")
+        } footer: {
+            if members.canAdd {
+                Text("You compare codes with each person once, in person or on a call you trust, not once per vault. The vault's key is sealed to the key you verified, never to one the server sends.")
+            }
+        }
+        .listRowBackground(Palette.raised)
+    }
+
+    @ViewBuilder
+    private func addingRows(_ adding: NewMemberView, vaultName: String) -> some View {
+        if adding.step == NewMemberStep.verify {
+            Text("You haven't verified the person at \(adding.email) on this device yet (the server calls them “\(adding.serverName)”). Do it together, in person or on a call you trust: they read the identity code from their own screen and you type it here, or you scan their QR code.")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Verify them…") {
+                open(model.verifyNewMember())
+            }
+            .disabled(model.state.busy)
+        } else if adding.step == NewMemberStep.verifyAgain {
+            Text(adding.reason ?? "")
+                .font(.footnote)
+                .foregroundStyle(Palette.danger)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Verify them again…") {
+                open(model.verifyNewMember())
+            }
+            .disabled(model.state.busy)
+        } else if adding.step == NewMemberStep.ready {
+            if let verified = adding.verified {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Verified", systemImage: "checkmark.seal")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Palette.inkDim)
+                    Text("You verified the person at \(verified.email) on \(day(verified.verifiedAtMs)), by their identity code. The name shown when you verified them: “\(verified.label)”.")
+                        .font(.footnote)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(IdentityCode.grouped(verified.code))
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(Palette.inkDim)
+                        .accessibilityLabel("Their verified identity code")
+                        .accessibilityValue(verified.code.map(String.init).joined(separator: " "))
+                }
+                Picker("Role", selection: $role) {
+                    Text("Writer: adds and edits items").tag("writer")
+                    Text("Reader: only views").tag("reader")
+                }
+                Button("Add \(verified.email) to “\(vaultName)”") {
+                    let chosen = role
+                    act(then: { email = ""; role = "writer" }) { await model.addNewMember(role: chosen) }
+                }
+                .disabled(model.state.busy)
+            }
+        } else if adding.step == NewMemberStep.refused {
+            Text(adding.reason ?? "")
+                .font(.footnote)
+                .foregroundStyle(Palette.danger)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func lookUp() {
+        let typed = email
+        guard !typed.trimmingCharacters(in: .whitespaces).isEmpty, !model.state.busy else { return }
+        act { await model.findNewMember(typed) }
+    }
+
+    // MARK: - Helpers
+
+    private func open(_ outcome: Outcome) {
+        message = outcome == .ok ? nil : outcome.message
+    }
+
+    private func day(_ ms: Int64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(ms) / 1000).formatted(date: .abbreviated, time: .omitted)
+    }
+
+    private func act(then done: @escaping () -> Void = {}, _ action: @escaping () async -> Outcome) {
+        message = nil
+        Task {
+            let outcome = await action()
+            if outcome == .ok { done() } else { message = outcome.message }
+        }
+    }
+}
+
+// MARK: - Comparing identity codes
+
+/// Comparing identity codes with someone (root cause A §7.2): together, in person or on a call both trust. They read
+/// their code from their own screen and it is typed here, or their QR code is scanned. Only a match records them as
+/// verified; their code is never shown here first, so nobody can match it by eye against what the server sent.
+struct VerifySheet: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var code = ""
+    @State private var message: String?
+    @State private var scanning = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let verifying = model.state.verifying {
+                    Section {
+                        Text(intro(verifying))
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .listRowBackground(Palette.raised)
+
+                    Section {
+                        if let image = IdentityCode.qrImage(verifying.myQr) {
+                            Image(uiImage: image)
+                                .interpolation(.none)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 200)
+                                .frame(maxWidth: .infinity)
+                                .accessibilityLabel("Your identity QR code")
+                        }
+                        Text(IdentityCode.grouped(verifying.myCode))
+                            .font(.body.monospaced())
+                            .foregroundStyle(Palette.ink)
+                            .frame(maxWidth: .infinity)
+                            .accessibilityLabel("Your identity code")
+                            .accessibilityValue(verifying.myCode.map(String.init).joined(separator: " "))
+                    } header: {
+                        Text("Your code")
+                    } footer: {
+                        Text("Show them this: they type your code on their device, or scan the QR code.")
+                    }
+                    .listRowBackground(Palette.raised)
+
+                    Section {
+                        TextField("From their screen, not this one", text: $code)
+                            .font(.body.monospaced())
+                            .keyboardType(.asciiCapable)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.done)
+                            .onSubmit(checkCode)
+                            .accessibilityIdentifier(AccessID.field("Their code"))
+                        Button("Verify", action: checkCode)
+                            .disabled(IdentityCode.hexCount(code) != 32 || model.state.busy)
+                        if QrScanning.supported {
+                            Button("Scan their QR code instead") {
+                                message = nil
+                                scanning = true
+                            }
+                            .disabled(model.state.busy)
+                        }
+                    } header: {
+                        Text("\(verifying.serverName)'s code")
+                    } footer: {
+                        Text("Type the 32 characters as they read them from their own screen. Spaces and capitals don't matter.")
+                    }
+                    .listRowBackground(Palette.raised)
+
+                    if let message {
+                        Section {
+                            InlineMessage(text: message)
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Palette.background)
+            .navigationTitle("Compare codes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        model.cancelVerifying()
+                    }
+                }
+            }
+            .sheet(isPresented: $scanning) {
+                QrScannerSheet(
+                    found: { payload in
+                        scanning = false
+                        checkQr(payload)
+                    },
+                    cancel: { scanning = false }
+                )
+                .interactiveDismissDisabled()
+                .privacyShield()
+            }
+        }
+        .interactiveDismissDisabled(model.state.busy)
+        .onDisappear {
+            code = ""
+        }
+    }
+
+    private func intro(_ verifying: VerifyView) -> String {
+        if verifying.invitation {
+            return "\(verifying.serverName) (as the server names them) wants to share a vault with you. Compare codes together, in person or on a call you trust: show them your code, and they show you theirs. The vault opens once their code matches."
+        }
+        let whom = verifying.email.map { "\(verifying.serverName), at \($0)" } ?? verifying.serverName
+        return "Verifying \(whom). Do this together, in person or on a call you trust: show them your code, and they show you theirs."
+    }
+
+    private func checkCode() {
+        let typed = code
+        guard IdentityCode.hexCount(typed) == 32, !model.state.busy else { return }
+        message = nil
+        Task {
+            let outcome = await model.verifyWithCode(typed)
+            if outcome != .ok { message = outcome.message }
+        }
+    }
+
+    private func checkQr(_ payload: String) {
+        message = nil
+        Task {
+            let outcome = await model.verifyWithQr(payload)
+            if outcome != .ok { message = outcome.message }
+        }
+    }
+}
+
+// MARK: - Identity codes and QR codes
+
+enum IdentityCode {
+    /// A 32-hex code in groups of four, on two lines, for reading aloud.
+    static func grouped(_ hex: String) -> String {
+        let groups = stride(from: 0, to: hex.count, by: 4).map { start -> String in
+            let from = hex.index(hex.startIndex, offsetBy: start)
+            let to = hex.index(from, offsetBy: 4, limitedBy: hex.endIndex) ?? hex.endIndex
+            return String(hex[from..<to])
+        }
+        let half = (groups.count + 1) / 2
+        return groups.prefix(half).joined(separator: " ") + "\n" + groups.dropFirst(half).joined(separator: " ")
+    }
+
+    /// The hex digits in what was typed (the core ignores everything else).
+    static func hexCount(_ typed: String) -> Int {
+        typed.lowercased().filter { "0123456789abcdef".contains($0) }.count
+    }
+
+    /// A QR code image of [text], drawn on this device.
+    static func qrImage(_ text: String) -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
+              let cg = CIContext().createCGImage(output, from: output.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+
+// MARK: - Scanning a QR code
+
+@MainActor
+enum QrScanning {
+    /// The camera scanner exists on this device (VisionKit's data scanner).
+    static var supported: Bool {
+        DataScannerViewController.isSupported
+    }
+}
+
+/// The camera, reading one QR code. Camera access is asked for here, the first time; without it, typing the code is
+/// the way. Nothing is kept: the scanner hands over the text of the first QR code it reads, and stops.
+struct QrScannerSheet: View {
+    let found: (String) -> Void
+    let cancel: () -> Void
+
+    @State private var access = AVCaptureDevice.authorizationStatus(for: .video)
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch access {
+                case .authorized:
+                    if DataScannerViewController.isAvailable {
+                        QrDataScanner(found: found)
+                            .ignoresSafeArea(edges: .bottom)
+                    } else {
+                        unavailable("The camera can't scan right now. Type their code instead.")
+                    }
+                case .notDetermined:
+                    ProgressView()
+                        .task {
+                            let granted = await AVCaptureDevice.requestAccess(for: .video)
+                            access = granted ? .authorized : .denied
+                        }
+                default:
+                    unavailable("andvari isn't allowed to use the camera. Type their code instead, or allow the camera for andvari in the Settings app.")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Palette.background)
+            .navigationTitle("Scan their QR code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: cancel)
+                }
+            }
+        }
+    }
+
+    private func unavailable(_ text: String) -> some View {
+        Text(text)
+            .font(.subheadline)
+            .foregroundStyle(Palette.inkDim)
+            .multilineTextAlignment(.center)
+            .padding(24)
+    }
+}
+
+/// VisionKit's data scanner, set to QR codes only.
+struct QrDataScanner: UIViewControllerRepresentable {
+    let found: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(found: found)
+    }
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.qr])],
+            qualityLevel: .balanced,
+            recognizesMultipleItems: false,
+            isHighFrameRateTrackingEnabled: false,
+            isHighlightingEnabled: true
+        )
+        scanner.delegate = context.coordinator
+        return scanner
+    }
+
+    func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {
+        if !scanner.isScanning, !context.coordinator.done {
+            try? scanner.startScanning()
+        }
+    }
+
+    static func dismantleUIViewController(_ scanner: DataScannerViewController, coordinator: Coordinator) {
+        scanner.stopScanning()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let found: (String) -> Void
+        private(set) var done = false
+
+        init(found: @escaping (String) -> Void) {
+            self.found = found
+        }
+
+        func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
+            guard !done else { return }
+            for item in addedItems {
+                if case let .barcode(barcode) = item, let payload = barcode.payloadStringValue {
+                    done = true
+                    dataScanner.stopScanning()
+                    found(payload)
+                    return
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Invitations
+
+/// A shared vault someone wants to share with this account, from someone this device has not verified (root cause A
+/// §1.6). It stays closed, and its name unshown, until the person compares codes with the sender.
+struct InvitationRow: View {
+    let invitation: InvitationView
+
+    @EnvironmentObject private var model: AppModel
+    @State private var message: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(sender) wants to share a vault with you.")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Verify them to accept: compare identity codes, in person or on a call you trust. Until then the vault stays closed.")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 20) {
+                Button("Verify and accept") {
+                    message = nil
+                    Task {
+                        let outcome = await model.verifyInvitation(invitation.id)
+                        if outcome != .ok { message = outcome.message }
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                Button("Decline") {
+                    model.declineInvitation(invitation.id)
+                }
+                .font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.state.busy)
+            if let message {
+                InlineMessage(text: message)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var sender: String {
+        invitation.from.map { "\($0) (as the server names them)" } ?? "Someone"
+    }
+}

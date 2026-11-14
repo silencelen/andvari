@@ -83,6 +83,20 @@ struct VaultView: View {
                 .tint(Palette.goldText)
                 .privacyShield()
         }
+        .sheet(isPresented: verifyingInvitation) {
+            VerifySheet()
+                .environmentObject(model)
+                .tint(Palette.goldText)
+                .privacyShield()
+        }
+    }
+
+    /// Comparing codes with whoever sent an invitation (a member's comparison is shown from the members screen).
+    private var verifyingInvitation: Binding<Bool> {
+        Binding(
+            get: { model.state.verifying?.invitation ?? false },
+            set: { if !$0 { model.cancelVerifying() } }
+        )
     }
 
     private var list: some View {
@@ -104,6 +118,18 @@ struct VaultView: View {
                     ForEach(model.state.vaultNotices, id: \.id) { notice in
                         VaultNoticeRow(notice: notice)
                     }
+                }
+                .listRowBackground(Palette.raised)
+            }
+            if !model.state.invitations.isEmpty {
+                Section {
+                    ForEach(model.state.invitations, id: \.id) { invitation in
+                        InvitationRow(invitation: invitation)
+                    }
+                } header: {
+                    SectionTitle("Shared-vault invitations")
+                } footer: {
+                    Text("andvari opens a shared vault only from someone you've verified, so the server can't slip you a vault of its own.")
                 }
                 .listRowBackground(Palette.raised)
             }

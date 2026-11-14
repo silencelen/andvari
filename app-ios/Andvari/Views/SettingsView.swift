@@ -11,6 +11,8 @@ struct SettingsView: View {
     @State private var identityCode: String?
     @State private var identityCodeFull: String?
     @State private var showFullCode = false
+    @State private var identityQr: String?
+    @State private var showQr = false
     /// Whether andvari is the AutoFill provider iOS uses (nil until the system has said).
     @State private var autofillOn: Bool?
     @AppStorage(Appearance.storageKey) private var appearance = Appearance.system.rawValue
@@ -45,6 +47,18 @@ struct SettingsView: View {
                             .textSelection(.enabled)
                             .accessibilityLabel("Your identity code")
                             .accessibilityValue(identityCode.map(String.init).joined(separator: " "))
+                        if let identityQr, let image = IdentityCode.qrImage(identityQr) {
+                            DisclosureGroup("QR code", isExpanded: $showQr) {
+                                Image(uiImage: image)
+                                    .interpolation(.none)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(maxWidth: 200)
+                                    .frame(maxWidth: .infinity)
+                                    .accessibilityLabel("Your identity QR code")
+                            }
+                            .font(.footnote)
+                        }
                         if let identityCodeFull {
                             DisclosureGroup("Full fingerprint", isExpanded: $showFullCode) {
                                 Text(Self.grouped(identityCodeFull))
@@ -57,7 +71,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Your identity code")
                     } footer: {
-                        Text("Someone sharing a vault with you sees this code for you on their screen. Compare it in person or on a call you trust: if it matches, they are really sharing with you.")
+                        Text("Anyone who shares a vault with you compares codes with you once, in person or on a call you trust: they type this code from your screen, or scan the QR code. andvari never trusts a key just because the server sent it.")
                     }
                     .listRowBackground(Palette.raised)
                 }
@@ -183,6 +197,7 @@ struct SettingsView: View {
             quickOn = quick.enrolled
             identityCode = model.identityCode()
             identityCodeFull = model.identityCodeFull()
+            identityQr = model.identityQr()
             readAutofillState()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in

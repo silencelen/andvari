@@ -702,6 +702,16 @@ open class SessionControllerTest {
 
     // ---- shared vaults ----
 
+    /** Another account the server knows: its identity key pair, and its code as its own screen shows it. */
+    private class Person(val userId: String, val email: String, val name: String, val pub: ByteArray, val priv: ByteArray) {
+        val pubB64: String get() = Bytes.toB64(pub)
+        val code: String get() = io.silencelen.andvari.core.crypto.SharedGrant.shortFingerprint(crypto, pub)
+        val qr: String get() = io.silencelen.andvari.core.client.IdentityQr.compose(crypto, userId, pub)
+        val served get() = io.silencelen.andvari.core.model.UserLookupResponse(userId, name, pubB64)
+
+        fun row(role: String) = io.silencelen.andvari.core.model.VaultMemberSummary(userId, email, name, role, pubB64, 2_000)
+    }
+
     /** A server that keeps vault rows and grants: creates, renames, deletes and restores what this account asks. */
     private inner class VaultServer(private val rig: Rig) {
         val vaults = LinkedHashMap<String, WireVault>()
@@ -710,9 +720,71 @@ open class SessionControllerTest {
         val deleted = mutableListOf<io.silencelen.andvari.core.model.DeletedVaultSummary>()
         var rev = 100L
 
+        /** Who each address looks up to (`/users/lookup`), and each account's served identity (`/users/{id}/identity`). */
+        val accounts = HashMap<String, io.silencelen.andvari.core.model.UserLookupResponse>()
+        val identities = HashMap<String, io.silencelen.andvari.core.model.UserLookupResponse>()
+
+        /** Each shared vault's members as the server lists them; and what the owner asked of it. */
+        val members = HashMap<String, MutableList<io.silencelen.andvari.core.model.VaultMemberSummary>>()
+        val adds = mutableListOf<Pair<String, io.silencelen.andvari.core.model.VaultMemberAdd>>()
+        val roles = mutableListOf<Triple<String, String, String>>()
+        val removals = mutableListOf<Triple<String, String, io.silencelen.andvari.core.model.VaultMemberRemoveRequest>>()
+
+        /** Another account, known to the server by [email]. */
+        fun person(email: String, name: String, id: String = "00000000-0000-4000-8000-0000000000e${accounts.size + 1}"): Person {
+            val keys = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
+            val p = Person(id, email, name, keys.publicKey, keys.privateKey)
+            accounts[email] = p.served
+            identities[id] = p.served
+            return p
+        }
+
         init {
             vaults[reg.personalVault.vaultId] = WireVault(reg.personalVault.vaultId, "personal", 1, reg.personalVault.metaBlob, 1_000)
             with(rig) {
+                routes["/users/lookup"] = { request ->
+                    val email = json.decodeFromString(io.silencelen.andvari.core.model.UserLookupRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()).email
+                    val u = accounts[email]
+                    if (u == null) respond("""{"error":"no_such_user","message":"no"}""", HttpStatusCode.NotFound, headers)
+                    else respond(json.encodeToString(io.silencelen.andvari.core.model.UserLookupResponse.serializer(), u), HttpStatusCode.OK, headers)
+                }
+                routes["/identity"] = { request ->
+                    val u = identities[request.url.encodedPath.removeSuffix("/identity").substringAfterLast('/')]
+                    if (u == null) respond("""{"error":"no_such_user","message":"no"}""", HttpStatusCode.NotFound, headers)
+                    else respond(json.encodeToString(io.silencelen.andvari.core.model.UserLookupResponse.serializer(), u), HttpStatusCode.OK, headers)
+                }
+                routes["/members"] = { request ->
+                    val vaultId = request.url.encodedPath.removeSuffix("/members").substringAfterLast('/')
+                    if (request.method == io.ktor.http.HttpMethod.Post) {
+                        val add = json.decodeFromString(io.silencelen.andvari.core.model.VaultMemberAdd.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                        adds += vaultId to add
+                        val who = identities.getValue(add.userId)
+                        members.getOrPut(vaultId) { mutableListOf() } += io.silencelen.andvari.core.model.VaultMemberSummary(add.userId, accounts.entries.first { it.value.userId == add.userId }.key, who.displayName, add.role, who.identityPub, 3_000)
+                        respond("""{"rev":${++rev}}""", HttpStatusCode.Created, headers)
+                    } else {
+                        respond(json.encodeToString(kotlinx.serialization.builtins.ListSerializer(io.silencelen.andvari.core.model.VaultMemberSummary.serializer()), members[vaultId].orEmpty()), HttpStatusCode.OK, headers)
+                    }
+                }
+                prefixRoutes["/api/v1/vaults/"] = { request ->
+                    // /api/v1/vaults/{vaultId}/members/{userId}: a role (PUT) or a removal (DELETE).
+                    val parts = request.url.encodedPath.removePrefix("/api/v1/vaults/").split('/')
+                    if (parts.size != 3 || parts[1] != "members") {
+                        respond("""{"error":"not_found","message":"no"}""", HttpStatusCode.NotFound, headers)
+                    } else {
+                        val (vaultId, _, userId) = parts
+                        val body = (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()
+                        val rows = members.getValue(vaultId)
+                        if (request.method == io.ktor.http.HttpMethod.Put) {
+                            val role = json.decodeFromString(io.silencelen.andvari.core.model.VaultMemberRole.serializer(), body).role
+                            roles += Triple(vaultId, userId, role)
+                            rows.replaceAll { if (it.userId == userId) it.copy(role = role) else it }
+                        } else {
+                            removals += Triple(vaultId, userId, json.decodeFromString(io.silencelen.andvari.core.model.VaultMemberRemoveRequest.serializer(), body))
+                            rows.removeAll { it.userId == userId }
+                        }
+                        respond("""{"rev":${++rev}}""", HttpStatusCode.OK, headers)
+                    }
+                }
                 routes["/account/state"] = { respond("""{"sealedState":null,"seq":0}""", HttpStatusCode.OK, headers) }
                 routes["/sync/push"] = { respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(rev, emptyList())), HttpStatusCode.OK, headers) }
                 routes["/sync"] = { request ->
@@ -729,6 +801,7 @@ open class SessionControllerTest {
                     val req = json.decodeFromString(io.silencelen.andvari.core.model.CreateVaultRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
                     vaults[req.vaultId] = WireVault(req.vaultId, "shared", ++rev, req.metaBlob, 2_000)
                     grants[req.vaultId] = io.silencelen.andvari.core.model.WireGrant(req.vaultId, reg.userId, "owner", req.wrappedVk, rev)
+                    members[req.vaultId] = mutableListOf(io.silencelen.andvari.core.model.VaultMemberSummary(reg.userId, EMAIL, "u", "owner", reg.identityPub, 2_000))
                     respond("""{"rev":$rev}""", HttpStatusCode.OK, headers)
                 }
                 routes["/meta"] = { request ->
@@ -808,6 +881,289 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Failed(SharingCopy.VAULT_GONE), controller.deleteSharedVault(elsewhere, "x"))
         assertEquals(ActionResult.Failed(SharingCopy.VAULT_GONE), controller.leaveSharedVault(elsewhere))
         assertEquals(ActionResult.Failed(SharingCopy.VAULT_GONE), controller.restoreDeletedVault(elsewhere))
+    }
+
+    // ---- members (root cause A §1.5, §1.6, §7.2) ----
+
+    /** A shared vault "Family" this account created here, so its own record says it owns it. */
+    private suspend fun Rig.familyVault(): Pair<VaultServer, String> {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.createSharedVault("Family"))
+        return server to server.vaults.values.single { it.type == "shared" }.vaultId
+    }
+
+    /**
+     * Adding someone: the address typed is looked up, the server's answer is not trusted, and nothing is sent until the
+     * person compared codes with them. The add then seals the vault's key to the key verified, as the role chosen.
+     */
+    @Test
+    fun anOwnerAddsSomeoneOnlyAfterComparingCodesWithThem() = test {
+        val (server, family) = familyVault()
+        val bea = server.person("bea@example.com", "Bea")
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        val open = assertNotNull(controller.state.members)
+        assertTrue(open.owner && open.canAdd, "created here: this account's own record says it owns it")
+        assertEquals("Family", open.vaultName)
+        val me = assertNotNull(open.members).single()
+        assertTrue(me.you)
+        assertNull(me.check)
+
+        assertEquals(ActionResult.Failed(MembersCopy.EMAIL_REQUIRED), controller.findNewMember(" "))
+        assertEquals(ActionResult.Failed(MembersCopy.NO_SUCH_USER), controller.findNewMember("nobody@example.com"))
+        server.accounts[EMAIL] = io.silencelen.andvari.core.model.UserLookupResponse(reg.userId, "u", reg.identityPub)
+        assertEquals(ActionResult.Failed(MembersCopy.THATS_YOU), controller.findNewMember(EMAIL))
+        assertEquals(ActionResult.Ok, controller.findNewMember(" bea@example.com "))
+        val adding = assertNotNull(controller.state.members?.adding)
+        assertEquals(NewMemberStep.VERIFY, adding.step)
+        assertEquals("Bea", adding.serverName)
+        assertNull(adding.verified)
+        assertEquals(ActionResult.Failed(MembersCopy.VERIFY_FIRST), controller.addNewMember("writer"))
+        assertTrue(server.adds.isEmpty(), "nothing is sent before the codes are compared")
+
+        assertEquals(ActionResult.Ok, controller.verifyNewMember())
+        val ceremony = assertNotNull(controller.state.verifying)
+        assertEquals("bea@example.com", ceremony.email)
+        assertFalse(ceremony.invitation)
+        assertEquals(enrolled.account.identityFingerprintShort(), ceremony.myCode, "this account's own code, from its own key")
+        assertEquals(io.silencelen.andvari.core.client.IdentityQr.compose(crypto, reg.userId, Bytes.fromB64(reg.identityPub)), ceremony.myQr)
+        assertFalse(controller.state.toString().contains(bea.code), "their code is never shown before it is typed")
+        assertEquals(ActionResult.Failed(MembersCopy.CODE_LENGTH), controller.verifyWithCode(bea.code.take(16)))
+        assertEquals(ActionResult.Failed(MembersCopy.CODE_MISMATCH), controller.verifyWithCode("0".repeat(32)))
+        assertEquals(NewMemberStep.VERIFY, controller.state.members?.adding?.step, "a mismatch records nothing")
+        assertNotNull(controller.state.verifying, "and the comparison stays open for another try")
+        // As read from their screen: spaces and case do not matter.
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(bea.code.uppercase().chunked(4).joinToString(" ")))
+        assertNull(controller.state.verifying)
+        val ready = assertNotNull(controller.state.members?.adding)
+        assertEquals(NewMemberStep.READY, ready.step)
+        val verified = assertNotNull(ready.verified)
+        assertEquals("bea@example.com", verified.email)
+        assertEquals("Bea", verified.label)
+        assertEquals(bea.code, verified.code)
+
+        assertEquals(ActionResult.Failed(MembersCopy.BAD_ROLE), controller.addNewMember("owner"))
+        assertEquals(ActionResult.Ok, controller.addNewMember("reader"))
+        val (vaultId, add) = server.adds.single()
+        assertEquals(family, vaultId)
+        assertEquals(bea.userId, add.userId)
+        assertEquals("reader", add.role)
+        assertNotNull(add.signedGrant, "a signed grant")
+        // The vault's key is sealed to the key verified: Bea's own key opens it.
+        io.silencelen.andvari.core.crypto.SharedGrant.open(crypto, bea.pub, bea.priv, family, Bytes.fromB64(add.sealedVk))
+        val after = assertNotNull(controller.state.members)
+        assertNull(after.adding)
+        val row = assertNotNull(after.members).single { it.userId == bea.userId }
+        assertEquals("reader", row.role)
+        assertEquals(MemberCheck.VERIFIED, row.check)
+        assertTrue(assertNotNull(controller.state.notice).startsWith("Added bea@example.com to “Family” as a reader."))
+        assertEquals(ActionResult.Failed(MembersCopy.LOOK_UP_AGAIN), controller.addNewMember("reader"), "added once")
+        assertEquals(ActionResult.Failed(MembersCopy.ALREADY_MEMBER), controller.findNewMember("bea@example.com"))
+    }
+
+    /** An owner makes a member a reader or a writer, and removes them with the removal proof; the owner's row stays. */
+    @Test
+    fun anOwnerChangesARoleAndRemovesAMemberButNotTheOwner() = test {
+        val (server, family) = familyVault()
+        val bea = server.person("bea@example.com", "Bea")
+        server.members.getValue(family) += bea.row("writer")
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(MemberCheck.NOT_VERIFIED, controller.state.members?.members?.single { it.userId == bea.userId }?.check)
+        assertEquals(ActionResult.Failed(MembersCopy.BAD_ROLE), controller.setMemberRole(bea.userId, "owner"))
+        assertEquals(ActionResult.Failed(MembersCopy.OWNER_STAYS), controller.setMemberRole(reg.userId, "reader"))
+        assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.setMemberRole("00000000-0000-4000-8000-0000000000ff", "reader"))
+        assertEquals(ActionResult.Ok, controller.setMemberRole(bea.userId, "writer"))
+        assertTrue(server.roles.isEmpty(), "a writer already: nothing to send")
+        assertEquals(ActionResult.Ok, controller.setMemberRole(bea.userId, "reader"))
+        assertEquals(listOf(Triple(family, bea.userId, "reader")), server.roles)
+        assertEquals("reader", controller.state.members?.members?.single { it.userId == bea.userId }?.role)
+        assertEquals("Bea is now a reader.", controller.state.notice)
+
+        assertEquals(ActionResult.Failed(MembersCopy.OWNER_STAYS), controller.removeMember(reg.userId))
+        assertEquals(ActionResult.Ok, controller.removeMember(bea.userId))
+        val (vaultId, userId, removal) = server.removals.single()
+        assertEquals(family to bea.userId, vaultId to userId)
+        assertEquals(2, removal.proofV)
+        assertNotNull(removal.proof, "the proof Bea's devices check")
+        assertNotNull(removal.nonce)
+        assertTrue(assertNotNull(controller.state.members?.members).none { it.userId == bea.userId })
+        assertTrue(assertNotNull(controller.state.notice).startsWith("Removed Bea from “Family”."))
+        assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.removeMember(bea.userId))
+    }
+
+    /**
+     * A listed member is verified by their identity QR code: it must name them and match the key served for them at full
+     * length (a machine's value is never compared by a prefix). When the server later serves another key, the list says so.
+     */
+    @Test
+    fun aListedMemberIsVerifiedByTheirQrCodeAndAChangedKeyShows() = test {
+        val (server, family) = familyVault()
+        val bea = server.person("bea@example.com", "Bea")
+        val cy = server.person("cy@example.com", "Cy")
+        server.members.getValue(family) += bea.row("writer")
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(ActionResult.Failed(MembersCopy.THATS_YOU), controller.verifyListedMember(reg.userId))
+        assertEquals(ActionResult.Ok, controller.verifyListedMember(bea.userId))
+        assertNull(assertNotNull(controller.state.verifying).email, "found from the list, not by an address typed")
+        assertEquals(ActionResult.Failed(MembersCopy.QR_NOT_IDENTITY), controller.verifyWithQr("https://example.com"))
+        assertEquals(
+            ActionResult.Failed(MembersCopy.QR_NOT_IDENTITY), controller.verifyWithQr(io.silencelen.andvari.core.client.IdentityQr.PREFIX + bea.userId + ":" + bea.code),
+            "a short code from a machine is not enough",
+        )
+        assertEquals(ActionResult.Failed(MembersCopy.QR_NOT_IDENTITY), controller.verifyWithQr(bea.qr + "\n"))
+        assertEquals(ActionResult.Failed(MembersCopy.QR_OTHER_ACCOUNT), controller.verifyWithQr(cy.qr))
+        val other = crypto.boxKeypairFromSeed(crypto.randomBytes(32)).publicKey
+        assertEquals(ActionResult.Failed(MembersCopy.QR_MISMATCH), controller.verifyWithQr(io.silencelen.andvari.core.client.IdentityQr.compose(crypto, bea.userId, other)))
+        assertEquals(MemberCheck.NOT_VERIFIED, controller.state.members?.members?.single { it.userId == bea.userId }?.check)
+        assertEquals(ActionResult.Ok, controller.verifyWithQr(bea.qr))
+        assertNull(controller.state.verifying)
+        assertEquals(MemberCheck.VERIFIED, controller.state.members?.members?.single { it.userId == bea.userId }?.check)
+        assertEquals("Verified Bea on this device.", controller.state.notice)
+
+        // The server serves another key for Bea now: the list says so.
+        server.members.getValue(family).replaceAll { if (it.userId == bea.userId) it.copy(identityPub = Bytes.toB64(other)) else it }
+        controller.closeMembers()
+        assertNull(controller.state.members)
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(MemberCheck.KEY_CHANGED, controller.state.members?.members?.single { it.userId == bea.userId }?.check)
+    }
+
+    /**
+     * A11: an add names who was verified for the address typed, never the look-up's answer. When the server answers that
+     * address with an account verified as someone else, nothing is added; when it serves another key, the person has to
+     * compare codes again, and the code from the real person's screen does not match the key served.
+     */
+    @Test
+    fun anAddTheVerificationsContradictIsRefused() = test {
+        val (server, family) = familyVault()
+        val bea = server.person("bea@example.com", "Bea")
+        val cy = server.person("cy@example.com", "Cy")
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(ActionResult.Ok, controller.findNewMember("bea@example.com"))
+        assertEquals(ActionResult.Ok, controller.verifyNewMember())
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(bea.code))
+        assertEquals(NewMemberStep.READY, controller.state.members?.adding?.step)
+        controller.cancelNewMember()
+        assertNull(controller.state.members?.adding)
+
+        // The server answers Bea's address with Cy's account.
+        server.accounts["bea@example.com"] = cy.served
+        assertEquals(ActionResult.Ok, controller.findNewMember("bea@example.com"))
+        val refused = assertNotNull(controller.state.members?.adding)
+        assertEquals(NewMemberStep.REFUSED, refused.step)
+        assertTrue(assertNotNull(refused.reason).contains("Don't add them"), refused.reason)
+        assertIs<ActionResult.Failed>(controller.verifyNewMember(), "comparing codes would not change it")
+        assertIs<ActionResult.Failed>(controller.addNewMember("writer"))
+
+        // The server serves another key for Bea.
+        val other = crypto.boxKeypairFromSeed(crypto.randomBytes(32)).publicKey
+        server.accounts["bea@example.com"] = bea.served.copy(identityPub = Bytes.toB64(other))
+        assertEquals(ActionResult.Ok, controller.findNewMember("bea@example.com"))
+        val changed = assertNotNull(controller.state.members?.adding)
+        assertEquals(NewMemberStep.VERIFY_AGAIN, changed.step)
+        assertTrue(assertNotNull(changed.reason).contains("different identity key"), changed.reason)
+        assertIs<ActionResult.Failed>(controller.addNewMember("writer"))
+        assertEquals(ActionResult.Ok, controller.verifyNewMember())
+        assertEquals(ActionResult.Failed(MembersCopy.CODE_MISMATCH), controller.verifyWithCode(bea.code), "her own screen shows her real key's code")
+        assertTrue(server.adds.isEmpty())
+    }
+
+    /**
+     * Root cause A §1.6: a shared vault from someone this device has not verified is an invitation. It stays closed, its
+     * name unshown, until the person compares codes with the sender; a wrong code opens nothing. Declining hides one.
+     */
+    @Test
+    fun anInvitationOpensItsVaultOnlyOnceTheSenderIsVerified() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        val me = io.silencelen.andvari.core.client.Contact(reg.userId, reg.identityPub, "u", 1_000, io.silencelen.andvari.core.client.Contact.METHOD_TYPED, EMAIL)
+        fun sender(email: String, name: String): io.silencelen.andvari.core.client.EnrollResult {
+            val e = Account.enroll("invite", email, name, PASSWORD, KdfParams(ops = 1, memBytes = 8192), null, null, "device", crypto)
+            server.identities[e.request.userId] = io.silencelen.andvari.core.model.UserLookupResponse(e.request.userId, name, e.request.identityPub)
+            return e
+        }
+        fun share(from: io.silencelen.andvari.core.client.EnrollResult, name: String): String {
+            val shared = from.account.buildCreateSharedVault(name)
+            server.vaults[shared.vaultId] = WireVault(shared.vaultId, "shared", ++server.rev, shared.request.metaBlob, 2_000)
+            server.grants[shared.vaultId] = io.silencelen.andvari.core.model.WireGrant(shared.vaultId, reg.userId, "writer", "", server.rev, null, from.account.buildSignedGrant(shared.vaultId, me))
+            server.members[shared.vaultId] = mutableListOf(
+                io.silencelen.andvari.core.model.VaultMemberSummary(from.request.userId, from.request.email, from.request.displayName, "owner", from.request.identityPub, 1_000),
+                io.silencelen.andvari.core.model.VaultMemberSummary(reg.userId, EMAIL, "u", "writer", reg.identityPub, 2_000),
+            )
+            return shared.vaultId
+        }
+        val olga = sender("olga@example.com", "Olga")
+        val cabin = share(olga, "Cabin")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        val invitation = controller.state.invitations.single()
+        settle { controller.state.invitations.single().from == "Olga" } // the sender's name, asked for in the background
+        assertTrue(controller.vaultsForNewItems().none { it.vaultId == cabin }, "closed until the sender is verified")
+        assertFalse(controller.state.toString().contains("Cabin"), "its name is not shown")
+
+        assertEquals(ActionResult.Ok, controller.verifyInvitation(invitation.id))
+        val ceremony = assertNotNull(controller.state.verifying)
+        assertTrue(ceremony.invitation)
+        assertEquals("Olga", ceremony.serverName)
+        assertNull(ceremony.email)
+        assertEquals(ActionResult.Failed(MembersCopy.INVITATION_MISMATCH), controller.verifyWithCode("0".repeat(32)))
+        assertEquals(1, controller.state.invitations.size, "a wrong code opens nothing")
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(olga.account.identityFingerprintShort()))
+        assertNull(controller.state.verifying)
+        assertTrue(controller.state.invitations.isEmpty())
+        assertEquals("Verified Olga. “Cabin” is open now.", controller.state.notice)
+        assertTrue(controller.vaultsForNewItems().any { it.vaultId == cabin }, "a writer can put items in it now")
+
+        // A member, not the owner: the members are listed read only, and Olga shows as verified.
+        assertEquals(ActionResult.Ok, controller.openMembers(cabin))
+        val members = assertNotNull(controller.state.members)
+        assertFalse(members.owner || members.canAdd)
+        assertEquals(MemberCheck.VERIFIED, members.members?.single { it.userId == olga.request.userId }?.check)
+        assertEquals(ActionResult.Failed(SharingCopy.OWNER_ONLY), controller.findNewMember("x@example.com"))
+        assertEquals(ActionResult.Failed(SharingCopy.OWNER_ONLY), controller.setMemberRole(reg.userId, "reader"))
+        assertEquals(ActionResult.Failed(SharingCopy.OWNER_ONLY), controller.removeMember(olga.request.userId))
+        controller.closeMembers()
+
+        // An invitation from someone else, declined: hidden on this device, and its vault stays closed.
+        val boat = share(sender("pat@example.com", "Pat"), "Boat")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        controller.declineInvitation(controller.state.invitations.single().id)
+        assertTrue(controller.state.invitations.isEmpty())
+        assertTrue(controller.vaultsForNewItems().none { it.vaultId == boat })
+    }
+
+    /** Nothing the members screen or a comparison of codes held outlives a lock, or a screen closed while its read was out. */
+    @Test
+    fun aLockOrAClosedScreenForgetsTheMembersAndAnOpenComparison() = test {
+        val (server, family) = familyVault()
+        val bea = server.person("bea@example.com", "Bea")
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(ActionResult.Ok, controller.findNewMember("bea@example.com"))
+        assertEquals(ActionResult.Ok, controller.verifyNewMember())
+        controller.lock()
+        assertNull(controller.state.members)
+        assertNull(controller.state.verifying)
+        assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
+        assertEquals(ActionResult.NotDone(null), controller.verifyWithCode(bea.code), "no comparison is open")
+        assertEquals(ActionResult.Failed(MembersCopy.LOOK_UP_AGAIN), controller.addNewMember("writer"))
+        assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.verifyListedMember(bea.userId))
+        assertTrue(server.adds.isEmpty())
+
+        kotlinx.coroutines.coroutineScope {
+            val gate = CompletableDeferred<Unit>()
+            val answer = routes.getValue("/members")
+            routes["/members"] = { request ->
+                gate.await()
+                answer(request)
+            }
+            val opening = async { controller.openMembers(family) }
+            settle { controller.state.busy }
+            controller.closeMembers()
+            gate.complete(Unit)
+            assertEquals(ActionResult.NotDone(null), opening.await())
+            assertNull(controller.state.members, "the closed screen does not come back")
+            assertFalse(controller.state.busy)
+        }
     }
 
     // ---- two-step sign-in ----
