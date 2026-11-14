@@ -1374,10 +1374,16 @@ open class SessionControllerTest {
         assertEquals(listOf("p-1", "p-2"), saves.load(enrolled.account).map { it.id }, "only in memory otherwise; one kept before stays found")
         assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"), "with its file, wherever the policy put it (round-9 review 8)")
         assertEquals(listOf("f-1"), blobs.ids())
-        // The policy forbids it: what was on disk moves into memory, files and all, and the disk is emptied.
+        // An open editor's file, set aside while the policy allowed it, named by no kept save yet.
+        durable = true
+        assertTrue(saves.putBlob("f-draft", byteArrayOf(7, 7)))
+        durable = false
+        // The policy forbids it: what was on disk moves into memory, files and all (the editor's too: round-11 review),
+        // and the disk is emptied.
         assertEquals(1, saves.leaveDisk(enrolled.account))
         assertNull(log.bytes)
         assertTrue(blobs.ids().isEmpty())
+        assertContentEquals(byteArrayOf(7, 7), saves.blob("f-draft"), "an open editor's file is moved, not dropped")
         assertEquals(setOf("p-1", "p-2"), saves.load(enrolled.account).map { it.id }.toSet(), "what is in memory stays while the account does")
         assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"))
         saves.forget(enrolled.account, "p-1")
@@ -1498,38 +1504,74 @@ open class SessionControllerTest {
     }
 
     /**
-     * Round-10 review 2: a policy that forbids keeping data, seen while locked (the probe at launch or on the way back),
-     * takes the kept saves off the disk without opening them: the sealed record and the files move into memory as they
-     * are. Nothing is swept or deleted unseen; the next unlock opens them, and says they are kept in memory now.
+     * Round-10 review 2, round-11 review: a policy that forbids keeping data, seen while locked (the probe at launch or on
+     * the way back), cannot open the kept saves, so nothing moves yet: the sealed record and the files stay on disk until
+     * the next unlock, which moves them into memory and says so. A copy in memory only would be lost if the system ended
+     * the process first; a copy is taken only as a cache, used should the disk's be gone by the unlock. Nothing is swept
+     * or deleted unseen.
      */
     @Test
-    fun aForbiddingPolicySeenWhileLockedMovesKeptSavesIntoMemoryUnopened() = test {
+    fun aForbiddingPolicySeenWhileLockedKeepsKeptSavesOnDiskUntilTheUnlockMovesThem() = test {
+        var durable = true
         val log = InMemoryFillSnapshots()
         val blobs = InMemoryBlobs()
-        val saves = PendingSaves(log, blobs) { true }
+        val saves = PendingSaves(log, blobs) { durable }
         val doc = ItemDoc(type = "note", name = "Lease")
         assertTrue(saves.keep(enrolled.account, PendingSave("p-1", null, "n-1", "v", 0, doc, listOf("f-1"))))
         assertTrue(saves.putBlob("f-1", byteArrayOf(1, 2, 3)))
         assertTrue(saves.putBlob("f-orphan", byteArrayOf(9)))
+        durable = false
         assertEquals(0, saves.leaveDisk(null), "locked: nothing can be opened, so nothing is counted yet")
-        assertNull(log.bytes, "the disk is emptied")
-        assertTrue(blobs.ids().isEmpty())
-        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"), "the files are in memory, encrypted as they were")
-        saves.sweep(enrolled.account, emptySet())
-        assertNotNull(saves.blob("f-orphan"), "nothing is swept before the unlock opens the record that names them")
-        val found = saves.unlocked(enrolled.account)
+        assertNotNull(log.bytes, "the record stays on disk until the unlock")
+        assertEquals(setOf("f-1", "f-orphan"), blobs.ids().toSet(), "and so do the files")
+        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"))
+
+        // The system ends the process before the unlock: the next one finds everything on disk, and its own probe and
+        // unlock move it.
+        val next = PendingSaves(log, blobs) { durable }
+        assertEquals(0, next.leaveDisk(null))
+        next.sweep(enrolled.account, emptySet())
+        assertNotNull(next.blob("f-orphan"), "nothing is swept before the unlock opens the record that names them")
+        val found = next.unlocked(enrolled.account)
         assertEquals(1, found.movedToMemory)
         assertEquals(0, found.unreadable)
-        assertEquals(listOf("p-1"), saves.load(enrolled.account).map { it.id })
-        saves.sweep(enrolled.account, emptySet())
-        assertNull(saves.blob("f-orphan"), "an orphan goes once the record is open")
-        assertContentEquals(byteArrayOf(1, 2, 3), saves.blob("f-1"))
-        assertEquals(0, saves.unlocked(enrolled.account).movedToMemory, "said once")
-        // A sign-out while one is held takes it too.
-        assertTrue(saves.keep(enrolled.account, PendingSave("p-2", null, "n-2", "v", 0, doc, emptyList())))
-        saves.leaveDisk(null)
-        saves.dropAll()
-        assertEquals(0, saves.unlocked(enrolled.account).movedToMemory)
+        assertNull(log.bytes, "moved at the unlock")
+        assertTrue(blobs.ids().isEmpty())
+        assertEquals(listOf("p-1"), next.load(enrolled.account).map { it.id })
+        next.sweep(enrolled.account, emptySet())
+        assertNull(next.blob("f-orphan"), "an orphan goes once the record is open")
+        assertContentEquals(byteArrayOf(1, 2, 3), next.blob("f-1"))
+        assertEquals(0, next.unlocked(enrolled.account).movedToMemory, "said once")
+
+        // Should the disk's record be gone by the unlock, the copy taken while locked is what is opened.
+        durable = true
+        val log3 = InMemoryFillSnapshots()
+        val blobs3 = InMemoryBlobs()
+        val again = PendingSaves(log3, blobs3) { durable }
+        assertTrue(again.keep(enrolled.account, PendingSave("p-3", null, "n-3", "v", 0, doc, listOf("f-3"))))
+        assertTrue(again.putBlob("f-3", byteArrayOf(3)))
+        durable = false
+        again.leaveDisk(null)
+        log3.delete()
+        assertEquals(1, again.unlocked(enrolled.account).movedToMemory)
+        assertEquals(listOf("p-3"), again.load(enrolled.account).map { it.id })
+        assertContentEquals(byteArrayOf(3), again.blob("f-3"))
+
+        // The policy allows keeping data again by the unlock: what is on disk stays there.
+        durable = true
+        val log4 = InMemoryFillSnapshots()
+        val stays = PendingSaves(log4, InMemoryBlobs()) { durable }
+        assertTrue(stays.keep(enrolled.account, PendingSave("p-4", null, "n-4", "v", 0, doc, emptyList())))
+        stays.leaveDisk(null)
+        assertEquals(0, stays.unlocked(enrolled.account).movedToMemory)
+        assertNotNull(log4.bytes)
+
+        // A sign-out takes everything, the copies too.
+        durable = false
+        stays.leaveDisk(null)
+        stays.dropAll()
+        assertNull(log4.bytes)
+        assertEquals(0, stays.unlocked(enrolled.account).movedToMemory)
     }
 
     /** The same through the app: the probe on the way back finds the policy forbidding, and the unlock says what it kept. */
@@ -1554,12 +1596,13 @@ open class SessionControllerTest {
         routes["/client-policy"] = { respond(json.encodeToString(ClientPolicy.serializer(), ClientPolicy(offlineCacheAllowed = false)), HttpStatusCode.OK, headers) }
         clocks.wall += 2 * 60 * MINUTE // the policy read last is stale
         controller.onForeground()
-        settle { pendingLog.bytes == null }
-        assertTrue(pendingFiles.ids().isEmpty(), "nothing is left on disk")
+        settle { controller.state.policy?.offlineCacheAllowed == false } // the probe found the policy forbidding
+        assertNotNull(pendingLog.bytes, "locked: the kept save stays on disk until the unlock moves it (round-11 review)")
+        assertFalse(pendingFiles.ids().isEmpty(), "with its file")
         // The forbidding policy took the cached keys with it: they come from the server now.
         twoStepServer()
         assertEquals(ActionResult.Ok, controller.unlock(PASSWORD))
-        settle { controller.state.items.any { it.name == "Bank" } && controller.state.upload == null && pendingFiles.ids().isEmpty() }
+        settle { controller.state.items.any { it.name == "Bank" } && controller.state.upload == null && pendingFiles.ids().isEmpty() && pendingLog.bytes == null }
         assertTrue(seen.any { it.notice == AttachmentCopy.KEPT_IN_MEMORY }, "the unlock said the save is kept only in memory now")
         val bank = controller.state.items.single { it.name == "Bank" }
         assertEquals(listOf(fileId), controller.itemDetail(bank.itemId)?.attachments?.map { it.id }, "finished, with its file, under its id")

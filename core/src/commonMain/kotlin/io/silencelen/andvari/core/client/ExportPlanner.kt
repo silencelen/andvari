@@ -117,7 +117,8 @@ object ExportPlanner {
     }
 
     /** Greedy §2.5 plan over [items] (already in export order): every attachment that
-     *  would push the total embedded plaintext past 64 MiB is skipped by name.
+     *  would push the total embedded plaintext past 64 MiB is skipped by name: the name as every app shows one
+     *  (core `AttachmentRules.safeFileName`, round-11 review), since whoever added the file chose it.
      *
      *  `ref.size` is the item author's CLAIM (a co-member's, in a shared vault — security review
      *  2026-10). A claim of zero or less, or one that would overflow the running total, is
@@ -130,7 +131,7 @@ object ExportPlanner {
         for (item in items) for (ref in item.doc.attachments) {
             // Overflow-safe: compared against the headroom, never summed first.
             if (ref.size <= 0 || ref.size > Backup.MAX_TOTAL_ATTACHMENT_PLAINTEXT - total) {
-                overCap.add(ref.name)
+                overCap.add(io.silencelen.andvari.core.app.AttachmentRules.safeFileName(ref.name))
             } else {
                 included.add(PlannedAttachment(item, ref))
                 total += ref.size

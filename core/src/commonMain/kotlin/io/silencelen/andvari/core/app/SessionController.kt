@@ -2382,8 +2382,9 @@ open class SessionController(
     private fun dropFillSnapshot() {
         runCatching { fillSnapshots.delete() }
         runCatching { saves.dropAll() }
-        // And the saves with files kept on disk: moved into memory while the account is unlocked, and said (round-9
-        // review 8); one in memory goes with the account.
+        // And the saves with files kept on disk: moved into memory, with every file set aside (an open editor's too),
+        // while the account is unlocked, and said (round-9 review 8); while it is locked they stay on disk until the next
+        // unlock moves them (round-11 review). One in memory goes with the account.
         val live = session.get()
         if (pendingSaves.leaveDisk(live?.account) > 0) update { it.copy(notice = AttachmentCopy.KEPT_IN_MEMORY) }
     }

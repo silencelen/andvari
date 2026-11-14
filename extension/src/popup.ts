@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -43,7 +43,16 @@ let tabHost: string | null = null;
  *  the popup is open. When it is not fillable, `allowOrigin` (a provider's form, shown by the page, on a site andvari may
  *  not run on), `pageFormOnly` (the page takes the card in its own fields) or `allowEverywhere` (Safari: andvari is not
  *  running on this page) gives the one line that says why the rows copy instead. */
-let cardFill: { fillable: boolean; origin: string | null; pageFormOnly: boolean; allowOrigin?: string; allowEverywhere?: boolean } = { fillable: false, origin: null, pageFormOnly: false };
+let cardFill: {
+  fillable: boolean;
+  origin: string | null;
+  /** The provider frames where the person chose a card field: shown as the Fill's destination, and sent back with it. */
+  frames: { frameId: number; origin: string }[];
+  pageFormOnly: boolean;
+  allowOrigin?: string;
+  allowEverywhere?: boolean;
+  doubled?: boolean;
+} = { fillable: false, origin: null, frames: [], pageFormOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
@@ -408,7 +417,7 @@ async function loadUnlocked(): Promise<void> {
       const o2 = cardFillOf(await ask({ type: "cardFillOffers" }));
       // [U21] pinned: the re-query diffs the reasons too — a late report from a provider's frame must surface its Fill,
       // and a late one from the page's own form the line that says why the rows copy instead.
-      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere) {
+      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || JSON.stringify(o2.frames) !== JSON.stringify(cardFill.frames) || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere || o2.doubled !== cardFill.doubled) {
         cardFill = o2;
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
@@ -422,13 +431,18 @@ async function loadUnlocked(): Promise<void> {
 
 /** The worker's card offer for the active tab, as the popup keeps it (nothing fillable when it did not answer). */
 function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof cardFill {
-  if (!offer) return { fillable: false, origin: null, pageFormOnly: false };
+  if (!offer) return { fillable: false, origin: null, frames: [], pageFormOnly: false };
+  const frames = Array.isArray(offer.frames)
+    ? offer.frames.filter((f) => typeof f?.frameId === "number" && typeof f?.origin === "string").map((f) => ({ frameId: f.frameId, origin: f.origin }))
+    : [];
   return {
     fillable: offer.fillable,
     origin: offer.origin,
+    frames,
     pageFormOnly: offer.pageFormOnly === true,
     ...(typeof offer.allowOrigin === "string" ? { allowOrigin: offer.allowOrigin } : {}),
     ...(offer.allowEverywhere === true ? { allowEverywhere: true } : {}),
+    ...(offer.doubled === true ? { doubled: true } : {}),
   };
 }
 
@@ -995,21 +1009,22 @@ function cardCopyRemedy(): string {
   return copiesLongLivedSecrets() ? "Use the copy buttons instead." : "Copy what you need from the andvari app.";
 }
 
+/** The one line that says why the rows copy instead of filling; null while they fill. */
+function cardCopyReason(safari: boolean): string | null {
+  if (cardFill.fillable) return null;
+  if (cardFill.doubled === true) return CARD_DUPLICATE_FIELDS;
+  if (cardFill.allowOrigin !== undefined) return cardProviderNotAllowedCopy(cardFill.allowOrigin, safari);
+  if (cardFill.pageFormOnly) return CARD_PAGE_FORM;
+  if (cardFill.allowEverywhere === true) return cardProviderNotAllowedCopy(undefined, safari);
+  return null;
+}
+
 /** Empty = hidden: login-only hoards see no Cards group at all. */
 function renderCards(items: CardItem[]): void {
   cardsLabel.hidden = items.length === 0;
   cardsList.hidden = items.length === 0;
   // The line needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
-  const safari = BUILD_TARGET === "safari";
-  const why = cardFill.fillable
-    ? null
-    : cardFill.allowOrigin !== undefined
-      ? cardProviderNotAllowedCopy(cardFill.allowOrigin, safari)
-      : cardFill.pageFormOnly
-        ? CARD_PAGE_FORM
-        : cardFill.allowEverywhere === true
-          ? cardProviderNotAllowedCopy(undefined, safari)
-          : null;
+  const why = cardCopyReason(BUILD_TARGET === "safari");
   cardsPspNote.hidden = items.length === 0 || why === null;
   if (why !== null) cardsPspNote.textContent = `${why} ${cardCopyRemedy()}`;
   cardsList.replaceChildren();
@@ -1040,9 +1055,12 @@ function cardRow(it: CardItem): HTMLElement {
   body.append(name, sub);
   // S3: show exactly where the card will go — the browser-provided origin, under the row body.
   if (cardFill.fillable && cardFill.origin) {
+    // Where the card goes: the provider origins of the frames where the person chose a field (round-11 review), or the
+    // provider's own when none is chosen yet (the Fill then asks for a tap).
+    const origins = cardFill.frames.length > 0 ? [...new Set(cardFill.frames.map((f) => f.origin))] : [cardFill.origin];
     const dest = document.createElement("div");
     dest.className = "card-fill-dest";
-    dest.textContent = `Fill → ${cardFill.origin}`;
+    dest.textContent = `Fill → ${origins.join(", ")}${cardFill.frames.length > 1 ? ` (${cardFill.frames.length} fields)` : ""}`;
     body.append(dest);
   }
 
@@ -1092,7 +1110,8 @@ function cardLabels(kinds: CardFieldKind[]): string[] {
  *  buttons, right beneath, are the remedy); anything else renders the canon seam copy. */
 async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void> {
   btn.disabled = true;
-  const r = await ask({ type: "fillCardFromPopup", itemId });
+  // Round-11 review: the fill goes to exactly the frames this popup showed, or to none.
+  const r = await ask({ type: "fillCardFromPopup", itemId, frames: cardFill.frames });
   btn.disabled = false;
   const filled = r?.outcome?.filled;
   if (filled === "card") {

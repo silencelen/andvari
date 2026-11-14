@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields" | "changed";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -274,8 +274,9 @@ export function cardProviderNotAllowedCopy(origin: string | undefined, safari: b
     : `The card form comes from ${host}, where andvari isn't allowed to run. To fill it, allow andvari on ${host} in the extension's site access.`;
 }
 
-/** Two frames of the payment form would take the same card detail (one the page added beside the provider's). */
-export const CARD_DUPLICATE_FIELDS = "This payment form shows more than one box for the same card detail, so nothing was filled.";
+/** Two provider card frames on the page ask for the same card detail (round-11 review): an invisible one laid over the
+ *  real one, or an extra one beside it, looks exactly like this, so andvari fills none of them. */
+export const CARD_DUPLICATE_FIELDS = "This page shows more than one payment form asking for the same card detail, so andvari fills none of them.";
 
 /** A card fill that wrote nothing: the refusals in words, the rest as for a login fill. */
 export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigin?: string, safari = false): string {
@@ -286,6 +287,8 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigi
       return cardProviderNotAllowedCopy(allowOrigin, safari);
     case "duplicate_fields":
       return CARD_DUPLICATE_FIELDS;
+    case "changed":
+      return "The payment form changed after andvari opened. Open andvari again and fill.";
     case "no_focus":
       return "Tap the card field in the payment form first, then fill again.";
     case "not_visible":

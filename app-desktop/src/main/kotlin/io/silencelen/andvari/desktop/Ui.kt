@@ -3648,7 +3648,8 @@ private fun NamedSkips(title: String, names: List<String>) {
     if (names.isEmpty()) return
     Spacer(Modifier.height(6.dp))
     Text(title, style = MaterialTheme.typography.bodySmall)
-    names.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    // An attachment's name is whatever its uploader chose: shown as every name is (round-11 review).
+    names.forEach { Text("• ${AttachmentRules.safeFileName(it)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 }
 
 private fun exportDateSuffix(): String =

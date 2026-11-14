@@ -248,7 +248,8 @@ test("a card fill that wrote nothing says why: no chosen field, one that cannot 
   assert.match(cardFillErrorCopy("provider_not_allowed", undefined), /allow andvari on all sites in the extension's site access/);
   assert.match(cardFillErrorCopy("provider_not_allowed", "not a url", true), /Every Website/);
   // Two frames would take the same card detail: no fill at all.
-  assert.equal(cardFillErrorCopy("duplicate_fields"), "This payment form shows more than one box for the same card detail, so nothing was filled.");
+  assert.equal(cardFillErrorCopy("duplicate_fields"), "This page shows more than one payment form asking for the same card detail, so andvari fills none of them.");
+  assert.equal(cardFillErrorCopy("changed"), "The payment form changed after andvari opened. Open andvari again and fill.");
   assert.equal(cardFillErrorCopy("locked"), fillErrorCopy("locked"), "the rest as for a login fill");
   assert.equal(cardFillErrorCopy(undefined), fillErrorCopy(undefined));
 });

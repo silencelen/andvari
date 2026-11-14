@@ -96,9 +96,24 @@ targets:
       properties:
         # The handler reads the app's server origin from here and answers the extension's native message.
         com.apple.security.application-groups: [group.com.silencelen.andvari]
+    postBuildScripts:
+      # The extension's UI-test build (extension/build.mjs, UITEST=1) lists the test site's stand-in payment provider.
+      # A Release build, which is what an archive is, must never carry it: this fails one whose bundled files name the
+      # test domain, so a local archive cannot ship it either (CI checks the same in ios-unsigned.yml).
+      - name: No UI-test domain in a Release build
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "${CONFIGURATION}" = "Release" ]; then
+            if grep -rIl "andvari-uitest" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"; then
+              echo "error: the Safari extension's files name the UI-test domain (andvari-uitest): build them without UITEST=1 (app-ios/scripts/prepare.sh) before archiving"
+              exit 1
+            fi
+          fi
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari.safari
+        # The script above reads the built extension's own files.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
         CODE_SIGN_IDENTITY: "Apple Distribution"
         TARGETED_DEVICE_FAMILY: "1"
         PROVISIONING_PROFILE_SPECIFIER: "com.silencelen.andvari.safari AppStore"

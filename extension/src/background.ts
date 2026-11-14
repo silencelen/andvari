@@ -33,7 +33,7 @@ import { gateServedEnvelope } from "./servedblob";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardFieldKind } from "./detect";
 import { isCardProviderOrigin } from "./cardproviders";
-import { cardFillPlan, chosenCardFrame, frameOriginOf, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, type CardFrameRecord, type CardGrant } from "./cardrelease";
+import { cardFillPlan, chosenCardFrames, frameOriginOf, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease";
 import type {
   CardFillFields,
   CardFillOutcome,
@@ -415,7 +415,7 @@ interface TabState {
    *  card-entry origin (cardproviders.ts) ever receives a card (owner decision 2026-11-14); the others' records only
    *  let the popup say why it copies instead. Cleared with the tab (onRemoved / lock). [U14]: a persisted pre-update
    *  `{fields}` record is DISCARDED on read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
-  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number; ancestors?: string[] | null }>;
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>;
   /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
    *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
   topOrigin?: string;
@@ -435,7 +435,7 @@ let tabs = new Map<number, TabState>();
  *  picked the login for can never redeem it. */
 const grants = new Map<number, LoginGrant>();
 /** S3 CARD fill grants, by tab then frame — a store SEPARATE from login `grants` ([A5]). One fill mints one grant per
- *  frame it reaches (the chosen provider frame, and its split-field siblings: cardrelease.ts cardFillPlan), each
+ *  frame it reaches (every provider frame where the person chose a card field: cardrelease.ts cardFillPlan), each
  *  bound to that frame's id and browser-reported provider origin, and redeemable ONLY by that frame through
  *  `revealCardForFill` (never the login `reveal()`, nor the reverse). One-shot, 30 s, voided when the fill's round trip
  *  ends. Tier 2 §2: a grant FREEZES its frame's form `kinds` + kind-signature `sig` at mint — [U15] redemption composes
@@ -2658,7 +2658,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "cardFillOffers":
       return cardFillOffers(sender);
     case "fillCardFromPopup":
-      return fillCardFromPopup(msg.itemId, sender);
+      return fillCardFromPopup(msg.itemId, msg.frames, sender);
     case "revealCardForFill":
       return revealCardForFill(msg, sender);
   }
@@ -4302,13 +4302,24 @@ async function cardFormInfo(
     if (!(frameId in reg)) return { ok: true };
     delete reg[frameId];
   } else {
-    // M2: the form holding the field the person chose, by index; stamped with when this worker heard of the choice
-    // (every choice, L7: choosing the same field again makes this frame the one that chose last).
+    // M2: the form holding the field the person chose, by index. A choice is made only by a report of a new one
+    // (`choseNow`, L7: choosing the same field again is one too), stamped when this worker heard of it; a later report
+    // keeps a choice this record still holds (its form may have moved), and never brings back one that was let go.
     const a = msg.anchor;
-    const anchor = typeof a === "number" && Number.isInteger(a) && a >= 0 && a < msg.forms.length ? a : null;
+    const index = typeof a === "number" && Number.isInteger(a) && a >= 0 && a < msg.forms.length ? a : null;
     const was = reg[frameId];
-    const anchorAt = anchor === null ? undefined : msg.choseNow === true || was?.anchor !== anchor || was.anchorAt === undefined ? Date.now() : was.anchorAt;
-    reg[frameId] = { origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}), ancestors: ancestorsOf(msg.ancestors) };
+    const anchorAt = index === null ? undefined : msg.choseNow === true ? Date.now() : typeof was?.anchor === "number" ? was.anchorAt : undefined;
+    const anchor = anchorAt === undefined ? null : index;
+    reg[frameId] = { origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}) };
+    // Round-11 review: a new choice of a kind clears the choices of that kind in every other frame, which are told.
+    if (msg.choseNow === true && anchor !== null && anchorAt !== undefined && mayReceiveCard(reg[frameId])) {
+      for (const other of supersededChoices(reg, frameId, msg.forms[anchor]!, anchorAt)) {
+        const r = reg[other]!;
+        reg[other] = { origin: r.origin, forms: r.forms, anchor: null };
+        const drop: TabMsg = { type: "dropCardChoice" };
+        void chrome.tabs.sendMessage(tabId, drop, { frameId: other }).catch(() => {});
+      }
+    }
   }
   st.cardForms = reg;
   tabs.set(tabId, st);
@@ -4334,11 +4345,32 @@ function eligibleCardFrames(tabId: number): { frameId: number; origin: string }[
   return providerCardFrames(tabs.get(tabId)?.cardForms ?? {});
 }
 
-/** The ancestor origins a frame's content script reported (`location.ancestorOrigins`, nearest first), bounded; null
- *  when it reported none (Firefox has no such list) or anything malformed. */
-function ancestorsOf(v: unknown): string[] | null {
-  if (!Array.isArray(v) || v.length > 32) return null;
-  return v.every((o) => typeof o === "string" && o.length <= 2048) ? (v as string[]) : null;
+/** How long a recorded frame may take to answer before it counts as gone. */
+const FRAME_PROBE_MS = 400;
+
+/**
+ * Drop the records of [tabId]'s frames that are gone (removed from the page, or navigated to a document with no content
+ * script), so a provider frame an SPA re-mounted does not count twice. Each recorded frame is asked to report afresh;
+ * one that cannot be reached is forgotten. The answer is the browser's, so a page cannot keep a record alive.
+ */
+async function pruneGoneCardFrames(tabId: number): Promise<void> {
+  const reg = tabs.get(tabId)?.cardForms;
+  if (reg === undefined) return;
+  const ids = Object.keys(reg).map(Number);
+  const rescan: TabMsg = { type: "rescanCardForms" };
+  const answered = await Promise.all(
+    ids.map((frameId) => Promise.race([chrome.tabs.sendMessage(tabId, rescan, { frameId }).then(() => true, () => false), delay(FRAME_PROBE_MS).then(() => true)])),
+  );
+  const now = tabs.get(tabId)?.cardForms;
+  if (now === undefined) return;
+  let changed = false;
+  ids.forEach((frameId, i) => {
+    if (!answered[i] && frameId in now) {
+      delete now[frameId];
+      changed = true;
+    }
+  });
+  if (changed) persistTabs();
 }
 
 /**
@@ -4570,24 +4602,32 @@ async function openPopupForSearch(sender: chrome.runtime.MessageSender): Promise
   }
 }
 
-/** Popup ONLY: may the Cards rows offer Fill for the active tab, and to which origin? Fillable iff a payment
- *  provider's card document with a card form is in the tab (cardrelease.ts providerCardFrames: the origin the browser
- *  reports for each frame, never the page's word). Otherwise the popup copies instead, and says why: a provider's frame
- *  the page shows, from a site this extension may not run on ([allowOrigin], from the page's own srcs: a hint only);
- *  the page takes the card in its own fields ([pageFormOnly]); or, in Safari, this extension is not running on the page
- *  at all ([allowEverywhere]). Refuses tab senders. [T5]: answers immediately off the registry; the broadcast makes
- *  frames report afresh, and the POPUP owns freshness with one delayed re-query (~350 ms). */
+/** Popup ONLY: may the Cards rows offer Fill for the active tab, into which frames? Fillable iff a payment provider's
+ *  card document with a card form is in the tab (cardrelease.ts providerCardFrames: the origin the browser reports for
+ *  each frame, never the page's word) and no card kind is offered by two provider card frames ([doubled] otherwise).
+ *  [frames]: the provider frames where the person chose a card field, with their origins: what a Fill will reach, and
+ *  what the popup sends back so the fill goes to exactly those (round-11 review). Otherwise the popup copies instead,
+ *  and says why: a provider's frame the page shows, from a site this extension may not run on ([allowOrigin], from the
+ *  page's own srcs: a hint only); the page takes the card in its own fields ([pageFormOnly]); or, in Safari, this
+ *  extension is not running on the page at all ([allowEverywhere]). Refuses tab senders. [T5]: answers off the
+ *  registry once gone frames are dropped; the broadcast makes frames report afresh, and the POPUP owns freshness with
+ *  one delayed re-query (~350 ms). */
 async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res<"cardFillOffers">> {
-  const none: Res<"cardFillOffers"> = { fillable: false, origin: null, pageFormOnly: false };
+  const none: Res<"cardFillOffers"> = { fillable: false, origin: null, frames: [], pageFormOnly: false };
   if (sender.tab !== undefined) return none; // popup-only guard
   if (!(APP_VAULT !== null ? APP_VAULT.unlocked : session !== null)) return none;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return none;
   const tabId = tab.id;
+  await pruneGoneCardFrames(tabId);
   broadcastRescanCardForms(tabId);
   const records = tabs.get(tabId)?.cardForms ?? {};
-  const frames = providerCardFrames(records);
-  if (frames.length > 0) return { fillable: true, origin: chosenCardFrame(records, Date.now())?.origin ?? frames[0]!.origin, pageFormOnly: false };
+  const provider = providerCardFrames(records);
+  if (provider.length > 0) {
+    if (kindsOfferedTwice(records).length > 0) return { ...none, doubled: true };
+    const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin }) => ({ frameId, origin }));
+    return { fillable: true, origin: frames[0]?.origin ?? provider[0]!.origin, frames, pageFormOnly: false };
+  }
   const allow = providerFrameNotAllowed(tabId);
   if (allow !== null) return { ...none, allowOrigin: allow };
   if (pageCardFormsOnly(records)) return { ...none, pageFormOnly: true };
@@ -4615,16 +4655,16 @@ function asCardFillOutcome(v: unknown): CardFillOutcome | null {
 }
 
 /**
- * Popup ONLY: fill the card into the payment provider's card box where the person chose a field (owner decision
- * 2026-11-14). The fill goes from the provider frame holding the person's latest choice (cardrelease.ts
- * chosenCardFrame), and reaches that frame and, for a provider that puts each field in a frame of its own, its siblings
- * (the same browser-reported origin and the same ancestor origins: cardFillPlan), each with its own form's kinds only;
- * when two of those frames would take the same kind, nothing is filled. One one-shot grant per frame, bound to its
- * frameId and origin; each frame redeems its own through `revealCardForFill` (the value round trip): the worker never
- * pushes card values at a tab. The chosen frame goes first, and a fill it refuses fills no sibling. The page's own
- * word (the provider srcs its top frame reports) only picks the words of a refusal. Refuses tab senders.
+ * Popup ONLY: fill the card into the payment provider's card frames where the person chose a field (owner decision
+ * 2026-11-14, round-11 review). The fill reaches every provider frame holding a live choice of the person's, each with
+ * the form holding its chosen field (cardrelease.ts cardFillPlan): one tap for a provider's single card frame, one in
+ * each frame of a split one, then one Fill. Nothing is filled while two provider card frames offer the same kind, and
+ * nothing unless the frames are exactly the ones the popup showed ([shown]: their frameIds and origins). One one-shot
+ * grant per frame, bound to its frameId and origin; each frame redeems its own through `revealCardForFill` (the value
+ * round trip): the worker never pushes card values at a tab. The page's own word (the provider srcs its top frame
+ * reports) only picks the words of a refusal. Refuses tab senders.
  */
-async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillCardFromPopup">> {
+async function fillCardFromPopup(itemId: string, shown: unknown, sender: chrome.runtime.MessageSender): Promise<Res<"fillCardFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
   // Safari: the app's open list stands in for the session's items; the card's fields are fetched at each redemption.
   if (!(APP_VAULT !== null ? APP_VAULT.unlocked : session !== null)) return { ok: false, code: "locked", error: "locked" };
@@ -4636,33 +4676,34 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
   if (tab?.id === undefined) return { ok: false, code: "unreachable", error: "no active tab" };
   const tabId = tab.id;
   const records = (): Readonly<Record<string, CardFrameRecord>> => tabs.get(tabId)?.cardForms ?? {};
-  // [T5] fast-path: a registry hit proceeds immediately; only a miss pays the rescan + 250 ms re-read. A hit fires NO
-  // broadcast here: a rescan racing the redemptions could replace a frame's declared kinds between mint and redeem.
-  let chosen = chosenCardFrame(records(), Date.now());
-  if (chosen === null) {
+  await pruneGoneCardFrames(tabId);
+  // [T5] a registry miss pays one rescan + a 250 ms re-read.
+  let plan = cardFillPlan(records(), Date.now());
+  if (!plan.ok && plan.reason === "no_choice") {
     broadcastRescanCardForms(tabId);
     await delay(250);
-    chosen = chosenCardFrame(records(), Date.now());
+    plan = cardFillPlan(records(), Date.now());
   }
-  if (chosen === null) {
+  if (!plan.ok) {
+    if (plan.reason === "duplicate_kind") return { ok: false, code: "duplicate_fields", error: `more than one provider card frame asks for ${plan.kinds.join(", ")}` };
     if (eligibleCardFrames(tabId).length > 0) return { ok: false, code: "no_focus", error: "no card field chosen in a payment provider's card box" };
     const allow = providerFrameNotAllowed(tabId);
     if (allow !== null) return { ok: false, code: "provider_not_allowed", allowOrigin: allow, error: "andvari may not run in the payment provider's frame" };
     if (pageCardFormsOnly(records())) return { ok: false, code: "page_form", error: "andvari fills a card only into a payment provider's card box" };
     return { ok: false, code: "no_form", error: "the payment provider's card box is gone" };
   }
-  const plan = cardFillPlan(records(), chosen);
-  // Two frames would take the same card detail (a frame the page added beside the provider's): no fill at all.
-  if (!plan.ok) return { ok: false, code: "duplicate_fields", error: `more than one frame takes ${plan.kinds.join(", ")}` };
+  // Round-11 review: exactly the frames, at the origins, the popup showed; anything else is a page that changed since.
+  if (!sameFrames(shown, plan.targets)) return { ok: false, code: "changed", error: "the payment form changed since andvari showed it" };
   const targets = plan.targets;
   const expiresMs = Date.now() + GRANT_TTL_MS;
   cardGrants.set(tabId, new Map(targets.map((t): [number, CardGrant] => [t.frameId, { itemId, frameId: t.frameId, origin: t.origin, kinds: t.kinds, sig: t.kinds.join(","), expiresMs }])));
   const filled: CardFieldKind[] = [];
   const missed: CardFieldKind[] = [];
   const unseen: CardFieldKind[] = [];
+  let refusal: CardFillOutcome | null | undefined;
   try {
     for (const t of targets) {
-      const msg: TabMsg = { type: "fillCard", itemId, sig: t.kinds.join(","), chosen: t.chosen };
+      const msg: TabMsg = { type: "fillCard", itemId, sig: t.kinds.join(",") };
       let raw: unknown = null;
       try {
         raw = await chrome.tabs.sendMessage(tabId, msg, { frameId: t.frameId });
@@ -4670,11 +4711,9 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
         raw = null;
       }
       const outcome = asCardFillOutcome(raw);
-      if (t.chosen) {
-        if (outcome === null) return { ok: false, code: "unreachable", error: "frame not reachable — reload the tab and retry" };
-        if (outcome.filled === "nothing") return { ok: false, outcome, code: outcome.code ?? "no_fields", error: `card fill wrote nothing (${outcome.code ?? "no_fields"})` };
-      }
-      if (outcome === null) {
+      if (outcome === null || outcome.filled === "nothing") {
+        // This frame filled nothing; the others still fill their own fields. The first refusal is the one told.
+        if (refusal === undefined) refusal = outcome;
         missed.push(...t.kinds);
         continue;
       }
@@ -4685,6 +4724,10 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
   } finally {
     // The round trip is over: void every grant not redeemed rather than leaving it armed for the TTL.
     cardGrants.delete(tabId);
+  }
+  if (filled.length === 0) {
+    if (refusal === null || refusal === undefined) return { ok: false, code: "unreachable", error: "frame not reachable — reload the tab and retry" };
+    return { ok: false, outcome: refusal, code: refusal.code ?? "no_fields", error: `card fill wrote nothing (${refusal.code ?? "no_fields"})` };
   }
   // Truthful verdict (F9) across the frames: a kind counts filled when ANY frame landed it.
   const filledKinds = [...new Set(filled)];

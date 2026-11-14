@@ -1,13 +1,16 @@
 /**
- * The card-release rule (owner decision 2026-11-14; docs/design/2026-11-09-ios-app.md, "Card fill threat model"):
- * which documents may receive card data, which choice a fill goes from, and which frames a fill reaches when a provider
- * puts each card field in a frame of its own.
+ * The card-release rule (owner decision 2026-11-14, round-11 review; docs/design/2026-11-09-ios-app.md, "Card fill
+ * threat model"): which documents may receive card data, and which of them one fill reaches.
  *
- * Every input is a fact the browser reports: each frame's origin from its own messages (`sender.origin`, else the origin
- * of `sender.url`), its frameId, and the origins of the documents it is nested in (`location.ancestorOrigins`, as the
- * content script running in that frame reads it; the page around it cannot change that list). Nothing a page writes
- * into its own DOM (a frame's src, a form's action, where a frame sits) is an input, so nothing a page does there can
- * change the answer.
+ * A card goes only into a payment provider's card document, and only into a frame where the person chose a card field
+ * themselves (a provider that puts each field in a frame of its own is filled by choosing each field, then pressing
+ * Fill once). No frame is ever filled because of where it sits. And no fill happens while more than one provider card
+ * frame in the tab asks for the same card detail: an invisible frame over the real one, or an extra one beside it,
+ * turns the fill into a refusal.
+ *
+ * Every input is a fact the browser reports, or a report of the content script running in that provider's own frame:
+ * each frame's origin from its own messages (`sender.origin`, else the origin of `sender.url`), its frameId, the card
+ * forms it holds and the field the person chose in it. Nothing the shop's page writes into its own DOM is an input.
  *
  * LEAF module (no chrome import): background.ts feeds it, node --test pins it (cardrelease.test.ts).
  */
@@ -36,12 +39,6 @@ export interface CardFrameRecord {
   anchor?: number | null;
   /** When this worker heard of that choice (ms). */
   anchorAt?: number;
-  /**
-   * The origins of the documents this frame is nested in, nearest first (`location.ancestorOrigins`, read by the content
-   * script in this frame; empty for a top-level page). Null where the browser has no such list (Firefox): such a frame
-   * has no split-field siblings, and a fill reaches it alone.
-   */
-  ancestors?: readonly string[] | null;
 }
 
 /** How long a choice stands: a fill long after it is a new decision, and asks for a new press. */
@@ -72,75 +69,104 @@ export interface ChosenCardFrame {
   kinds: CardFieldKind[];
 }
 
+/** The live choice a record holds, or null: an index into its forms, made within [CHOICE_TTL_MS]. */
+function liveChoice(r: CardFrameRecord, now: number): CardFieldKind[] | null {
+  const a = r.anchor;
+  const at = r.anchorAt;
+  if (typeof a !== "number" || !Number.isInteger(a) || a < 0 || a >= r.forms.length || typeof at !== "number") return null;
+  if (now - at > CHOICE_TTL_MS || at - now > 60_000) return null;
+  const kinds = r.forms[a]!;
+  return Array.isArray(kinds) && kinds.length > 0 ? kinds : null;
+}
+
 /**
- * The frame where the person chose a card field last, in a provider's document, with the form holding it; null when no
- * provider frame holds a choice made within [CHOICE_TTL_MS]. A choice in any other document is never one.
+ * Every provider frame holding a live choice of the person's, with the form holding the chosen field, newest first. A
+ * choice made in any other document is never one. Of two choices covering the same kind, the newer stands (the
+ * worker also clears the older one when the newer is made: [supersededChoices]).
  */
-export function chosenCardFrame(records: Readonly<Record<string, CardFrameRecord>>, now: number): ChosenCardFrame | null {
-  let best: (ChosenCardFrame & { at: number }) | null = null;
+export function chosenCardFrames(records: Readonly<Record<string, CardFrameRecord>>, now: number): ChosenCardFrame[] {
+  const live: (ChosenCardFrame & { at: number })[] = [];
   for (const [fid, r] of Object.entries(records)) {
     if (!mayReceiveCard(r)) continue;
-    const a = r.anchor;
-    const at = r.anchorAt;
-    if (typeof a !== "number" || !Number.isInteger(a) || a < 0 || a >= r.forms.length || typeof at !== "number") continue;
-    if (now - at > CHOICE_TTL_MS || at - now > 60_000) continue;
-    const kinds = r.forms[a]!;
-    if (!Array.isArray(kinds) || kinds.length === 0) continue;
-    if (best === null || at > best.at) best = { frameId: Number(fid), origin: r.origin, kinds, at };
+    const kinds = liveChoice(r, now);
+    if (kinds !== null) live.push({ frameId: Number(fid), origin: r.origin, kinds, at: r.anchorAt! });
   }
-  return best === null ? null : { frameId: best.frameId, origin: best.origin, kinds: best.kinds };
+  live.sort((x, y) => y.at - x.at || x.frameId - y.frameId);
+  const covered = new Set<CardFieldKind>();
+  const out: ChosenCardFrame[] = [];
+  for (const c of live) {
+    if (c.kinds.some((k) => covered.has(k))) continue;
+    for (const k of c.kinds) covered.add(k);
+    out.push({ frameId: c.frameId, origin: c.origin, kinds: c.kinds });
+  }
+  return out;
 }
 
-export interface CardFillTarget extends ChosenCardFrame {
-  /** The frame the person chose in; the others are its split-field siblings. */
-  chosen: boolean;
+/** The newest live choice, or null (the popup names its frame's origin). */
+export function chosenCardFrame(records: Readonly<Record<string, CardFrameRecord>>, now: number): ChosenCardFrame | null {
+  return chosenCardFrames(records, now)[0] ?? null;
 }
 
-/** Whether two frames are nested in the same chain of documents, by origin: both lists known and equal. */
-function sameAncestors(a: readonly string[] | null | undefined, b: readonly string[] | null | undefined): boolean {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-  return a.every((o, i) => o === b[i]);
+/**
+ * The frames whose choice a new choice in [frameId] of [kinds] replaces: every other frame of the tab with a choice
+ * whose form covers any of the same kinds. The worker clears them, and tells each frame to let its choice go.
+ */
+export function supersededChoices(records: Readonly<Record<string, CardFrameRecord>>, frameId: number, kinds: readonly CardFieldKind[], now: number): number[] {
+  const mine = new Set(kinds);
+  return Object.entries(records)
+    .filter(([fid, r]) => Number(fid) !== frameId && (liveChoice(r, now)?.some((k) => mine.has(k)) ?? false))
+    .map(([fid]) => Number(fid));
+}
+
+/**
+ * The card kinds more than one provider card frame of the tab offers (any origin, any parent), as the content script in
+ * each of those frames reports its card forms. While there is any, nothing is filled: nothing tells which of two frames
+ * asking for the same detail is the box the person meant, and an invisible frame laid over the real one, or an extra
+ * one beside it, is exactly that.
+ */
+export function kindsOfferedTwice(records: Readonly<Record<string, CardFrameRecord>>): CardFieldKind[] {
+  const seen = new Set<CardFieldKind>();
+  const twice = new Set<CardFieldKind>();
+  for (const r of Object.values(records)) {
+    if (!mayReceiveCard(r)) continue;
+    const offered = new Set(r.forms.flat());
+    for (const k of offered) {
+      if (seen.has(k)) twice.add(k);
+      seen.add(k);
+    }
+  }
+  return [...twice].sort();
 }
 
 /** What one fill does: the frames it reaches, or why it reaches none. */
 export type CardFillPlan =
-  | { ok: true; targets: CardFillTarget[] }
-  /** Two of the frames the fill would reach take the same card detail (a frame the page added beside the provider's):
-   *  nothing is filled, since nothing tells which of them is the provider's own. */
-  | { ok: false; reason: "duplicate_kind"; kinds: CardFieldKind[] };
+  | { ok: true; targets: ChosenCardFrame[] }
+  | { ok: false; reason: "duplicate_kind"; kinds: CardFieldKind[] }
+  | { ok: false; reason: "no_choice" };
 
 /**
- * The frames one fill reaches. The chosen frame, with the form holding the chosen field. And, for a provider that puts
- * each field in a frame of its own (Braintree, Adyen, Checkout.com, Cybersource, VGS and others), every other frame of
- * the tab with the same browser-reported origin and the same chain of ancestor origins that holds one card form: each
- * receives its own form's kinds, and nothing else. A frame nested elsewhere (inside an ad, or one level deeper) never
- * does, whatever its origin; where the browser gives no ancestor list (Firefox) the chosen frame is filled alone, one
- * field per Fill. Exactly one frame may take each kind: when two would (an extra frame the page put beside the
- * provider's, even one of the same provider), the whole fill is refused.
+ * The frames one fill reaches: every provider frame where the person chose a card field (one tap in a single-frame card
+ * element; one in each frame of a split one), each with the form holding its chosen field. None while any card kind is
+ * offered by more than one provider card frame ([kindsOfferedTwice]).
  */
-export function cardFillPlan(records: Readonly<Record<string, CardFrameRecord>>, chosen: ChosenCardFrame): CardFillPlan {
-  const targets: CardFillTarget[] = [{ ...chosen, chosen: true }];
-  const chain = records[chosen.frameId]?.ancestors;
-  if (Array.isArray(chain)) {
-    for (const [fid, r] of Object.entries(records)) {
-      const frameId = Number(fid);
-      if (frameId === chosen.frameId || !mayReceiveCard(r) || r.origin !== chosen.origin || !sameAncestors(r.ancestors, chain)) continue;
-      if (r.forms.length !== 1) continue;
-      const kinds = r.forms[0]!;
-      if (!Array.isArray(kinds) || kinds.length === 0) continue;
-      targets.push({ frameId, origin: r.origin, kinds, chosen: false });
-    }
+export function cardFillPlan(records: Readonly<Record<string, CardFrameRecord>>, now: number): CardFillPlan {
+  const twice = kindsOfferedTwice(records);
+  if (twice.length > 0) return { ok: false, reason: "duplicate_kind", kinds: twice };
+  const targets = chosenCardFrames(records, now);
+  return targets.length > 0 ? { ok: true, targets } : { ok: false, reason: "no_choice" };
+}
+
+/** Whether [shown] (what the popup showed, as it sends it back) names exactly the frames and origins of [targets]. */
+export function sameFrames(shown: unknown, targets: readonly { frameId: number; origin: string }[]): boolean {
+  if (!Array.isArray(shown) || shown.length !== targets.length) return false;
+  const keys = new Set<string>();
+  for (const f of shown) {
+    if (typeof f !== "object" || f === null) return false;
+    const { frameId, origin } = f as { frameId?: unknown; origin?: unknown };
+    if (typeof frameId !== "number" || typeof origin !== "string") return false;
+    keys.add(`${frameId}|${origin}`);
   }
-  const taken = new Set<CardFieldKind>();
-  const twice = new Set<CardFieldKind>();
-  for (const t of targets) {
-    for (const k of new Set(t.kinds)) {
-      if (taken.has(k)) twice.add(k);
-      taken.add(k);
-    }
-  }
-  if (twice.size > 0) return { ok: false, reason: "duplicate_kind", kinds: [...twice] };
-  return { ok: true, targets };
+  return keys.size === targets.length && targets.every((t) => keys.has(`${t.frameId}|${t.origin}`));
 }
 
 /** A card grant: what one frame may redeem once, for one fill. */
