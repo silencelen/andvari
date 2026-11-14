@@ -8,8 +8,6 @@ import XCTest
 final class T4VaultFeatureTests: UITestCase {
     private let stamp = Int(Date().timeIntervalSince1970) % 100000
 
-    /// The Safari tab layout the card fills run in: test07 finds whether the default one works (nil: not tried yet).
-    private static var cardLayout: String?
 
     /// Delete a login, find it in the trash, restore it; delete it again and delete it forever.
     func test01_TrashRestoreAndDeleteForever() {
@@ -46,20 +44,27 @@ final class T4VaultFeatureTests: UITestCase {
     /// Change a login's password, find the earlier version in its history, and restore it.
     func test02_ItemHistoryRestoresAVersion() {
         let name = "History Me \(stamp)"
+        let shown = { (self.element("detail.password").value as? String) ?? "" }
         step("login-added") {
             freshVault()
             addLogin(name, user: "hana", password: "First-Passw0rd")
+            openItem(name)
+            element("detail.reveal-password").tap()
+            XCTAssertTrue(waitUntil(10) { shown() == "First-Passw0rd" }, "the login was saved with the password “\(shown())”")
         }
         step("password-changed") {
-            openItem(name)
+            // Typing over a secure field that holds a password lost the keys on the runner: the editor generates one.
             app.buttons["Edit"].tap()
-            // A secure field shows no value to read and clears at the first key once it has the keyboard: a delete
-            // empties it, the rest find nothing to delete, and the new password follows.
-            let password = app.secureTextFields["Password"]
-            enter(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20) + "Second-Passw0rd", into: password, what: "the editor's password field")
+            require(app.navigationBars["Edit login"], "the login editor")
+            let generate = app.buttons["Generate"]
+            scrollToComfort(generate)
+            generate.tap()
+            require(app.buttons["Generate another"], "a generated password in the editor", timeout: 5)
             app.buttons["Save"].tap()
-            element("detail.reveal-password").tap()
-            XCTAssertTrue(waitUntil(10) { (self.element("detail.password").value as? String) == "Second-Passw0rd" }, "the new password was not saved")
+            let reveal = element("detail.reveal-password")
+            require(reveal, "the saved login's password", timeout: 15)
+            reveal.tap()
+            XCTAssertTrue(waitUntil(10) { !shown().isEmpty && shown() != "First-Passw0rd" && !shown().contains("•") }, "the generated password was not saved, the login holds “\(shown())”")
         }
         step("earlier-version-listed") {
             let show = app.buttons["Show earlier versions"]
@@ -77,7 +82,7 @@ final class T4VaultFeatureTests: UITestCase {
             app.navigationBars.buttons.firstMatch.tap()
             openItem(name)
             element("detail.reveal-password").tap()
-            XCTAssertTrue(waitUntil(15) { (self.element("detail.password").value as? String) == "First-Passw0rd" }, "the restored version's password is not back, the login holds \(String(describing: self.element("detail.password").value))")
+            XCTAssertTrue(waitUntil(15) { shown() == "First-Passw0rd" }, "the restored version's password is not back, the login holds “\(shown())”")
             app.navigationBars.buttons.firstMatch.tap()
         }
     }
@@ -249,8 +254,7 @@ final class T4VaultFeatureTests: UITestCase {
     }
 
     /// A card filled from the popup in Safari's default tab layout (Compact), the popup reached with the keyboard still
-    /// up: the bar that shrank to the page's address above it is tapped back. The next card tests run in the layout
-    /// this shows to work.
+    /// up: the bar that shrank to the page's address above it is tapped back. The card page tests reach it the same way.
     func test07_CardFillWithTheKeyboardUp() throws {
         step("provider-and-extension-on") {
             requireAutoFillProvider()
@@ -259,10 +263,7 @@ final class T4VaultFeatureTests: UITestCase {
         let number = safari.webViews.textFields["Card number"]
         try step("number-tapped-and-filled") {
             openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            // Until this fill shows the default works, the next card tests use the layout that keeps the menu in reach.
-            Self.cardLayout = "Top"
             try tapAndFill(number, "the new card's number", layout: "Compact", reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
-            Self.cardLayout = "Compact"
         }
     }
 
@@ -286,7 +287,7 @@ final class T4VaultFeatureTests: UITestCase {
             requireAutoFillProvider()
             requireSafariExtension()
         }
-        let layout = useCardLayout()
+        let layout = "Compact"
         let codes = { self.safari.webViews.textFields.matching(NSPredicate(format: "label == 'Security code'")) }
         let number = { self.safari.webViews.textFields["Card number"] }
         // The page's second step first: the first can only be skipped with its finding, which ends the test.
@@ -313,7 +314,7 @@ final class T4VaultFeatureTests: UITestCase {
             requireAutoFillProvider()
             requireSafariExtension()
         }
-        let layout = useCardLayout()
+        let layout = "Compact"
         let number = safari.webViews.textFields["Card number"]
         try step("form-scrolled-into-view-and-filled") {
             openInSafari(Fixture.siteOrigin + "/test-pages/card-inner-scroll.html?uitest-events", heading: "Checkout")
@@ -643,47 +644,5 @@ final class T4VaultFeatureTests: UITestCase {
     private func pageEvents() -> String {
         let line = safari.webViews.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'events:'")).firstMatch
         return line.exists ? line.label : "no event log"
-    }
-
-    /// The tab layout the card fills run in (test07's finding), chosen in Settings when it is not the default; the
-    /// default comes back after the test.
-    private func useCardLayout() -> String {
-        let layout = Self.cardLayout ?? "Compact"
-        guard layout != "Compact" else { return layout }
-        step("tab-layout-\(layout.lowercased())") {
-            XCTAssertTrue(chooseSafariTabLayout(layout), "Safari's \(layout) tab layout could not be chosen in Settings")
-        }
-        addTeardownBlock { [unowned self] in
-            self.shot("before-the-default-tab-layout")
-            _ = self.chooseSafariTabLayout("Compact")
-        }
-        return layout
-    }
-
-    /// Settings > Apps > Safari > Tabs: [layout] ("Compact", the default; "Bottom"; "Top"). True when it is chosen.
-    private func chooseSafariTabLayout(_ layout: String) -> Bool {
-        let settings = settingsApp
-        settings.terminate()
-        settings.launch()
-        guard scrollToAndTap(labelled("Apps", in: settings), in: settings) else { return false }
-        Thread.sleep(forTimeInterval: 1.5)
-        let search = settings.searchFields.firstMatch
-        if search.exists {
-            search.tap()
-            search.typeText("Safari")
-            Thread.sleep(forTimeInterval: 1.5)
-        }
-        let row = settings.cells.matching(NSPredicate(format: "label BEGINSWITH 'Safari'")).firstMatch
-        guard scrollToAndTap(row.exists ? row : labelled("Safari", in: settings), in: settings, swipes: 12) else { return false }
-        Thread.sleep(forTimeInterval: 1.5)
-        let choice = settings.cells["SEARCH_POSITION"].buttons.containing(NSPredicate(format: "label == %@", layout)).firstMatch
-        guard scrollToAndTap(choice, in: settings, swipes: 10) else {
-            dumpTree(settings, as: "no-tab-layout-\(layout.lowercased())")
-            return false
-        }
-        let chosen = waitUntil(5) { choice.isSelected }
-        dumpTree(settings, as: "tab-layout-\(layout.lowercased())")
-        settings.terminate()
-        return chosen
     }
 }
