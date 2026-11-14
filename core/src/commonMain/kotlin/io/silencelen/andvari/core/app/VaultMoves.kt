@@ -44,15 +44,17 @@ class VaultMoves(private val store: Store = Store.Memory()) {
         fun save(memos: Map<String, Kept>)
 
         /**
-         * Kept in [file] (app-private storage), sealed to the signed-in account ([account], null while locked): a lock
-         * leaves nothing of it in memory, and only that account opens it. Nothing is read or written while locked; an
-         * empty save removes the file whatever the state.
+         * Kept in [file] (app-private storage), sealed to the signed-in account ([account], null while locked) with a MAC
+         * only it can make ([Account.sealLocalRecord]): a lock leaves nothing of it in memory, and only that account
+         * opens it or writes one it accepts. Nothing is read or written while locked; an empty save removes the file
+         * whatever the state.
          */
         class Sealed(private val file: FillSnapshotStore, private val account: () -> Account?) : Store {
             override fun load(): Map<String, Kept> {
                 val owner = account() ?: return emptyMap()
                 val sealed = file.read() ?: return emptyMap()
-                val plain = runCatching { owner.openQueuedSave(sealed) }.getOrNull() ?: return emptyMap()
+                // A memo that is not this account's own (its MAC does not hold, round-9 review 2) is dropped unread.
+                val plain = runCatching { owner.openLocalRecord(RECORD, sealed) }.getOrNull() ?: return emptyMap()
                 return try {
                     runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrDefault(emptyMap())
                 } finally {
@@ -68,13 +70,15 @@ class VaultMoves(private val store: Store = Store.Memory()) {
                 val owner = account() ?: return
                 val plain = json.encodeToString(serializer, memos).encodeToByteArray()
                 try {
-                    if (!file.write(owner.cryptoProvider().sealTo(owner.identityPub, plain))) file.delete()
+                    if (!file.write(owner.sealLocalRecord(RECORD, plain))) file.delete()
                 } finally {
                     plain.fill(0)
                 }
             }
 
             private companion object {
+                /** What the memos are sealed for ([Account.sealLocalRecord]). */
+                const val RECORD = "move-memos"
                 val json = Json { ignoreUnknownKeys = true }
                 val serializer = MapSerializer(String.serializer(), Kept.serializer())
             }

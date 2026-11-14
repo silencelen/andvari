@@ -263,7 +263,10 @@ open class SessionController(
 
     /** The app came to the foreground: the idle check first, then a quiet sync. */
     fun onForeground() {
-        backgroundLockPending = false // the person is back: a lock still waiting for an action is void
+        // A lock that waited for running work lands now if its time ran out while the app was away (round-9 review 6:
+        // a suspended app runs no ticker); otherwise the person is back, and it is void.
+        checkBackgroundGrace()
+        backgroundLockPending = false
         checkIdleLock()
         backgroundSync()
         refreshPolicyIfStale()
@@ -803,7 +806,7 @@ open class SessionController(
                     expMonth = c.expMonth?.ifEmpty { null }, expYear = c.expYear?.ifEmpty { null },
                 )
             },
-            attachments = doc.attachments.map { AttachmentView(it.id, it.name, it.size) },
+            attachments = doc.attachments.map(::attachmentView),
         )
     }
 
@@ -1185,8 +1188,8 @@ open class SessionController(
     private fun draftView(live: VaultSession.Unlocked, d: Draft): AttachmentDraftView {
         val kept = keptFiles(live, d)
         return AttachmentDraftView(
-            kept = kept.map { AttachmentView(it.id, it.name, it.size) },
-            added = d.added.map { AttachmentView(it.id, it.name, it.size) },
+            kept = kept.map(::attachmentView),
+            added = d.added.map(::attachmentView),
             totalBytes = kept.sumOf { it.size } + d.added.sumOf { it.size },
             limits = attachmentLimits(),
         )
@@ -1278,9 +1281,11 @@ open class SessionController(
         update { it.copy(attachmentDraft = draftView(live, d)) }
     }
 
-    /** What a file is called: the last part of a path, without control characters, at most 200 characters. */
-    private fun fileName(raw: String): String =
-        raw.substringAfterLast('/').substringAfterLast('\\').filter { it >= ' ' && it != '\u007f' }.trim().take(200).ifEmpty { "File" }
+    /** What a file is called here: its name made safe to show and to offer to Files ([AttachmentRules.safeFileName]). */
+    private fun fileName(raw: String): String = AttachmentRules.safeFileName(raw)
+
+    /** A file as the app lists it: never its name as stored, which whoever added the file chose (round-9 review 1). */
+    private fun attachmentView(ref: AttachmentRef): AttachmentView = AttachmentView(ref.id, fileName(ref.name), ref.size)
 
     /**
      * One file of an item, decrypted, for a preview or to save to Files: the caller keeps it in memory and writes no
@@ -1292,19 +1297,20 @@ open class SessionController(
         val live = session.get() ?: return@withContext AttachmentContent("", null, null)
         val ref = live.engine.item(itemId)?.doc?.attachments?.firstOrNull { it.id == attachmentId }
             ?: return@withContext AttachmentContent("", null, AttachmentCopy.FILE_GONE)
-        if (ref.size > AttachmentRules.MAX_FILE_BYTES) return@withContext AttachmentContent(ref.name, null, AttachmentCopy.FILE_TOO_LARGE_TO_OPEN)
+        val name = fileName(ref.name)
+        if (ref.size > AttachmentRules.MAX_FILE_BYTES) return@withContext AttachmentContent(name, null, AttachmentCopy.FILE_TOO_LARGE_TO_OPEN)
         session.touch()
         try {
             val bytes = runBounded(BoundedOps.attachmentMs(ref.size)) { live.engine.downloadAttachment(ref) }
             if (session.get() !== live) {
                 bytes.fill(0)
-                AttachmentContent(ref.name, null, null)
+                AttachmentContent(name, null, null)
             } else {
-                AttachmentContent(ref.name, bytes, null)
+                AttachmentContent(name, bytes, null)
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            AttachmentContent(ref.name, null, HouseholdCopy.forError(t))
+            AttachmentContent(name, null, HouseholdCopy.forError(t))
         }
     }
 
@@ -1329,6 +1335,7 @@ open class SessionController(
         val p = PendingSave(
             id = d.keptId ?: live.account.newItemId(), itemId = itemId, newItemId = d.newItemId, vaultId = home,
             baseRev = itemId?.let { live.engine.item(it)?.rev } ?: 0L, doc = withFiles, newFiles = d.added.map { it.id },
+            removedFiles = d.removed.toList(),
         )
         if (!pendingSaves.keep(live.account, p)) throw IllegalStateException(AttachmentCopy.FILE_NOT_SET_ASIDE)
         // Files an earlier try of this editor's save named and this one does not: set aside for nothing now.
@@ -1338,9 +1345,9 @@ open class SessionController(
         d.keptFiles += p.newFiles
         d.saving = true
         try {
-            val outcome = finishPendingSave(live, p) ?: return null
+            val finished = finishPendingSave(live, p, resumed = false) ?: return null
             if (draft === d) draft = null
-            return outcome
+            return finished.outcome
         } finally {
             d.saving = false
         }
@@ -1353,12 +1360,20 @@ open class SessionController(
     private fun landed(live: VaultSession.Unlocked, p: PendingSave): Boolean =
         live.engine.item(p.newItemId)?.doc?.attachments?.map { it.id }?.containsAll(p.newFiles) == true
 
+    /** How a kept save was finished: the save's outcome, and whether only its files went onto the item as it is now. */
+    private class Finished(val outcome: SaveOutcome, val filesOnly: Boolean)
+
     /**
-     * Send a kept save's new files, then the item that names them, from the revision it was edited from (someone else's
-     * change since is kept as a conflict copy, never overwritten); the save is let go once the server has the item. Null:
-     * the vault locked first, and the save stays kept.
+     * Send a kept save's new files, then the item that names them; the save is let go once the server has the item.
+     * Null: the vault locked first, and the save stays kept.
+     *
+     * The editor's own save ([resumed] false) goes from the revision it was edited from, so someone else's change made
+     * meanwhile is kept as a conflict copy, never overwritten; edits of this device still waiting to be sent are in the
+     * document it was built from, so they are folded into it. A save finished later ([resumed]) is older than what may
+     * have happened since (round-9 review 3): when the item's revision moved, or an edit of it waits to be sent, only
+     * its files go onto the item as it is now, and nothing else of the older save overwrites a newer edit.
      */
-    private suspend fun finishPendingSave(live: VaultSession.Unlocked, p: PendingSave): SaveOutcome? {
+    private suspend fun finishPendingSave(live: VaultSession.Unlocked, p: PendingSave, resumed: Boolean): Finished? {
         val refs = p.doc.attachments.associateBy { it.id }
         try {
             if (!landed(live, p)) {
@@ -1376,14 +1391,24 @@ open class SessionController(
                 }
             }
             return saves.exclusive {
-                when {
-                    session.get() !== live -> null
-                    landed(live, p) -> SaveOutcome.APPLIED
-                    else -> live.engine.saveWithUploads(
+                if (session.get() !== live) return@exclusive null
+                if (landed(live, p)) return@exclusive Finished(SaveOutcome.APPLIED, filesOnly = false).also { pendingSaves.forget(live.account, p.id) }
+                val current = p.itemId?.let { live.engine.item(it) }
+                val waiting = p.itemId != null && live.engine.hasPendingSync(p.itemId)
+                val finished = if (resumed && current != null && (current.rev != p.baseRev || waiting)) {
+                    val added = p.doc.attachments.filter { it.id in p.newFiles }
+                    val files = current.doc.attachments.filter { it.id !in p.removedFiles && it.id !in p.newFiles } + added
+                    Finished(live.engine.saveWithUploads(p.itemId, current.doc.copy(attachments = files), emptyList(), p.vaultId), filesOnly = true)
+                } else {
+                    val outcome = live.engine.saveWithUploads(
                         p.itemId, p.doc, emptyList(), p.vaultId,
-                        newItemId = if (p.itemId == null) p.newItemId else null, baseItemRev = p.baseRev,
+                        newItemId = if (p.itemId == null) p.newItemId else null,
+                        baseItemRev = if (p.itemId != null && !waiting) p.baseRev else null,
                     )
-                }?.also { pendingSaves.forget(live.account, p.id) }
+                    Finished(outcome, filesOnly = false)
+                }
+                pendingSaves.forget(live.account, p.id)
+                finished
             }
         } finally {
             if (session.get() === live) update { it.copy(upload = null) }
@@ -1405,12 +1430,14 @@ open class SessionController(
         if (kept.isEmpty()) return
         resuming = scope.launch {
             var done = 0
+            val filesOnly = mutableListOf<String>()
             try {
                 for (p in kept) {
                     if (session.get() !== live) return@launch
                     if (draft?.keptId == p.id) continue // its editor is open: its own Save finishes it
                     try {
-                        finishPendingSave(live, p) ?: return@launch
+                        val finished = finishPendingSave(live, p, resumed = true) ?: return@launch
+                        if (finished.filesOnly) filesOnly += p.doc.name.ifBlank { "An item" }
                         done++
                     } catch (t: Throwable) {
                         if (t is CancellationException) throw t
@@ -1428,7 +1455,12 @@ open class SessionController(
                 afterAction() // a lock that waited for this upload lands now
             }
             if (done > 0 && session.get() === live) {
-                update { it.copy(items = summaries(it.query), notice = if (done == 1) AttachmentCopy.KEPT_SAVE_DONE else "$done ${AttachmentCopy.KEPT_SAVES_DONE}") }
+                val said = when {
+                    filesOnly.isNotEmpty() -> AttachmentCopy.filesOnly(filesOnly.first())
+                    done == 1 -> AttachmentCopy.KEPT_SAVE_DONE
+                    else -> "$done ${AttachmentCopy.KEPT_SAVES_DONE}"
+                }
+                update { it.copy(items = summaries(it.query), notice = said) }
                 writeFillSnapshot()
             }
         }
@@ -2316,7 +2348,10 @@ open class SessionController(
     private fun dropFillSnapshot() {
         runCatching { fillSnapshots.delete() }
         runCatching { saves.dropAll() }
-        pendingSaves.dropDurable() // and the saves with files kept on disk (one in memory goes with the account)
+        // And the saves with files kept on disk: moved into memory while the account is unlocked, and said (round-9
+        // review 8); one in memory goes with the account.
+        val live = session.get()
+        if (pendingSaves.leaveDisk(live?.account) > 0) update { it.copy(notice = AttachmentCopy.KEPT_IN_MEMORY) }
     }
 
     /**

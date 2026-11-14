@@ -561,7 +561,9 @@ internal class SaveImporter(
         val stored = runCatching { json.decodeFromString(Stored.serializer(), text) }.getOrNull()
             ?: runCatching { Stored(json.decodeFromString(ListSerializer(String.serializer()), text)) }.getOrNull() ?: return
         for (entry in stored.records.take(MAX_LISTED)) {
-            val record = runCatching { json.decodeFromString(AppliedRecord.serializer(), live.account.openQueuedSave(Bytes.fromB64(entry)).decodeToString()) }.getOrNull() ?: continue
+            // A record that is not this account's own (its MAC does not hold, round-9 review 2) is dropped unread.
+            val plain = runCatching { live.account.openLocalRecord(APPLIED_RECORD, Bytes.fromB64(entry)) }.getOrNull() ?: continue
+            val record = runCatching { json.decodeFromString(AppliedRecord.serializer(), plain.decodeToString()) }.getOrNull() ?: continue
             applied[record.id] = record
         }
         held += stored.held.take(MAX_LISTED)
@@ -579,7 +581,7 @@ internal class SaveImporter(
             if (why != Persist.CHANGE) appliedStore.delete()
             return
         }
-        val sealed = applied.values.toList().takeLast(MAX_LISTED).map { Bytes.toB64(crypto().sealTo(live.account.identityPub, json.encodeToString(AppliedRecord.serializer(), it).encodeToByteArray())) }
+        val sealed = applied.values.toList().takeLast(MAX_LISTED).map { Bytes.toB64(live.account.sealLocalRecord(APPLIED_RECORD, json.encodeToString(AppliedRecord.serializer(), it).encodeToByteArray())) }
         appliedStore.write(json.encodeToString(Stored.serializer(), Stored(sealed, held.toList().takeLast(MAX_LISTED))).encodeToByteArray())
     }
 
@@ -605,6 +607,9 @@ internal class SaveImporter(
     }
 
     companion object {
+        /** What the list of automatic saves seals its records for ([Account.sealLocalRecord]). */
+        const val APPLIED_RECORD = "applied-saves"
+
         const val MAX_AUTO_PER_RUN = 5
         const val HISTORY_MAX = 20
         const val MAX_LISTED = 200

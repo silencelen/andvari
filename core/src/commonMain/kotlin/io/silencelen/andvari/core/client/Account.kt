@@ -10,6 +10,7 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.GrantOutcome
 import io.silencelen.andvari.core.crypto.GrantPin
 import io.silencelen.andvari.core.crypto.GrantVerdict
+import io.silencelen.andvari.core.crypto.Hkdf
 import io.silencelen.andvari.core.crypto.LegacyGrant
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.KeyPairBytes
@@ -605,6 +606,9 @@ class Account private constructor(
     private val grantAnomalies: MutableMap<String, GrantVerdict> = mutableMapOf()
 
     companion object {
+        /** The MAC in front of a local record ([sealLocalRecord]): HMAC-SHA-256. */
+        const val LOCAL_RECORD_MAC_BYTES = 32
+
         /** Highest item formatVersion this client can decrypt (spec 02 §3 fail-closed). */
         const val ITEM_FORMAT_VERSION = 2
 
@@ -1987,6 +1991,40 @@ class Account private constructor(
      * magic and its account before showing it. A seal that does not open throws.
      */
     fun openQueuedSave(sealed: ByteArray): ByteArray = withKeys { crypto.sealOpen(identityPub, identityPriv, sealed) }
+
+    /**
+     * Seal [plain] for this app's own storage, for [purpose] (the list of automatic saves, kept moves, kept saves with
+     * files; round-9 review 2). A sealed box to [identityPub], as the save queue's, and in front of it a MAC under a key
+     * only this account holds: derived from its UVK for that purpose (HKDF-SHA-256, domain-separated). Every
+     * co-member has the public key, so a sealed box alone could be forged by anyone who wrote into the container.
+     */
+    fun sealLocalRecord(purpose: String, plain: ByteArray): ByteArray = withKeys {
+        val sealed = crypto.sealTo(identityPub, plain)
+        val key = localRecordKey(purpose)
+        try {
+            crypto.hmacSha256(key, sealed) + sealed
+        } finally {
+            key.fill(0)
+        }
+    }
+
+    /** What [sealLocalRecord] sealed for [purpose]; null for anything else: a MAC that does not hold, or no seal. */
+    fun openLocalRecord(purpose: String, record: ByteArray): ByteArray? {
+        if (record.size <= LOCAL_RECORD_MAC_BYTES) return null
+        return withKeys {
+            val sealed = record.copyOfRange(LOCAL_RECORD_MAC_BYTES, record.size)
+            val key = localRecordKey(purpose)
+            val genuine = try {
+                Bytes.ctEquals(record.copyOfRange(0, LOCAL_RECORD_MAC_BYTES), crypto.hmacSha256(key, sealed))
+            } finally {
+                key.fill(0)
+            }
+            if (genuine) runCatching { crypto.sealOpen(identityPub, identityPriv, sealed) }.getOrNull() else null
+        }
+    }
+
+    private fun localRecordKey(purpose: String): ByteArray =
+        Hkdf.sha256(crypto, uvk, ByteArray(0), "andvari local record v1|$purpose".encodeToByteArray(), 32)
 
     fun decryptItem(item: WireItem): ItemDoc {
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")

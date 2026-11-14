@@ -39,7 +39,12 @@ object Attachments {
             chunks.add(plaintext.copyOfRange(off, end))
             off = end
         }
-        val result = crypto.secretstreamEncrypt(fileKey, chunks)
+        // The chunks are copies of the plaintext: zeroed once encrypted, whatever happens (round-9 review 9).
+        val result = try {
+            crypto.secretstreamEncrypt(fileKey, chunks)
+        } finally {
+            chunks.forEach { it.fill(0) }
+        }
         val total = result.chunks.sumOf { it.size }
         val out = ByteArray(total)
         var o = 0
@@ -67,13 +72,18 @@ object Attachments {
     fun decrypt(crypto: CryptoProvider, fileKey: ByteArray, header: ByteArray, ciphertext: ByteArray): ByteArray {
         if (header.size != HEADER_BYTES) throw CryptoException("attachment header must be $HEADER_BYTES bytes")
         val plain = crypto.secretstreamDecrypt(fileKey, header, splitChunks(ciphertext))
-        val total = plain.sumOf { it.size }
-        val out = ByteArray(total)
-        var o = 0
-        for (p in plain) {
-            p.copyInto(out, o)
-            o += p.size
+        try {
+            val total = plain.sumOf { it.size }
+            val out = ByteArray(total)
+            var o = 0
+            for (p in plain) {
+                p.copyInto(out, o)
+                o += p.size
+            }
+            return out
+        } finally {
+            // The decrypted chunks are copies of what is returned: zeroed once joined (round-9 review 9).
+            plain.forEach { it.fill(0) }
         }
-        return out
     }
 }

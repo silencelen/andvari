@@ -63,6 +63,39 @@ object AttachmentRules {
     fun size(bytes: Long): String =
         if (bytes >= 1024 * 1024) "${(bytes + 512 * 1024) / (1024 * 1024)} MB" else "${maxOf(1, (bytes + 512) / 1024)} KB"
 
+    /** The longest a file's name is shown or saved as. */
+    const val MAX_NAME_CHARS = 120
+
+    /** What a file is called when its name leaves nothing to show. */
+    const val FALLBACK_NAME = "File"
+
+    /**
+     * A file's name as this app shows it and offers it to Files (round-9 review 1). A name is whatever the person or
+     * client that added the file wrote, a co-member's included, so it is never trusted as a path: the last part after
+     * any `/` or `\`, without control, format or bidirectional characters (a right-to-left override can make a name
+     * that ends in "exe" read as one that ends in "jpg"), without leading dots or spaces (no "..", no hidden file), `:`
+     * made a hyphen, at most [MAX_NAME_CHARS] characters with its extension kept, and [FALLBACK_NAME] when nothing is
+     * left.
+     */
+    fun safeFileName(raw: String): String {
+        val last = raw.substringAfterLast('/').substringAfterLast('\\')
+        val clean = buildString {
+            for (c in last) {
+                when {
+                    c.code < 0x20 || c.code in 0x7F..0x9F -> {}
+                    c.code in 0x200B..0x200F || c.code in 0x2028..0x202E || c.code in 0x2060..0x206F || c.code == 0xFEFF || c.code == 0x061C || c.code == 0x00AD -> {}
+                    c == ':' -> append('-')
+                    else -> append(c)
+                }
+            }
+        }.trimEnd().trimStart(' ', '.').trimEnd('.', ' ')
+        if (clean.isEmpty()) return FALLBACK_NAME
+        if (clean.length <= MAX_NAME_CHARS) return clean
+        val dot = clean.lastIndexOf('.')
+        val ext = if (dot > 0 && clean.length - dot <= 16) clean.substring(dot) else ""
+        return clean.take(MAX_NAME_CHARS - ext.length).trimEnd().trimEnd('.', ' ') + ext
+    }
+
     /** Why a file of [size] bytes cannot join files that come to [held] bytes, or null when it can. */
     fun refusal(size: Long, held: Long, limits: AttachmentLimitsView): String? = when {
         size <= 0 -> "This file is empty."
@@ -84,6 +117,12 @@ internal object AttachmentCopy {
     fun savedWithoutFiles(name: String, why: String) = "“$name” could not be saved with its files: $why"
 
     fun savedLater(name: String) = "“$name” has not been saved with its files yet. andvari tries again the next time you unlock."
+
+    fun filesOnly(name: String) =
+        "“$name” was changed after a save with files was cut short: its files were added to it as it is now, and any other change in that save was not kept."
+
+    const val KEPT_IN_MEMORY =
+        "This server no longer allows keeping data on this device, so a save with files that was cut short is kept only while andvari stays open."
 }
 
 /**
@@ -107,6 +146,8 @@ internal data class PendingSave(
     val doc: ItemDoc,
     /** The ids of the new files, which go up before the item that names them. */
     val newFiles: List<String>,
+    /** The ids of the files the edit took off: what it changed of the item's files besides [newFiles]. */
+    val removedFiles: List<String> = emptyList(),
 )
 
 /** Where files set aside for a save lie, encrypted, by attachment id: the app's own storage on iOS, memory in tests. */
@@ -148,10 +189,12 @@ class InMemoryBlobs : BlobStore {
 }
 
 /**
- * The kept saves ([PendingSave]), sealed to the signed-in account, and their files. They are on disk ([disk],
- * [diskBlobs]) while [durable] says the origin's policy allows an offline cache, and only in memory otherwise, as the
- * save queue is (design 2026-11-09, "Saving"). The list is read and written only while unlocked; an empty list removes
- * the log.
+ * The kept saves ([PendingSave]) and their files. A kept save is sealed to the signed-in account with a MAC only it can
+ * make ([Account.sealLocalRecord], round-9 review 2), so one written by anyone else is dropped unread. It is kept on
+ * disk ([disk], [diskBlobs]) when the origin's policy allows an offline cache ([durable], read when it is kept), and
+ * only in memory otherwise, as the save queue is (design 2026-11-09, "Saving"). Both are read, so a save kept before
+ * the policy changed is still found with its files ([leaveDisk] moves the disk's into memory when it forbids them).
+ * The lists are read and written only while unlocked; an empty list removes its log.
  */
 internal class PendingSaves(private val disk: FillSnapshotStore, private val diskBlobs: BlobStore, private val durable: () -> Boolean) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -159,12 +202,9 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
     private val memoryLog = InMemoryFillSnapshots()
     private val memoryBlobs = InMemoryBlobs()
 
-    private val log: FillSnapshotStore get() = if (durable()) disk else memoryLog
-    private val blobs: BlobStore get() = if (durable()) diskBlobs else memoryBlobs
-
-    fun load(account: Account): List<PendingSave> {
-        val sealed = log.read() ?: return emptyList()
-        val plain = runCatching { account.openQueuedSave(sealed) }.getOrNull() ?: return emptyList()
+    private fun read(log: FillSnapshotStore, account: Account): List<PendingSave> {
+        val record = log.read() ?: return emptyList()
+        val plain = runCatching { account.openLocalRecord(RECORD, record) }.getOrNull() ?: return emptyList()
         return try {
             runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrDefault(emptyList())
         } finally {
@@ -172,54 +212,95 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
         }
     }
 
-    private fun store(account: Account, saves: List<PendingSave>): Boolean {
+    private fun write(log: FillSnapshotStore, account: Account, saves: List<PendingSave>): Boolean {
         if (saves.isEmpty()) {
             log.delete()
             return true
         }
         val plain = json.encodeToString(serializer, saves).encodeToByteArray()
         try {
-            return log.write(account.cryptoProvider().sealTo(account.identityPub, plain))
+            return log.write(account.sealLocalRecord(RECORD, plain))
         } finally {
             plain.fill(0)
         }
     }
 
-    /** Keep [save], in place of the one with its id: false when it could not be written. */
-    fun keep(account: Account, save: PendingSave): Boolean = store(account, load(account).filter { it.id != save.id } + save)
+    /** Every kept save, on disk and in memory. */
+    fun load(account: Account): List<PendingSave> = read(disk, account) + read(memoryLog, account)
+
+    /** Keep [save], in place of the one with its id, where the policy says now: false when it could not be written. */
+    fun keep(account: Account, save: PendingSave): Boolean {
+        val (here, there) = if (durable()) disk to memoryLog else memoryLog to disk
+        val others = read(there, account)
+        if (others.any { it.id == save.id }) write(there, account, others.filter { it.id != save.id })
+        return write(here, account, read(here, account).filter { it.id != save.id } + save)
+    }
 
     /** [id] is done or given up: it goes, and the files only it named. */
     fun forget(account: Account, id: String) {
-        val all = load(account)
-        val gone = all.firstOrNull { it.id == id } ?: return
-        val rest = all.filter { it.id != id }
-        store(account, rest)
-        val stillNamed = rest.flatMapTo(HashSet()) { it.newFiles }
-        gone.newFiles.filter { it !in stillNamed }.forEach { blobs.delete(it) }
+        var gone: PendingSave? = null
+        for (log in listOf(disk, memoryLog)) {
+            val all = read(log, account)
+            val hit = all.firstOrNull { it.id == id } ?: continue
+            gone = hit
+            write(log, account, all.filter { it.id != id })
+        }
+        val stillNamed = load(account).flatMapTo(HashSet()) { it.newFiles }
+        gone?.newFiles?.filter { it !in stillNamed }?.forEach(::dropBlob)
     }
 
-    fun putBlob(id: String, sealed: ByteArray): Boolean = blobs.put(id, sealed)
+    /** Set a file aside where the policy says now. */
+    fun putBlob(id: String, sealed: ByteArray): Boolean = (if (durable()) diskBlobs else memoryBlobs).put(id, sealed)
 
-    fun blob(id: String): ByteArray? = blobs.get(id)
+    /** A file set aside, wherever it was set aside. */
+    fun blob(id: String): ByteArray? = memoryBlobs.get(id) ?: diskBlobs.get(id)
 
-    fun dropBlob(id: String) = blobs.delete(id)
+    fun dropBlob(id: String) {
+        memoryBlobs.delete(id)
+        diskBlobs.delete(id)
+    }
 
     /** The files no kept save names and [inUse] does not hold (an editor the app was closed in left them): they go. */
     fun sweep(account: Account, inUse: Set<String>) {
         val named = load(account).flatMapTo(HashSet()) { it.newFiles }
-        blobs.ids().filter { it !in named && it !in inUse }.forEach { blobs.delete(it) }
+        for (store in listOf(memoryBlobs, diskBlobs)) store.ids().filter { it !in named && it !in inUse }.forEach { store.delete(it) }
     }
 
-    /** What is kept on disk goes (the policy no longer allows it there, or the account is going). */
-    fun dropDurable() {
+    /**
+     * The policy no longer allows keeping data on this device (round-9 review 8): what is kept on disk goes, the saves
+     * of [account] (when it is unlocked) moved into memory first with their files, so they are still finished while the
+     * app runs. How many were moved, for the notice that says so.
+     */
+    fun leaveDisk(account: Account?): Int {
+        var moved = 0
+        if (account != null) {
+            val onDisk = runCatching { read(disk, account) }.getOrDefault(emptyList())
+            if (onDisk.isNotEmpty()) {
+                for (id in onDisk.flatMap { it.newFiles }) {
+                    diskBlobs.get(id)?.let { bytes ->
+                        memoryBlobs.put(id, bytes)
+                        bytes.fill(0)
+                    }
+                }
+                val kept = read(memoryLog, account).filter { m -> onDisk.none { it.id == m.id } }
+                if (write(memoryLog, account, kept + onDisk)) moved = onDisk.size
+            }
+        }
         runCatching { disk.delete() }
         runCatching { diskBlobs.clear() }
+        return moved
     }
 
     /** The account is going: every kept save and file goes, on disk and in memory. */
     fun dropAll() {
-        dropDurable()
+        runCatching { disk.delete() }
+        runCatching { diskBlobs.clear() }
         memoryLog.delete()
         memoryBlobs.clear()
+    }
+
+    companion object {
+        /** What kept saves are sealed for ([Account.sealLocalRecord]). */
+        const val RECORD = "kept-saves"
     }
 }

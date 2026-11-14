@@ -2702,7 +2702,9 @@ class SyncEngine(
         }
         return syncMutex.withLock {
             // H37: the queued burst's ORIGINAL base rev wins over the cache's — see below.
-            val folded = queuedPutsToFold(id)
+            // Round-9 review 3: a put sent from a revision of its own ([baseItemRev], a kept save) never folds the item's
+            // unsent puts: they may be newer than it, and folding would drop them.
+            val folded = if (baseItemRev != null) null else queuedPutsToFold(id)
             // A13 review RF4 (web q54's core twin): the seal is the step that can still refuse here — INV-WRITE-KEY, a
             // home that moved, or a key a pull dropped during the upload awaits above. The folded rows are dequeued only
             // once it has succeeded, so a refusal leaves the item's offline backlog queued exactly as it was.
