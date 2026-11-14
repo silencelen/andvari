@@ -540,7 +540,7 @@ final class T4VaultFeatureTests: UITestCase {
 
     /// Pull the vault list down from its top: a sync.
     private func refreshVault() {
-        for _ in 0..<2 where !(settingsButton.exists && settingsButton.isHittable) { app.navigationBars.buttons.firstMatch.tap() }
+        for _ in 0..<2 where !(self.safelyHittable(settingsButton)) { app.navigationBars.buttons.firstMatch.tap() }
         for _ in 0..<2 {
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
             start.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)), withVelocity: .slow, thenHoldForDuration: 0.5)
