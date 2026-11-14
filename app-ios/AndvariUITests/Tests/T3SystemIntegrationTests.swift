@@ -62,9 +62,17 @@ final class T3SystemIntegrationTests: UITestCase {
             if fillOfferButton.exists && fillOfferButton.isHittable {
                 fillOfferButton.tap()
             }
-            XCTAssertTrue(matchFaceUntil(25) { (username.value as? String) == Fixture.siteUser }, "the username was not filled, it holds \(String(describing: username.value))")
-            let password = safari.webViews.secureTextFields["Password"]
-            XCTAssertFalse(((password.value as? String) ?? "").isEmpty, "the password was not filled")
+            // Safari may submit the form the moment it fills it: the test site's page then lists the fields that came
+            // with a value. Either that page names both, or the fields hold the login.
+            let submitted = safari.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Fields:' AND label CONTAINS 'password' AND label CONTAINS 'username'")).firstMatch
+            XCTAssertTrue(
+                matchFaceUntil(25) { submitted.exists || (username.exists && (username.value as? String) == Fixture.siteUser) },
+                "the username was not filled, it holds \(String(describing: username.exists ? username.value : nil))"
+            )
+            if !submitted.exists {
+                let password = safari.webViews.secureTextFields["Password"]
+                XCTAssertFalse(((password.value as? String) ?? "").isEmpty, "the password was not filled")
+            }
         }
     }
 
