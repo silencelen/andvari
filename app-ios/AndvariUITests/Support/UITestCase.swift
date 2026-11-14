@@ -19,7 +19,16 @@ enum Fixture {
     static let otherHost = value("UITEST_OTHER_HOST", "other-uitest.test")
     /// The test site's plain-http port on the loopback address, for the control requests (Backend.swift).
     static let controlOrigin = value("UITEST_CONTROL_ORIGIN", "http://127.0.0.1:8081")
+    /// The test site's stand-in payment provider, the one origin a card is filled into here (owner decision 2026-11-14);
+    /// only the Safari extension's UI-test build lists it.
+    static let providerOrigin = value("UITEST_PROVIDER_ORIGIN", "https://pay.andvari-uitest.test:8443")
+    /// How the built extension finds a split-field provider's sibling frames: "frame-tree" (webNavigation) or
+    /// "ancestor-origins" (each frame's location.ancestorOrigins, one frame per field kind). The workflow reads it from
+    /// the built manifest.
+    static let siblingRule = value("UITEST_SIBLING_RULE", "frame-tree")
     static let cardNumber = "4111111111111111"
+    /// The seeded card's expiry, 12/2031, as the digits a field shows it in ("12/31", "12 / 31" or "12/2031").
+    static let cardExpiryDigits: Set<String> = ["1231", "122031"]
     static let cardCode = "123"
     static let secondItem = "UITest Site second"
     static let secondUser = "alice.second"
