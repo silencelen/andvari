@@ -74,17 +74,20 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | A login for another site chosen in the popup: nothing filled until a confirmation that names both sites | Works | `T3…test12` |
 | Two logins saved before the app is next unlocked both arrive and are listed; Undo all takes both back | Works since the save-id fix (below); the test checks the queue and skips with the reason if two saves ever share an entry again | `T3…test13` |
 | Delete a login, restore it from the trash; delete it again and delete it forever | Works | `T4…test01` |
-| Change a login's password, then restore the earlier version from its history | Works | `T4…test02` |
+| Change a login's password twice (the editor's generator), then restore the earlier version that held a password | Works | `T4…test02` |
 | Create a shared vault; copy a login into it (both stay) and move another (it leaves Personal) | Works | `T4…test03` |
 | A shared vault deleted, then restored, on another device: a notice for each after a sync, gone when dismissed | Works | `T4…test04` |
 | A login in a vault the account only reads: no Edit, "Copy to another vault…" and no Move; the copy in Personal can be edited | Works. A second account shares the vault read-only and another device of this account accepts it; the app takes it at a sync, through the account's own wrap of the vault key, with no invitation screen of its own | `T4…test05` |
-| card-skimmer.html: Fill refuses with nothing tapped and with only the email tapped; the hidden form receives nothing | Works | `T4…test06` |
-| A card filled from the popup into a merchant page, the popup reached with the keyboard still up (a tap on the address Safari's bar shrank to) | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test07` |
-| The same with the keyboard closed first by its Done | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test08` |
-| card-two-forms.html: only the form of the field tapped is filled | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test09` |
-| card-inner-scroll.html: filled once scrolled into view, refused once scrolled away | Skipped: card fill is being rebuilt to provider frames only (owner 2026-11-14) | `T4…test10` |
-| The third-party keyboard switch | Present and off by default. Whether such a keyboard is kept out is skipped: the simulator has none, and the suite would need an app of its own to add one | `T4…test11` |
-| Two-step setup survives a trip to the Settings app (the same key at the confirm step after the unlock); the authenticator's code turns it on, a later one off | Works | `T4…test12` |
+| The third-party keyboard switch | Present and off by default. Whether such a keyboard is kept out is skipped: the simulator has none, and the suite would need an app of its own to add one | `T4…test06` |
+| Two-step setup survives a trip to the Settings app (the same key at the confirm step after the unlock); the authenticator's code turns it on, a later one off | Works | `T4…test07` |
+| A password typed into the login editor a key at a time keeps the keyboard and is saved as typed | Skipped: app defect (below) | `T4…test08` |
+| Every card test page (extension/test-pages/card-*.html: the review rounds' attacks and first-party card forms): no Fill, and the popup's line says to copy from the app; the skimmer's hidden form receives nothing | Works | `T5…test01` |
+| checkout.html with the provider's frame Safari keeps the extension out of (Other Websites: Ask): no Fill; with every website allowed in Safari's settings, a Fill into the provider's origin | Works; the line naming the provider's site to allow is missing (finding below), so the test ends skipped with it | `T5…test02` |
+| `?layout=card`: a tap on the number in the provider's frame, then Fill: number, expiry and code in the provider's form, the shop's own name-on-card field empty | Works | `T5…test03` |
+| `?layout=split`: one provider frame per field; each sibling frame receives its own field | Works | `T5…test04` |
+| `?layout=code`: a security code alone in the provider's frame | Works | `T5…test05` |
+| The choice survives the keyboard's Done | Works | `T5…test06` |
+| `?layout=twice`: a second card-number frame beside the first; nothing is filled | Skipped until the extension matches sibling frames by `location.ancestorOrigins` with one frame per field kind (coming on ios-ui); the workflow reads which rule the build has from its manifest | `T5…test07` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
@@ -104,16 +107,24 @@ assertion.
   The same id also makes a later save replace an earlier save's record in the "Saved … from AutoFill" list
   even when the app was unlocked in between, so the earlier save can no longer be undone from the list.
 
-- **Card fill into merchant pages** (found 2026-11-13, overtaken by the owner's redesign of 2026-11-14: a card
-  is to be released only to a payment provider's card-entry document, and a merchant page gets none, with the
-  popup offering to copy from the app). Three findings from the tests of the earlier design, kept for the new
-  one: since 3ef56e8b a page with no frame (card-two-forms.html) was refused as having "Something else … over
-  or under the card field you tapped"; closing the keyboard with its Done, the keyboard's own way to bring
-  Safari's page menu back in the Compact and Bottom layouts, blurred the tapped field while the page kept its
-  focus (event log: `focusout #cc-number hasFocus=true now=body`), so the field was let go and Fill asked for a
-  tap; and a form holding only a security code was never a card form (`buildCardForm` wants a card number),
-  though card-two-forms.html expects that code filled. The page event log (`?uitest-events`) and both ways of
-  reaching the popup (`PopupReach`) stay for the new design's tests.
+- **The login editor's password field lets go of the keyboard while it is typed into** (found 2026-11-14).
+  Typed a key at a time, 0.4 s apart, it keeps the keyboard for a key or two; typed fast, the rest of the keys
+  are lost (a password saved as "Fi" for "First-Passw0rd"). `LoginEditorView` and `CardEditorView` make their
+  `SecretTextField` without `focused`, which defaults to false, and every update of the field (each key changes
+  the draft) runs `updateUIView`, which resigns the first responder of a field that is not `focused`
+  (`Support/SecretFields.swift`, since bfd0b412). `InputField` passes its focus and is not affected.
+
+- **No word in the popup when Safari keeps the extension out of the provider's frame** (found 2026-11-14). With
+  Safari's default for other websites (Ask), the popup on checkout.html lists the cards with no Fill and no line;
+  the design has it name the provider's site to allow ("The card form comes from pay.andvari-uitest.test:8443,
+  where Safari doesn't let andvari run yet…"). Safari may not report to the extension a frame it keeps the
+  extension out of. Once every website is allowed, the Fill is offered.
+
+- **Card fill into merchant pages, before 2026-11-14** (overtaken by the owner's redesign: a card goes only into a
+  payment provider's card form). Under the earlier design the tests found that closing the keyboard with its Done
+  dropped the tapped field, that a form holding only a security code was never filled, and that since 3ef56e8b a
+  page with no frame was refused as having something over or under the field. The new design keeps the choice
+  across Done and fills a provider frame holding only a security code (T5 test05, test06).
 
 - **The personal-vault notice on a device's first sign-in** (found 2026-11-12, fixed on ios-ui by d6ff8074;
   the test still accepts both sentences) opened with "The server says your personal vault
