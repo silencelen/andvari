@@ -730,6 +730,11 @@ open class SessionControllerTest {
         val roles = mutableListOf<Triple<String, String, String>>()
         val removals = mutableListOf<Triple<String, String, io.silencelen.andvari.core.model.VaultMemberRemoveRequest>>()
 
+        /** Ownership offers made (`POST /vaults/{id}/transfer`), offers taken back or declined (`DELETE`), and accepts. */
+        val offers = mutableListOf<Pair<String, io.silencelen.andvari.core.model.TransferOfferRequest>>()
+        val withdrawn = mutableListOf<String>()
+        val accepts = mutableListOf<Pair<String, io.silencelen.andvari.core.model.TransferAcceptRequest>>()
+
         /** Another account, known to the server by [email]. */
         fun person(email: String, name: String, id: String = "00000000-0000-4000-8000-0000000000e${accounts.size + 1}"): Person {
             val keys = crypto.boxKeypairFromSeed(crypto.randomBytes(32))
@@ -784,6 +789,37 @@ open class SessionControllerTest {
                         }
                         respond("""{"rev":${++rev}}""", HttpStatusCode.OK, headers)
                     }
+                }
+                routes["/transfer"] = { request ->
+                    val vaultId = request.url.encodedPath.removeSuffix("/transfer").substringAfterLast('/')
+                    val v = vaults.getValue(vaultId)
+                    if (request.method == io.ktor.http.HttpMethod.Post) {
+                        val req = json.decodeFromString(io.silencelen.andvari.core.model.TransferOfferRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                        offers += vaultId to req
+                        val seq = (v.lastTransfer?.seq ?: 0L) + 1
+                        vaults[vaultId] = v.copy(rev = ++rev, pendingTransfer = io.silencelen.andvari.core.model.PendingTransfer(req.toUserId, req.offerId, req.proof, req.expiresAt, seq))
+                        respond("""{"rev":$rev,"expiresAt":${req.expiresAt}}""", HttpStatusCode.Created, headers)
+                    } else {
+                        withdrawn += vaultId
+                        vaults[vaultId] = v.copy(rev = ++rev, pendingTransfer = null)
+                        respond("""{"rev":$rev}""", HttpStatusCode.OK, headers)
+                    }
+                }
+                routes["/transfer/accept"] = { request ->
+                    val vaultId = request.url.encodedPath.removeSuffix("/transfer/accept").substringAfterLast('/')
+                    val req = json.decodeFromString(io.silencelen.andvari.core.model.TransferAcceptRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                    accepts += vaultId to req
+                    val v = vaults.getValue(vaultId)
+                    val pt = v.pendingTransfer!!
+                    val wrapHash = Bytes.toHexLower(crypto.sha256(req.wrappedVk.encodeToByteArray()))
+                    vaults[vaultId] = v.copy(rev = ++rev, pendingTransfer = null, lastTransfer = io.silencelen.andvari.core.model.TransferRecord(pt.offerId, pt.toUserId, req.proof, pt.seq, wrapHash))
+                    grants[vaultId] = io.silencelen.andvari.core.model.WireGrant(vaultId, pt.toUserId, "owner", req.wrappedVk, rev)
+                    members[vaultId]?.let { rows ->
+                        for (i in rows.indices) {
+                            if (rows[i].userId == pt.toUserId) rows[i] = rows[i].copy(role = "owner") else if (rows[i].role == "owner") rows[i] = rows[i].copy(role = "writer")
+                        }
+                    }
+                    respond("""{"rev":$rev}""", HttpStatusCode.OK, headers)
                 }
                 routes["/account/state"] = { respond("""{"sealedState":null,"seq":0}""", HttpStatusCode.OK, headers) }
                 routes["/sync/push"] = { respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(rev, emptyList())), HttpStatusCode.OK, headers) }
@@ -1131,6 +1167,126 @@ open class SessionControllerTest {
         controller.declineInvitation(controller.state.invitations.single().id)
         assertTrue(controller.state.invitations.isEmpty())
         assertTrue(controller.vaultsForNewItems().none { it.vaultId == boat })
+    }
+
+    /**
+     * Handing a vault over (spec 03 §11): the owner offers it to a member, signed under the vault's key, and can take the
+     * offer back until it is accepted. Only a listed, active member who is not the owner can be offered it.
+     */
+    @Test
+    fun anOwnerOffersTheVaultToAMemberAndCanTakeTheOfferBack() = test {
+        val (server, family) = familyVault()
+        val bea = server.person("bea@example.com", "Bea")
+        val cy = server.person("cy@example.com", "Cy")
+        server.members.getValue(family) += bea.row("writer")
+        server.members.getValue(family) += cy.row("reader").copy(status = "disabled")
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertNull(controller.state.members?.offer)
+
+        assertEquals(ActionResult.Failed(MembersCopy.OWNER_ALREADY), controller.offerOwnership(reg.userId))
+        assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.offerOwnership("00000000-0000-4000-8000-0000000000ff"))
+        assertEquals(ActionResult.Failed(MembersCopy.DISABLED_CANNOT_OWN), controller.offerOwnership(cy.userId))
+        assertTrue(server.offers.isEmpty())
+
+        assertEquals(ActionResult.Ok, controller.offerOwnership(bea.userId))
+        val (vaultId, offer) = server.offers.single()
+        assertEquals(family, vaultId)
+        assertEquals(bea.userId, offer.toUserId)
+        // Signed under the vault's key (a member's devices check it before they show it: the next test), for 14 days.
+        assertTrue(offer.proof.isNotEmpty())
+        val left = offer.expiresAt - kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
+        assertTrue(left in 13 * DAY..14 * DAY, "$left")
+        val shown = assertNotNull(controller.state.members?.offer)
+        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt), shown)
+        assertTrue(assertNotNull(controller.state.notice).startsWith("Asked Bea to take over “Family”."))
+        assertEquals(ActionResult.Failed(MembersCopy.OFFER_PENDING), controller.offerOwnership(bea.userId), "one offer at a time")
+
+        assertEquals(ActionResult.Ok, controller.cancelOwnershipOffer())
+        assertEquals(listOf(family), server.withdrawn)
+        assertNull(controller.state.members?.offer)
+        assertEquals(MembersCopy.OFFER_CANCELLED, controller.state.notice)
+        assertEquals("owner", controller.state.members?.members?.single { it.you }?.role, "nothing changed")
+    }
+
+    /**
+     * An offer to make this account a vault's owner is listed only once it verifies under that vault's key: one the
+     * server made up is not. Accepting seals the vault's key to this account as its owner; declining leaves it as it was.
+     */
+    @Test
+    fun anOfferToTakeAVaultOverIsListedOnlyWhenItVerifiesAndAcceptingMakesThisAccountItsOwner() = test {
+        unlockedWithAPersonalVault()
+        val server = VaultServer(this)
+        val me = io.silencelen.andvari.core.client.Contact(reg.userId, reg.identityPub, "u", 1_000, io.silencelen.andvari.core.client.Contact.METHOD_TYPED, EMAIL)
+        val olga = Account.enroll("invite", "olga@example.com", "Olga", PASSWORD, KdfParams(ops = 1, memBytes = 8192), null, null, "device", crypto)
+        server.identities[olga.request.userId] = io.silencelen.andvari.core.model.UserLookupResponse(olga.request.userId, "Olga", olga.request.identityPub)
+        fun share(name: String): String {
+            val shared = olga.account.buildCreateSharedVault(name)
+            server.vaults[shared.vaultId] = WireVault(shared.vaultId, "shared", ++server.rev, shared.request.metaBlob, 2_000)
+            server.grants[shared.vaultId] = io.silencelen.andvari.core.model.WireGrant(shared.vaultId, reg.userId, "writer", "", server.rev, null, olga.account.buildSignedGrant(shared.vaultId, me))
+            server.members[shared.vaultId] = mutableListOf(
+                io.silencelen.andvari.core.model.VaultMemberSummary(olga.request.userId, "olga@example.com", "Olga", "owner", olga.request.identityPub, 1_000),
+                io.silencelen.andvari.core.model.VaultMemberSummary(reg.userId, EMAIL, "u", "writer", reg.identityPub, 2_000),
+            )
+            return shared.vaultId
+        }
+        fun offerTo(vaultId: String, proof: String? = null): io.silencelen.andvari.core.model.PendingTransfer {
+            val offerId = enrolled.account.newItemId()
+            val expiresAt = 4_000_000_000_000L
+            val signed = io.silencelen.andvari.core.crypto.LifecycleProof.offer(crypto, olga.account.lifecycleKeyFor(vaultId), vaultId, offerId, reg.userId, expiresAt, 1)
+            val pt = io.silencelen.andvari.core.model.PendingTransfer(reg.userId, offerId, proof ?: signed, expiresAt, 1)
+            server.vaults[vaultId] = server.vaults.getValue(vaultId).copy(rev = ++server.rev, pendingTransfer = pt)
+            return pt
+        }
+        val cabin = share("Cabin")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.verifyInvitation(controller.state.invitations.single().id))
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(olga.account.identityFingerprintShort()))
+
+        // One the server made up (its proof is not the vault key's) is never listed.
+        offerTo(cabin, proof = Bytes.toB64(ByteArray(32)))
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertTrue(controller.state.ownershipOffers.isEmpty(), "an offer that does not verify is not shown")
+        assertIs<ActionResult.Failed>(controller.acceptOwnership(cabin))
+        assertTrue(server.accepts.isEmpty())
+
+        offerTo(cabin)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        val listed = controller.state.ownershipOffers.single()
+        assertEquals(cabin, listed.vaultId)
+        assertEquals("Cabin", listed.vaultName)
+        settle { controller.state.ownershipOffers.single().from == "Olga" } // the owner's name, asked for in the background
+
+        assertEquals(ActionResult.Ok, controller.acceptOwnership(cabin))
+        val (vaultId, accept) = server.accepts.single()
+        assertEquals(cabin, vaultId)
+        // The vault's key, wrapped under this account's own key as its owner, and the accept proof over that wrap.
+        val key = olga.account.lifecycleKeyFor(cabin)
+        assertEquals(io.silencelen.andvari.core.crypto.LifecycleProof.accept(crypto, key, cabin, accept.offerId, reg.userId, 1, accept.wrappedVk), accept.proof)
+        assertTrue(controller.state.ownershipOffers.isEmpty())
+        assertEquals("You own “Cabin” now: you manage its members, and only you can rename, hand over or delete it.", controller.state.notice)
+        assertEquals(ActionResult.Ok, controller.openMembers(cabin))
+        assertTrue(assertNotNull(controller.state.members).owner, "this account owns it now")
+        controller.closeMembers()
+
+        // Another, declined: the vault stays with its owner. (Olga is verified on this device now: Boat opens at once.)
+        val boat = share("Boat")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertTrue(controller.state.invitations.isEmpty())
+        offerTo(boat)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(listOf(boat), controller.state.ownershipOffers.map { it.vaultId })
+        assertEquals(ActionResult.Ok, controller.declineOwnership(boat))
+        assertEquals(listOf(boat), server.withdrawn)
+        assertTrue(controller.state.ownershipOffers.isEmpty())
+        assertEquals("Declined. “Boat” stays with its owner.", controller.state.notice)
+        assertEquals(1, server.accepts.size)
+
+        // A lock forgets the offers; the next unlock lists them again from what it verifies.
+        offerTo(boat)
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(1, controller.state.ownershipOffers.size)
+        controller.lock()
+        assertTrue(controller.state.ownershipOffers.isEmpty())
     }
 
     /** Nothing the members screen or a comparison of codes held outlives a lock, or a screen closed while its read was out. */

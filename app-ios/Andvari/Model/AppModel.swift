@@ -506,6 +506,26 @@ final class AppModel: ObservableObject {
         controller.identityQr()
     }
 
+    // MARK: - Handing a vault over
+
+    /// Offer to make a member the owner of the vault whose members are open.
+    func offerOwnership(_ userId: String) async -> Outcome {
+        await run { try await $0.offerOwnership(userId: userId) }
+    }
+
+    func cancelOwnershipOffer() async -> Outcome {
+        await run { try await $0.cancelOwnershipOffer() }
+    }
+
+    /// Become the owner of a vault an offer was made for ([AppState.ownershipOffers]).
+    func acceptOwnership(_ vaultId: String) async -> Outcome {
+        await run { try await $0.acceptOwnership(vaultId: vaultId) }
+    }
+
+    func declineOwnership(_ vaultId: String) async -> Outcome {
+        await run { try await $0.declineOwnership(vaultId: vaultId) }
+    }
+
     // MARK: - Two-step sign-in
 
     func loadTwoStep() async -> Outcome {

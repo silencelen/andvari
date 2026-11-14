@@ -6,7 +6,8 @@ import VisionKit
 
 /// One shared vault's members (spec 03 §10): who the server lists, and whether this device verified each of them by
 /// comparing identity codes (root cause A §7.2). The owner adds someone once codes were compared with them, changes a
-/// member's role and removes members; anyone else sees the list and can verify the people in it.
+/// member's role, removes members and offers to make a member the owner (spec 03 §11); anyone else sees the list and can
+/// verify the people in it.
 struct VaultMembersView: View {
     let vaultId: String
 
@@ -16,11 +17,15 @@ struct VaultMembersView: View {
     @State private var email = ""
     @State private var role = "writer"
     @State private var removing: MemberView?
+    @State private var handingOver: MemberView?
 
     var body: some View {
         Form {
             if let members {
                 listSection(members)
+                if let offer = members.offer {
+                    offerSection(offer, vaultName: members.vaultName)
+                }
                 if members.owner {
                     addSection(members)
                 }
@@ -63,6 +68,13 @@ struct VaultMembersView: View {
         } message: { _ in
             Text("They lose access to this vault on all their devices. What they already saw they may have kept: the vault's key is not changed, so change any password that matters at its website too.")
         }
+        .confirmationDialog("Make \(handingOver?.name ?? "") the owner?", isPresented: handOverAsked, titleVisibility: .visible, presenting: handingOver) { member in
+            Button("Ask \(member.name) to take over") {
+                act { await model.offerOwnership(member.userId) }
+            }
+        } message: { _ in
+            Text("Nothing changes until they accept in their app, within 14 days, and you can cancel until then. Afterwards they manage the vault's members, and only they can rename, hand over or delete it; you stay in it as a writer.")
+        }
     }
 
     private var members: MembersView? {
@@ -81,13 +93,21 @@ struct VaultMembersView: View {
         Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })
     }
 
+    private var handOverAsked: Binding<Bool> {
+        Binding(get: { handingOver != nil }, set: { if !$0 { handingOver = nil } })
+    }
+
     // MARK: - The list
 
     private func listSection(_ members: MembersView) -> some View {
         Section {
             if let rows = members.members {
                 ForEach(rows, id: \.userId) { member in
-                    memberRow(member, managed: members.owner && member.role != "owner" && !member.you)
+                    memberRow(
+                        member,
+                        managed: members.owner && member.role != "owner" && !member.you,
+                        canHandOver: members.canAdd && members.offer == nil && !member.disabled
+                    )
                 }
             } else {
                 ProgressView()
@@ -106,7 +126,7 @@ struct VaultMembersView: View {
         .listRowBackground(Palette.raised)
     }
 
-    private func memberRow(_ member: MemberView, managed: Bool) -> some View {
+    private func memberRow(_ member: MemberView, managed: Bool, canHandOver: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -124,6 +144,11 @@ struct VaultMembersView: View {
                             Text("Reader: only views").tag("reader")
                         }
                         Divider()
+                        if canHandOver {
+                            Button("Make owner…") {
+                                handingOver = member
+                            }
+                        }
                         Button("Remove from vault…", role: .destructive) {
                             removing = member
                         }
@@ -137,7 +162,7 @@ struct VaultMembersView: View {
                     }
                     .disabled(model.state.busy)
                     .accessibilityLabel("\(member.name), \(member.role)")
-                    .accessibilityHint("Change their role, or remove them")
+                    .accessibilityHint(canHandOver ? "Change their role, make them the owner, or remove them" : "Change their role, or remove them")
                 } else {
                     Text(member.role)
                         .font(.footnote)
@@ -192,6 +217,23 @@ struct VaultMembersView: View {
                 act { await model.setMemberRole(member.userId, role: chosen) }
             }
         )
+    }
+
+    // MARK: - Handing the vault over
+
+    private func offerSection(_ offer: OwnerOfferView, vaultName: String) -> some View {
+        Section {
+            Text("You asked \(offer.toName) to take over “\(vaultName)”. It's theirs once they accept, which they can do until \(day(offer.expiresAtMs)).")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Cancel the offer") {
+                act { await model.cancelOwnershipOffer() }
+            }
+            .disabled(model.state.busy)
+        } header: {
+            Text("Offer to hand over")
+        }
+        .listRowBackground(Palette.raised)
     }
 
     // MARK: - Adding someone
@@ -632,5 +674,65 @@ struct InvitationRow: View {
 
     private var sender: String {
         invitation.from.map { "\($0) (as the server names them)" } ?? "Someone"
+    }
+}
+
+// MARK: - Offers to take a vault over
+
+/// An offer to make this account the owner of a shared vault (spec 03 §11). It is shown only once it verified under the
+/// vault's own key, so the server cannot make one up; who sent it is the server's word, to confirm with them.
+struct OwnershipOfferRow: View {
+    let offer: OwnershipOfferView
+
+    @EnvironmentObject private var model: AppModel
+    @State private var message: String?
+    @State private var confirming = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(owner) wants to make you the owner of “\(offer.vaultName)”.")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("The offer was signed with the vault's own key. To be sure it came from them, and not from a server that was broken into, ask them in person or on a call you trust. As its owner you would manage its members, and only you could rename, hand over or delete it.")
+                .font(.footnote)
+                .foregroundStyle(Palette.inkDim)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 20) {
+                Button("Become the owner") {
+                    confirming = true
+                }
+                .font(.subheadline.weight(.semibold))
+                Button("Decline") {
+                    run { await model.declineOwnership(offer.vaultId) }
+                }
+                .font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.state.busy)
+            if let message {
+                InlineMessage(text: message)
+            }
+        }
+        .padding(.vertical, 4)
+        .confirmationDialog("Become the owner of “\(offer.vaultName)”?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Become the owner") {
+                run { await model.acceptOwnership(offer.vaultId) }
+            }
+        } message: {
+            Text("\(owner) stays in the vault as a writer.")
+        }
+    }
+
+    private var owner: String {
+        offer.from.map { "\($0) (as the server names them)" } ?? "The vault's owner"
+    }
+
+    private func run(_ action: @escaping () async -> Outcome) {
+        message = nil
+        Task {
+            let outcome = await action()
+            if outcome != .ok { message = outcome.message }
+        }
     }
 }
