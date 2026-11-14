@@ -81,8 +81,6 @@ import platform.Security.kSecPrivateKeyAttrs
 import platform.Security.kSecReturnRef
 import platform.Security.kSecUseAuthenticationContext
 import kotlin.coroutines.resume
-import kotlin.experimental.ExperimentalNativeApi
-import kotlin.native.CName
 
 /**
  * iOS quick unlock (spec 01 §8.1, design 2026-11-09): the UVK, never the password, wrapped under a Secure Enclave
@@ -367,9 +365,8 @@ internal fun inSimulator(): Boolean {
 }
 
 /**
- * An exported symbol every build of the framework has. The CI check that the device framework holds no simulator key
- * looks for it first, so a pass means it could read the framework's symbols (.github/workflows/ios-core.yml).
+ * A class every build of the framework declares in its generated header. The CI check that the device framework holds
+ * no simulator key looks for it first, so a pass means it could read the header (.github/workflows/ios-core.yml).
+ * Nothing uses it.
  */
-@OptIn(ExperimentalNativeApi::class)
-@CName("andvari_quick_unlock_secure_enclave_only")
-fun quickUnlockSecureEnclaveOnly(): Int = 1
+class QuickUnlockSecureEnclaveOnly
