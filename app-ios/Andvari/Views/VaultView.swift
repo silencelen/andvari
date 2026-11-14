@@ -133,6 +133,16 @@ struct VaultView: View {
                 }
                 .listRowBackground(Palette.raised)
             }
+            if !model.state.ownershipOffers.isEmpty {
+                Section {
+                    ForEach(model.state.ownershipOffers, id: \.vaultId) { offer in
+                        OwnershipOfferRow(offer: offer)
+                    }
+                } header: {
+                    SectionTitle("Offers to take a vault over")
+                }
+                .listRowBackground(Palette.raised)
+            }
             if !model.state.appliedSaves.isEmpty {
                 Section {
                     ForEach(model.state.appliedSaves, id: \.id) { applied in

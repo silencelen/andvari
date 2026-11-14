@@ -72,6 +72,8 @@ data class AppState(
     val verifying: VerifyView? = null,
     /** VAULT: shared vaults waiting for this account to verify who sent them. */
     val invitations: List<InvitationView> = emptyList(),
+    /** VAULT: offers to make this account the owner of a shared vault, each verified under that vault's key (spec 03 §11). */
+    val ownershipOffers: List<OwnershipOfferView> = emptyList(),
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
@@ -288,6 +290,23 @@ data class MembersView(
     val members: List<MemberView>?,
     /** Someone being added, after a look-up ([SessionController.findNewMember]); null otherwise. */
     val adding: NewMemberView?,
+    /** The owner's offer to make a member the owner, while it waits for their answer ([SessionController.offerOwnership]). */
+    val offer: OwnerOfferView? = null,
+)
+
+/** An offer this account made to hand a vault over: to whom (the server's name for them), and until when. */
+data class OwnerOfferView(val toUserId: String, val toName: String, val expiresAtMs: Long)
+
+/**
+ * An offer to make this account the owner of a shared vault. It is listed only once it verified under the vault's own
+ * key, so the server cannot make one up; who sent it is the server's word ([from]), to confirm with them in person.
+ */
+data class OwnershipOfferView(
+    val vaultId: String,
+    val vaultName: String,
+    /** What the server calls the vault's owner, once it said; null before (or when it could not say). */
+    val from: String?,
+    val expiresAtMs: Long,
 )
 
 data class MemberView(
