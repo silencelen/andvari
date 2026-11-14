@@ -100,12 +100,17 @@ final class AppModel: ObservableObject {
         endObservation = { observation.close() }
         controller.start()
         CredentialIdentities.publishProviderState()
+        TemporaryFiles.protect()
         TemporaryFiles.clear() // whatever a file export left when the app was stopped during it
     }
 
     private func receive(_ next: AppState) {
         if Screen(next.screen) != .trustGate {
             gateForInvite = false
+        }
+        // The vault locked: nothing an export or a scan staged stays behind (round-9 review 5).
+        if Screen(state.screen) == .vault && Screen(next.screen) != .vault {
+            TemporaryFiles.clear()
         }
         state = next
         // The work the lock waited for is done, or the vault locked: the time asked of iOS goes back.
@@ -152,6 +157,7 @@ final class AppModel: ObservableObject {
         switch phase {
         case .background:
             wasInBackground = true
+            TemporaryFiles.clear()
             if controller.onBackground() {
                 holdForRunningWork()
             }
@@ -174,6 +180,10 @@ final class AppModel: ObservableObject {
                 self?.controller.backgroundTimeEnded()
                 self?.endGrace()
             }
+        }
+        // No time was given (round-9 review 6): the app may be suspended at once, so the vault locks now.
+        if grace == .invalid {
+            controller.backgroundTimeEnded()
         }
     }
 

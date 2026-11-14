@@ -130,10 +130,9 @@ struct LoginEditorView: View {
         .onAppear {
             load()
         }
-        .onDisappear {
-            forget()
-            model.closeAttachmentDraft()
-        }
+        // The form is not emptied when the editor leaves the screen: a sheet over it (a picker, the document camera) is
+        // not its end, and a Save after it must not write empty fields (round-9 review 4). Its state goes with its sheet,
+        // whose dismissal closes the files' draft (ItemDetailView, VaultView).
         .onChange(of: draft) {
             // Typing happens outside the window the touch watcher sees.
             model.userActivity()
@@ -294,11 +293,6 @@ struct LoginEditorView: View {
         }
         draft = next
         model.openAttachmentDraft(itemId)
-    }
-
-    private func forget() {
-        draft = LoginDraft()
-        lastGenerated = ""
     }
 
     private func generate() {

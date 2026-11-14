@@ -194,13 +194,28 @@ struct MemoryFile: FileDocument {
     }
 }
 
-/// The app's temporary folder, emptied when an export ends and at launch: the file exporter stages what it writes there.
+/// The app's temporary folder: the file exporter stages what it writes there, and the document camera may leave its
+/// pages there. It is emptied at launch, when an export ends, after a scan, when the app leaves the foreground and when
+/// the vault locks; and what is created there is protected until the device is next unlocked (round-9 review 5).
 enum TemporaryFiles {
     static func clear() {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory
         for url in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
             try? fm.removeItem(at: url)
+        }
+    }
+
+    /// Files created in the temporary folder and in Caches inherit the folder's protection: complete, readable only
+    /// while the device is unlocked.
+    static func protect() {
+        let fm = FileManager.default
+        var dirs = [fm.temporaryDirectory]
+        if let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            dirs.append(caches)
+        }
+        for dir in dirs {
+            try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: dir.path)
         }
     }
 }
@@ -432,6 +447,8 @@ final class FileAdding: ObservableObject {
 
     /// A scan's pages, made into one PDF in memory and added as it is; none: the scan was cancelled.
     func addScan(_ pages: [Data], model: AppModel) {
+        // Whatever the document camera left in the app's temporary folder goes (round-9 review 5).
+        TemporaryFiles.clear()
         guard !pages.isEmpty else {
             working = false
             return
@@ -578,7 +595,9 @@ struct FilePickers: ViewModifier {
             .onChange(of: adding.photoItems) { _, items in
                 adding.addPhotos(items, model: model)
             }
-            .fullScreenCover(isPresented: $adding.scanning) {
+            // A sheet, never a full-screen cover: a cover takes the editor off screen, and the editor's form must stay as
+            // it is while the scan is made (round-9 review 4).
+            .sheet(isPresented: $adding.scanning) {
                 DocumentScanner(
                     preparing: {
                         adding.scanning = false
@@ -590,6 +609,8 @@ struct FilePickers: ViewModifier {
                     }
                 )
                 .ignoresSafeArea()
+                .interactiveDismissDisabled()
+                .privacyShield()
             }
     }
 }

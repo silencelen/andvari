@@ -250,18 +250,21 @@ internal class IosQuickUnlockKeys(private val blobs: KeychainSecrets, private va
 
     /**
      * Every quick-unlock blob and key this app holds, whoever's (round-8 review L): what an install must not inherit from
-     * the one before it, since the Keychain outlives an uninstall. The access group holds nothing else.
+     * the one before it, since the Keychain outlives an uninstall. The access group holds nothing else. True when every
+     * delete succeeded or found nothing to delete.
      */
-    fun wipeAll() {
-        runCatching { blobs.deleteAll() }
-        runCatching {
+    fun wipeAll(): Boolean {
+        val blobsGone = runCatching { blobs.deleteAll() }.getOrDefault(false)
+        val keysGone = runCatching {
             val owned = CfOwned()
             try {
-                SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, *owned.group(accessGroup)))
+                val status = SecItemDelete(owned.dictionary(kSecClass to kSecClassKey, kSecAttrKeyType to kSecAttrKeyTypeECSECPrimeRandom, *owned.group(accessGroup)))
+                status == errSecSuccess || status == errSecItemNotFound
             } finally {
                 owned.release()
             }
-        }
+        }.getOrDefault(false)
+        return blobsGone && keysGone
     }
 
     /**

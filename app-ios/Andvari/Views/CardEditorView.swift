@@ -132,10 +132,8 @@ struct CardEditorView: View {
         .onAppear {
             load()
         }
-        .onDisappear {
-            draft = CardDraft()
-            model.closeAttachmentDraft()
-        }
+        // Not emptied when it leaves the screen (round-9 review 4): its state goes with its sheet, whose dismissal closes
+        // the files' draft.
     }
 
     private func secretField(_ label: String, text: Binding<String>, shown: Binding<Bool>) -> some View {
