@@ -777,7 +777,7 @@ open class SessionControllerTest {
                         if (request.method == io.ktor.http.HttpMethod.Put) {
                             val role = json.decodeFromString(io.silencelen.andvari.core.model.VaultMemberRole.serializer(), body).role
                             roles += Triple(vaultId, userId, role)
-                            rows.replaceAll { if (it.userId == userId) it.copy(role = role) else it }
+                            for (i in rows.indices) if (rows[i].userId == userId) rows[i] = rows[i].copy(role = role)
                         } else {
                             removals += Triple(vaultId, userId, json.decodeFromString(io.silencelen.andvari.core.model.VaultMemberRemoveRequest.serializer(), body))
                             rows.removeAll { it.userId == userId }
@@ -1022,7 +1022,8 @@ open class SessionControllerTest {
         assertEquals("Verified Bea on this device.", controller.state.notice)
 
         // The server serves another key for Bea now: the list says so.
-        server.members.getValue(family).replaceAll { if (it.userId == bea.userId) it.copy(identityPub = Bytes.toB64(other)) else it }
+        val rows = server.members.getValue(family)
+        for (i in rows.indices) if (rows[i].userId == bea.userId) rows[i] = rows[i].copy(identityPub = Bytes.toB64(other))
         controller.closeMembers()
         assertNull(controller.state.members)
         assertEquals(ActionResult.Ok, controller.openMembers(family))
