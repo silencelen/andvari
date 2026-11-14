@@ -133,6 +133,18 @@ struct VaultView: View {
                 }
                 .listRowBackground(Palette.raised)
             }
+            if !model.state.legacyReviews.isEmpty {
+                Section {
+                    ForEach(model.state.legacyReviews, id: \.vaultId) { review in
+                        LegacyReviewRow(review: review)
+                    }
+                } header: {
+                    SectionTitle("Review your shared vaults")
+                } footer: {
+                    Text("These vaults were shared in a way andvari can't check: it can't confirm who sent them. You can read them, but nothing is saved into them until you accept. Accept only a vault you expected to be in; that is trust on first use. If you don't recognise one, leave it and tell your admin.")
+                }
+                .listRowBackground(Palette.raised)
+            }
             if !model.state.ownershipOffers.isEmpty {
                 Section {
                     ForEach(model.state.ownershipOffers, id: \.vaultId) { offer in
