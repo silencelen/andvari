@@ -128,7 +128,8 @@ export type CardFillFailCode =
   | "page_form" //   the page takes the card in its own fields: andvari fills a card only into a payment provider's box (owner decision 2026-11-14)
   | "provider_not_allowed" // a payment provider's box is there, but andvari may not run in it (Safari asks per site)
   | "duplicate_fields" // two provider card frames in the tab ask for the same card detail: nothing is filled (round-11 review)
-  | "changed"; //       the frames to fill are not the ones the popup showed: the page changed since
+  | "changed" //       the frames to fill are not the ones the popup showed: the page changed since
+  | "no_frame_origin"; // this browser does not say which site a frame comes from (Firefox before 126): no card in a frame
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -498,8 +499,16 @@ export type Req =
       /** Round-7 review L7: the person chose a field again since the last report (the worker stamps the time). */
       choseNow?: boolean;
       /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own
-       *  word, so only a HINT for the popup (which site to allow andvari on); it never decides where a card goes. */
+       *  word: it can refuse a fill (a provider frame that has not reported, round-12 review) and name the site to allow
+       *  andvari on, never release a card. */
       providerOrigins?: string[];
+      /** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
+       *  (`location.ancestorOrigins`); null where the browser has no such list (Firefox). The choices of one fill share
+       *  them (cardrelease.ts chosenCardFrames). */
+      ancestors?: string[] | null;
+      /** A provider's card document only: whether the frame shows anywhere in the top-level viewport with a size (an
+       *  IntersectionObserver from inside it); a collapsed one neither counts nor can be chosen (round-12 review). */
+      shown?: boolean;
     }
   /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
    *  literal — **no `host`, no `kinds`, no `frameId` member** ([A2]/[S7]). A page-controlled member
@@ -534,7 +543,7 @@ export type Req =
    *  chose a card field, each bound to (tabId,itemId,frameId,origin) with the form holding its chosen
    *  field; and sends {type:"fillCard"} to each. [frames]: the frames and origins the popup showed
    *  (cardFillOffers): the fill goes to exactly those, or to none (round-11 review). */
-  | { type: "fillCardFromPopup"; itemId: string; frames: { frameId: number; origin: string }[] }
+  | { type: "fillCardFromPopup"; itemId: string; frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[] }
   /** Content (S3 redemption): a granted frame redeems ITS card grant. The SW verifies, all
    *  fail-closed-on-undefined ([A3]): a live card grant for (tabId, sender.frameId, itemId); the
    *  origin the browser reports for the frame now equals the grant's, a payment provider's
@@ -672,9 +681,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               fillable: boolean;
                                               /** The provider origin a Fill goes to (where the person chose, else the first). */
                                               origin: string | null;
-                                              /** The provider frames where the person chose a card field: what a Fill reaches,
-                                               *  sent back with it so it reaches exactly those. */
-                                              frames: { frameId: number; origin: string }[];
+                                              /** The provider frames a Fill reaches, each with the card details it would fill
+                                               *  there (the popup names them), sent back with the Fill so it reaches exactly
+                                               *  those. */
+                                              frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[];
+                                              /** This browser does not say which site a frame comes from: no card in a frame. */
+                                              noFrameOrigin?: boolean;
                                               /** Two provider card frames ask for the same card detail: no Fill, and the popup
                                                *  says why. */
                                               doubled?: boolean;

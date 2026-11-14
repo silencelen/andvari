@@ -18,7 +18,12 @@ iframe { display: block; width: 100%; border: 1px solid #888; margin-top: 16px; 
      2026-11-14), never into the shop's own fields: the name on card here stays empty after a fill.
      ?layout=card (the default): one provider frame holding the number, the expiry and the security code.
      ?layout=split: one provider frame per field, siblings under this page.
-     ?layout=code: a security code alone (a saved card's re-authentication). -->
+     ?layout=code: a security code alone (a saved card's re-authentication).
+     ?layout=lure: the round-12 lure: the shop asks only for the security code, and a "rewards" widget of another site
+       shows provider frames of its own labelled "Rewards number" and "Valid thru". Typed into earlier, they never join
+       the code's fill.
+     ?layout=clipped: the one card frame clipped by the page so that only its postal code shows; a fill from a tap there
+       writes no detail that does not show. -->
 <form method="post" action="submitted">
 <label for="email">Email</label>
 <input id="email" name="email" type="email" autocomplete="email" autocapitalize="none" aria-label="Email">
@@ -32,17 +37,37 @@ iframe { display: block; width: 100%; border: 1px solid #888; margin-top: 16px; 
 // The provider is the same test server under its own name (env.sh UITEST_PROVIDER_HOST), on this page's port.
 const provider = location.protocol + "//pay.andvari-uitest.test" + (location.port ? ":" + location.port : "");
 const layouts = {
-  card: [["card.html", "Card details", 330]],
+  card: [["card.html", "Card details", 380]],
   split: [["field.html?kind=number", "Card number", 110], ["field.html?kind=expiry", "Expiry date", 110], ["field.html?kind=code", "Security code", 110]],
   code: [["field.html?kind=code", "Security code", 110]],
 };
 const box = document.getElementById("provider");
-for (const [path, title, height] of layouts[new URLSearchParams(location.search).get("layout") || "card"] || []) {
+const layout = new URLSearchParams(location.search).get("layout") || "card";
+const providerFrame = (path, title, height) => {
   const frame = document.createElement("iframe");
   frame.src = provider + "/pay/" + path;
   frame.title = title;
   frame.height = String(height);
-  box.append(frame);
+  return frame;
+};
+if (layout === "lure") {
+  box.append(providerFrame("field.html?kind=code", "Security code", 110));
+  // The widget is another site's page (other-uitest.test), and the provider frames are inside it.
+  const widget = document.createElement("iframe");
+  widget.src = location.protocol + "//other-uitest.test" + (location.port ? ":" + location.port : "") + "/rewards.html";
+  widget.title = "Rewards";
+  widget.height = "300";
+  box.append(widget);
+} else if (layout === "clipped") {
+  // Only the bottom of the card frame shows: its postal code row. The rest is clipped away by this page.
+  const clip = document.createElement("div");
+  clip.style.cssText = "height: 90px; overflow: hidden; position: relative;";
+  const frame = providerFrame("card.html", "Postal code", 380);
+  frame.style.cssText = "position: absolute; bottom: 0; left: 0; width: 100%; border: 0;";
+  clip.append(frame);
+  box.append(clip);
+} else {
+  for (const [path, title, height] of layouts[layout] || []) box.append(providerFrame(path, title, height));
 }
 </script>
 </body>

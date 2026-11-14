@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rewards</title>
+<style>
+body { font: 16px -apple-system, sans-serif; margin: 8px; }
+iframe { display: block; width: 100%; border: 1px solid #888; margin-top: 8px; }
+</style>
+</head>
+<body>
+<!-- The round-12 lure (checkout.html?layout=lure): a widget of another site that mounts provider frames of its own,
+     labelled as something else. What the person types here is never part of the shop's card fill. -->
+<h1>Join our rewards</h1>
+<p>Rewards number</p>
+<div id="number"></div>
+<p>Valid thru</p>
+<div id="expiry"></div>
+<script>
+// The stand-in provider is the test server under its own name, on this page's port.
+const provider = location.protocol + "//pay.andvari-uitest.test" + (location.port ? ":" + location.port : "");
+for (const [id, kind] of [["number", "number"], ["expiry", "expiry"]]) {
+  const frame = document.createElement("iframe");
+  frame.src = provider + "/pay/field.html?kind=" + kind;
+  frame.title = id === "number" ? "Rewards number" : "Valid thru";
+  frame.height = "90";
+  document.getElementById(id).append(frame);
+}
+</script>
+</body>
+</html>

@@ -23,7 +23,7 @@ import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
-import { isCardProviderOrigin } from "./cardproviders";
+import { isCardEntryDocument, isCardProviderOrigin } from "./cardproviders";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
@@ -349,10 +349,41 @@ async function scheduleClipboardClear(): Promise<void> {
 // the SW sends {fillCard} to THIS frame only, we redeem via revealCardForFill (the value round-trip), and the revealed
 // card fields stay strictly function-local — never snapshotted, never save-bannerable ([A6]).
 
-/** Whether this document is a payment provider's card document by its own origin: where a field can be chosen, the
- *  chip can show, and a form holding only some of a card's fields (a security code alone, one field of a split form)
- *  is a card form. The worker checks the origin the browser reports before anything is filled. */
-const cardBox = isCardProviderOrigin(location.origin);
+/** Whether this document is a payment provider's card document by its own origin and, where the provider serves several
+ *  kinds of element from it, its own path (round-12 review: Stripe's Address Element is no card frame): where a field
+ *  can be chosen, the chip can show, and a form holding only some of a card's fields (a security code alone, one field
+ *  of a split form) is a card form. The worker checks the origin the browser reports before anything is filled. */
+const cardBox = isCardEntryDocument(location.origin, location.pathname);
+
+/** A provider's document that is not a card document (an address or a sign-in element): it reports no card form. */
+const providerNonCardDocument = !cardBox && isCardProviderOrigin(location.origin);
+
+/** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
+ *  (`location.ancestorOrigins`; the page around this frame cannot change the list). Null where the browser has no such
+ *  list (Firefox). The choices of one fill share them (round-12 review). */
+const ancestorChain: string[] | null = (() => {
+  const list = (location as Location & { ancestorOrigins?: DOMStringList }).ancestorOrigins;
+  if (list === undefined || list === null) return null;
+  return Array.from({ length: list.length }, (_, i) => list.item(i) ?? "null");
+})();
+
+/**
+ * A provider's card document only: whether this frame shows in the top-level viewport with a size, as an
+ * IntersectionObserver from inside it sees its document (round-12 review: a collapsed frame, of zero size or nowhere in
+ * the viewport, such as a second payment method or a stored card's code beside the new-card form, neither counts nor
+ * can be chosen). Null until the browser first answers.
+ */
+let frameShown: boolean | null = null;
+if (cardBox && typeof IntersectionObserver === "function") {
+  new IntersectionObserver((entries) => {
+    const e = entries[entries.length - 1];
+    if (e === undefined) return;
+    const shown = e.isIntersecting && e.intersectionRect.width > 0 && e.intersectionRect.height > 0;
+    if (shown === frameShown) return;
+    frameShown = shown;
+    reportCardForm();
+  }).observe(document.documentElement);
+}
 
 /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own word, so
  *  only a hint for the popup's line (which site to allow andvari on); the worker never decides a fill from it. */
@@ -383,7 +414,7 @@ let lastCardSig: string | null = null;
  *  across [document, …shadowRoots] — §2 [U13]). Empty ⇒ every form went away and the SW clears
  *  our record. Idempotent: a stable structure never re-sends. */
 function reportCardForm(): void {
-  const all = allCardForms();
+  const all = providerNonCardDocument ? [] : allCardForms();
   const forms: CardFieldKind[][] = all.map((f) => f.fields.map((x) => x.kind));
   // Round-6 review M2: which of them holds the field the person chose, so the worker builds a fill's grant from that
   // form's kinds (not the frame's richest form) and sends it to this frame.
@@ -393,12 +424,15 @@ function reportCardForm(): void {
   // L7: a new choice (even of the same field) is told, so the worker stamps when this frame chose last.
   const choseNow = chosenSeq !== reportedChoice;
   const providerOrigins = providerOriginsShown();
-  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, chosenSeq, providerOrigins]);
+  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, chosenSeq, providerOrigins, frameShown]);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
   reportedChoice = chosenSeq;
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
-  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow, ...(isTop ? { providerOrigins } : {}) });
+  void safeSend({
+    type: "cardFormInfo", forms, anchor, choseNow, ancestors: ancestorChain,
+    ...(isTop ? { providerOrigins } : {}), ...(cardBox && frameShown !== null ? { shown: frameShown } : {}),
+  });
 }
 
 /** Bumped by every choice of a card field, so a report tells the worker a new choice was made ([reportCardForm]). */
@@ -424,14 +458,15 @@ function cardTargetOf(el: FillableControl): CardTargetMeta {
  * that moved focus to it, not prevented once the keydown was done, from the field focused when the key went down,
  * with nothing else moving focus in between (M2-tab, round-8 review L). A script's el.focus() fires a trusted focusin
  * too, so a focus alone never chooses anything. At the choice the field must pass the fill's visibility rules.
- * It stands until another element of this document takes focus, the document goes, or [CHOICE_TTL_MS] passes: focus
- * moving to the page's body (iOS's keyboard Done) or out of the window (the popup opening) keeps it.
+ * It stands until another element of this document takes focus, the document goes, or [CHOICE_TTL_MS] (2 minutes,
+ * round-12 review) passes: focus moving to the page's body (iOS's keyboard Done) or out of the window (the popup
+ * opening) keeps it.
  */
 let cardFocus: FillableControl | null = null;
 /** When the field was chosen (performance.now()). */
 let chosenAt = 0;
 /** How long a choice stands (cardrelease.ts CHOICE_TTL_MS, which the worker applies too). */
-const CHOICE_TTL_MS = 10 * 60 * 1000;
+const CHOICE_TTL_MS = 2 * 60 * 1000;
 
 /** The chosen field while its choice stands: still in the document and within [CHOICE_TTL_MS]; null otherwise. */
 function chosenField(): FillableControl | null {
@@ -786,18 +821,30 @@ async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillO
   if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");
   const form = cardFormHolding(anchor);
   if (!form || cardSigOf(form) !== sig) return nothing("no_form");
-  if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");
-  if (!(await shownInTopViewport(anchor))) return nothing("not_visible");
+  const before = cardFieldsSeen(form, anchor);
+  if (before === null) return nothing("not_visible");
+  // Round-12 review: every field that would be written must show in the top-level viewport, not only the chosen one (a
+  // parent can clip a card frame to show one harmless field); the chosen one failing fills nothing.
+  if (!(await fieldsShown(before)).has(anchor)) return nothing("not_visible");
   const r = await safeSend({ type: "revealCardForFill", itemId });
   if (!r) return nothing("unreachable");
   if (!r.ok || !r.fields) return nothing("not_allowed");
   // The page had a round trip to change things: look again before anything is written.
-  if (!(await shownInTopViewport(anchor))) return nothing("not_visible");
   const now = cardFormHolding(anchor);
   if (!now || cardSigOf(now) !== sig) return nothing("no_form");
   const seen = cardFieldsSeen(now, anchor);
   if (seen === null) return nothing("not_visible");
-  return applyCardFill(now, r.fields, seen);
+  const shown = await fieldsShown(seen);
+  if (!shown.has(anchor)) return nothing("not_visible");
+  // A field that does not show is not written; the popup names the detail it skipped.
+  return applyCardFill(now, r.fields, shown);
+}
+
+/** The fields of [fields] that show in the top-level viewport ([shownInTopViewport], each asked of the browser). */
+async function fieldsShown(fields: ReadonlySet<FillableControl>): Promise<Set<FillableControl>> {
+  const list = [...fields];
+  const shown = await Promise.all(list.map((f) => shownInTopViewport(f)));
+  return new Set(list.filter((_, i) => shown[i]));
 }
 
 // ---- G2 save-card capture (design 2026-07-23 §G2 [X2-A3]) ----
