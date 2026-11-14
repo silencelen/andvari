@@ -506,6 +506,25 @@ final class AppModel: ObservableObject {
         controller.identityQr()
     }
 
+    // MARK: - The people this account verified
+
+    func openHousehold() async -> Outcome {
+        await run { try await $0.openHousehold() }
+    }
+
+    func closeHousehold() {
+        controller.closeHousehold()
+    }
+
+    /// Look up the account for an address typed to verify someone; the codes are compared next.
+    func findHouseholdMember(_ email: String) async -> Outcome {
+        await run { try await $0.findHouseholdMember(email: email) }
+    }
+
+    func removeContact(_ userId: String) async -> Outcome {
+        await run { try await $0.removeContact(userId: userId) }
+    }
+
     // MARK: - Handing a vault over
 
     /// Offer to make a member the owner of the vault whose members are open.

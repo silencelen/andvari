@@ -68,6 +68,11 @@ struct SettingsView: View {
                             }
                             .font(.footnote)
                         }
+                        NavigationLink {
+                            VerifiedPeopleView()
+                        } label: {
+                            Text("People you verified")
+                        }
                     } header: {
                         Text("Your identity code")
                     } footer: {
