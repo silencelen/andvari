@@ -40,9 +40,10 @@ async function ask<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promi
 let tabHost: string | null = null;
 /** S3: whether the active tab has a payment provider's card form we may Fill into, and to which origin (owner decision
  *  2026-11-14: andvari fills a card only there). Fetched once per unlocked render — the active tab can't change while
- *  the popup is open. When it is not fillable, `pageFormOnly` (the page takes the card in its own fields) or
- *  `allowOrigin` (a provider's form andvari may not run in) gives the one line that says why the rows copy instead. */
-let cardFill: { fillable: boolean; origin: string | null; pageFormOnly: boolean; allowOrigin?: string } = { fillable: false, origin: null, pageFormOnly: false };
+ *  the popup is open. When it is not fillable, `allowOrigin` (a provider's form, shown by the page, on a site andvari may
+ *  not run on), `pageFormOnly` (the page takes the card in its own fields) or `allowEverywhere` (Safari: andvari is not
+ *  running on this page) gives the one line that says why the rows copy instead. */
+let cardFill: { fillable: boolean; origin: string | null; pageFormOnly: boolean; allowOrigin?: string; allowEverywhere?: boolean } = { fillable: false, origin: null, pageFormOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
@@ -407,7 +408,7 @@ async function loadUnlocked(): Promise<void> {
       const o2 = cardFillOf(await ask({ type: "cardFillOffers" }));
       // [U21] pinned: the re-query diffs the reasons too — a late report from a provider's frame must surface its Fill,
       // and a late one from the page's own form the line that says why the rows copy instead.
-      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin) {
+      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere) {
         cardFill = o2;
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
@@ -422,7 +423,13 @@ async function loadUnlocked(): Promise<void> {
 /** The worker's card offer for the active tab, as the popup keeps it (nothing fillable when it did not answer). */
 function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof cardFill {
   if (!offer) return { fillable: false, origin: null, pageFormOnly: false };
-  return { fillable: offer.fillable, origin: offer.origin, pageFormOnly: offer.pageFormOnly === true, ...(typeof offer.allowOrigin === "string" ? { allowOrigin: offer.allowOrigin } : {}) };
+  return {
+    fillable: offer.fillable,
+    origin: offer.origin,
+    pageFormOnly: offer.pageFormOnly === true,
+    ...(typeof offer.allowOrigin === "string" ? { allowOrigin: offer.allowOrigin } : {}),
+    ...(offer.allowEverywhere === true ? { allowEverywhere: true } : {}),
+  };
 }
 
 /** activeTab (granted by opening the popup) exposes the page URL on http/https only. */
@@ -974,9 +981,10 @@ cardsLabel.hidden = true;
 const cardsList = document.createElement("div");
 cardsList.className = "list";
 cardsList.hidden = true;
-/** The one line that says why the rows copy instead of filling (owner decision 2026-11-14): the page takes the card in
- *  its own fields, or a payment provider's form is there that andvari may not run in (its origin, to allow). Shown only
- *  while the SW reports one of them; the Fill button never renders then (cardRow gates Fill on `fillable` alone). */
+/** The one line that says why the rows copy instead of filling (owner decision 2026-11-14): a payment provider's form
+ *  the page shows, on a site andvari may not run on (its origin, to allow); the page takes the card in its own fields;
+ *  or (Safari) andvari is not running on the page at all (allow it on Every Website). Shown only while the SW reports
+ *  one of them; the Fill button never renders then (cardRow gates Fill on `fillable` alone). */
 const cardsPspNote = document.createElement("div");
 cardsPspNote.className = "empty slim";
 cardsPspNote.hidden = true;
@@ -992,7 +1000,16 @@ function renderCards(items: CardItem[]): void {
   cardsLabel.hidden = items.length === 0;
   cardsList.hidden = items.length === 0;
   // The line needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
-  const why = cardFill.fillable ? null : cardFill.allowOrigin !== undefined ? cardProviderNotAllowedCopy(cardFill.allowOrigin, BUILD_TARGET === "safari") : cardFill.pageFormOnly ? CARD_PAGE_FORM : null;
+  const safari = BUILD_TARGET === "safari";
+  const why = cardFill.fillable
+    ? null
+    : cardFill.allowOrigin !== undefined
+      ? cardProviderNotAllowedCopy(cardFill.allowOrigin, safari)
+      : cardFill.pageFormOnly
+        ? CARD_PAGE_FORM
+        : cardFill.allowEverywhere === true
+          ? cardProviderNotAllowedCopy(undefined, safari)
+          : null;
   cardsPspNote.hidden = items.length === 0 || why === null;
   if (why !== null) cardsPspNote.textContent = `${why} ${cardCopyRemedy()}`;
   cardsList.replaceChildren();
@@ -1098,7 +1115,7 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
     );
   } else {
     const code = r?.outcome?.code ?? r?.code;
-    const remedy = code === "page_form" || code === "provider_not_allowed" ? ` ${cardCopyRemedy()}` : "";
+    const remedy = code === "page_form" || code === "provider_not_allowed" || code === "duplicate_fields" ? ` ${cardCopyRemedy()}` : "";
     showMsg("err", cardFillErrorCopy(code, r?.allowOrigin, BUILD_TARGET === "safari") + remedy);
   }
 }
