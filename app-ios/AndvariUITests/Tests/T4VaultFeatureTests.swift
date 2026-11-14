@@ -253,84 +253,30 @@ final class T4VaultFeatureTests: UITestCase {
         }
     }
 
-    /// A card filled from the popup in Safari's default tab layout (Compact), the popup reached with the keyboard still
-    /// up: the bar that shrank to the page's address above it is tapped back. The card page tests reach it the same way.
+    /// Card fill is being rebuilt so that a card is released only to a payment provider's card-entry document (provider
+    /// frames, hosted checkout pages); a merchant page gets none and the popup offers to copy from the app (owner
+    /// 2026-11-14). These four tests of in-page fill on merchant pages wait for that design and are written again for
+    /// it. test06 stays: a merchant page must still refuse.
+    private static let cardFillRebuilt = "card fill being rebuilt to provider frames only (owner 2026-11-14)"
+
+    /// A card filled on a merchant page with the popup reached while the keyboard is up.
     func test07_CardFillWithTheKeyboardUp() throws {
-        step("provider-and-extension-on") {
-            requireAutoFillProvider()
-            requireSafariExtension()
-        }
-        let number = safari.webViews.textFields["Card number"]
-        try step("number-tapped-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            try tapAndFill(number, "the new card's number", layout: "Compact", reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
-        }
+        try skip(Self.cardFillRebuilt)
     }
 
-    /// The same fill with the keyboard closed first by its Done, the other way a person gets the page menu back in the
-    /// Compact layout.
+    /// The same with the keyboard closed first by its Done.
     func test08_CardFillAfterTheKeyboardsDone() throws {
-        step("provider-and-extension-on") {
-            requireAutoFillProvider()
-            requireSafariExtension()
-        }
-        let number = safari.webViews.textFields["Card number"]
-        try step("number-tapped-done-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            try tapAndFill(number, "the new card's number", layout: "Compact", reach: .keyboardDone) { self.digits(number) == Fixture.cardNumber }
-        }
+        try skip(Self.cardFillRebuilt)
     }
 
-    /// card-two-forms.html: the fill uses the form of the field tapped, not the page's richest form.
+    /// card-two-forms.html: only the form of the field tapped is filled.
     func test09_CardTwoFormsFillsOnlyTheTappedForm() throws {
-        step("provider-and-extension-on") {
-            requireAutoFillProvider()
-            requireSafariExtension()
-        }
-        let layout = "Compact"
-        let codes = { self.safari.webViews.textFields.matching(NSPredicate(format: "label == 'Security code'")) }
-        let number = { self.safari.webViews.textFields["Card number"] }
-        // The page's second step first: the first can only be skipped with its finding, which ends the test.
-        try step("new-card-number-tapped-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            try tapAndFill(number(), "the new card's number", layout: layout, reach: .addressBar) { self.digits(number()) == Fixture.cardNumber }
-            XCTAssertEqual(digits(codes().element(boundBy: 1)), Fixture.cardCode, "the new card's code was not filled")
-            XCTAssertEqual(digits(codes().element(boundBy: 0)), "", "the saved card's code was filled from the new card's field")
-        }
-        try step("saved-card-code-tapped-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            try tapAndFill(codes().element(boundBy: 0), "the saved card's security code", layout: layout, reach: .addressBar, codeOnlyFormField: "saved-cvc") {
-                self.digits(codes().element(boundBy: 0)) == Fixture.cardCode
-            }
-            XCTAssertEqual(digits(number()), "", "the new-card form was filled from the saved card's field")
-            XCTAssertEqual(digits(codes().element(boundBy: 1)), "", "the new card's code was filled from the saved card's field")
-        }
+        try skip(Self.cardFillRebuilt)
     }
 
-    /// card-inner-scroll.html: a card form low in a modal that scrolls on its own. Filled once scrolled into view; with
-    /// the form scrolled away again, a fill writes nothing and says the field can't be seen.
+    /// card-inner-scroll.html: filled once scrolled into view, refused once scrolled away.
     func test10_CardInnerScrollFillsOnceInView() throws {
-        step("provider-and-extension-on") {
-            requireAutoFillProvider()
-            requireSafariExtension()
-        }
-        let layout = "Compact"
-        let number = safari.webViews.textFields["Card number"]
-        try step("form-scrolled-into-view-and-filled") {
-            openInSafari(Fixture.siteOrigin + "/test-pages/card-inner-scroll.html?uitest-events", heading: "Checkout")
-            XCTAssertTrue(scrollToComfort(number, in: safari, tries: 16), "the card form could not be scrolled into view inside the modal")
-            try tapAndFill(number, "the card number", layout: layout, reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
-        }
-        let unseen = popupSays("be seen on the page, so nothing was filled")
-        step("scrolled-away-fills-nothing") {
-            // Back to the top of the modal: the field tapped is out of view.
-            let title = safari.webViews.staticTexts["Checkout"]
-            XCTAssertTrue(scrollToComfort(title, in: safari, tries: 16), "the modal could not be scrolled back up")
-            let before = digits(number)
-            XCTAssertTrue(fillCardFromPopup(until: { unseen.exists }, reach: .addressBar), "the popup did not say the field can't be seen. It says: \(popupWords()). The page saw: \(pageEvents())")
-            closePopup()
-            XCTAssertEqual(digits(number), before, "a fill with the field out of view changed it")
-        }
+        try skip(Self.cardFillRebuilt)
     }
 
     /// Settings has the switch for other apps' keyboards, off by default. Whether a third-party keyboard is then kept out
@@ -414,10 +360,6 @@ final class T4VaultFeatureTests: UITestCase {
     }
 
     // MARK: - Helpers
-
-    private func digits(_ field: XCUIElement) -> String {
-        ((field.value as? String) ?? "").filter(\.isNumber)
-    }
 
     private func addLogin(_ name: String, user: String, password: String? = nil) {
         let newLogin = app.buttons["New login"]
@@ -597,52 +539,5 @@ final class T4VaultFeatureTests: UITestCase {
             if attempt == 2 || !unlock.exists { break }
         }
         return outcome()
-    }
-
-    /// Tap [field] on the page (again when Safari took a tap as nothing), then fill the seeded card from the popup,
-    /// reached the [reach] way while the field has the keyboard, until [filled] holds; the popup is closed after.
-    /// Otherwise the test fails with what the popup said and what the page saw (its event log, served with
-    /// ?uitest-events). One case is skipped with its finding instead: the page menu was behind the keyboard, reaching it
-    /// blurred the field while the page kept its focus, and the popup then said nothing was tapped.
-    private func tapAndFill(_ field: XCUIElement, _ what: String, layout: String, reach: PopupReach, codeOnlyFormField: String? = nil, until filled: @escaping () -> Bool) throws {
-        require(field, what)
-        // A moment after the page shows, as a person takes. Always one press: a field can have the focus already (a
-        // focus without a press chooses nothing).
-        Thread.sleep(forTimeInterval: 2)
-        for attempt in 0..<3 where attempt == 0 || !hasKeyboardFocus(field) {
-            field.tap()
-            _ = waitUntil(4) { self.hasKeyboardFocus(field) }
-        }
-        let focused = hasKeyboardFocus(field)
-        let menu = safari.buttons["PageFormatMenuButton"]
-        let reachable = waitUntil(3) { menu.exists && self.safelyHittable(menu) }
-        shot("field-tapped-\(layout.lowercased())")
-        if !reachable { dumpTree(safari, as: "page-menu-behind-keyboard-\(layout.lowercased())") }
-        let letGo = popupSays("Tap the card number field on the page first")
-        _ = fillCardFromPopup(until: { filled() || letGo.exists }, reach: reach)
-        if filled() {
-            closePopup()
-            return
-        }
-        let saidLetGo = letGo.exists
-        let words = popupWords()
-        closePopup()
-        let seen = pageEvents()
-        if let id = codeOnlyFormField, saidLetGo, seen.contains("click #\(id)"), !seen.contains("focusout #\(id) hasFocus=true") {
-            try skip("Finding (2026-11-13), for the extension or its test page: card-two-forms.html expects a tap on the saved card's security code, then Fill, to fill only that code. The field was pressed and kept the focus, and the popup says “\(words)” and fills nothing: a form needs a card-number field to be a card form (buildCardForm, extension/src/detect.ts), so a form holding only a security code is never one and its field is never chosen. The page's other step (the new card's number fills only its own form) passed above. What the page saw: \(seen)")
-        }
-        if saidLetGo && focused && !reachable && seen.contains("hasFocus=true now=body") {
-            let how = reach == .keyboardDone
-                ? "closing the keyboard with its Done"
-                : "bringing Safari's bar back by a tap on the page's address shrunk above the keyboard"
-            try skip("App defect (found 2026-11-13): in Safari's \(layout) tab layout a card cannot be filled from the popup after \(how). A card fill goes only into the form of the field the person tapped, and while that field has the keyboard, Safari's page menu (the way to the popup) is behind it. Reaching it that way blurs the field while the page keeps its focus, and the content script lets a field go when focus moves elsewhere in the page (noteFocusLeft, extension/src/content.ts), so the popup says “\(words)” and fills nothing. What the page saw: \(seen)")
-        }
-        XCTFail("\(what) was not filled (it had the keyboard: \(focused); Safari's page menu was in reach with the keyboard up: \(reachable)). The popup says: \(words). The page saw: \(seen)")
-    }
-
-    /// The page's own event log (served with ?uitest-events): presses, focus moves, and whether the page had focus.
-    private func pageEvents() -> String {
-        let line = safari.webViews.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'events:'")).firstMatch
-        return line.exists ? line.label : "no event log"
     }
 }
