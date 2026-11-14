@@ -126,7 +126,8 @@ export type CardFillFailCode =
   | "not_visible" // the chosen field cannot be seen in its box (hidden, transparent, tiny, off screen, covered)
   | "closed_form" // the box keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
   | "page_form" //   the page takes the card in its own fields: andvari fills a card only into a payment provider's box (owner decision 2026-11-14)
-  | "provider_not_allowed"; // a payment provider's box is there, but andvari may not run in it (Safari asks per site)
+  | "provider_not_allowed" // a payment provider's box is there, but andvari may not run in it (Safari asks per site)
+  | "duplicate_fields"; // two frames of the box would take the same card detail (one the page added): nothing is filled
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -495,6 +496,13 @@ export type Req =
       anchor?: number | null;
       /** Round-7 review L7: the person chose a field again since the last report (the worker stamps the time). */
       choseNow?: boolean;
+      /** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
+       *  (`location.ancestorOrigins`); null where the browser has no such list (Firefox). A split-field provider's
+       *  siblings are the frames of its origin with the same list (cardrelease.ts cardFillPlan). */
+      ancestors?: string[] | null;
+      /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own
+       *  word, so only a HINT for the popup (which site to allow andvari on); it never decides where a card goes. */
+      providerOrigins?: string[];
     }
   /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
    *  literal — **no `host`, no `kinds`, no `frameId` member** ([A2]/[S7]). A page-controlled member
@@ -526,8 +534,9 @@ export type Req =
   | { type: "cardFillOffers" }
   /** Popup ONLY: user clicked Fill on a card row → the SW mints one one-shot CARD grant per frame the
    *  fill reaches (a store SEPARATE from login `grants`, [A5]): the provider frame where the person
-   *  chose a field, and its split-field siblings (same parent, same origin), each bound to
-   *  (tabId,itemId,frameId,origin) with its own form's kinds; and sends {type:"fillCard"} to each. */
+   *  chose a field, and its split-field siblings (same origin, same ancestor origins, one frame per
+   *  field kind), each bound to (tabId,itemId,frameId,origin) with its own form's kinds; and sends
+   *  {type:"fillCard"} to each. */
   | { type: "fillCardFromPopup"; itemId: string }
   /** Content (S3 redemption): a granted frame redeems ITS card grant. The SW verifies, all
    *  fail-closed-on-undefined ([A3]): a live card grant for (tabId, sender.frameId, itemId); the
@@ -669,9 +678,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               /** The page takes the card in its own fields only: no Fill; the popup says
                                                *  andvari fills a card only into a payment provider's box, and copies. */
                                               pageFormOnly: boolean;
-                                              /** A payment provider's frame the browser lists that andvari may not run in:
-                                               *  its origin, which the popup names to allow. */
+                                              /** A payment provider's frame the page shows (by its src: a hint) from a site
+                                               *  andvari has not run on: its origin, which the popup names to allow. */
                                               allowOrigin?: string;
+                                              /** Safari: andvari is not running on this page at all, and no site is known
+                                               *  to name: the popup says to allow andvari on Every Website. */
+                                              allowEverywhere?: boolean;
                                             }
                                           : T extends "fillCardFromPopup"
                                             ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; allowOrigin?: string; error?: string }

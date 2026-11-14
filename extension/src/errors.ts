@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -254,19 +254,28 @@ export function fillErrorCopy(code: FillFailCode | undefined): string {
  *  buttons, or the andvari app in Safari). */
 export const CARD_PAGE_FORM = "andvari fills a card only into a payment provider's card form, and this page takes the card itself.";
 
-/** A payment provider's card form is on the page, in a frame andvari may not run in: the origin to allow. [safari]: the
- *  Safari build, where the person allows it per site (or on every website) in Safari. */
+/** andvari may not run where the card form is: the provider's origin to allow when one is known (from the frames the
+ *  page shows), else every website. [safari]: the Safari build, where the person allows it per site (or on every
+ *  website) in Safari. */
 export function cardProviderNotAllowedCopy(origin: string | undefined, safari: boolean): string {
-  let host = "the payment provider's site";
+  let host: string | null = null;
   try {
-    if (origin !== undefined) host = new URL(origin).host;
+    if (origin !== undefined) host = new URL(origin).host || null;
   } catch {
-    /* keep the general words */
+    host = null;
+  }
+  if (host === null) {
+    return safari
+      ? "andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on Every Website in Safari's extension settings."
+      : "andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on all sites in the extension's site access.";
   }
   return safari
     ? `The card form comes from ${host}, where Safari doesn't let andvari run yet. To fill it, allow andvari on ${host} or on Every Website in Safari's extension settings.`
     : `The card form comes from ${host}, where andvari isn't allowed to run. To fill it, allow andvari on ${host} in the extension's site access.`;
 }
+
+/** Two frames of the payment form would take the same card detail (one the page added beside the provider's). */
+export const CARD_DUPLICATE_FIELDS = "This payment form shows more than one box for the same card detail, so nothing was filled.";
 
 /** A card fill that wrote nothing: the refusals in words, the rest as for a login fill. */
 export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigin?: string, safari = false): string {
@@ -275,6 +284,8 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigi
       return CARD_PAGE_FORM;
     case "provider_not_allowed":
       return cardProviderNotAllowedCopy(allowOrigin, safari);
+    case "duplicate_fields":
+      return CARD_DUPLICATE_FIELDS;
     case "no_focus":
       return "Tap the card field in the payment form first, then fill again.";
     case "not_visible":

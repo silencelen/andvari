@@ -10,7 +10,7 @@
       "update_url": "https://andvari.monahanhosting.com/downloads/firefox-updates.json"
     }
   },
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "clipboardWrite", "contextMenus", "webNavigation"],
+  "permissions": ["storage", "activeTab", "scripting", "alarms", "clipboardWrite", "contextMenus"],
   "host_permissions": [
     "https://andvari.monahanhosting.com/*",
     "https://*/*",

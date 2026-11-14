@@ -33,7 +33,7 @@ import { gateServedEnvelope } from "./servedblob";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardFieldKind } from "./detect";
 import { isCardProviderOrigin } from "./cardproviders";
-import { cardFillTargets, chosenCardFrame, frameOriginOf, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, type CardGrant } from "./cardrelease";
+import { cardFillPlan, chosenCardFrame, frameOriginOf, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, type CardFrameRecord, type CardGrant } from "./cardrelease";
 import type {
   CardFillFields,
   CardFillOutcome,
@@ -415,7 +415,7 @@ interface TabState {
    *  card-entry origin (cardproviders.ts) ever receives a card (owner decision 2026-11-14); the others' records only
    *  let the popup say why it copies instead. Cleared with the tab (onRemoved / lock). [U14]: a persisted pre-update
    *  `{fields}` record is DISCARDED on read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
-  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>;
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number; ancestors?: string[] | null }>;
   /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
    *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
   topOrigin?: string;
@@ -435,16 +435,20 @@ let tabs = new Map<number, TabState>();
  *  picked the login for can never redeem it. */
 const grants = new Map<number, LoginGrant>();
 /** S3 CARD fill grants, by tab then frame — a store SEPARATE from login `grants` ([A5]). One fill mints one grant per
- *  frame it reaches (the chosen provider frame, and its split-field siblings: cardrelease.ts cardFillTargets), each
+ *  frame it reaches (the chosen provider frame, and its split-field siblings: cardrelease.ts cardFillPlan), each
  *  bound to that frame's id and browser-reported provider origin, and redeemable ONLY by that frame through
  *  `revealCardForFill` (never the login `reveal()`, nor the reverse). One-shot, 30 s, voided when the fill's round trip
  *  ends. Tier 2 §2: a grant FREEZES its frame's form `kinds` + kind-signature `sig` at mint — [U15] redemption composes
  *  against grant.kinds (never the live registry: a mint→redeem rescan could widen egress) and [U12] the content script
  *  fills only a current-sig-matching form. */
 const cardGrants = new Map<number, Map<number, CardGrant>>();
-/** Frames (by tab) that reported their card forms in this worker's life, empty or not: a provider's frame the browser
- *  lists that never reported is one this extension may not run in (the popup names its origin to allow). Memory-only. */
-const cardFramesHeard = new Map<number, Set<number>>();
+/**
+ * What this worker heard from each tab's frames since the tab's last navigation (memory-only): whether the top frame
+ * reported at all (if not, this extension is not running on the page), the origins of the frames that reported, and the
+ * payment providers' origins the top frame's own frames load, by their src. The last is the page's word, a HINT only:
+ * it names the site the popup suggests allowing andvari on, and never decides where a card goes.
+ */
+const cardReports = new Map<number, { top: boolean; origins: Set<string>; hints: string[] }>();
 /** G2 save-card ([X2-A1]): the tab's pending card save — a MODULE-SCOPE Map, NEVER a `TabState`
  *  field. `persistTabs` serializes the entire tabs map to `storage.session` on every state change,
  *  so a `TabState.pendingCardSave` would write the FULL PAN at rest across a lock (the [iii] hazard).
@@ -1574,7 +1578,7 @@ atLoad("tabs.onUpdated", () => chrome.tabs.onUpdated.addListener((tabId, changeI
   if (changeInfo.status !== "loading") return;
   grants.delete(tabId); // q39: a navigation voids the login grant too — it was minted for the OLD document
   cardGrants.delete(tabId);
-  cardFramesHeard.delete(tabId); // the frames that reported were the OLD document's
+  cardReports.delete(tabId); // the frames that reported were the OLD document's
   // C1 [S2]: the topOrigin erase below is ASYNC (it must await ensureLoaded), so mark the tab
   // stale SYNCHRONOUSLY — right here, before the first await — or the chip gate would spend that
   // window comparing the NEW document's sender.origin against the OLD document's recorded origin.
@@ -1619,7 +1623,7 @@ atLoad("tabs.onUpdated", () => chrome.tabs.onUpdated.addListener((tabId, changeI
 atLoad("tabs.onRemoved", () => chrome.tabs.onRemoved.addListener((tabId) => {
   grants.delete(tabId);
   cardGrants.delete(tabId);
-  cardFramesHeard.delete(tabId);
+  cardReports.delete(tabId);
   pendingCardSave.delete(tabId); // [X2-A2b]
   cardCaptureDedupe.delete(tabId);
   // C1 hygiene: the per-tab chip throttles + the [S2] stale marker die with the tab (a closed tab
@@ -1881,7 +1885,7 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
   }
   grants.clear();
   cardGrants.clear();
-  cardFramesHeard.clear();
+  cardReports.clear();
   pendingCardSave.clear(); // [X2-A2b] pending card saves hold the PAN — locked means no PAN at rest
   cardCaptureDedupe.clear();
   reuseNotices.clear(); // a reuse answer is an unlocked-vault fact — it never outlives the session
@@ -2064,7 +2068,7 @@ function browserSessionReported(): void {
   tabs.clear();
   grants.clear();
   cardGrants.clear();
-  cardFramesHeard.clear();
+  cardReports.clear();
   pendingCardSave.clear();
   cardCaptureDedupe.clear();
   reuseNotices.clear();
@@ -4279,10 +4283,16 @@ async function cardFormInfo(
   const tabId = sender.tab?.id;
   const frameId = sender.frameId;
   const origin = frameOriginOf(sender);
-  if (tabId === undefined || frameId === undefined || origin === null) return { ok: false };
-  let heard = cardFramesHeard.get(tabId);
-  if (heard === undefined) cardFramesHeard.set(tabId, (heard = new Set()));
-  heard.add(frameId);
+  if (tabId === undefined || frameId === undefined) return { ok: false };
+  let heard = cardReports.get(tabId);
+  if (heard === undefined) cardReports.set(tabId, (heard = { top: false, origins: new Set(), hints: [] }));
+  if (frameId === 0) {
+    heard.top = true; // the content script runs in this page, whatever origin the browser reports for it
+    // The page's own word about the provider frames it shows: a hint for the popup's line, nothing more (bounded).
+    heard.hints = Array.isArray(msg.providerOrigins) ? msg.providerOrigins.filter((o): o is string => typeof o === "string" && isCardProviderOrigin(o) && new URL(o).origin === o).slice(0, 8) : [];
+  }
+  if (origin === null) return { ok: false };
+  heard.origins.add(origin);
   const st = tabs.get(tabId) ?? {};
   const reg = st.cardForms ?? {};
   if (msg.forms.length === 0) {
@@ -4298,7 +4308,7 @@ async function cardFormInfo(
     const anchor = typeof a === "number" && Number.isInteger(a) && a >= 0 && a < msg.forms.length ? a : null;
     const was = reg[frameId];
     const anchorAt = anchor === null ? undefined : msg.choseNow === true || was?.anchor !== anchor || was.anchorAt === undefined ? Date.now() : was.anchorAt;
-    reg[frameId] = { origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}) };
+    reg[frameId] = { origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}), ancestors: ancestorsOf(msg.ancestors) };
   }
   st.cardForms = reg;
   tabs.set(tabId, st);
@@ -4324,47 +4334,22 @@ function eligibleCardFrames(tabId: number): { frameId: number; origin: string }[
   return providerCardFrames(tabs.get(tabId)?.cardForms ?? {});
 }
 
-/** How long the browser's frame tree may take to arrive. The popup's Cards rows wait on the answer that reads it, so a
- *  browser that never answers must not hold them: past this, the tree counts as unknown. */
-const FRAME_TREE_TIMEOUT_MS = 500;
-
-/** The tab's frames as the browser reports them (webNavigation), for a split-field provider's siblings and for the
- *  provider frames this extension may not run in; null where the browser does not answer, or not in time. */
-async function frameTree(tabId: number): Promise<{ frameId: number; parentFrameId: number; url: string }[] | null> {
-  const nav = (chrome as unknown as { webNavigation?: { getAllFrames?: (d: { tabId: number }) => Promise<unknown> } }).webNavigation;
-  if (typeof nav?.getAllFrames !== "function") return null;
-  try {
-    const frames = await Promise.race([nav.getAllFrames({ tabId }), delay(FRAME_TREE_TIMEOUT_MS).then(() => null)]);
-    if (!Array.isArray(frames)) return null;
-    return frames.flatMap((f: unknown) => {
-      const r = f as { frameId?: unknown; parentFrameId?: unknown; url?: unknown };
-      return typeof r.frameId === "number" && typeof r.parentFrameId === "number" ? [{ frameId: r.frameId, parentFrameId: r.parentFrameId, url: typeof r.url === "string" ? r.url : "" }] : [];
-    });
-  } catch {
-    return null;
-  }
+/** The ancestor origins a frame's content script reported (`location.ancestorOrigins`, nearest first), bounded; null
+ *  when it reported none (Firefox has no such list) or anything malformed. */
+function ancestorsOf(v: unknown): string[] | null {
+  if (!Array.isArray(v) || v.length > 32) return null;
+  return v.every((o) => typeof o === "string" && o.length <= 2048) ? (v as string[]) : null;
 }
 
 /**
- * A payment provider's card-entry frame the browser lists in [tabId] that never reported to this worker: this
- * extension may not run there (Safari asks per site, Chrome and Firefox may be granted some sites only), so the popup
- * names its origin to allow. Null when there is none, or the browser lists no frames.
+ * A payment provider's origin that the tab's top frame shows a frame of (by its src) and from which no frame reported to
+ * this worker: this extension may not run there (Safari asks per site; Chrome and Firefox may be granted some sites
+ * only), so the popup names it to allow. A hint from the page's own DOM: it never decides where a card goes. Null when
+ * there is none.
  */
-async function providerFrameNotAllowed(tabId: number): Promise<string | null> {
-  const tree = await frameTree(tabId);
-  if (tree === null) return null;
-  const heard = cardFramesHeard.get(tabId) ?? new Set<number>();
-  for (const f of tree) {
-    if (heard.has(f.frameId)) continue;
-    let origin: string;
-    try {
-      origin = new URL(f.url).origin;
-    } catch {
-      continue;
-    }
-    if (isCardProviderOrigin(origin)) return origin;
-  }
-  return null;
+function providerFrameNotAllowed(tabId: number): string | null {
+  const heard = cardReports.get(tabId);
+  return heard?.hints.find((o) => !heard.origins.has(o)) ?? null;
 }
 
 /** V4 (design §V4): the tab's SINGLE badge authority, so the login count and the card discovery dot
@@ -4587,23 +4572,33 @@ async function openPopupForSearch(sender: chrome.runtime.MessageSender): Promise
 
 /** Popup ONLY: may the Cards rows offer Fill for the active tab, and to which origin? Fillable iff a payment
  *  provider's card document with a card form is in the tab (cardrelease.ts providerCardFrames: the origin the browser
- *  reports for each frame, never the page's word). Otherwise the popup copies instead, and says why: the page takes
- *  the card in its own fields ([pageFormOnly]), or a provider's frame is there that this extension may not run in
- *  ([allowOrigin]). Refuses tab senders. [T5]: answers immediately off the registry; the broadcast makes frames report
- *  afresh, and the POPUP owns freshness with one delayed re-query (~350 ms). */
+ *  reports for each frame, never the page's word). Otherwise the popup copies instead, and says why: a provider's frame
+ *  the page shows, from a site this extension may not run on ([allowOrigin], from the page's own srcs: a hint only);
+ *  the page takes the card in its own fields ([pageFormOnly]); or, in Safari, this extension is not running on the page
+ *  at all ([allowEverywhere]). Refuses tab senders. [T5]: answers immediately off the registry; the broadcast makes
+ *  frames report afresh, and the POPUP owns freshness with one delayed re-query (~350 ms). */
 async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res<"cardFillOffers">> {
   const none: Res<"cardFillOffers"> = { fillable: false, origin: null, pageFormOnly: false };
   if (sender.tab !== undefined) return none; // popup-only guard
   if (!(APP_VAULT !== null ? APP_VAULT.unlocked : session !== null)) return none;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return none;
-  broadcastRescanCardForms(tab.id);
-  const records = tabs.get(tab.id)?.cardForms ?? {};
+  const tabId = tab.id;
+  broadcastRescanCardForms(tabId);
+  const records = tabs.get(tabId)?.cardForms ?? {};
   const frames = providerCardFrames(records);
   if (frames.length > 0) return { fillable: true, origin: chosenCardFrame(records, Date.now())?.origin ?? frames[0]!.origin, pageFormOnly: false };
-  const allow = await providerFrameNotAllowed(tab.id);
+  const allow = providerFrameNotAllowed(tabId);
   if (allow !== null) return { ...none, allowOrigin: allow };
-  return { ...none, pageFormOnly: pageCardFormsOnly(records) };
+  if (pageCardFormsOnly(records)) return { ...none, pageFormOnly: true };
+  // Safari asks per site, and the popup cannot grant itself one (the app explains it). When nothing of this page has
+  // reported, not even after the rescan above has had a moment, andvari is not running there: the line names no site,
+  // since none is known, and says to allow andvari on Every Website. A page that is not a web page is left alone.
+  if (BUILD_TARGET === "safari" && cardReports.get(tabId)?.top !== true && (tab.url === undefined || /^https?:/.test(tab.url))) {
+    await delay(250);
+    if (cardReports.get(tabId)?.top !== true) return { ...none, allowEverywhere: true };
+  }
+  return none;
 }
 
 /** Shape-check the granted frame's sendResponse before trusting it (mirrors asFillOutcome).
@@ -4623,10 +4618,11 @@ function asCardFillOutcome(v: unknown): CardFillOutcome | null {
  * Popup ONLY: fill the card into the payment provider's card box where the person chose a field (owner decision
  * 2026-11-14). The fill goes from the provider frame holding the person's latest choice (cardrelease.ts
  * chosenCardFrame), and reaches that frame and, for a provider that puts each field in a frame of its own, its siblings
- * (same parent, same browser-reported origin: cardFillTargets), each with its own form's kinds only. One one-shot grant
- * per frame, bound to its frameId and origin; each frame redeems its own through `revealCardForFill` (the value round
- * trip): the worker never pushes card values at a tab. The chosen frame goes first, and a fill it refuses fills no
- * sibling. Refuses tab senders.
+ * (the same browser-reported origin and the same ancestor origins: cardFillPlan), each with its own form's kinds only;
+ * when two of those frames would take the same kind, nothing is filled. One one-shot grant per frame, bound to its
+ * frameId and origin; each frame redeems its own through `revealCardForFill` (the value round trip): the worker never
+ * pushes card values at a tab. The chosen frame goes first, and a fill it refuses fills no sibling. The page's own
+ * word (the provider srcs its top frame reports) only picks the words of a refusal. Refuses tab senders.
  */
 async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageSender): Promise<Res<"fillCardFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
@@ -4639,7 +4635,7 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return { ok: false, code: "unreachable", error: "no active tab" };
   const tabId = tab.id;
-  const records = (): Readonly<Record<string, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>> => tabs.get(tabId)?.cardForms ?? {};
+  const records = (): Readonly<Record<string, CardFrameRecord>> => tabs.get(tabId)?.cardForms ?? {};
   // [T5] fast-path: a registry hit proceeds immediately; only a miss pays the rescan + 250 ms re-read. A hit fires NO
   // broadcast here: a rescan racing the redemptions could replace a frame's declared kinds between mint and redeem.
   let chosen = chosenCardFrame(records(), Date.now());
@@ -4650,11 +4646,15 @@ async function fillCardFromPopup(itemId: string, sender: chrome.runtime.MessageS
   }
   if (chosen === null) {
     if (eligibleCardFrames(tabId).length > 0) return { ok: false, code: "no_focus", error: "no card field chosen in a payment provider's card box" };
-    const allow = await providerFrameNotAllowed(tabId);
+    const allow = providerFrameNotAllowed(tabId);
     if (allow !== null) return { ok: false, code: "provider_not_allowed", allowOrigin: allow, error: "andvari may not run in the payment provider's frame" };
-    return { ok: false, code: "page_form", error: "andvari fills a card only into a payment provider's card box" };
+    if (pageCardFormsOnly(records())) return { ok: false, code: "page_form", error: "andvari fills a card only into a payment provider's card box" };
+    return { ok: false, code: "no_form", error: "the payment provider's card box is gone" };
   }
-  const targets = cardFillTargets(records(), chosen, await frameTree(tabId));
+  const plan = cardFillPlan(records(), chosen);
+  // Two frames would take the same card detail (a frame the page added beside the provider's): no fill at all.
+  if (!plan.ok) return { ok: false, code: "duplicate_fields", error: `more than one frame takes ${plan.kinds.join(", ")}` };
+  const targets = plan.targets;
   const expiresMs = Date.now() + GRANT_TTL_MS;
   cardGrants.set(tabId, new Map(targets.map((t): [number, CardGrant] => [t.frameId, { itemId, frameId: t.frameId, origin: t.origin, kinds: t.kinds, sig: t.kinds.join(","), expiresMs }])));
   const filled: CardFieldKind[] = [];

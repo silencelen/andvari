@@ -167,8 +167,9 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     same-origin frames never receive card data; the popup copies instead and says why. Every card
     value crosses into a provider's document only through a **one-shot `revealCardForFill` grant per
     frame, minted by a popup click and redeemable only by the frame it names, at the provider origin
-    it was minted for** (`src/cardrelease.ts`); a split-field provider's sibling frames (same parent,
-    same origin, from `webNavigation`) receive their own fields only. Inside the provider's form the
+    it was minted for** (`src/cardrelease.ts`); a split-field provider's sibling frames (same origin,
+    same `location.ancestorOrigins`; one frame per field kind, or no fill) receive their own fields
+    only. Inside the provider's form the
     fill engine (`src/cardfill.ts` + `src/content.ts`) handles `<select>` expiry/type dropdowns,
     split-PAN boxes, radio card types and billing ZIP. The C1 in-page chip carries zero data, mints
     no grant and shows only inside a provider's card form — a signpost that opens the popup (design

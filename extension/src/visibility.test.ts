@@ -285,12 +285,24 @@ test("the worker: a card only to a provider's card document, by the origin the b
   assert.match(info, /const origin = frameOriginOf\(sender\);/, "the frame's identity is the browser's report");
   assert.match(info, /const anchor = typeof a === "number" && Number\.isInteger\(a\) && a >= 0 && a < msg\.forms\.length \? a : null;/, "an index out of range is no choice");
   assert.match(info, /msg\.choseNow === true \|\| was\?\.anchor !== anchor \|\| was\.anchorAt === undefined \? Date\.now\(\) : was\.anchorAt/, "L7: every choice is stamped");
-  assert.ok(!info.includes("providers"), "no page-reported frames");
+  // The top frame's word about the provider frames it shows is a hint for the popup's line, kept apart from the records
+  // a fill reads; the frames' ancestor origins are each frame's own report of what the browser lists for it.
+  assert.match(info, /if \(frameId === 0\) \{\s*heard\.top = true;[\s\S]*?heard\.hints = /);
+  assert.match(info, /reg\[frameId\] = \{ origin, forms: msg\.forms, anchor, \.\.\.\(anchorAt !== undefined \? \{ anchorAt \} : \{\}\), ancestors: ancestorsOf\(msg\.ancestors\) \};/);
+  for (const [name, from, to] of [
+    ["fillCardFromPopup", "async function fillCardFromPopup(", "async function revealCardForFill("],
+    ["revealCardForFill", "async function revealCardForFill(", "// ---- capture → pending save → resolve ----"],
+    ["cardChipOffer", "async function cardChipOffer(", "async function openPopupForCards("],
+  ] as const) {
+    const body = background.slice(background.indexOf(from), background.indexOf(to));
+    assert.ok(!/\.hints\b/.test(body), `${name} never reads the page's hints`);
+  }
   const chip = background.slice(background.indexOf("async function cardChipOffer("), background.indexOf("async function openPopupForCards("));
   assert.match(chip, /if \(!isCardProviderOrigin\(origin\)\) return no;/);
   assert.match(chip, /if \(rec\.origin !== origin \|\| !mayReceiveCard\(rec\)\) return no;/);
   const fill = background.slice(background.indexOf("async function fillCardFromPopup("), background.indexOf("async function revealCardForFill("));
-  assert.match(fill, /const targets = cardFillTargets\(records\(\), chosen, await frameTree\(tabId\)\);/);
+  assert.match(fill, /const plan = cardFillPlan\(records\(\), chosen\);[\s\S]{0,200}?if \(!plan\.ok\) return \{ ok: false, code: "duplicate_fields",[\s\S]{0,120}?const targets = plan\.targets;/, "two frames taking one kind: no fill at all");
+  assert.ok(fill.indexOf("if (!plan.ok)") < fill.indexOf("cardGrants.set("), "refused before any grant is minted");
   assert.match(fill, /if \(outcome\.filled === "nothing"\) return \{ ok: false, outcome,/, "a fill the chosen frame refuses fills no sibling");
   assert.match(fill, /\} finally \{\s*\/\/[^\n]*\n\s*cardGrants\.delete\(tabId\);/, "every grant not redeemed is voided when the round trip ends");
   assert.ok(!fill.includes("topOrigin("), "the shop's top origin decides nothing");

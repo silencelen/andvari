@@ -240,7 +240,15 @@ test("a card fill that wrote nothing says why: no chosen field, one that cannot 
     "The card form comes from js.stripe.com, where Safari doesn't let andvari run yet. To fill it, allow andvari on js.stripe.com or on Every Website in Safari's extension settings.",
   );
   assert.match(cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com"), /allow andvari on js\.stripe\.com in the extension's site access/);
-  assert.match(cardFillErrorCopy("provider_not_allowed", undefined, true), /the payment provider's site/);
+  // No origin known (nothing of the page reported): every website.
+  assert.equal(
+    cardFillErrorCopy("provider_not_allowed", undefined, true),
+    "andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on Every Website in Safari's extension settings.",
+  );
+  assert.match(cardFillErrorCopy("provider_not_allowed", undefined), /allow andvari on all sites in the extension's site access/);
+  assert.match(cardFillErrorCopy("provider_not_allowed", "not a url", true), /Every Website/);
+  // Two frames would take the same card detail: no fill at all.
+  assert.equal(cardFillErrorCopy("duplicate_fields"), "This payment form shows more than one box for the same card detail, so nothing was filled.");
   assert.equal(cardFillErrorCopy("locked"), fillErrorCopy("locked"), "the rest as for a login fill");
   assert.equal(cardFillErrorCopy(undefined), fillErrorCopy(undefined));
 });

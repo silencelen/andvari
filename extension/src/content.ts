@@ -354,6 +354,33 @@ async function scheduleClipboardClear(): Promise<void> {
  *  is a card form. The worker checks the origin the browser reports before anything is filled. */
 const cardBox = isCardProviderOrigin(location.origin);
 
+/** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
+ *  (`location.ancestorOrigins`; the page around this frame cannot change the list). Null where the browser has no such
+ *  list (Firefox): the worker then fills this frame alone, one field per Fill. */
+const ancestorChain: string[] | null = (() => {
+  const list = (location as Location & { ancestorOrigins?: DOMStringList }).ancestorOrigins;
+  if (list === undefined || list === null) return null;
+  return Array.from({ length: list.length }, (_, i) => list.item(i) ?? "null");
+})();
+
+/** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own word, so
+ *  only a hint for the popup's line (which site to allow andvari on); the worker never decides a fill from it. */
+function providerOriginsShown(): string[] {
+  if (!isTop) return [];
+  const out = new Set<string>();
+  for (const scope of scanScopes()) {
+    for (const el of scope.querySelectorAll("iframe[src], frame[src]")) {
+      try {
+        const o = new URL(el.getAttribute("src") ?? "", document.baseURI).origin;
+        if (isCardProviderOrigin(o)) out.add(o);
+      } catch {
+        /* not a URL */
+      }
+    }
+  }
+  return [...out].sort().slice(0, 8);
+}
+
 /** Last reported registry signature — skip redundant cardFormInfo sends on quiet mutations. NULL
  *  (not "") until the first report (§7): the first reportCardForm after injection ALWAYS sends,
  *  even empty, clearing the SW's stale record for the new document in this frame slot. [U13]:
@@ -374,12 +401,13 @@ function reportCardForm(): void {
   const anchor = at >= 0 ? at : null;
   // L7: a new choice (even of the same field) is told, so the worker stamps when this frame chose last.
   const choseNow = chosenSeq !== reportedChoice;
-  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, chosenSeq]);
+  const providerOrigins = providerOriginsShown();
+  const sig = JSON.stringify(forms) + "|" + JSON.stringify([anchor, chosenSeq, providerOrigins]);
   if (sig === lastCardSig) return;
   lastCardSig = sig;
   reportedChoice = chosenSeq;
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
-  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow });
+  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow, ancestors: ancestorChain, ...(isTop ? { providerOrigins } : {}) });
 }
 
 /** Bumped by every choice of a card field, so a report tells the worker a new choice was made ([reportCardForm]). */

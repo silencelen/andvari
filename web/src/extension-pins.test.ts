@@ -5,7 +5,7 @@ import { brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, masked
 import { isCvvNameOrId } from "../../extension/src/detect";
 import type { CardFieldKind } from "../../extension/src/detect";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "../../extension/src/format";
-import { cardFillTargets, chosenCardFrame, mayRedeem, type CardFrameRecord, type CardGrant } from "../../extension/src/cardrelease";
+import { cardFillPlan, chosenCardFrame, mayRedeem, type CardFrameRecord, type CardGrant } from "../../extension/src/cardrelease";
 import type { ItemDoc } from "./api/types";
 import { WEAK_KDF_MESSAGE } from "./crypto/keys";
 import { VAULT_KEYS_DAMAGED } from "./vault/account";
@@ -340,8 +340,8 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     const SHOP = "https://shop.example";
     const STRIPE = "https://js.stripe.com";
     const NOW = 1_800_000_000_000;
-    const rec = (origin: string, forms: CardFieldKind[][], anchor: number | null, at = NOW - 1_000): CardFrameRecord =>
-      ({ origin, forms, anchor, ...(anchor !== null ? { anchorAt: at } : {}) });
+    const rec = (origin: string, forms: CardFieldKind[][], anchor: number | null, at = NOW - 1_000, ancestors: string[] | null = [SHOP]): CardFrameRecord =>
+      ({ origin, forms, anchor, ...(anchor !== null ? { anchorAt: at } : {}), ancestors });
     const full: CardFieldKind[] = ["cardnumber", "cardexpiry", "cardcvv", "cardname"];
     // The shop's richer top-frame form, chosen more recently, never out-bids the provider's frame…
     expect(chosenCardFrame({ 0: rec(SHOP, [full], 0, NOW - 10), 3: rec(STRIPE, [["cardnumber"]], 0, NOW - 5_000) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardnumber"] });
@@ -350,14 +350,20 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // The form is the one holding the chosen field, never the frame's richest; no choice made, none.
     expect(chosenCardFrame({ 3: rec(STRIPE, [full, ["cardcvv"]], 1) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardcvv"] });
     expect(chosenCardFrame({ 3: rec(STRIPE, [full], null) }, NOW)).toBe(null);
-    // The targets: the chosen frame, plus only same-parent, same-origin split-field siblings holding ONE form — a shop
-    // frame beside it (same parent, its own origin) gets nothing.
-    const tree = [{ frameId: 0, parentFrameId: -1 }, { frameId: 3, parentFrameId: 0 }, { frameId: 4, parentFrameId: 0 }];
-    expect(cardFillTargets({ 0: rec(SHOP, [full], null), 3: rec(STRIPE, [full], 0), 4: rec(SHOP, [["cardcvv"]], null) }, { frameId: 3, origin: STRIPE, kinds: full }, tree)).toEqual([{ frameId: 3, origin: STRIPE, kinds: full, chosen: true }]);
+    // The targets: the chosen frame, plus only same-origin split-field siblings with the same ancestor origins, holding
+    // ONE form each — a shop frame beside it (same nesting, its own origin) gets nothing…
+    const chosen = { frameId: 3, origin: STRIPE, kinds: full };
+    expect(cardFillPlan({ 0: rec(SHOP, [full], null, NOW, []), 3: rec(STRIPE, [full], 0), 4: rec(SHOP, [["cardcvv"]], null) }, chosen)).toEqual({ ok: true, targets: [{ ...chosen, chosen: true }] });
+    // …and a frame the page adds beside the provider's (its own merchant account, the same provider) taking a kind
+    // another frame takes stops the whole fill: nothing tells which of the two is the box the person meant.
+    expect(cardFillPlan({ 3: rec(STRIPE, [full], 0), 7: rec(STRIPE, [["cardnumber"]], null) }, chosen)).toEqual({ ok: false, reason: "duplicate_kind", kinds: ["cardnumber"] });
+    // Where the browser lists no ancestor origins (Firefox), no frame is anyone's sibling: one field per Fill.
+    expect(cardFillPlan({ 3: rec(STRIPE, [["cardnumber"]], 0, NOW - 1_000, null), 7: rec(STRIPE, [["cardcvv"]], null, NOW, null) }, { ...chosen, kinds: ["cardnumber"] })).toEqual({ ok: true, targets: [{ ...chosen, kinds: ["cardnumber"], chosen: true }] });
     // Source anchors: the SW WIRES both at grant mint, freezing each target's kinds + sig ([U12]/[U15], never a live
-    // registry read at redemption).
+    // registry read at redemption), and refuses a plan with a doubled kind before minting anything.
     expect(bg).toContain("let chosen = chosenCardFrame(records(), Date.now());");
-    expect(bg).toContain("const targets = cardFillTargets(records(), chosen, await frameTree(tabId));");
+    expect(bg).toContain("const plan = cardFillPlan(records(), chosen);");
+    expect(bg).toMatch(/if \(!plan\.ok\) return \{ ok: false, code: "duplicate_fields",[^\n]*\n\s*const targets = plan\.targets;\n\s*const expiresMs = Date\.now\(\) \+ GRANT_TTL_MS;\n\s*cardGrants\.set\(/);
     expect(bg).toContain('{ itemId, frameId: t.frameId, origin: t.origin, kinds: t.kinds, sig: t.kinds.join(","), expiresMs }');
   });
 
@@ -478,8 +484,9 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
 
   it("[U21] the copy-instead line: exact neutral copy, one reason at a time, Fill gated on fillable alone", () => {
     // Re-scoped (owner decision 2026-11-14; was crossOriginFormsOnly): with no payment provider's card form to fill,
-    // the popup says in one line why its rows copy instead: the page takes the card in its own fields, or a provider's
-    // form is there in a frame andvari may not run in (named, to allow). Byte-exact, capability-framed sentences.
+    // the popup says in one line why its rows copy instead: a provider's form the page shows on a site andvari may not
+    // run on (named, to allow), the page takes the card in its own fields, or (Safari) andvari is not running on the page
+    // at all (allow it on Every Website). Byte-exact, capability-framed sentences.
     // F24 (2026-08-13 audit): lowercase brand — if a sentence-initial capital is ever wanted, rephrase so the brand is
     // not the first word.
     const er = readFileSync(extensionSrc + "errors.ts", "utf-8");
@@ -487,22 +494,25 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(er, "the brand is lowercase in running copy").not.toContain("Andvari fills a card");
     expect(er).toContain("`The card form comes from ${host}, where Safari doesn't let andvari run yet. To fill it, allow andvari on ${host} or on Every Website in Safari's extension settings.`");
     expect(er).toContain("`The card form comes from ${host}, where andvari isn't allowed to run. To fill it, allow andvari on ${host} in the extension's site access.`");
-    // The SW answers ONE of the three, in one place: a provider's card form → fillable, no reason; else a provider's
-    // frame it may not run in → allowOrigin; else the page's own card form → pageFormOnly. An eligible frame can never
-    // also raise a reason, so gating Fill on `fillable` alone renders no Fill button beside the line.
+    expect(er).toContain(`"andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on Every Website in Safari's extension settings."`);
+    // The SW answers ONE of them, in one place: a provider's card form → fillable, no reason; else a provider's frame the
+    // page shows on a site it has heard nothing from → allowOrigin; else the page's own card form → pageFormOnly; else, in
+    // Safari, nothing of the page reported → allowEverywhere. An eligible frame can never also raise a reason, so gating
+    // Fill on `fillable` alone renders no Fill button beside the line.
     const offers = spanOf(bg, "async function cardFillOffers(", "function asCardFillOutcome(");
     expect(offers).toContain('const none: Res<"cardFillOffers"> = { fillable: false, origin: null, pageFormOnly: false };');
     expect(offers).toContain("if (frames.length > 0) return { fillable: true, origin: chosenCardFrame(records, Date.now())?.origin ?? frames[0]!.origin, pageFormOnly: false };");
     expect(offers).toContain("if (allow !== null) return { ...none, allowOrigin: allow };");
-    expect(offers).toContain("return { ...none, pageFormOnly: pageCardFormsOnly(records) };");
-    // The Cards rows render after this answer, so the browser's frame tree it may read is bounded in time.
-    expect(bg).toContain("const frames = await Promise.race([nav.getAllFrames({ tabId }), delay(FRAME_TREE_TIMEOUT_MS).then(() => null)]);");
+    expect(offers).toContain("if (pageCardFormsOnly(records)) return { ...none, pageFormOnly: true };");
+    expect(offers).toMatch(/if \(BUILD_TARGET === "safari" && cardReports\.get\(tabId\)\?\.top !== true[^\n]*\n\s*await delay\(250\);\n\s*if \(cardReports\.get\(tabId\)\?\.top !== true\) return \{ \.\.\.none, allowEverywhere: true \};/);
+    // The site named is a HINT from the page's own srcs (its top frame's report): it picks the words, never a frame.
+    expect(bg).toContain("return heard?.hints.find((o) => !heard.origins.has(o)) ?? null;");
     expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\("fill"/);
-    expect(pp).toContain('const why = cardFill.fillable ? null : cardFill.allowOrigin !== undefined ? cardProviderNotAllowedCopy(cardFill.allowOrigin, BUILD_TARGET === "safari") : cardFill.pageFormOnly ? CARD_PAGE_FORM : null;');
+    expect(pp).toMatch(/const why = cardFill\.fillable\s*\? null\s*: cardFill\.allowOrigin !== undefined\s*\? cardProviderNotAllowedCopy\(cardFill\.allowOrigin, safari\)\s*: cardFill\.pageFormOnly\s*\? CARD_PAGE_FORM\s*: cardFill\.allowEverywhere === true\s*\? cardProviderNotAllowedCopy\(undefined, safari\)\s*: null;/);
     expect(pp).toContain("cardsPspNote.hidden = items.length === 0 || why === null;");
     // The popup's delayed re-query diffs every field (a late provider-frame report must surface or clear the line),
     // folding a missing field (mixed-version SW) to false.
-    expect(pp).toContain("o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin");
+    expect(pp).toContain("o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere");
     expect(pp).toContain("pageFormOnly: offer.pageFormOnly === true");
   });
 });

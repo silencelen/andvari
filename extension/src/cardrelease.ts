@@ -4,8 +4,10 @@
  * puts each card field in a frame of its own.
  *
  * Every input is a fact the browser reports: each frame's origin from its own messages (`sender.origin`, else the origin
- * of `sender.url`), its frameId, and the tab's frame tree (webNavigation). Nothing a page writes into its own DOM (a
- * frame's src, a form's action, where a frame sits) is an input, so nothing a page does there can change the answer.
+ * of `sender.url`), its frameId, and the origins of the documents it is nested in (`location.ancestorOrigins`, as the
+ * content script running in that frame reads it; the page around it cannot change that list). Nothing a page writes
+ * into its own DOM (a frame's src, a form's action, where a frame sits) is an input, so nothing a page does there can
+ * change the answer.
  *
  * LEAF module (no chrome import): background.ts feeds it, node --test pins it (cardrelease.test.ts).
  */
@@ -34,6 +36,12 @@ export interface CardFrameRecord {
   anchor?: number | null;
   /** When this worker heard of that choice (ms). */
   anchorAt?: number;
+  /**
+   * The origins of the documents this frame is nested in, nearest first (`location.ancestorOrigins`, read by the content
+   * script in this frame; empty for a top-level page). Null where the browser has no such list (Firefox): such a frame
+   * has no split-field siblings, and a fill reaches it alone.
+   */
+  ancestors?: readonly string[] | null;
 }
 
 /** How long a choice stands: a fill long after it is a new decision, and asks for a new press. */
@@ -83,39 +91,56 @@ export function chosenCardFrame(records: Readonly<Record<string, CardFrameRecord
   return best === null ? null : { frameId: best.frameId, origin: best.origin, kinds: best.kinds };
 }
 
-/** A frame of the tab as the browser reports it (webNavigation): its id and its parent's (-1 for the top frame). */
-export interface FrameInTree {
-  frameId: number;
-  parentFrameId: number;
-}
-
 export interface CardFillTarget extends ChosenCardFrame {
   /** The frame the person chose in; the others are its split-field siblings. */
   chosen: boolean;
 }
 
+/** Whether two frames are nested in the same chain of documents, by origin: both lists known and equal. */
+function sameAncestors(a: readonly string[] | null | undefined, b: readonly string[] | null | undefined): boolean {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.every((o, i) => o === b[i]);
+}
+
+/** What one fill does: the frames it reaches, or why it reaches none. */
+export type CardFillPlan =
+  | { ok: true; targets: CardFillTarget[] }
+  /** Two of the frames the fill would reach take the same card detail (a frame the page added beside the provider's):
+   *  nothing is filled, since nothing tells which of them is the provider's own. */
+  | { ok: false; reason: "duplicate_kind"; kinds: CardFieldKind[] };
+
 /**
  * The frames one fill reaches. The chosen frame, with the form holding the chosen field. And, for a provider that puts
- * each field in a frame of its own (Braintree, Adyen, Checkout.com, Cybersource, VGS and others), every other frame with
- * the same parent and the same browser-reported origin that holds one card form: each receives its own form's kinds,
- * and nothing else. A frame under another parent (another widget's, an ad's) never does, whatever its origin. [tree] is
- * the tab's frames as the browser reports them; without it (no webNavigation), the chosen frame alone.
+ * each field in a frame of its own (Braintree, Adyen, Checkout.com, Cybersource, VGS and others), every other frame of
+ * the tab with the same browser-reported origin and the same chain of ancestor origins that holds one card form: each
+ * receives its own form's kinds, and nothing else. A frame nested elsewhere (inside an ad, or one level deeper) never
+ * does, whatever its origin; where the browser gives no ancestor list (Firefox) the chosen frame is filled alone, one
+ * field per Fill. Exactly one frame may take each kind: when two would (an extra frame the page put beside the
+ * provider's, even one of the same provider), the whole fill is refused.
  */
-export function cardFillTargets(records: Readonly<Record<string, CardFrameRecord>>, chosen: ChosenCardFrame, tree: readonly FrameInTree[] | null): CardFillTarget[] {
-  const out: CardFillTarget[] = [{ ...chosen, chosen: true }];
-  if (tree === null) return out;
-  const me = tree.find((f) => f.frameId === chosen.frameId);
-  // A provider's top-level page (a hosted checkout) has no siblings.
-  if (me === undefined || me.parentFrameId < 0) return out;
-  for (const f of tree) {
-    if (f.frameId === chosen.frameId || f.parentFrameId !== me.parentFrameId) continue;
-    const r = records[f.frameId];
-    if (!mayReceiveCard(r) || r.origin !== chosen.origin || r.forms.length !== 1) continue;
-    const kinds = r.forms[0]!;
-    if (!Array.isArray(kinds) || kinds.length === 0) continue;
-    out.push({ frameId: f.frameId, origin: r.origin, kinds, chosen: false });
+export function cardFillPlan(records: Readonly<Record<string, CardFrameRecord>>, chosen: ChosenCardFrame): CardFillPlan {
+  const targets: CardFillTarget[] = [{ ...chosen, chosen: true }];
+  const chain = records[chosen.frameId]?.ancestors;
+  if (Array.isArray(chain)) {
+    for (const [fid, r] of Object.entries(records)) {
+      const frameId = Number(fid);
+      if (frameId === chosen.frameId || !mayReceiveCard(r) || r.origin !== chosen.origin || !sameAncestors(r.ancestors, chain)) continue;
+      if (r.forms.length !== 1) continue;
+      const kinds = r.forms[0]!;
+      if (!Array.isArray(kinds) || kinds.length === 0) continue;
+      targets.push({ frameId, origin: r.origin, kinds, chosen: false });
+    }
   }
-  return out;
+  const taken = new Set<CardFieldKind>();
+  const twice = new Set<CardFieldKind>();
+  for (const t of targets) {
+    for (const k of new Set(t.kinds)) {
+      if (taken.has(k)) twice.add(k);
+      taken.add(k);
+    }
+  }
+  if (twice.size > 0) return { ok: false, reason: "duplicate_kind", kinds: [...twice] };
+  return { ok: true, targets };
 }
 
 /** A card grant: what one frame may redeem once, for one fill. */
