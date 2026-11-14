@@ -3,7 +3,8 @@ import XCTest
 /// What landed in the app after the first suite: the trash, item history, moving and copying between vaults, lifecycle
 /// notices, a vault this account only reads, the extension's card test pages (extension/test-pages/), two-step
 /// sign-in, and what the simulator cannot show. Runs after T3, so AutoFill, the Safari extension and Face ID are
-/// already on. Two-step sign-in comes last: the other-device steps before it sign in without a code.
+/// already on. Two-step sign-in comes last: the other-device steps before it sign in without a code. Each test that
+/// works in the app starts it again, so a sheet an earlier test left open cannot stand in its way.
 final class T4VaultFeatureTests: UITestCase {
     private let stamp = Int(Date().timeIntervalSince1970) % 100000
 
@@ -14,8 +15,7 @@ final class T4VaultFeatureTests: UITestCase {
     func test01_TrashRestoreAndDeleteForever() {
         let name = "Trash Me \(stamp)"
         step("login-added") {
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
             addLogin(name, user: "tom")
         }
         step("deleted") {
@@ -36,9 +36,7 @@ final class T4VaultFeatureTests: UITestCase {
             openTrash()
             require(trashRow(name), "\(name) in the trash again", timeout: 20)
             trashRow(name).buttons["Delete forever"].tap()
-            let confirm = app.buttons.matching(NSPredicate(format: "label == 'Delete forever' AND identifier == ''"))
-            XCTAssertTrue(waitUntil(5) { confirm.count >= 2 }, "Delete forever asked for no confirmation")
-            confirm.element(boundBy: confirm.count - 1).tap()
+            confirm("Delete forever", inDialog: "Delete forever?")
             XCTAssertTrue(waitUntil(15) { !self.trashRow(name).exists }, "the login is still in the trash after Delete forever")
             closeTrash()
             XCTAssertFalse(vaultRow(name).exists, "the login deleted forever is in the vault")
@@ -49,8 +47,7 @@ final class T4VaultFeatureTests: UITestCase {
     func test02_ItemHistoryRestoresAVersion() {
         let name = "History Me \(stamp)"
         step("login-added") {
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
             addLogin(name, user: "hana", password: "First-Passw0rd")
         }
         step("password-changed") {
@@ -74,9 +71,7 @@ final class T4VaultFeatureTests: UITestCase {
         }
         step("version-restored") {
             app.buttons.matching(NSPredicate(format: "label == 'Restore'")).firstMatch.tap()
-            let confirm = app.buttons.matching(NSPredicate(format: "label == 'Restore' AND identifier == ''"))
-            XCTAssertTrue(waitUntil(5) { confirm.count >= 2 }, "Restore asked for no confirmation")
-            confirm.element(boundBy: confirm.count - 1).tap()
+            confirm("Restore", inDialog: "Restore this version?")
             Thread.sleep(forTimeInterval: 3)
             // A password shown before the restore stays as it was shown: read it again from a fresh detail.
             app.navigationBars.buttons.firstMatch.tap()
@@ -93,8 +88,7 @@ final class T4VaultFeatureTests: UITestCase {
         let copied = "Copy Me \(stamp)"
         let moved = "Move Me \(stamp)"
         step("shared-vault-created") {
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
             openSharedVaults()
             app.buttons["New shared vault…"].tap()
             let field = app.alerts.textFields.firstMatch
@@ -133,8 +127,7 @@ final class T4VaultFeatureTests: UITestCase {
         let vault = "Lifecycle \(stamp)"
         step("vault-created-elsewhere-and-synced-here") {
             XCTAssertNil(OtherDevice.vault("create", vault), "the other device could not create the vault")
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
             openSharedVaults()
             let listed = containing(vault, in: app)
             if !waitUntil(10, { listed.exists }) {
@@ -179,8 +172,7 @@ final class T4VaultFeatureTests: UITestCase {
         let item = "Shared To Read \(stamp)"
         step("shared-read-only-elsewhere-and-synced-here") {
             XCTAssertNil(OtherDevice.shareReadOnly(vault: vault, item: item), "the read-only share could not be made")
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
             for _ in 0..<3 where !vaultRow(item).exists {
                 refreshVault()
                 _ = waitUntil(10) { self.vaultRow(item).exists }
@@ -256,9 +248,10 @@ final class T4VaultFeatureTests: UITestCase {
         }
     }
 
-    /// A card filled from the popup in Safari's default tab layout (Compact): the new card's number tapped on
-    /// card-two-forms.html, then Fill. The next card tests run in the layout this shows to work.
-    func test07_CardFillInTheDefaultTabLayout() throws {
+    /// A card filled from the popup in Safari's default tab layout (Compact), the popup reached with the keyboard still
+    /// up: the bar that shrank to the page's address above it is tapped back. The next card tests run in the layout
+    /// this shows to work.
+    func test07_CardFillWithTheKeyboardUp() throws {
         step("provider-and-extension-on") {
             requireAutoFillProvider()
             requireSafariExtension()
@@ -268,13 +261,27 @@ final class T4VaultFeatureTests: UITestCase {
             openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
             // Until this fill shows the default works, the next card tests use the layout that keeps the menu in reach.
             Self.cardLayout = "Top"
-            try tapAndFill(number, "the new card's number", layout: "Compact") { self.digits(number) == Fixture.cardNumber }
+            try tapAndFill(number, "the new card's number", layout: "Compact", reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
             Self.cardLayout = "Compact"
         }
     }
 
+    /// The same fill with the keyboard closed first by its Done, the other way a person gets the page menu back in the
+    /// Compact layout.
+    func test08_CardFillAfterTheKeyboardsDone() throws {
+        step("provider-and-extension-on") {
+            requireAutoFillProvider()
+            requireSafariExtension()
+        }
+        let number = safari.webViews.textFields["Card number"]
+        try step("number-tapped-done-and-filled") {
+            openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
+            try tapAndFill(number, "the new card's number", layout: "Compact", reach: .keyboardDone) { self.digits(number) == Fixture.cardNumber }
+        }
+    }
+
     /// card-two-forms.html: the fill uses the form of the field tapped, not the page's richest form.
-    func test08_CardTwoFormsFillsOnlyTheTappedForm() throws {
+    func test09_CardTwoFormsFillsOnlyTheTappedForm() throws {
         step("provider-and-extension-on") {
             requireAutoFillProvider()
             requireSafariExtension()
@@ -284,7 +291,7 @@ final class T4VaultFeatureTests: UITestCase {
         let number = { self.safari.webViews.textFields["Card number"] }
         try step("saved-card-code-tapped-and-filled") {
             openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            try tapAndFill(codes().element(boundBy: 0), "the saved card's security code", layout: layout) {
+            try tapAndFill(codes().element(boundBy: 0), "the saved card's security code", layout: layout, reach: .addressBar) {
                 self.digits(codes().element(boundBy: 0)) == Fixture.cardCode
             }
             XCTAssertEqual(digits(number()), "", "the new-card form was filled from the saved card's field")
@@ -292,7 +299,7 @@ final class T4VaultFeatureTests: UITestCase {
         }
         try step("new-card-number-tapped-and-filled") {
             openInSafari(Fixture.siteOrigin + "/test-pages/card-two-forms.html?uitest-events", heading: "Two card forms")
-            try tapAndFill(number(), "the new card's number", layout: layout) { self.digits(number()) == Fixture.cardNumber }
+            try tapAndFill(number(), "the new card's number", layout: layout, reach: .addressBar) { self.digits(number()) == Fixture.cardNumber }
             XCTAssertEqual(digits(codes().element(boundBy: 1)), Fixture.cardCode, "the new card's code was not filled")
             XCTAssertEqual(digits(codes().element(boundBy: 0)), "", "the saved card's code was filled from the new card's field")
         }
@@ -300,7 +307,7 @@ final class T4VaultFeatureTests: UITestCase {
 
     /// card-inner-scroll.html: a card form low in a modal that scrolls on its own. Filled once scrolled into view; with
     /// the form scrolled away again, a fill writes nothing and says the field can't be seen.
-    func test09_CardInnerScrollFillsOnceInView() throws {
+    func test10_CardInnerScrollFillsOnceInView() throws {
         step("provider-and-extension-on") {
             requireAutoFillProvider()
             requireSafariExtension()
@@ -310,7 +317,7 @@ final class T4VaultFeatureTests: UITestCase {
         try step("form-scrolled-into-view-and-filled") {
             openInSafari(Fixture.siteOrigin + "/test-pages/card-inner-scroll.html?uitest-events", heading: "Checkout")
             XCTAssertTrue(scrollToComfort(number, in: safari, tries: 16), "the card form could not be scrolled into view inside the modal")
-            try tapAndFill(number, "the card number", layout: layout) { self.digits(number) == Fixture.cardNumber }
+            try tapAndFill(number, "the card number", layout: layout, reach: .addressBar) { self.digits(number) == Fixture.cardNumber }
         }
         let unseen = popupSays("be seen on the page, so nothing was filled")
         step("scrolled-away-fills-nothing") {
@@ -318,7 +325,7 @@ final class T4VaultFeatureTests: UITestCase {
             let title = safari.webViews.staticTexts["Checkout"]
             XCTAssertTrue(scrollToComfort(title, in: safari, tries: 16), "the modal could not be scrolled back up")
             let before = digits(number)
-            XCTAssertTrue(fillCardFromPopup(until: { unseen.exists }, keepKeyboard: true), "the popup did not say the field can't be seen. It says: \(popupWords()). The page saw: \(pageEvents())")
+            XCTAssertTrue(fillCardFromPopup(until: { unseen.exists }, reach: .addressBar), "the popup did not say the field can't be seen. It says: \(popupWords()). The page saw: \(pageEvents())")
             closePopup()
             XCTAssertEqual(digits(number), before, "a fill with the field out of view changed it")
         }
@@ -327,10 +334,9 @@ final class T4VaultFeatureTests: UITestCase {
     /// Settings has the switch for other apps' keyboards, off by default. Whether a third-party keyboard is then kept out
     /// cannot be shown: the simulator has none installed, and the suite would have to ship a keyboard extension in an
     /// app of its own to add one.
-    func test10_ThirdPartyKeyboardSwitch() throws {
+    func test11_ThirdPartyKeyboardSwitch() throws {
         step("switch-off-by-default") {
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
             openSettings()
             let toggle = app.switches["Allow third-party keyboards"]
             scrollToComfort(toggle)
@@ -343,10 +349,9 @@ final class T4VaultFeatureTests: UITestCase {
 
     /// Two-step setup survives a trip to another app: the app locks on the way out, and after the unlock it opens the
     /// confirm step again with the same key. The code an authenticator would show then turns it on; a later one off.
-    func test11_TwoStepSetupSurvivesATripAway() {
+    func test12_TwoStepSetupSurvivesATripAway() {
         step("vault") {
-            bringAppForward()
-            reachVaultAnyWay()
+            freshVault()
         }
         let keyText = app.staticTexts.matching(NSPredicate(format: "label MATCHES '^[A-Z2-7]{4}( [A-Z2-7]{1,4})+$'")).firstMatch
         var key = ""
@@ -442,13 +447,41 @@ final class T4VaultFeatureTests: UITestCase {
         require(delete, "Delete login in the editor")
         scrollToComfort(delete)
         delete.tap()
-        let confirm = app.buttons.matching(NSPredicate(format: "label == 'Delete' AND identifier == ''")).firstMatch
-        require(confirm, "the delete confirmation", timeout: 5)
-        confirm.tap()
+        confirm("Delete", inDialog: "Delete this login?")
         if !waitUntil(15, { !self.vaultRow(name).exists }) {
             dumpTree(app, as: "login-not-deleted")
             XCTFail("\(name) is still in the vault after Delete")
         }
+    }
+
+    /// The app started again: it comes up locked, with nothing an earlier test left open over the vault.
+    private func freshVault() {
+        app.terminate()
+        launchApp()
+        reachVaultAnyWay()
+    }
+
+    /// Tap the button [label] of the dialog titled [title]. The rows behind a dialog can carry the same word (each trash
+    /// row has its own Delete forever), so it is the one that can be tapped while the dialog is up, nearest below its
+    /// title.
+    private func confirm(_ label: String, inDialog title: String) {
+        let heading = app.staticTexts[title]
+        require(heading, "the dialog “\(title)”", timeout: 5)
+        let buttons = app.buttons.matching(NSPredicate(format: "label == %@", label))
+        var target: XCUIElement?
+        _ = waitUntil(5) {
+            let top = heading.frame.minY
+            target = buttons.allElementsBoundByIndex
+                .filter { self.safelyHittable($0) && $0.frame.minY > top }
+                .min { $0.frame.minY < $1.frame.minY }
+            return target != nil
+        }
+        guard let target else {
+            dumpTree(app, as: "no-confirm-\(label)")
+            XCTFail("the dialog “\(title)” has no \(label) to tap")
+            return
+        }
+        target.tap()
     }
 
     /// The trash's row for [name]: a row with the name and a Restore button (the vault list behind has no Restore).
@@ -542,11 +575,11 @@ final class T4VaultFeatureTests: UITestCase {
     /// before it releases the card, until [outcome] holds. The popup's unlock lasts 90 s (APP_VAULT_LIFETIME_MS in
     /// extension/src/appvault.ts): a Fill that meets its end finds the unlock screen instead, and is tried once more.
     @discardableResult
-    private func fillCardFromPopup(until outcome: @escaping () -> Bool, keepKeyboard: Bool = false) -> Bool {
+    private func fillCardFromPopup(until outcome: @escaping () -> Bool, reach: PopupReach = .keyboardDone) -> Bool {
         let fill = safari.webViews.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fill this card'")).firstMatch
         let unlock = safari.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Unlock with'")).firstMatch
         for attempt in 1...2 {
-            if !openPopup(until: { fill.exists }, keepKeyboard: keepKeyboard) {
+            if !openPopup(until: { fill.exists }, reach: reach) {
                 XCTFail("the popup offered no card to fill. It says: \(popupDetails())")
                 return false
             }
@@ -558,26 +591,27 @@ final class T4VaultFeatureTests: UITestCase {
         return outcome()
     }
 
-    /// Tap [field] on the page until it has the keyboard, then fill the seeded card from the popup, keeping the keyboard
-    /// up when Safari's page menu can be reached past it, until [filled] holds; the popup is closed after. Otherwise the
-    /// test fails with what the popup said and what the page saw (its event log, served with ?uitest-events). One case
-    /// is skipped with its finding instead: the menu was behind the keyboard, closing the keyboard took the focus from
-    /// the field while the page kept it, and the popup then said nothing was tapped.
-    private func tapAndFill(_ field: XCUIElement, _ what: String, layout: String, until filled: @escaping () -> Bool) throws {
+    /// Tap [field] on the page (again when Safari took a tap as nothing), then fill the seeded card from the popup,
+    /// reached the [reach] way while the field has the keyboard, until [filled] holds; the popup is closed after.
+    /// Otherwise the test fails with what the popup said and what the page saw (its event log, served with
+    /// ?uitest-events). One case is skipped with its finding instead: the page menu was behind the keyboard, reaching it
+    /// blurred the field while the page kept its focus, and the popup then said nothing was tapped.
+    private func tapAndFill(_ field: XCUIElement, _ what: String, layout: String, reach: PopupReach, until filled: @escaping () -> Bool) throws {
         require(field, what)
-        // A moment after the page shows, as a person takes; tapped again when Safari took a tap as nothing.
+        // A moment after the page shows, as a person takes. Always one press: a field can have the focus already (a
+        // focus without a press chooses nothing).
         Thread.sleep(forTimeInterval: 2)
-        for _ in 0..<3 where !hasKeyboardFocus(field) {
+        for attempt in 0..<3 where attempt == 0 || !hasKeyboardFocus(field) {
             field.tap()
             _ = waitUntil(4) { self.hasKeyboardFocus(field) }
         }
         let focused = hasKeyboardFocus(field)
         let menu = safari.buttons["PageFormatMenuButton"]
-        let reachable = waitUntil(3) { menu.exists && menu.isHittable }
+        let reachable = waitUntil(3) { menu.exists && self.safelyHittable(menu) }
         shot("field-tapped-\(layout.lowercased())")
         if !reachable { dumpTree(safari, as: "page-menu-behind-keyboard-\(layout.lowercased())") }
         let letGo = popupSays("Tap the card number field on the page first")
-        _ = fillCardFromPopup(until: { filled() || letGo.exists }, keepKeyboard: true)
+        _ = fillCardFromPopup(until: { filled() || letGo.exists }, reach: reach)
         if filled() {
             closePopup()
             return
@@ -587,7 +621,10 @@ final class T4VaultFeatureTests: UITestCase {
         closePopup()
         let seen = pageEvents()
         if saidLetGo && focused && !reachable && seen.contains("hasFocus=true now=body") {
-            try skip("App defect (found 2026-11-13): no card can be filled from the popup in Safari's \(layout) tab layout. A card fill goes only into the form of the field the person tapped, and while that field has the keyboard, Safari's page menu (the way to the popup) is behind it. Closing the keyboard (its Done) blurs the field while the page keeps its focus, and the content script lets a field go when focus moves elsewhere in the page (noteFocusLeft, extension/src/content.ts), so the popup says “\(words)” and fills nothing. What the page saw: \(seen)")
+            let how = reach == .keyboardDone
+                ? "closing the keyboard with its Done"
+                : "bringing Safari's bar back by a tap on the page's address shrunk above the keyboard"
+            try skip("App defect (found 2026-11-13): in Safari's \(layout) tab layout a card cannot be filled from the popup after \(how). A card fill goes only into the form of the field the person tapped, and while that field has the keyboard, Safari's page menu (the way to the popup) is behind it. Reaching it that way blurs the field while the page keeps its focus, and the content script lets a field go when focus moves elsewhere in the page (noteFocusLeft, extension/src/content.ts), so the popup says “\(words)” and fills nothing. What the page saw: \(seen)")
         }
         XCTFail("\(what) was not filled (it had the keyboard: \(focused); Safari's page menu was in reach with the keyboard up: \(reachable)). The popup says: \(words). The page saw: \(seen)")
     }

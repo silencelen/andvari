@@ -1,10 +1,27 @@
 import CryptoKit
 import XCTest
 
+/// How Safari's page menu (the way to andvari's popup) is reached while a page field has the keyboard.
+enum PopupReach {
+    /// Close the keyboard with its Done first. That takes the focus from the field while the page keeps it.
+    case keyboardDone
+    /// Leave the keyboard up: the menu as it is, or Safari's bar brought back by a tap on its shrunk address.
+    case addressBar
+}
+
 /// iOS itself: Settings, Safari, and the pieces of the keyboard that belong to AutoFill.
 extension UITestCase {
     var settingsApp: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.Preferences") }
     var safari: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.mobilesafari") }
+
+    /// Whether [element] can be tapped, false for one caught mid-change with no frame on screen (isHittable fails the
+    /// test for such an element instead of answering).
+    func safelyHittable(_ element: XCUIElement) -> Bool {
+        guard element.exists else { return false }
+        let frame = element.frame
+        guard frame.width >= 1, frame.height >= 1, frame.intersects(springboard.frame) else { return false }
+        return element.isHittable
+    }
 
     /// "26.2" as (26, 2).
     var systemVersion: (major: Int, minor: Int) {
@@ -392,20 +409,37 @@ extension UITestCase {
     // MARK: - The Safari extension's popup
 
     /// Open andvari's popup on the page Safari shows and look at the phone until [done], answering Safari's
-    /// per-site questions on the way. The popup asks for Face ID by itself once it has painted.
+    /// per-site questions on the way. The popup asks for Face ID by itself once it has painted. [reach] is how
+    /// Safari's page menu is reached while a page field has the keyboard.
     @discardableResult
-    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true, keepKeyboard: Bool = false) -> Bool {
+    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true, reach: PopupReach = .keyboardDone) -> Bool {
         closePopup()
         _ = waitUntil(4) { self.fillOfferButton.exists }
         closeFillOffer()
         let menu = safari.buttons["PageFormatMenuButton"]
-        // The keyboard's bar has a Done of its own, and the keyboard can hide Safari's toolbar. Closing it takes the
-        // focus from the page's field, so [keepKeyboard] closes it only when the page menu cannot be reached past it.
+        let menuInReach = { menu.exists && self.safelyHittable(menu) }
         let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
-        if safari.keyboards.firstMatch.exists && keyboardDone.exists && !(keepKeyboard && menu.exists && menu.isHittable) {
-            tapWhereItIs(keyboardDone, in: safari)
+        if safari.keyboards.firstMatch.exists {
+            switch reach {
+            case .keyboardDone:
+                // The keyboard's bar has a Done of its own, and the keyboard can hide Safari's toolbar.
+                if keyboardDone.exists { tapWhereItIs(keyboardDone, in: safari) }
+            case .addressBar where !menuInReach():
+                // In the Compact and Bottom layouts the bar shrinks to the page's address above the keyboard: a tap on
+                // it brings the bar, and its page menu, back. A tap that opened the address for typing is cancelled.
+                let address = safari.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'CapsuleNavigationBar'")).firstMatch
+                if address.exists { tapWhereItIs(address, in: safari) }
+                if !waitUntil(5, menuInReach) {
+                    let cancel = safari.buttons["Cancel"]
+                    if cancel.exists { tapWhereItIs(cancel, in: safari) }
+                }
+                shot("page-menu-by-the-address-bar")
+                dumpTree(safari, as: "page-menu-by-the-address-bar")
+            case .addressBar:
+                break
+            }
         }
-        if !waitUntil(10, { menu.exists && menu.isHittable }) {
+        if !waitUntil(10, menuInReach) {
             dumpTree(safari, as: "no-page-menu")
             XCTFail("Safari's page menu button is not reachable")
             return false
@@ -432,7 +466,7 @@ extension UITestCase {
             // The button is the retry after a prompt that was cancelled or missed. It is also on screen for a moment
             // while the popup's own prompt is still on its way, so it is used only once it has stayed for a while,
             // and tapped where it was: a button that has just gone must not fail the test.
-            if unlock.exists && unlock.isHittable {
+            if unlock.exists && self.safelyHittable(unlock) {
                 if let since = unlockSeenSince {
                     if Date().timeIntervalSince(since) > 9 && !done() {
                         unlockSeenSince = nil
