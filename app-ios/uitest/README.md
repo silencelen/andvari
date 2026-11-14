@@ -34,7 +34,9 @@ under its own name, which the certificate carries too. Only the Safari extension
 provider (`UITEST=1` in `prepare.sh`, which this workflow sets; `extension/build.mjs`), and `ios-unsigned.yml` fails
 when a release bundle names the test domain. `checkout.html` is a shop page that embeds the provider's card form:
 `pay/card.html` in one frame (`?layout=card`, the default), one `pay/field.html` frame per field (`?layout=split`), or
-a security code alone (`?layout=code`). The shop's own name-on-card field there is never filled.
+a security code alone (`?layout=code`). The shop's own name-on-card field there is never filled. `?layout=lure` adds a
+rewards widget of another site with provider frames of its own (`rewards.html`), whose fields never join the code's
+fill; `?layout=clipped` clips the card frame to its postal code, so a fill from a tap there writes nothing else.
 
 ## Adding a test
 

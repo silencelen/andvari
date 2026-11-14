@@ -307,7 +307,7 @@ test("the Safari worker fills a card only into a payment provider's box, only by
   // Owner decision 2026-11-14, round-11 review: grants are minted only for the provider frames holding the person's
   // choices, and only when they are the frames the popup showed. Every provider origin is https (cardproviders.test.ts),
   // so no card goes to a plain-http page.
-  const plan = fill.indexOf("let plan = cardFillPlan(records(), Date.now());");
+  const plan = fill.indexOf("let plan = cardFillPlan(records(), Date.now(), providerFrameNotAllowed(tabId));");
   assert.ok(plan > 0 && plan < fill.indexOf("cardGrants.set(tabId"), "no grant before the plan of chosen frames");
   assert.ok(fill.indexOf("if (!sameFrames(shown, plan.targets))") < fill.indexOf("cardGrants.set(tabId"), "nor for frames the popup did not show");
   const reveal = bg.slice(bg.indexOf("async function revealCardForFill("), bg.indexOf("// ---- capture → pending save → resolve ----"));

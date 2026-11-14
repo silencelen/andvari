@@ -217,7 +217,15 @@ test("the hit test looks at nine points: the field itself at the centre; elsewhe
 });
 
 test("only the person chooses the card field, only in a provider's card document, held to the fill rules (round-7 H1, M2-tab, regression 6)", () => {
-  assert.match(content, /const cardBox = isCardProviderOrigin\(location\.origin\);/);
+  // Round-12 review: a provider's card document by its origin and, where the provider serves several kinds of element,
+  // its own path; a provider's other documents (an address element) report no card form at all.
+  assert.match(content, /const cardBox = isCardEntryDocument\(location\.origin, location\.pathname\);/);
+  assert.match(content, /const providerNonCardDocument = !cardBox && isCardProviderOrigin\(location\.origin\);/);
+  assert.match(content, /const all = providerNonCardDocument \? \[\] : allCardForms\(\);/);
+  // A collapsed card frame says so (an IntersectionObserver on its own document, implicit root).
+  assert.match(content, /const shown = e\.isIntersecting && e\.intersectionRect\.width > 0 && e\.intersectionRect\.height > 0;/);
+  assert.match(content, /\}\)\.observe\(document\.documentElement\);/);
+  assert.match(content, /ancestors: ancestorChain,/);
   const choose = content.slice(content.indexOf("function chooseIfPersonPut("), content.indexOf("/** The innermost element focus is on"));
   assert.match(choose, /if \(filling \|\| !cardBox\) return;/, "a press in any other document never chooses a card field");
   assert.match(choose, /const onField = press !== null && press\.target === t && now - press\.at < CHOOSE_PRESS_MS;/, "a press on that very field");
@@ -245,7 +253,7 @@ test("only the person chooses the card field, only in a provider's card document
   assert.match(left, /if \(filling \|\| cardFocus === null \|\| !document\.hasFocus\(\)\) return;/);
   assert.match(left, /if \(now === null \|\| now === cardFocus \|\| now === document\.body \|\| now === document\.documentElement\) return;\s*setCardFocus\(null\);/);
   assert.match(content, /if \(!cardFocus\.isConnected \|\| performance\.now\(\) - chosenAt > CHOICE_TTL_MS\) \{/, "the choice expires");
-  assert.match(content, /const CHOICE_TTL_MS = 10 \* 60 \* 1000;/, "as the worker's does (cardrelease.ts)");
+  assert.match(content, /const CHOICE_TTL_MS = 2 \* 60 \* 1000;/, "as the worker's does (cardrelease.ts; 2 minutes since the round-12 review)");
 });
 
 test("a card fill: only in a provider's card document, only where the person chose a field, only that form's fields that can be seen", () => {
@@ -257,14 +265,17 @@ test("a card fill: only in a provider's card document, only where the person cho
   assert.ok(!fill.includes("forms.length === 1"), "no sibling path");
   assert.equal(fill.match(/cardFormHolding\(anchor\)/g)?.length, 2, "the form holding the chosen field, before and after the round trip");
   const sig = fill.indexOf('if (!form || cardSigOf(form) !== sig) return nothing("no_form");');
-  const before = fill.indexOf('if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");');
-  const shownBefore = fill.indexOf('if (!(await shownInTopViewport(anchor))) return nothing("not_visible");');
+  const before = fill.indexOf('if (before === null) return nothing("not_visible");');
+  const shownBefore = fill.indexOf('if (!(await fieldsShown(before)).has(anchor)) return nothing("not_visible");');
   const reveal = fill.indexOf('await safeSend({ type: "revealCardForFill", itemId })');
-  const shownAfter = fill.lastIndexOf('if (!(await shownInTopViewport(anchor))) return nothing("not_visible");');
   const sigAfter = fill.indexOf('if (!now || cardSigOf(now) !== sig) return nothing("no_form");');
   const after = fill.indexOf('if (seen === null) return nothing("not_visible");');
-  const write = fill.indexOf("return applyCardFill(now, r.fields, seen);");
-  assert.ok(sig > 0 && sig < before && before < shownBefore && shownBefore < reveal && reveal < shownAfter && shownAfter < sigAfter && sigAfter < after && after < write, "checked before the card is asked for and again before it is written");
+  const shownAfter = fill.indexOf("const shown = await fieldsShown(seen);");
+  const write = fill.indexOf("return applyCardFill(now, r.fields, shown);");
+  assert.ok(sig > 0 && sig < before && before < shownBefore && shownBefore < reveal && reveal < sigAfter && sigAfter < after && after < shownAfter && shownAfter < write, "checked before the card is asked for and again before it is written");
+  // Round-12 review: EVERY field that would be written is asked of the top-level viewport, not only the chosen one; one
+  // that does not show is not written (applyCardFill writes only [seen]) and is named as not filled.
+  assert.match(content, /async function fieldsShown\(fields: ReadonlySet<FillableControl>\): Promise<Set<FillableControl>> \{\s*const list = \[\.\.\.fields\];\s*const shown = await Promise\.all\(list\.map\(\(f\) => shownInTopViewport\(f\)\)\);/);
   // The top-level viewport is asked with the implicit root (no `root`), at least half the field in it, and Chrome's
   // IntersectionObserver v2 visibility where the engine has it; no answer in time is a no.
   const shown = content.slice(content.indexOf("function shownInTopViewport("), content.indexOf("/** How long the top-level viewport may take to answer"));
@@ -301,11 +312,11 @@ test("the worker: a card only to a provider's card document, by the origin the b
   // L7: every new choice is stamped; a later report keeps a choice the record holds and never brings one back.
   assert.match(info, /const anchorAt = index === null \? undefined : msg\.choseNow === true \? Date\.now\(\) : typeof was\?\.anchor === "number" \? was\.anchorAt : undefined;/);
   // Round-11 review: a new choice of a kind lets go of that kind's choices in every other frame, which are told.
-  assert.match(info, /for \(const other of supersededChoices\(reg, frameId, msg\.forms\[anchor\]!, anchorAt\)\) \{[\s\S]*?reg\[other\] = \{ origin: r\.origin, forms: r\.forms, anchor: null \};[\s\S]*?\{ type: "dropCardChoice" \}/);
+  assert.match(info, /for \(const other of supersededChoices\(reg, frameId, msg\.forms\[anchor\]!, anchorAt\)\) \{[\s\S]*?reg\[other\] = \{ origin: r\.origin, forms: r\.forms, anchor: null,[\s\S]*?\{ type: "dropCardChoice" \}/);
   // The top frame's word about the provider frames it shows is a hint for the popup's line, kept apart from the records
   // a fill reads; the frames' ancestor origins are each frame's own report of what the browser lists for it.
   assert.match(info, /if \(frameId === 0\) \{\s*heard\.top = true;[\s\S]*?heard\.hints = /);
-  assert.match(info, /reg\[frameId\] = \{ origin, forms: msg\.forms, anchor, \.\.\.\(anchorAt !== undefined \? \{ anchorAt \} : \{\}\) \};/);
+  assert.match(info, /reg\[frameId\] = \{\s*origin, forms: msg\.forms, anchor, \.\.\.\(anchorAt !== undefined \? \{ anchorAt \} : \{\}\),[\s\S]*?ancestors: ancestorsOf\(msg\.ancestors\), \.\.\.\(typeof msg\.shown === "boolean" \? \{ shown: msg\.shown \} : \{\}\),\s*\};/);
   for (const [name, from, to] of [
     ["fillCardFromPopup", "async function fillCardFromPopup(", "async function revealCardForFill("],
     ["revealCardForFill", "async function revealCardForFill(", "// ---- capture → pending save → resolve ----"],
@@ -318,7 +329,9 @@ test("the worker: a card only to a provider's card document, by the origin the b
   assert.match(chip, /if \(!isCardProviderOrigin\(origin\)\) return no;/);
   assert.match(chip, /if \(rec\.origin !== origin \|\| !mayReceiveCard\(rec\)\) return no;/);
   const fill = background.slice(background.indexOf("async function fillCardFromPopup("), background.indexOf("async function revealCardForFill("));
-  assert.match(fill, /let plan = cardFillPlan\(records\(\), Date\.now\(\)\);/);
+  // Round-12 review: a provider frame the page shows that has not reported refuses (the page's hint can only refuse).
+  assert.match(fill, /let plan = cardFillPlan\(records\(\), Date\.now\(\), providerFrameNotAllowed\(tabId\)\);/);
+  assert.match(fill, /if \(plan\.reason === "unreported"\) \{[\s\S]{0,250}?return \{ ok: false, code: "provider_not_allowed", allowOrigin: plan\.origin,/);
   assert.match(fill, /if \(plan\.reason === "duplicate_kind"\) return \{ ok: false, code: "duplicate_fields",/, "two provider frames offering one kind: no fill at all");
   assert.match(fill, /if \(!sameFrames\(shown, plan\.targets\)\) return \{ ok: false, code: "changed",/, "exactly the frames the popup showed");
   assert.ok(fill.indexOf("if (!plan.ok)") < fill.indexOf("cardGrants.set(") && fill.indexOf("if (!sameFrames(") < fill.indexOf("cardGrants.set("), "refused before any grant is minted");

@@ -415,7 +415,7 @@ interface TabState {
    *  card-entry origin (cardproviders.ts) ever receives a card (owner decision 2026-11-14); the others' records only
    *  let the popup say why it copies instead. Cleared with the tab (onRemoved / lock). [U14]: a persisted pre-update
    *  `{fields}` record is DISCARDED on read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
-  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>;
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number; ancestors?: string[] | null; shown?: boolean }>;
   /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
    *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
   topOrigin?: string;
@@ -448,7 +448,7 @@ const cardGrants = new Map<number, Map<number, CardGrant>>();
  * payment providers' origins the top frame's own frames load, by their src. The last is the page's word, a HINT only:
  * it names the site the popup suggests allowing andvari on, and never decides where a card goes.
  */
-const cardReports = new Map<number, { top: boolean; origins: Set<string>; hints: string[] }>();
+const cardReports = new Map<number, { top: boolean; origins: Set<string>; hints: string[]; originless?: boolean }>();
 /** G2 save-card ([X2-A1]): the tab's pending card save — a MODULE-SCOPE Map, NEVER a `TabState`
  *  field. `persistTabs` serializes the entire tabs map to `storage.session` on every state change,
  *  so a `TabState.pendingCardSave` would write the FULL PAN at rest across a lock (the [iii] hazard).
@@ -4291,7 +4291,12 @@ async function cardFormInfo(
     // The page's own word about the provider frames it shows: a hint for the popup's line, nothing more (bounded).
     heard.hints = Array.isArray(msg.providerOrigins) ? msg.providerOrigins.filter((o): o is string => typeof o === "string" && isCardProviderOrigin(o) && new URL(o).origin === o).slice(0, 8) : [];
   }
-  if (origin === null) return { ok: false };
+  if (origin === null) {
+    // Round-12 review: a sub-frame whose message carries no origin (Firefox before 126) is never a card frame; the popup
+    // says that this browser fills no card in a payment frame.
+    if (frameId !== 0 && sender.origin === undefined) heard.originless = true;
+    return { ok: false };
+  }
   heard.origins.add(origin);
   const st = tabs.get(tabId) ?? {};
   const reg = st.cardForms ?? {};
@@ -4310,12 +4315,17 @@ async function cardFormInfo(
     const was = reg[frameId];
     const anchorAt = index === null ? undefined : msg.choseNow === true ? Date.now() : typeof was?.anchor === "number" ? was.anchorAt : undefined;
     const anchor = anchorAt === undefined ? null : index;
-    reg[frameId] = { origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}) };
+    reg[frameId] = {
+      origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}),
+      // Round-12 review: the frame's own report of its ancestor origins (a fill's chain of choices must share them) and
+      // whether it is collapsed (then it neither counts nor can be chosen).
+      ancestors: ancestorsOf(msg.ancestors), ...(typeof msg.shown === "boolean" ? { shown: msg.shown } : {}),
+    };
     // Round-11 review: a new choice of a kind clears the choices of that kind in every other frame, which are told.
     if (msg.choseNow === true && anchor !== null && anchorAt !== undefined && mayReceiveCard(reg[frameId])) {
       for (const other of supersededChoices(reg, frameId, msg.forms[anchor]!, anchorAt)) {
         const r = reg[other]!;
-        reg[other] = { origin: r.origin, forms: r.forms, anchor: null };
+        reg[other] = { origin: r.origin, forms: r.forms, anchor: null, ...(r.ancestors !== undefined ? { ancestors: r.ancestors } : {}), ...(r.shown !== undefined ? { shown: r.shown } : {}) };
         const drop: TabMsg = { type: "dropCardChoice" };
         void chrome.tabs.sendMessage(tabId, drop, { frameId: other }).catch(() => {});
       }
@@ -4371,6 +4381,13 @@ async function pruneGoneCardFrames(tabId: number): Promise<void> {
     }
   });
   if (changed) persistTabs();
+}
+
+/** The ancestor origins a frame's content script reported (`location.ancestorOrigins`, nearest first), bounded; null
+ *  when it reported none (Firefox has no such list) or anything malformed. */
+function ancestorsOf(v: unknown): string[] | null {
+  if (!Array.isArray(v) || v.length > 32) return null;
+  return v.every((o) => typeof o === "string" && o.length <= 2048) ? (v as string[]) : null;
 }
 
 /**
@@ -4623,13 +4640,17 @@ async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res
   broadcastRescanCardForms(tabId);
   const records = tabs.get(tabId)?.cardForms ?? {};
   const provider = providerCardFrames(records);
+  // Round-12 review: a provider frame the page shows that has not reported refuses every fill (its card kinds cannot
+  // be counted); the hint can only refuse, never release. Where the browser names no sub-frame's origin, that is why.
+  const originless = cardReports.get(tabId)?.originless === true;
+  const allow = providerFrameNotAllowed(tabId);
+  if (allow !== null) return originless ? { ...none, noFrameOrigin: true } : { ...none, allowOrigin: allow };
   if (provider.length > 0) {
     if (kindsOfferedTwice(records).length > 0) return { ...none, doubled: true };
-    const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin }) => ({ frameId, origin }));
+    const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin, kinds }) => ({ frameId, origin, kinds }));
     return { fillable: true, origin: frames[0]?.origin ?? provider[0]!.origin, frames, pageFormOnly: false };
   }
-  const allow = providerFrameNotAllowed(tabId);
-  if (allow !== null) return { ...none, allowOrigin: allow };
+  if (originless) return { ...none, noFrameOrigin: true };
   if (pageCardFormsOnly(records)) return { ...none, pageFormOnly: true };
   // Safari asks per site, and the popup cannot grant itself one (the app explains it). When nothing of this page has
   // reported, not even after the rescan above has had a moment, andvari is not running there: the line names no site,
@@ -4678,17 +4699,20 @@ async function fillCardFromPopup(itemId: string, shown: unknown, sender: chrome.
   const records = (): Readonly<Record<string, CardFrameRecord>> => tabs.get(tabId)?.cardForms ?? {};
   await pruneGoneCardFrames(tabId);
   // [T5] a registry miss pays one rescan + a 250 ms re-read.
-  let plan = cardFillPlan(records(), Date.now());
+  let plan = cardFillPlan(records(), Date.now(), providerFrameNotAllowed(tabId));
   if (!plan.ok && plan.reason === "no_choice") {
     broadcastRescanCardForms(tabId);
     await delay(250);
-    plan = cardFillPlan(records(), Date.now());
+    plan = cardFillPlan(records(), Date.now(), providerFrameNotAllowed(tabId));
   }
   if (!plan.ok) {
+    if (plan.reason === "unreported") {
+      if (cardReports.get(tabId)?.originless === true) return { ok: false, code: "no_frame_origin", error: "this browser does not say which site a frame comes from" };
+      return { ok: false, code: "provider_not_allowed", allowOrigin: plan.origin, error: "a payment provider's frame on the page has not reported" };
+    }
     if (plan.reason === "duplicate_kind") return { ok: false, code: "duplicate_fields", error: `more than one provider card frame asks for ${plan.kinds.join(", ")}` };
     if (eligibleCardFrames(tabId).length > 0) return { ok: false, code: "no_focus", error: "no card field chosen in a payment provider's card box" };
-    const allow = providerFrameNotAllowed(tabId);
-    if (allow !== null) return { ok: false, code: "provider_not_allowed", allowOrigin: allow, error: "andvari may not run in the payment provider's frame" };
+    if (cardReports.get(tabId)?.originless === true) return { ok: false, code: "no_frame_origin", error: "this browser does not say which site a frame comes from" };
     if (pageCardFormsOnly(records())) return { ok: false, code: "page_form", error: "andvari fills a card only into a payment provider's card box" };
     return { ok: false, code: "no_form", error: "the payment provider's card box is gone" };
   }

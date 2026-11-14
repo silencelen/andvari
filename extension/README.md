@@ -168,9 +168,10 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     value crosses into a provider's document only through a **one-shot `revealCardForFill` grant per
     frame, minted by a popup click and redeemable only by the frame it names, at the provider origin
     it was minted for** (`src/cardrelease.ts`), and only to frames where the person chose a card
-    field (a split-field provider: a tap in each field, then one Fill); nothing is filled while two
-    provider card frames offer the same field, and the chosen field must show in the top-level
-    viewport (IntersectionObserver). Inside the provider's form the
+    field: the newest choice and its quick chain of taps (same origin, same ancestor origins, each
+    within 30 s; a choice stands 2 minutes). Nothing is filled while two provider card frames offer
+    the same field or a provider frame the page shows has not reported, and every field written must
+    show in the top-level viewport (IntersectionObserver). Inside the provider's form the
     fill engine (`src/cardfill.ts` + `src/content.ts`) handles `<select>` expiry/type dropdowns,
     split-PAN boxes, radio card types and billing ZIP. The C1 in-page chip carries zero data, mints
     no grant and shows only inside a provider's card form — a signpost that opens the popup (design

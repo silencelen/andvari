@@ -70,7 +70,13 @@ await esbuild.build({
   minify: release,
   sourcemap: !release,
   // buildtarget.ts reads this: the App Store-distributed Safari build has no self-update channel.
-  define: { __ANDVARI_TARGET__: JSON.stringify(target), __ANDVARI_UITEST_PROVIDER__: JSON.stringify(uitest ? UITEST_PROVIDER : "") },
+  define: {
+    __ANDVARI_TARGET__: JSON.stringify(target),
+    __ANDVARI_UITEST_PROVIDER__: JSON.stringify(uitest ? UITEST_PROVIDER : ""),
+    // Round-12 review: the payment providers' sandbox and test hosts are card-entry origins in the debug and UI-test
+    // builds only (cardproviders.ts CARD_PROVIDER_TEST_ORIGINS); a release build fails if one is left in it (below).
+    __ANDVARI_PROVIDER_TEST_HOSTS__: JSON.stringify(!release || uitest),
+  },
   plugins: target === "safari" ? [noDefaultServer] : [],
 });
 
@@ -115,5 +121,16 @@ if (target === "safari") {
     const leaked = walk("dist").filter((f) => !f.endsWith(".png") && readFileSync(f, "utf8").includes(testHost));
     if (leaked.length > 0) throw new Error(`only the UI-test build may name ${testHost}, but it is in: ${leaked.join(", ")}`);
   }
+}
+if (release && !uitest) {
+  // The providers' sandbox and test hosts never ship (cardproviders.ts): read from the source, so a host added there is
+  // checked too.
+  const source = readFileSync("src/cardproviders.ts", "utf8");
+  const block = source.slice(source.indexOf("export const CARD_PROVIDER_TEST_ORIGINS"), source.indexOf("];", source.indexOf("export const CARD_PROVIDER_TEST_ORIGINS")));
+  const hosts = [...block.matchAll(/origin: "https:\/\/([^"]+)"/g)].map((m) => m[1]);
+  if (hosts.length === 0) throw new Error("build.mjs could not read the providers' test hosts from cardproviders.ts");
+  const walkAll = (dir) => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? walkAll(join(dir, name)) : [join(dir, name)]));
+  const leaked = walkAll("dist").filter((f) => !f.endsWith(".png") && hosts.some((h) => readFileSync(f, "utf8").includes(h)));
+  if (leaked.length > 0) throw new Error(`a release build must not list a payment provider's test host, but one is in: ${leaked.join(", ")}`);
 }
 console.log(`built → dist/ (${target}${release ? ", release" : ""}${uitest ? ", UI-test provider" : ""}; Load unpacked: extension/dist)`);

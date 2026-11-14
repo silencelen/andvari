@@ -250,6 +250,7 @@ test("a card fill that wrote nothing says why: no chosen field, one that cannot 
   // Two frames would take the same card detail: no fill at all.
   assert.equal(cardFillErrorCopy("duplicate_fields"), "This page shows more than one payment form asking for the same card detail, so andvari fills none of them.");
   assert.equal(cardFillErrorCopy("changed"), "The payment form changed after andvari opened. Open andvari again and fill.");
+  assert.match(cardFillErrorCopy("no_frame_origin"), /doesn't tell andvari which site a payment form's frame comes from/);
   assert.equal(cardFillErrorCopy("locked"), fillErrorCopy("locked"), "the rest as for a login fill");
   assert.equal(cardFillErrorCopy(undefined), fillErrorCopy(undefined));
 });

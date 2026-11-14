@@ -188,10 +188,13 @@ describe("S3 card-fill egress pins ([A9]) — the safety-critical background.ts 
 
   it("redemption binds the granted origin: the provider origin the browser reports for the redeeming frame", () => {
     expect(reveal()).toContain('if (!mayRedeem(grant, msg.itemId, sender, Date.now())) return { ok: false, error: "no card grant" };');
-    // sender.origin, else the frame's own sender.url (Safari promises no origin); an opaque "null" is no origin.
+    // sender.origin, else the TOP frame's own sender.url (Safari promises no origin; a sandboxed sub-frame keeps its URL
+    // but has no origin, round-12 review); an opaque "null" is no origin.
     expect(cr).toContain("const origin = frameOriginOf(sender);");
     expect(cr).toContain("return origin !== null && origin === grant.origin && isCardProviderOrigin(origin);");
-    expect(mayRedeem(grant, "card-1", { frameId: 3, url: "https://js.stripe.com/v3/elements-inner-card.html" }, NOW), "Safari: the frame's own URL").toBe(true);
+    expect(cr).toContain("return sender.frameId === 0 ? webOriginOfUrl(sender.url) : null;");
+    expect(mayRedeem(grant, "card-1", { frameId: 3, url: "https://js.stripe.com/v3/elements-inner-card-0a.html" }, NOW), "a sub-frame's URL is no origin").toBe(false);
+    expect(mayRedeem({ ...grant, frameId: 0, origin: "https://checkout.stripe.com" }, "card-1", { frameId: 0, url: "https://checkout.stripe.com/c/pay/x" }, NOW), "the top frame's own URL").toBe(true);
     expect(mayRedeem(grant, "card-1", { frameId: 3, origin: SHOP }, NOW), "the frame navigated to the shop").toBe(false);
     expect(mayRedeem(grant, "card-1", { frameId: 3, origin: "null", url: "https://js.stripe.com/x" }, NOW), "sandboxed").toBe(false);
     // A grant for a shop's own document is never minted, and could not be redeemed either.
@@ -342,8 +345,8 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     const STRIPE = "https://js.stripe.com";
     const BRAINTREE = "https://assets.braintreegateway.com";
     const NOW = 1_800_000_000_000;
-    const rec = (origin: string, forms: CardFieldKind[][], anchor: number | null, at = NOW - 1_000): CardFrameRecord =>
-      ({ origin, forms, anchor, ...(anchor !== null ? { anchorAt: at } : {}) });
+    const rec = (origin: string, forms: CardFieldKind[][], anchor: number | null, at = NOW - 1_000, ancestors: string[] = [SHOP]): CardFrameRecord =>
+      ({ origin, forms, anchor, ...(anchor !== null ? { anchorAt: at } : {}), ancestors });
     const full: CardFieldKind[] = ["cardnumber", "cardexpiry", "cardcvv", "cardname"];
     // The shop's richer top-frame form, chosen more recently, never out-bids the provider's frame…
     expect(chosenCardFrame({ 0: rec(SHOP, [full], 0, NOW - 10), 3: rec(STRIPE, [["cardnumber"]], 0, NOW - 5_000) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardnumber"] });
@@ -352,20 +355,29 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // The form is the one holding the chosen field, never the frame's richest; no choice made, none.
     expect(chosenCardFrame({ 3: rec(STRIPE, [full, ["cardcvv"]], 1) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardcvv"] });
     expect(chosenCardFrame({ 3: rec(STRIPE, [full], null) }, NOW)).toBe(null);
-    // A split provider: the frames the person tapped, each with its own form's kinds; an untapped frame gets nothing…
+    // A split provider: the frames the person tapped in one quick chain, each with its own form's kinds; an untapped frame
+    // gets nothing…
     const split = { 1: rec(BRAINTREE, [["cardnumber"]], 0, NOW - 2_000), 2: rec(BRAINTREE, [["cardexpiry"]], 0, NOW - 1_000), 3: rec(BRAINTREE, [["cardcvv"]], null) };
     expect(cardFillPlan(split, NOW)).toEqual({ ok: true, targets: [{ frameId: 2, origin: BRAINTREE, kinds: ["cardexpiry"] }, { frameId: 1, origin: BRAINTREE, kinds: ["cardnumber"] }] });
+    // …round-12 review: a field typed into for something else (a rewards widget's lure, inside another chain of
+    // documents, or long before) never joins a later fill: only the newest choice and its quick chain of taps.
+    const lure = { 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 90_000, ["https://rewards.example", SHOP]) };
+    expect(cardFillPlan(lure, NOW)).toEqual({ ok: true, targets: [{ frameId: 1, origin: STRIPE, kinds: ["cardcvv"] }] });
+    // …and a provider frame the page shows that has not reported refuses everything (the hint can only refuse).
+    expect(cardFillPlan(split, NOW, "https://js.stripe.com")).toEqual({ ok: false, reason: "unreported", origin: "https://js.stripe.com" });
     // …and a frame the page mounts beside or over the provider's (its own merchant account) offering a kind another
     // provider frame offers stops every fill, chosen or not: nothing tells which of the two the person meant.
     expect(cardFillPlan({ ...split, 9: rec(BRAINTREE, [["cardnumber"]], null) }, NOW)).toEqual({ ok: false, reason: "duplicate_kind", kinds: ["cardnumber"] });
     expect(cardFillPlan({ ...split, 9: rec(STRIPE, [["cardcvv"]], null) }, NOW)).toEqual({ ok: false, reason: "duplicate_kind", kinds: ["cardcvv"] });
-    // Exactly the frames and origins the popup showed.
-    expect(sameFrames([{ frameId: 1, origin: BRAINTREE }, { frameId: 2, origin: BRAINTREE }], [{ frameId: 2, origin: BRAINTREE }, { frameId: 1, origin: BRAINTREE }])).toBe(true);
-    expect(sameFrames([{ frameId: 1, origin: BRAINTREE }], [{ frameId: 2, origin: BRAINTREE }, { frameId: 1, origin: BRAINTREE }])).toBe(false);
+    // Exactly the frames, origins and card details the popup showed (it names the details, round-12 review).
+    const shownTargets = [{ frameId: 2, origin: BRAINTREE, kinds: ["cardexpiry"] as CardFieldKind[] }, { frameId: 1, origin: BRAINTREE, kinds: ["cardnumber"] as CardFieldKind[] }];
+    expect(sameFrames([{ frameId: 1, origin: BRAINTREE, kinds: ["cardnumber"] }, { frameId: 2, origin: BRAINTREE, kinds: ["cardexpiry"] }], shownTargets)).toBe(true);
+    expect(sameFrames([{ frameId: 1, origin: BRAINTREE, kinds: ["cardnumber"] }], shownTargets)).toBe(false);
+    expect(sameFrames([{ frameId: 1, origin: BRAINTREE, kinds: ["cardnumber", "cardcvv"] }, { frameId: 2, origin: BRAINTREE, kinds: ["cardexpiry"] }], shownTargets)).toBe(false);
     // Source anchors: the SW WIRES the plan at grant mint, freezing each target's kinds + sig ([U12]/[U15], never a live
     // registry read at redemption), and refuses a doubled kind, or frames the popup did not show, before minting anything.
     const fill = spanOf(bg, "async function fillCardFromPopup(", "async function revealCardForFill(");
-    expect(fill).toContain("let plan = cardFillPlan(records(), Date.now());");
+    expect(fill).toContain("let plan = cardFillPlan(records(), Date.now(), providerFrameNotAllowed(tabId));");
     expect(fill).toMatch(/if \(!sameFrames\(shown, plan\.targets\)\) return \{ ok: false, code: "changed",[^\n]*\n\s*const targets = plan\.targets;\n\s*const expiresMs = Date\.now\(\) \+ GRANT_TTL_MS;\n\s*cardGrants\.set\(/);
     expect(bg).toContain('{ itemId, frameId: t.frameId, origin: t.origin, kinds: t.kinds, sig: t.kinds.join(","), expiresMs }');
     expect(bg).toContain("return fillCardFromPopup(msg.itemId, msg.frames, sender);");
@@ -504,16 +516,21 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     const offers = spanOf(bg, "async function cardFillOffers(", "function asCardFillOutcome(");
     expect(offers).toContain('const none: Res<"cardFillOffers"> = { fillable: false, origin: null, frames: [], pageFormOnly: false };');
     expect(offers).toContain("if (kindsOfferedTwice(records).length > 0) return { ...none, doubled: true };");
-    expect(offers).toContain("const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin }) => ({ frameId, origin }));");
+    expect(offers).toContain("const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin, kinds }) => ({ frameId, origin, kinds }));");
+    // Round-12 review: a provider frame the page shows that has not reported refuses before anything is offered.
+    expect(offers.indexOf("if (allow !== null) return originless ? { ...none, noFrameOrigin: true } : { ...none, allowOrigin: allow };")).toBeLessThan(offers.indexOf("if (provider.length > 0) {"));
     expect(offers).toContain("return { fillable: true, origin: frames[0]?.origin ?? provider[0]!.origin, frames, pageFormOnly: false };");
-    expect(offers).toContain("if (allow !== null) return { ...none, allowOrigin: allow };");
+    expect(offers).toContain("if (allow !== null) return originless ? { ...none, noFrameOrigin: true } : { ...none, allowOrigin: allow };");
     expect(offers).toContain("if (pageCardFormsOnly(records)) return { ...none, pageFormOnly: true };");
     expect(offers).toMatch(/if \(BUILD_TARGET === "safari" && cardReports\.get\(tabId\)\?\.top !== true[^\n]*\n\s*await delay\(250\);\n\s*if \(cardReports\.get\(tabId\)\?\.top !== true\) return \{ \.\.\.none, allowEverywhere: true \};/);
     // The site named is a HINT from the page's own srcs (its top frame's report): it picks the words, never a frame.
     expect(bg).toContain("return heard?.hints.find((o) => !heard.origins.has(o)) ?? null;");
-    expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\("fill"/);
+    expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\(\s*"fill"/);
+    // The Fill names exactly which card details it writes, never a bare count (round-12 review).
+    expect(pp).toContain('dest.textContent = cardFill.frames.length > 0 ? `Fill → ${[...new Set(cardFill.frames.map((f) => new URL(f.origin).host))].join(", ")}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;');
+    expect(pp).not.toMatch(/fields\)`/);
     const reason = spanOf(pp, "function cardCopyReason(", "function renderCards(");
-    expect(reason).toMatch(/if \(cardFill\.fillable\) return null;\s*if \(cardFill\.doubled === true\) return CARD_DUPLICATE_FIELDS;\s*if \(cardFill\.allowOrigin !== undefined\) return cardProviderNotAllowedCopy\(cardFill\.allowOrigin, safari\);\s*if \(cardFill\.pageFormOnly\) return CARD_PAGE_FORM;\s*if \(cardFill\.allowEverywhere === true\) return cardProviderNotAllowedCopy\(undefined, safari\);\s*return null;/);
+    expect(reason).toMatch(/if \(cardFill\.fillable\) return null;\s*if \(cardFill\.doubled === true\) return CARD_DUPLICATE_FIELDS;\s*if \(cardFill\.noFrameOrigin === true\) return CARD_NO_FRAME_ORIGIN;\s*if \(cardFill\.allowOrigin !== undefined\) return cardProviderNotAllowedCopy\(cardFill\.allowOrigin, safari\);\s*if \(cardFill\.pageFormOnly\) return CARD_PAGE_FORM;\s*if \(cardFill\.allowEverywhere === true\) return cardProviderNotAllowedCopy\(undefined, safari\);\s*return null;/);
     expect(pp).toContain('const why = cardCopyReason(BUILD_TARGET === "safari");');
     // The Fill sends back exactly the frames this popup showed (round-11 review).
     expect(pp).toContain('const r = await ask({ type: "fillCardFromPopup", itemId, frames: cardFill.frames });');
@@ -750,7 +767,7 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     expect(gate).toContain("if (!isCardProviderOrigin(origin)) return no;");
     expect(gate).toContain("if (rec.origin !== origin || !mayReceiveCard(rec)) return no; // a refusal, NOT a repair case");
     expect(gate.indexOf("if (!isCardProviderOrigin(origin)) return no;"), "a shop's document is refused before anything else is looked up").toBeLessThan(gate.indexOf("CHIP_OFFER_MIN_GAP_MS"));
-    expect(spanOf(bg, "async function cardFormInfo(", "function broadcastRescanCardForms(")).toMatch(/const origin = frameOriginOf\(sender\);[\s\S]*?reg\[frameId\] = \{ origin, forms: msg\.forms, anchor,/);
+    expect(spanOf(bg, "async function cardFormInfo(", "function broadcastRescanCardForms(")).toMatch(/const origin = frameOriginOf\(sender\);[\s\S]*?reg\[frameId\] = \{\s*origin, forms: msg\.forms, anchor,/);
     // [S2] mid-nav tabs are refused — and (2026-07-27 audit, quality-secdrift--1) the stale check
     // PRECEDES the [S-rate] replay branch, so an [S2]-marked tab can never be served from cache
     // (belt to the loading handler's chipOfferLast delete — braces).

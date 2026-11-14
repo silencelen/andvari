@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -46,12 +46,14 @@ let tabHost: string | null = null;
 let cardFill: {
   fillable: boolean;
   origin: string | null;
-  /** The provider frames where the person chose a card field: shown as the Fill's destination, and sent back with it. */
-  frames: { frameId: number; origin: string }[];
+  /** The provider frames a Fill reaches, with the card details it fills there: shown as the Fill's destination (the
+   *  details by name, round-12 review), and sent back with it. */
+  frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[];
   pageFormOnly: boolean;
   allowOrigin?: string;
   allowEverywhere?: boolean;
   doubled?: boolean;
+  noFrameOrigin?: boolean;
 } = { fillable: false, origin: null, frames: [], pageFormOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
@@ -417,7 +419,7 @@ async function loadUnlocked(): Promise<void> {
       const o2 = cardFillOf(await ask({ type: "cardFillOffers" }));
       // [U21] pinned: the re-query diffs the reasons too — a late report from a provider's frame must surface its Fill,
       // and a late one from the page's own form the line that says why the rows copy instead.
-      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || JSON.stringify(o2.frames) !== JSON.stringify(cardFill.frames) || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere || o2.doubled !== cardFill.doubled) {
+      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || JSON.stringify(o2.frames) !== JSON.stringify(cardFill.frames) || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere || o2.doubled !== cardFill.doubled || o2.noFrameOrigin !== cardFill.noFrameOrigin) {
         cardFill = o2;
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
@@ -433,7 +435,9 @@ async function loadUnlocked(): Promise<void> {
 function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof cardFill {
   if (!offer) return { fillable: false, origin: null, frames: [], pageFormOnly: false };
   const frames = Array.isArray(offer.frames)
-    ? offer.frames.filter((f) => typeof f?.frameId === "number" && typeof f?.origin === "string").map((f) => ({ frameId: f.frameId, origin: f.origin }))
+    ? offer.frames
+        .filter((f) => typeof f?.frameId === "number" && typeof f?.origin === "string" && Array.isArray(f?.kinds))
+        .map((f) => ({ frameId: f.frameId, origin: f.origin, kinds: f.kinds.filter((k): k is CardFieldKind => typeof k === "string" && k in CARD_DETAIL_NAME) }))
     : [];
   return {
     fillable: offer.fillable,
@@ -443,6 +447,7 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
     ...(typeof offer.allowOrigin === "string" ? { allowOrigin: offer.allowOrigin } : {}),
     ...(offer.allowEverywhere === true ? { allowEverywhere: true } : {}),
     ...(offer.doubled === true ? { doubled: true } : {}),
+    ...(offer.noFrameOrigin === true ? { noFrameOrigin: true } : {}),
   };
 }
 
@@ -1013,6 +1018,7 @@ function cardCopyRemedy(): string {
 function cardCopyReason(safari: boolean): string | null {
   if (cardFill.fillable) return null;
   if (cardFill.doubled === true) return CARD_DUPLICATE_FIELDS;
+  if (cardFill.noFrameOrigin === true) return CARD_NO_FRAME_ORIGIN;
   if (cardFill.allowOrigin !== undefined) return cardProviderNotAllowedCopy(cardFill.allowOrigin, safari);
   if (cardFill.pageFormOnly) return CARD_PAGE_FORM;
   if (cardFill.allowEverywhere === true) return cardProviderNotAllowedCopy(undefined, safari);
@@ -1055,12 +1061,12 @@ function cardRow(it: CardItem): HTMLElement {
   body.append(name, sub);
   // S3: show exactly where the card will go — the browser-provided origin, under the row body.
   if (cardFill.fillable && cardFill.origin) {
-    // Where the card goes: the provider origins of the frames where the person chose a field (round-11 review), or the
-    // provider's own when none is chosen yet (the Fill then asks for a tap).
-    const origins = cardFill.frames.length > 0 ? [...new Set(cardFill.frames.map((f) => f.origin))] : [cardFill.origin];
+    // Where the card goes, and exactly which details (round-12 review): the provider origin of the frames where the
+    // person chose a field, and the details the fill writes there, by name; or the provider's own origin when none is
+    // chosen yet (the Fill then asks for a tap).
     const dest = document.createElement("div");
     dest.className = "card-fill-dest";
-    dest.textContent = `Fill → ${origins.join(", ")}${cardFill.frames.length > 1 ? ` (${cardFill.frames.length} fields)` : ""}`;
+    dest.textContent = cardFill.frames.length > 0 ? `Fill → ${[...new Set(cardFill.frames.map((f) => new URL(f.origin).host))].join(", ")}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;
     body.append(dest);
   }
 
@@ -1068,7 +1074,11 @@ function cardRow(it: CardItem): HTMLElement {
   acts.className = "acts";
   if (cardFill.fillable) {
     acts.append(
-      actBtn("fill", `Fill this card into ${cardFill.origin ?? "the page"}`, (btn) => void fillCardRow(it.itemId, btn)),
+      actBtn(
+        "fill",
+        cardFill.frames.length > 0 ? `Fill this card's ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))} into ${cardFill.origin ?? "the page"}` : `Fill this card into ${cardFill.origin ?? "the page"}`,
+        (btn) => void fillCardRow(it.itemId, btn),
+      ),
     );
   }
   if (it.hasNumber && copiesLongLivedSecrets()) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
@@ -1079,6 +1089,24 @@ function cardRow(it: CardItem): HTMLElement {
 
   r.append(glyph, body, acts);
   return r;
+}
+
+/** The card details a fill writes, by name, for the line that says where a Fill goes (round-12 review). */
+const CARD_DETAIL_NAME: Record<CardFieldKind, string> = {
+  cardnumber: "card number",
+  cardexpiry: "expiry date",
+  cardexpmonth: "expiry date",
+  cardexpyear: "expiry date",
+  cardcvv: "security code",
+  cardname: "name on card",
+  cardtype: "card type",
+  cardpostal: "postal code",
+};
+
+/** "card number, expiry date, security code": each detail once, in that order. */
+function cardDetailNames(kinds: readonly CardFieldKind[]): string {
+  const order: CardFieldKind[] = ["cardnumber", "cardexpiry", "cardexpmonth", "cardexpyear", "cardcvv", "cardname", "cardpostal", "cardtype"];
+  return [...new Set(order.filter((k) => kinds.includes(k)).map((k) => CARD_DETAIL_NAME[k]))].join(", ");
 }
 
 /** §5 partial-outcome copy: human labels per detected kind. The three expiry kinds deliberately
@@ -1134,7 +1162,7 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
     );
   } else {
     const code = r?.outcome?.code ?? r?.code;
-    const remedy = code === "page_form" || code === "provider_not_allowed" || code === "duplicate_fields" ? ` ${cardCopyRemedy()}` : "";
+    const remedy = code === "page_form" || code === "provider_not_allowed" || code === "duplicate_fields" || code === "no_frame_origin" ? ` ${cardCopyRemedy()}` : "";
     showMsg("err", cardFillErrorCopy(code, r?.allowOrigin, BUILD_TARGET === "safari") + remedy);
   }
 }
