@@ -5,7 +5,7 @@ import { brand, brandLabel, cardSubtitle, composeShortExpiry, digitsOnly, masked
 import { isCvvNameOrId } from "../../extension/src/detect";
 import type { CardFieldKind } from "../../extension/src/detect";
 import { LOGIN_FORMAT_VERSION, MAX_ITEM_FORMAT_VERSION } from "../../extension/src/format";
-import { chooseCardTarget } from "../../extension/src/messages";
+import { cardFillTargets, chosenCardFrame, mayRedeem, type CardFrameRecord, type CardGrant } from "../../extension/src/cardrelease";
 import type { ItemDoc } from "./api/types";
 import { WEAK_KDF_MESSAGE } from "./crypto/keys";
 import { VAULT_KEYS_DAMAGED } from "./vault/account";
@@ -38,13 +38,6 @@ import {
  * popup.ts — which cannot be imported under node at all. Those are read as text and asserted on,
  * so editing a pinned line must break this file first, deliberately.
  */
-
-/** messages.ts (imported above for the PURE chooseCardTarget export — §9 [U11]) types its send()
- *  helper against the chrome runtime, which the web program lacks (`types: ["node"]`). Type-only
- *  shim: nothing here ever CALLS send(), so no chrome value is evaluated at runtime. */
-declare global {
-  const chrome: { runtime: { sendMessage(req: unknown): Promise<unknown> } };
-}
 
 const extensionSrc = fileURLToPath(new URL("../../extension/src/", import.meta.url));
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
@@ -162,27 +155,72 @@ describe("CVV-negative rule — whole-token-run verdicts (never substring)", () 
 
 describe("S3 card-fill egress pins ([A9]) — the safety-critical background.ts lines", () => {
   const bg = readFileSync(extensionSrc + "background.ts", "utf-8");
+  // Owner decision 2026-11-14: card data goes only to a payment provider's card document. The release rule is the
+  // chrome-free leaf cardrelease.ts, pinned here by BEHAVIOUR (imported) and by the background lines that call it.
+  const cr = readFileSync(extensionSrc + "cardrelease.ts", "utf-8");
+
+  const spanOf = (src: string, from: string, to: string): string => {
+    const a = src.indexOf(from);
+    const b = src.indexOf(to);
+    expect(a, `span start missing: ${from}`).toBeGreaterThan(-1);
+    expect(b, `span end missing/out of order: ${to}`).toBeGreaterThan(a);
+    return src.slice(a, b);
+  };
+  const reveal = (): string => spanOf(bg, "async function revealCardForFill(", "// ---- capture → pending save → resolve ----");
+
+  const STRIPE = "https://js.stripe.com";
+  const SHOP = "https://shop.example";
+  const NOW = 1_800_000_000_000;
+  const grant: CardGrant = { itemId: "card-1", frameId: 3, origin: STRIPE, kinds: ["cardnumber"], sig: "cardnumber", expiresMs: NOW + 30_000 };
 
   it("redemption binds the granted frameId (fail-closed)", () => {
-    // The frame that detected the card form is the ONLY one that can redeem its grant.
-    expect(bg).toContain("sender.frameId === grant.frameId");
+    // The frame the grant was minted for is the ONLY one that can redeem it: one grant per frame, looked up by the
+    // redeeming frame's own browser-set frameId, and that frameId checked against the grant's again in the leaf.
+    const r = reveal();
+    expect(r).toContain('if (tabId === undefined || typeof frameId !== "number") return { ok: false, error: "not a page sender" };');
+    expect(r).toContain("const grant = cardGrants.get(tabId)?.get(frameId);");
+    expect(cr).toContain('if (typeof sender.frameId !== "number" || sender.frameId !== grant.frameId) return false;');
+    expect(mayRedeem(grant, "card-1", { frameId: 3, origin: STRIPE }, NOW)).toBe(true);
+    expect(mayRedeem(grant, "card-1", { frameId: 4, origin: STRIPE }, NOW), "another frame, even of the same provider").toBe(false);
+    expect(mayRedeem(grant, "card-1", { origin: STRIPE }, NOW), "no frameId").toBe(false);
+    expect(mayRedeem(grant, "card-2", { frameId: 3, origin: STRIPE }, NOW), "another item").toBe(false);
   });
 
-  it("redemption binds the granted origin (first-ever sender.origin reliance)", () => {
-    expect(bg).toContain("sender.origin === grant.origin");
+  it("redemption binds the granted origin: the provider origin the browser reports for the redeeming frame", () => {
+    expect(reveal()).toContain('if (!mayRedeem(grant, msg.itemId, sender, Date.now())) return { ok: false, error: "no card grant" };');
+    // sender.origin, else the frame's own sender.url (Safari promises no origin); an opaque "null" is no origin.
+    expect(cr).toContain("const origin = frameOriginOf(sender);");
+    expect(cr).toContain("return origin !== null && origin === grant.origin && isCardProviderOrigin(origin);");
+    expect(mayRedeem(grant, "card-1", { frameId: 3, url: "https://js.stripe.com/v3/elements-inner-card.html" }, NOW), "Safari: the frame's own URL").toBe(true);
+    expect(mayRedeem(grant, "card-1", { frameId: 3, origin: SHOP }, NOW), "the frame navigated to the shop").toBe(false);
+    expect(mayRedeem(grant, "card-1", { frameId: 3, origin: "null", url: "https://js.stripe.com/x" }, NOW), "sandboxed").toBe(false);
+    // A grant for a shop's own document is never minted, and could not be redeemed either.
+    expect(mayRedeem({ ...grant, frameId: 0, origin: SHOP }, "card-1", { frameId: 0, origin: SHOP }, NOW)).toBe(false);
   });
 
-  it("redemption re-fetches the live top-level origin and re-checks it", () => {
-    // A nav between the popup click and the redemption voids the fill: the recheck reads tab.url…
-    expect(bg).toContain("new URL(t.url).origin");
-    // …and compares the grant's origin against that freshly-fetched top origin.
-    expect(bg).toContain("grant.origin === top");
+  it("redemption reads the redeeming frame's LIVE origin, and looks at the grant again after the app answers", () => {
+    // Re-scoped (owner decision 2026-11-14; was "re-fetches the live top-level origin"): what is checked at redemption
+    // is the origin the browser reports for the frame redeeming NOW, so a frame that navigated since the click
+    // redeems nothing. The shop's top-level origin plays no part in a card release: no tab URL is read on this path.
+    const r = reveal();
+    expect(r).not.toMatch(/\btab\.url|\bt\.url|topOrigin\(/);
+    // The app may take a moment (a second Face ID): a navigation (the [A4] handler deletes the tab's grants), a new
+    // fill or the grant's expiry in between voids this redemption, before anything is composed.
+    const recheck = r.indexOf('if (cardGrants.get(tabId)?.get(frameId) !== grant || grant.expiresMs <= Date.now()) return { ok: false, error: "no card grant" };');
+    expect(recheck).toBeGreaterThan(r.indexOf("await appVaultCard("));
+    expect(recheck).toBeLessThan(r.indexOf("const declared = new Set(grant.kinds)"));
+    expect(mayRedeem(grant, "card-1", { frameId: 3, origin: STRIPE }, NOW + 30_000), "expired").toBe(false);
   });
 
   it("the card grant is ONE-SHOT (consumed on redemption) and a store SEPARATE from login grants", () => {
-    expect(bg).toContain("cardGrants.delete(");
     // A distinct store — sharing single-slot `grants` would let card/login grants clobber + cross-redeem.
-    expect(bg).toMatch(/const cardGrants = new Map</);
+    expect(bg).toMatch(/const cardGrants = new Map<number, Map<number, CardGrant>>\(\)/);
+    // Success consumes the redeeming frame's own grant, after every check above it…
+    const r = reveal();
+    expect(r).toContain("cardGrants.get(tabId)?.delete(frameId); // one-shot");
+    expect(r.indexOf("cardGrants.get(tabId)?.delete(frameId)")).toBeGreaterThan(r.indexOf("const declared = new Set(grant.kinds)"));
+    // …and the popup's fill voids every grant not redeemed once its round trip is over.
+    expect(spanOf(bg, "async function fillCardFromPopup(", "async function revealCardForFill(")).toMatch(/\} finally \{[\s\S]{0,200}?cardGrants\.delete\(tabId\);/);
   });
 
   it("the new popup-only card messages refuse tab (page) senders", () => {
@@ -295,30 +333,32 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     return src.slice(a, b);
   };
 
-  const F = (frameId: number, ...forms: CardFieldKind[][]): { frameId: number; forms: CardFieldKind[][] } => ({ frameId, forms });
-
-  it("[U11] frame 0 wins with ANY eligible form — a same-origin sub-frame never out-bids the visible top checkout", () => {
-    // The chooser is pure + exported from messages.ts (chrome-free at import) exactly so this
-    // suite can pin the RULE, not just its source shape.
-    expect(chooseCardTarget([F(3, ["cardnumber", "cardexpiry", "cardcvv", "cardname"]), F(0, ["cardnumber"])])).toEqual({ frameId: 0, kinds: ["cardnumber"] });
-    // Frame 0 recorded but formless → it does NOT bid; the richest sub-frame wins…
-    expect(chooseCardTarget([F(0), F(7, ["cardnumber"]), F(2, ["cardnumber", "cardcvv"])])).toEqual({ frameId: 2, kinds: ["cardnumber", "cardcvv"] });
-    // …and a richness tie goes to the LOWEST frameId, regardless of input order.
-    expect(chooseCardTarget([F(9, ["cardnumber", "cardcvv"]), F(4, ["cardexpiry", "cardname"])])).toEqual({ frameId: 4, kinds: ["cardexpiry", "cardname"] });
-    // Richest FORM within the chosen frame: most DISTINCT kinds; a tie keeps document order.
-    expect(chooseCardTarget([F(0, ["cardnumber"], ["cardnumber", "cardexpiry", "cardcvv"])])).toEqual({ frameId: 0, kinds: ["cardnumber", "cardexpiry", "cardcvv"] });
-    expect(chooseCardTarget([F(0, ["cardnumber", "cardcvv"], ["cardexpiry", "cardname"])])).toEqual({ frameId: 0, kinds: ["cardnumber", "cardcvv"] });
-    // Duplicate kinds must not inflate richness (twin expiry boxes ≠ a richer form).
-    expect(chooseCardTarget([F(0, ["cardnumber", "cardnumber", "cardnumber"], ["cardnumber", "cardcvv"])])).toEqual({ frameId: 0, kinds: ["cardnumber", "cardcvv"] });
-    expect(chooseCardTarget([])).toBe(null);
-    // Source anchors: the frame-0 branch exists in the pure chooser, and the SW actually WIRES it
-    // at grant mint (freezing the chosen form's kinds + sig — [U12]/[U15], not a live registry read).
-    const ms = readFileSync(extensionSrc + "messages.ts", "utf-8");
-    expect(ms).toContain("f.frameId === 0 && f.forms.length > 0");
-    // Round-6 review M2: the form holding the field the person chose (chooseAnchoredCardTarget) decides first; this
-    // chooser picks only when no frame reports a chosen field (that frame then answers no_focus).
-    expect(bg).toContain("const target = chooseAnchoredCardTarget(eligible) ?? chooseCardTarget(eligible)");
-    expect(bg).toContain("kinds: target.kinds, sig,");
+  it("[U11] a fill goes from the person's choice in a PROVIDER's document — a shop's frame never bids, whatever it holds", () => {
+    // Re-scoped (owner decision 2026-11-14; was "frame 0 wins with ANY eligible form"): the shop's own documents (its
+    // top frame and its same-origin frames) never receive a card, so they never compete. The rule is pure + exported
+    // from cardrelease.ts (chrome-free) exactly so this suite can pin the RULE, not just its source shape.
+    const SHOP = "https://shop.example";
+    const STRIPE = "https://js.stripe.com";
+    const NOW = 1_800_000_000_000;
+    const rec = (origin: string, forms: CardFieldKind[][], anchor: number | null, at = NOW - 1_000): CardFrameRecord =>
+      ({ origin, forms, anchor, ...(anchor !== null ? { anchorAt: at } : {}) });
+    const full: CardFieldKind[] = ["cardnumber", "cardexpiry", "cardcvv", "cardname"];
+    // The shop's richer top-frame form, chosen more recently, never out-bids the provider's frame…
+    expect(chosenCardFrame({ 0: rec(SHOP, [full], 0, NOW - 10), 3: rec(STRIPE, [["cardnumber"]], 0, NOW - 5_000) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardnumber"] });
+    // …and with no provider frame, nothing is chosen at all, however many forms the shop's frames hold.
+    expect(chosenCardFrame({ 0: rec(SHOP, [full], 0), 2: rec(SHOP, [full], 0) }, NOW)).toBe(null);
+    // The form is the one holding the chosen field, never the frame's richest; no choice made, none.
+    expect(chosenCardFrame({ 3: rec(STRIPE, [full, ["cardcvv"]], 1) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardcvv"] });
+    expect(chosenCardFrame({ 3: rec(STRIPE, [full], null) }, NOW)).toBe(null);
+    // The targets: the chosen frame, plus only same-parent, same-origin split-field siblings holding ONE form — a shop
+    // frame beside it (same parent, its own origin) gets nothing.
+    const tree = [{ frameId: 0, parentFrameId: -1 }, { frameId: 3, parentFrameId: 0 }, { frameId: 4, parentFrameId: 0 }];
+    expect(cardFillTargets({ 0: rec(SHOP, [full], null), 3: rec(STRIPE, [full], 0), 4: rec(SHOP, [["cardcvv"]], null) }, { frameId: 3, origin: STRIPE, kinds: full }, tree)).toEqual([{ frameId: 3, origin: STRIPE, kinds: full, chosen: true }]);
+    // Source anchors: the SW WIRES both at grant mint, freezing each target's kinds + sig ([U12]/[U15], never a live
+    // registry read at redemption).
+    expect(bg).toContain("let chosen = chosenCardFrame(records(), Date.now());");
+    expect(bg).toContain("const targets = cardFillTargets(records(), chosen, await frameTree(tabId));");
+    expect(bg).toContain('{ itemId, frameId: t.frameId, origin: t.origin, kinds: t.kinds, sig: t.kinds.join(","), expiresMs }');
   });
 
   it("[U12] grant-sig targeting fails CLOSED — sig-match only, never an index fallback", () => {
@@ -333,7 +373,9 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // End the span at the G2 capture section (G2's own composedPath()[0] lives BELOW this, and is
     // not part of the fill-redemption path this pin guards) — not at maybeOpen far downstream.
     const fillEntry = spanOf(ct, "async function fillCardIntoForm(", "// ---- G2 save-card capture");
-    expect(fillEntry).toContain('if (typeof sig !== "string") return nothing("no_form");');
+    // Owner decision 2026-11-14: and only in a payment provider's card document (the worker checks the origin the
+    // browser reports before it mints, and again at redemption; this is the content script's own refusal).
+    expect(fillEntry).toContain('if (typeof sig !== "string" || !cardBox) return nothing("no_form");');
     // Round-8 review: each check tests the form it names (no "!form || cardSigOf(now)" mix-up), the first before the card
     // is asked for and the second after it came back, before the write.
     const sigChecks = [...fillEntry.matchAll(/if \(!(form|now) \|\| cardSigOf\(\1\) !== sig\) return nothing\("no_form"\);/g)];
@@ -343,10 +385,18 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(revealAt).toBeGreaterThan(-1);
     expect(sigChecks[0]!.index!).toBeLessThan(revealAt);
     expect(sigChecks[1]!.index!).toBeGreaterThan(revealAt);
-    expect(fillEntry.indexOf("const now = cardFormHolding(anchor);")).toBeGreaterThan(revealAt);
+    expect(fillEntry.indexOf("const now = formNow();")).toBeGreaterThan(revealAt);
     expect(fillEntry).not.toContain("cardFormBySig");
-    // The Tier-1 shape this replaced — any positional pick — must never come back on this path.
-    for (const [name, span] of [["cardFormHolding", holding], ["fillCardIntoForm", fillEntry]] as const) {
+    // The frame where the person chose fills the form holding the chosen field, and nothing without one.
+    expect(fillEntry).toMatch(/if \(chosen === true\) \{[\s\S]{0,300}?anchor = chosenField\(\);[\s\S]{0,300}?if \(anchor === null\) return nothing\(/);
+    // Owner decision 2026-11-14: a split-field sibling (a provider frame per field, no chosen field of its own) fills
+    // its frame's ONLY card form, never one of several, and still sig-matched by the two checks above. That is the
+    // one positional read on this path, spelled exactly once, behind the anchor branch.
+    const single = "return forms.length === 1 ? forms[0]! : null;";
+    expect(fillEntry.split(single), "the sibling's single-form read, exactly once").toHaveLength(2);
+    expect(fillEntry).toMatch(/if \(anchor !== null\) return cardFormHolding\(anchor\);\s*const forms = freshCardForms\(\);\s*return forms\.length === 1 \? forms\[0\]! : null;/);
+    // The Tier-1 shape this replaced — any other positional pick — must never come back on this path.
+    for (const [name, span] of [["cardFormHolding", holding], ["fillCardIntoForm", fillEntry.replace(single, "")]] as const) {
       expect(span, `${name} has an index fallback`).not.toMatch(/\[0\]|\.at\(|forms\[/);
     }
     // SW side ([U14]/[A3]): a malformed grant (missing kinds/sig) refuses before ANY compose.
@@ -366,8 +416,11 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(report).toContain("const sig = JSON.stringify(forms)");
     expect(report).not.toContain(".join(");
     // The GRANT sig stays single-level kinds.join(",") (unambiguous over a flat list) — the two
-    // sigs are different beasts and must not converge on one encoding by refactor.
-    expect(bg).toContain('const sig = target.kinds.join(",")');
+    // sigs are different beasts and must not converge on one encoding by refactor. Since the owner
+    // decision 2026-11-14 one fill mints a grant per target frame: the grant and the fillCard
+    // message carry the same per-frame join.
+    expect(bg).toContain('sig: t.kinds.join(","), expiresMs');
+    expect(bg).toContain('const msg: TabMsg = { type: "fillCard", itemId, sig: t.kinds.join(","), chosen: t.chosen };');
   });
 
   it("[U17] composedPath()[0] retargets the shadow-blind paths: focusin, input, keydown, click-reopen, focusout (+G2 capture keydown)", () => {
@@ -423,22 +476,34 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(sv.match(/nativeValueSetter\.call\(input, value\)/g)).toHaveLength(2);
   });
 
-  it("[U21] crossOriginFormsOnly: exact neutral copy, mutually-exclusive flags, Fill gated on fillable alone", () => {
-    // Byte-exact design sentence — capability-framed, never vouching the page is a checkout.
-    // F24 (2026-08-13 audit): lowercase brand. This was the ONE capitalized user-facing "andvari"
-    // in the tree — and this pin was what protected the drift. If a sentence-initial capital is
-    // ever wanted here, rephrase so the brand is not the first word.
-    expect(pp).toContain("andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.");
-    expect(pp, "the brand is lowercase in running copy").not.toContain("Andvari can't auto-fill");
-    // The SW computes the two flags mutually exclusive in ONE return — an eligible frame can
-    // never also raise the explainer, so gating Fill on `fillable` alone renders no Fill button
-    // in the explainer state.
-    expect(bg).toContain("return { fillable: eligible, origin: eligible ? top : null, crossOriginFormsOnly: recorded && !eligible };");
+  it("[U21] the copy-instead line: exact neutral copy, one reason at a time, Fill gated on fillable alone", () => {
+    // Re-scoped (owner decision 2026-11-14; was crossOriginFormsOnly): with no payment provider's card form to fill,
+    // the popup says in one line why its rows copy instead: the page takes the card in its own fields, or a provider's
+    // form is there in a frame andvari may not run in (named, to allow). Byte-exact, capability-framed sentences.
+    // F24 (2026-08-13 audit): lowercase brand — if a sentence-initial capital is ever wanted, rephrase so the brand is
+    // not the first word.
+    const er = readFileSync(extensionSrc + "errors.ts", "utf-8");
+    expect(er).toContain(`export const CARD_PAGE_FORM = "andvari fills a card only into a payment provider's card form, and this page takes the card itself.";`);
+    expect(er, "the brand is lowercase in running copy").not.toContain("Andvari fills a card");
+    expect(er).toContain("`The card form comes from ${host}, where Safari doesn't let andvari run yet. To fill it, allow andvari on ${host} or on Every Website in Safari's extension settings.`");
+    expect(er).toContain("`The card form comes from ${host}, where andvari isn't allowed to run. To fill it, allow andvari on ${host} in the extension's site access.`");
+    // The SW answers ONE of the three, in one place: a provider's card form → fillable, no reason; else a provider's
+    // frame it may not run in → allowOrigin; else the page's own card form → pageFormOnly. An eligible frame can never
+    // also raise a reason, so gating Fill on `fillable` alone renders no Fill button beside the line.
+    const offers = spanOf(bg, "async function cardFillOffers(", "function asCardFillOutcome(");
+    expect(offers).toContain('const none: Res<"cardFillOffers"> = { fillable: false, origin: null, pageFormOnly: false };');
+    expect(offers).toContain("if (frames.length > 0) return { fillable: true, origin: chosenCardFrame(records, Date.now())?.origin ?? frames[0]!.origin, pageFormOnly: false };");
+    expect(offers).toContain("if (allow !== null) return { ...none, allowOrigin: allow };");
+    expect(offers).toContain("return { ...none, pageFormOnly: pageCardFormsOnly(records) };");
+    // The Cards rows render after this answer, so the browser's frame tree it may read is bounded in time.
+    expect(bg).toContain("const frames = await Promise.race([nav.getAllFrames({ tabId }), delay(FRAME_TREE_TIMEOUT_MS).then(() => null)]);");
     expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\("fill"/);
-    expect(pp).toContain("cardsPspNote.hidden = items.length === 0 || !cardFill.crossOriginFormsOnly");
-    // The popup's delayed re-query diffs the flag too (a late PSP-frame report must surface the
-    // explainer), folding a missing field (mixed-version SW) to false.
-    expect(pp).toContain("(o2.crossOriginFormsOnly === true) !== cardFill.crossOriginFormsOnly");
+    expect(pp).toContain('const why = cardFill.fillable ? null : cardFill.allowOrigin !== undefined ? cardProviderNotAllowedCopy(cardFill.allowOrigin, BUILD_TARGET === "safari") : cardFill.pageFormOnly ? CARD_PAGE_FORM : null;');
+    expect(pp).toContain("cardsPspNote.hidden = items.length === 0 || why === null;");
+    // The popup's delayed re-query diffs every field (a late provider-frame report must surface or clear the line),
+    // folding a missing field (mixed-version SW) to false.
+    expect(pp).toContain("o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin");
+    expect(pp).toContain("pageFormOnly: offer.pageFormOnly === true");
   });
 });
 
@@ -524,7 +589,8 @@ describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1�
   it("[V4] the discovery badge paints CARD_BADGE_TEXT only when a card form is eligible AND there is no login count", () => {
     // refreshTabBadge is the tab's SINGLE badge authority so the login count and the card dot never
     // clobber each other: login count takes precedence; the dot paints ONLY when loginCount === 0
-    // and an eligible same-origin card frame exists.
+    // and a payment provider's card frame is in the tab (owner decision 2026-11-14 — the only
+    // frames a card can go to).
     expect(bg).toContain('const CARD_BADGE_TEXT = "•"');
     // Review-fold: refreshTabBadge went SYNC — its origin now comes from the recorded top-frame
     // sender.origin (st.topOrigin), never a tab.url read; no await, no lock interleave.
@@ -533,8 +599,10 @@ describe("Tier-3 card autofill pins (design 2026-07-23-…-tier3.md §7) — V1�
     expect(badge).not.toContain("await topOrigin(");
     expect(badge).not.toMatch(/tab\.url/);
     expect(badge).toContain("const loginCount = host !== \"\" ? matchesFor(host).length : 0;");
-    expect(badge).toContain("loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId, top).length > 0 ? CARD_BADGE_TEXT : \"\"");
+    expect(badge).toContain("loginCount > 0 ? String(loginCount) : top !== null && eligibleCardFrames(tabId).length > 0 ? CARD_BADGE_TEXT : \"\"");
     expect(badge).toContain("chrome.action.setBadgeText({ tabId, text })");
+    // …and "eligible" is the release rule's own answer, nothing looser.
+    expect(bg).toContain("function eligibleCardFrames(tabId: number): { frameId: number; origin: string }[] {\n  return providerCardFrames(tabs.get(tabId)?.cardForms ?? {});\n}");
   });
 
   it("[V4] a top-level navigation clears the card dot in the [A4] loading handler, beside the cardForms delete", () => {
@@ -573,9 +641,10 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // The Res branches admit no `string` type — no origin echo, no item name, no masked identity.
     expect(ms).toMatch(/T extends "cardChipOffer"\s*\?\s*\{ fillable: boolean; locked: boolean \}/);
     expect(ms).toMatch(/T extends "openPopupForCards"\s*\?\s*\{ opened: boolean \}/);
-    // [S4b] the repair nudge rides the typed wire (a rename on one side is a silent no-op).
-    expect(ms).toContain('{ type: "reportPageInfo" }');
-    expect(bg).toContain('{ type: "reportPageInfo" }');
+    // [S4b] the repair nudge rides the typed wire (a rename on one side is a silent no-op). Since the owner decision
+    // 2026-11-14 the chip needs only the asking frame's own record, so the nudge is that frame's card rescan.
+    expect(ms).toContain('| { type: "rescanCardForms" }');
+    expect(bg).toContain('const rescan: TabMsg = { type: "rescanCardForms" };');
   });
 
   it("[C2] cardChipOffer is PASSIVE (a focus loop must not defer the idle autolock); the click is NOT", () => {
@@ -626,8 +695,8 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
 
   it("[S2] a top-level nav marks the tab stale SYNCHRONOUSLY — before the async topOrigin erase", () => {
     // The erase can only run after `await ensureLoaded()`; between navigation-start and that
-    // microtask the map still holds the PREVIOUS document's top origin, which is exactly what the
-    // chip gate compares `sender.origin` against. The marker is added beside `cardGrants.delete`
+    // microtask the map still holds the PREVIOUS document's top origin and card records, which
+    // are exactly what the badge and the chip gate read. The marker is added beside `cardGrants.delete`
     // (pre-await) and released in a `finally` so a failed hydrate can't blind the tab forever.
     expect(bg).toContain("const topOriginPendingClear = new Set<number>();");
     const handler =
@@ -642,7 +711,7 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     expect(handler).toContain("chipRepairLast.delete(tabId)");
   });
 
-  it("[S8]/[S1]/[S3] the cardChipOffer gate: no tab URL, no topOrigin() read, strict frame 0, no vault condition", () => {
+  it("[S8]/[S1]/[S3] the cardChipOffer gate: no tab URL, no topOrigin() read, a provider's frame only, no vault condition", () => {
     // PLACEMENT: the handler lives inside the refreshTabBadge → "Popup ONLY" span so the shipped
     // [V4] negatives cover it too; these are the gate's OWN pins (the [A4] pin is scoped to the
     // onUpdated handler and [V4] to refreshTabBadge — neither would catch a brand-new handler, and
@@ -651,13 +720,19 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     const gate = spanOf(bg, "async function cardChipOffer(", "/** C1 §C4");
     expect(gate).not.toMatch(/tab\.url/);
     expect(gate).not.toContain("topOrigin("); // `topOriginPendingClear` has no paren — the real read does
-    // [S1] STRICTLY frameId 0. The shipped badge's `frameId === undefined || frameId === 0`
-    // disjunct is a fail-OPEN admission — tolerable for a badge repaint, never for a per-frame
-    // render decision. Reproducing it here must red this pin.
-    expect(gate).toContain('typeof frameId !== "number" || frameId !== 0');
+    // [S1] re-scoped (owner decision 2026-11-14; was "strictly frameId 0"): the chip shows only where a card can go —
+    // a payment provider's card document, usually a sub-frame — so ANY frame may ask, and its browser-reported origin
+    // decides. The frameId must still be a number: the badge's `frameId === undefined ||` disjunct is a fail-OPEN
+    // admission, never acceptable for a per-frame render decision. Reproducing it here must red this pin.
+    expect(gate).toContain('if (tabId === undefined || typeof frameId !== "number") return no;');
     expect(gate, "the gate must not inherit the badge's fail-open frameId disjunct").not.toContain("frameId === undefined ||");
-    // The origin comparison is browser-set on BOTH sides.
-    expect(gate).toContain("sender.origin !== top");
+    // The origin is browser-set on BOTH sides: this message's own (frameOriginOf: sender.origin, else the frame's own
+    // sender.url), a provider's card-entry origin, and the frame's record, filed from the same browser report.
+    expect(gate).toContain("const origin = frameOriginOf(sender);");
+    expect(gate).toContain("if (!isCardProviderOrigin(origin)) return no;");
+    expect(gate).toContain("if (rec.origin !== origin || !mayReceiveCard(rec)) return no; // a refusal, NOT a repair case");
+    expect(gate.indexOf("if (!isCardProviderOrigin(origin)) return no;"), "a shop's document is refused before anything else is looked up").toBeLessThan(gate.indexOf("CHIP_OFFER_MIN_GAP_MS"));
+    expect(spanOf(bg, "async function cardFormInfo(", "function broadcastRescanCardForms(")).toMatch(/const origin = frameOriginOf\(sender\);[\s\S]*?reg\[frameId\] = \{ origin, forms: msg\.forms, anchor,/);
     // [S2] mid-nav tabs are refused — and (2026-07-27 audit, quality-secdrift--1) the stale check
     // PRECEDES the [S-rate] replay branch, so an [S2]-marked tab can never be served from cache
     // (belt to the loading handler's chipOfferLast delete — braces).
@@ -675,18 +750,16 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // [S-rate] + [S4b]: the gate is throttled, and a MISSING record repairs (never a refusal —
     // a hostile frame must not be able to retry a "no" into a "yes").
     expect(gate).toContain("CHIP_OFFER_MIN_GAP_MS");
-    expect(gate).toMatch(/if \(top === undefined \|\| !hasForm\) \{[\s\S]{0,200}?repairPageRecords\(tabId, now\);/);
-    // Re-scoped (review #7): the repair's rescan is now FRAME-0 SCOPED, not the tab-wide
-    // broadcast. The wide form messaged every frame incl. cross-origin ones, each doing a full
-    // document + shadow-root scan — a top frame that deletes its own registry entry could drive
-    // that as a cross-origin CPU amplifier, and the chip only ever needs frame 0's record.
-    expect(bg).toMatch(
-      /function repairPageRecords\([\s\S]{0,900}?CHIP_REPAIR_MIN_GAP_MS[\s\S]{0,1200}?rescanCardForms[\s\S]{0,200}?\{ frameId: 0 \}/,
-    );
-    expect(bg, "the repair must not tab-broadcast the rescan").not.toMatch(
-      /function repairPageRecords\([\s\S]{0,1400}?broadcastRescanCardForms\(/,
-    );
-    expect(bg).toContain('chrome.tabs.sendMessage(tabId, msg, { frameId: 0 })');
+    expect(gate).toMatch(/if \(rec === undefined\) \{[\s\S]{0,200}?repairCardRecord\(tabId, frameId, now\);[\s\S]{0,200}?return no;/);
+    expect(gate.match(/repairCardRecord\(/g), "the refusal branches never repair").toHaveLength(1);
+    // Re-scoped (review #7, then the owner decision 2026-11-14): the repair's rescan goes to the ONE frame whose record
+    // is missing — a provider's frame, past the origin check above — never the tab-wide broadcast. The wide form
+    // messaged every frame incl. cross-origin ones, each doing a full document + shadow-root scan: a frame that deletes
+    // its own registry entry could drive that as a cross-origin CPU amplifier.
+    const repair = spanOf(bg, "function repairCardRecord(", "async function cardChipOffer(");
+    expect(repair).toContain("CHIP_REPAIR_MIN_GAP_MS");
+    expect(repair).toContain("void chrome.tabs.sendMessage(tabId, rescan, { frameId }).catch(() => {});");
+    expect(repair, "the repair must not tab-broadcast the rescan").not.toContain("broadcastRescanCardForms(");
   });
 
   it("[C4] openPopupForCards ATTEMPTS the one API and answers honestly — never tabs.create, never a pre-mint", () => {

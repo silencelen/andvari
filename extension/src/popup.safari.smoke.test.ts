@@ -155,7 +155,7 @@ test("it prompts once on open, shows the list after the unlock whatever the card
       case "matches": return { locked: !unlocked, matches: unlocked ? [{ ...item, siteMatch: true }] : [] };
       case "allItems": return { locked: !unlocked, items: unlocked ? [item] : [] };
       case "cardItems": return { locked: !unlocked, items: [] }; // the app's vault has no cards: an empty list, not "locked"
-      case "cardFillOffers": return { fillable: false, origin: null, crossOriginFormsOnly: false };
+      case "cardFillOffers": return { fillable: false, origin: null, pageFormOnly: false };
       case "ping": return { ok: true };
       case "updateStatus": return { current: "0", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null };
       default: return undefined;
@@ -189,7 +189,7 @@ test("a popup opened again inside the unlock's lifetime shows the list without a
       case "matches": return { locked: false, matches: [] };
       case "allItems": return { locked: false, items: [] };
       case "cardItems": return { locked: false, items: [] };
-      case "cardFillOffers": return { fillable: false, origin: null, crossOriginFormsOnly: false };
+      case "cardFillOffers": return { fillable: false, origin: null, pageFormOnly: false };
       default: return undefined;
     }
   };
@@ -207,7 +207,7 @@ test("the Safari popup shows no desktop setup banners, no connection test, and n
       case "appServer": return { app: "set" };
       case "serverInfo": return { url: "https://home.example", trustedStore: true, block: null };
       case "status": return { ...lockedStatus, pageSummoned: true }; // no Face ID by itself in this test
-      case "cardFillOffers": return { fillable: false, origin: null, crossOriginFormsOnly: false };
+      case "cardFillOffers": return { fillable: false, origin: null, pageFormOnly: false };
       default: return undefined;
     }
   };
@@ -231,7 +231,7 @@ test("when the worker's ask of the app got no answer, the popup asks the app and
       case "appServerAnswer": adopted = msg; return { app: "set" };
       case "serverInfo": return adopted ? { url: "https://home.example", trustedStore: true, block: null } : { url: "https://no-server.invalid", trustedStore: true, block: { kind: "unsettled" } };
       case "status": return { ...lockedStatus, pageSummoned: true };
-      case "cardFillOffers": return { fillable: false, origin: null, crossOriginFormsOnly: false };
+      case "cardFillOffers": return { fillable: false, origin: null, pageFormOnly: false };
       default: return undefined;
     }
   };

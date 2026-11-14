@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "provider_frame" | "field_changed";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -249,25 +249,40 @@ export function fillErrorCopy(code: FillFailCode | undefined): string {
   }
 }
 
-/** A card fill that wrote nothing: the two refusals of round-5 review C1 in words, the rest as for a login fill. */
-export function cardFillErrorCopy(code: CardFillFailCode | undefined, providerHost?: string): string {
+/** Why a card is not filled into this page (owner decision 2026-11-14): andvari fills a card only into a payment
+ *  provider's card form, and this page takes the card in its own fields. One line; the popup adds the remedy (the copy
+ *  buttons, or the andvari app in Safari). */
+export const CARD_PAGE_FORM = "andvari fills a card only into a payment provider's card form, and this page takes the card itself.";
+
+/** A payment provider's card form is on the page, in a frame andvari may not run in: the origin to allow. [safari]: the
+ *  Safari build, where the person allows it per site (or on every website) in Safari. */
+export function cardProviderNotAllowedCopy(origin: string | undefined, safari: boolean): string {
+  let host = "the payment provider's site";
+  try {
+    if (origin !== undefined) host = new URL(origin).host;
+  } catch {
+    /* keep the general words */
+  }
+  return safari
+    ? `The card form comes from ${host}, where Safari doesn't let andvari run yet. To fill it, allow andvari on ${host} or on Every Website in Safari's extension settings.`
+    : `The card form comes from ${host}, where andvari isn't allowed to run. To fill it, allow andvari on ${host} in the extension's site access.`;
+}
+
+/** A card fill that wrote nothing: the refusals in words, the rest as for a login fill. */
+export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigin?: string, safari = false): string {
   switch (code) {
-    case "provider_frame":
-      // Round-8 review H. Neutral: a frame's source is the page's own claim, so the copy names a listed provider's host
-      // without vouching that the page is a checkout, and otherwise says only what andvari saw and did.
-      return providerHost !== undefined
-        ? `This page takes the card in a payment form from ${providerHost}. andvari doesn't fill a card into the page itself there, so nothing was filled.`
-        : "Something else sits over or under the card field you tapped, such as a form embedded from another page. andvari doesn't fill a card there, so nothing was filled.";
-    case "field_changed":
-      return "The card field changed after you tapped it, so nothing was filled. Tap it again, then fill.";
+    case "page_form":
+      return CARD_PAGE_FORM;
+    case "provider_not_allowed":
+      return cardProviderNotAllowedCopy(allowOrigin, safari);
     case "no_focus":
-      return "Tap the card number field on the page first, then fill again.";
+      return "Tap the card field in the payment form first, then fill again.";
     case "not_visible":
       return "The card field you tapped can't be seen on the page, so nothing was filled. Scroll to the form and try again, or fill it by hand.";
     case "closed_form":
-      return "This page keeps its card form where andvari can't tell which field you tapped, so nothing was filled. Fill it by hand.";
+      return "This payment form keeps its fields where andvari can't tell which one you tapped, so nothing was filled. Fill it by hand.";
     case "no_form":
-      return "The card form on this page changed — tap its card number field and try again.";
+      return "The payment form changed — tap its card field and try again.";
     case "no_fields":
       return "Couldn't fill the card fields on this page.";
     default:

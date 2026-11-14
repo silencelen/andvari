@@ -425,8 +425,8 @@ function isRendered(el: HTMLElement): boolean {
  * field to the full rules ([probeVisibility] with `fill`). Shared by login and card detection on every target.
  *
  * Round-7 review: rules like these cannot win against a script that owns the top frame, which controls rendering. The
- * structural defence is elsewhere (paymentproviders.ts: no card fill into a page whose card fields are a provider's
- * frames); these rules are defence in depth for first-party card forms.
+ * card defence is structural (owner decision 2026-11-14, cardrelease.ts): a card goes only into a payment provider's
+ * own document, never into a page's. Inside that document these rules keep the provider's own hidden fields unfilled.
  */
 function isVisible(el: HTMLElement): boolean {
   return isRendered(el) && visibilityOf(probeVisibility(el, { onScreen: false, hitTest: false }), proxiedAtDetection(el)) === "ok";
@@ -853,41 +853,6 @@ export function paintsOver(p: PaintFacts): boolean {
 }
 
 const REPLACED = new Set(["IMG", "VIDEO", "CANVAS", "IFRAME", "FRAME", "EMBED", "OBJECT", "PICTURE"]);
-/** The elements that show another document or a plug-in's content: a frame, whatever its source or none (round-8 H). */
-export const FRAME_TAGS: ReadonlySet<string> = new Set(["IFRAME", "FRAME", "EMBED", "OBJECT"]);
-
-/** PURE: whether [a] and [b] share an area; boxes that only touch do not. */
-export function boxesOverlap(a: Box, b: Box): boolean {
-  const w = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
-  const h = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
-  return w > 0.5 && h > 0.5;
-}
-
-/** PURE: whether [p] lies in [b]. */
-export function boxContains(b: Box, p: { x: number; y: number }): boolean {
-  return b.width > 0 && b.height > 0 && p.x >= b.left && p.x < b.left + b.width && p.y >= b.top && p.y < b.top + b.height;
-}
-
-/** PURE: the smallest box holding every one of [boxes] that has an area; null when none has. */
-export function unionBox(boxes: readonly Box[]): Box | null {
-  const real = boxes.filter((b) => b.width > 0 && b.height > 0);
-  if (real.length === 0) return null;
-  const left = Math.min(...real.map((b) => b.left));
-  const top = Math.min(...real.map((b) => b.top));
-  const right = Math.max(...real.map((b) => b.left + b.width));
-  const bottom = Math.max(...real.map((b) => b.top + b.height));
-  return { left, top, width: right - left, height: bottom - top };
-}
-
-/** PURE: the part of [b] inside [clip], or null when none is. */
-export function clipBox(b: Box, clip: Box): Box | null {
-  const left = Math.max(b.left, clip.left);
-  const top = Math.max(b.top, clip.top);
-  const right = Math.min(b.left + b.width, clip.left + clip.width);
-  const bottom = Math.min(b.top + b.height, clip.top + clip.height);
-  return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
-}
-
 function paintFactsOf(at: Element): PaintFacts {
   const view = at.ownerDocument.defaultView!;
   const cs = view.getComputedStyle(at);
@@ -972,40 +937,6 @@ export function excusedOffCentre(at: Element): boolean {
 }
 
 /**
- * Elements that can host a shadow root (DOM Standard, attachShadow): a custom element, or one of these. In Safari a
- * closed root's content is out of this script's sight, so such an element is never excused as part of a field.
- */
-const SHADOW_HOSTS = new Set(["ARTICLE", "ASIDE", "BLOCKQUOTE", "BODY", "DIV", "FOOTER", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER", "MAIN", "NAV", "P", "SECTION", "SPAN"]);
-
-/** PURE (by tag): whether [tagName] names an element that can host a shadow root. */
-export function canHostShadow(tagName: string): boolean {
-  return tagName.includes("-") || SHADOW_HOSTS.has(tagName.toUpperCase());
-}
-
-/** PURE: whether [src] is a page of a browser extension (another password manager's menu, say), never a site's frame. */
-export function extensionFrameSrc(src: string): boolean {
-  return /^(chrome|moz|safari-web|safari|ms-browser)-extension:/i.test(src.trim());
-}
-
-/**
- * PURE: whether a computed `transform` keeps a box axis-aligned (none, a translation, or a scale with no rotation or
- * skew), so a point and a box can be mapped through it by its bounding box. Anything else (a rotation, a skew, a
- * perspective) is refused where a frame's content must be mapped into its parent.
- */
-export function axisAligned(transform: string): boolean {
-  const t = transform.trim();
-  if (t === "" || t === "none") return true;
-  const m = /^matrix(3d)?\(([^)]*)\)$/.exec(t);
-  if (m === null) return false;
-  const v = m[2]!.split(",").map((x) => Number.parseFloat(x));
-  if (v.some((x) => !Number.isFinite(x))) return false;
-  if (m[1] === undefined) return v.length === 6 && v[1] === 0 && v[2] === 0 && v[0]! > 0 && v[3]! > 0;
-  // matrix3d, column-major: only a scale and a translation, no perspective.
-  return v.length === 16 && v[0]! > 0 && v[5]! > 0 && v[10]! > 0 && v[15] === 1 &&
-    [1, 2, 3, 4, 6, 7, 8, 9, 11].every((i) => v[i] === 0);
-}
-
-/**
  * What shows at each of [points] (viewport coordinates of [el]'s document): "self" when, at every one, the topmost
  * element that paints anything ([paintsOver]) is [el] or inside it; "other" otherwise, including where [el] is not there
  * at all (clipped, or under something). At the centre nothing else is excused, not even the field's own label or
@@ -1073,15 +1004,6 @@ export function probeVisibility(el: HTMLElement, opts: { onScreen: boolean; hitT
     hit = whatShowsAt(el, samplePoints(rect).filter((p) => p.x >= 0 && p.y >= 0 && p.x < vw && p.y < vh), opts.ignore);
   }
   return { chain, ink, rect, extents: extentsOf(el, view), viewport: opts.onScreen ? { width: vw, height: vh } : null, hit };
-}
-
-/** Where [el] sits in its scrolling container's content (or the page's): unmoved by scrolling, moved by a relayout. */
-export function contentPositionOf(el: HTMLElement): Box {
-  const view = el.ownerDocument.defaultView ?? window;
-  const r = el.getBoundingClientRect();
-  const extents = extentsOf(el, view);
-  const e = extents[extents.length - 1]!;
-  return { left: r.left - e.left, top: r.top - e.top, width: r.width, height: r.height };
 }
 
 /** [U6] per-sweep-generation label cache: extraction costs textContent walks and a form-sized
@@ -1383,8 +1305,9 @@ export function findLoginForms(root: Document | ShadowRoot): LoginForm[] {
   return out;
 }
 
-/** A same-page card form: a field group with a detected card-NUMBER anchor. `fields` carries the
- *  index-aligned card kinds + their inputs (CSC demotion applied) for the S3 fill executor. */
+/** A same-page card form: a field group with a detected card-NUMBER anchor (in a payment provider's card document, any
+ *  card field: [findCardForms]'s `numberless`). `fields` carries the index-aligned card kinds + their inputs (CSC
+ *  demotion applied) for the S3 fill executor. */
 export interface CardFormFieldRef {
   kind: CardFieldKind;
   input: FillableControl;
@@ -1401,8 +1324,10 @@ export interface CardForm {
   fields: CardFormFieldRef[];
 }
 
-function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): CardForm | null {
-  if (!fields.some((f) => f.cardKind === "cardnumber")) return null; // a card form REQUIRES the PAN anchor
+function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[], numberless: boolean): CardForm | null {
+  // A card form REQUIRES the PAN anchor, except in a payment provider's card document, where a security code alone
+  // (saved-card re-authentication) or one field of a form split across frames is a card form of its own.
+  if (!numberless && !fields.some((f) => f.cardKind === "cardnumber")) return null;
   const refs: CardFormFieldRef[] = [];
   // [W12] same-name cardtype radios collapse to ONE ref within THIS form ([W10] never document-wide):
   // the first member owns the ref (+ a growing `group` array of members); later members fold in.
@@ -1432,6 +1357,7 @@ function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: F
   // The count predicate is the SHARED `postalIsAmbiguous` (also driven by the pure test) — this DOM
   // path can't run under node --test, so the exported predicate is what carries direct coverage.
   const finalRefs = postalIsAmbiguous(refs.map((r) => r.kind)) ? refs.filter((r) => r.kind !== "cardpostal") : refs;
+  if (finalRefs.length === 0) return null;
   return { form, container, fields: finalRefs };
 }
 
@@ -1443,11 +1369,12 @@ export function postalIsAmbiguous(kinds: readonly (CardFieldKind | null)[]): boo
 }
 
 /** All same-page card forms under `root`, document order — same grouping as findLoginForms so the
- *  two views never disagree on which fields belong to which form. */
-export function findCardForms(root: Document | ShadowRoot): CardForm[] {
+ *  two views never disagree on which fields belong to which form. [numberless]: a payment provider's card document
+ *  (content.ts cardBox), where a group of card fields with no card number is a card form too. */
+export function findCardForms(root: Document | ShadowRoot, opts: { numberless?: boolean } = {}): CardForm[] {
   const out: CardForm[] = [];
   for (const g of groupFields(root)) {
-    const built = buildCardForm(g.form, g.container, g.fields);
+    const built = buildCardForm(g.form, g.container, g.fields, opts.numberless === true);
     if (built) out.push(built);
   }
   return out;

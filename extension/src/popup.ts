@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, cardFillErrorCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -38,11 +38,11 @@ async function ask<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promi
 }
 
 let tabHost: string | null = null;
-/** S3: whether the active tab has a same-origin card form we may Fill into, and to which origin.
- *  Fetched once per unlocked render — the active tab can't change while the popup is open.
- *  `crossOriginFormsOnly` (Tier 2 §6 [U21]) drives the PSP explainer; mutually exclusive with
- *  `fillable` (SW-computed), so the explainer state can never also render a Fill button. */
-let cardFill: { fillable: boolean; origin: string | null; crossOriginFormsOnly: boolean; providerHost?: string } = { fillable: false, origin: null, crossOriginFormsOnly: false };
+/** S3: whether the active tab has a payment provider's card form we may Fill into, and to which origin (owner decision
+ *  2026-11-14: andvari fills a card only there). Fetched once per unlocked render — the active tab can't change while
+ *  the popup is open. When it is not fillable, `pageFormOnly` (the page takes the card in its own fields) or
+ *  `allowOrigin` (a provider's form andvari may not run in) gives the one line that says why the rows copy instead. */
+let cardFill: { fillable: boolean; origin: string | null; pageFormOnly: boolean; allowOrigin?: string } = { fillable: false, origin: null, pageFormOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
 let searchSeq = 0;
@@ -400,17 +400,15 @@ async function loadUnlocked(): Promise<void> {
   // delayed re-query below is what picks up a form the rescan just surfaced (CSS-revealed step,
   // bfcache return) — freshness without an inline wait on the popup's critical path.
   const offer = await ask({ type: "cardFillOffers" });
-  cardFill = offer
-    ? { fillable: offer.fillable, origin: offer.origin, crossOriginFormsOnly: offer.crossOriginFormsOnly === true, ...(typeof offer.providerHost === "string" ? { providerHost: offer.providerHost } : {}) }
-    : { fillable: false, origin: null, crossOriginFormsOnly: false };
+  cardFill = cardFillOf(offer);
   renderCards(cards.items);
   window.setTimeout(() => {
     void (async () => {
-      const o2 = await ask({ type: "cardFillOffers" });
-      // [U21] pinned: the re-query diffs crossOriginFormsOnly too — a late PSP-frame report
-      // must surface the explainer, not just a late same-origin form the Fill button.
-      if (o2 && (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || (o2.crossOriginFormsOnly === true) !== cardFill.crossOriginFormsOnly)) {
-        cardFill = { fillable: o2.fillable, origin: o2.origin, crossOriginFormsOnly: o2.crossOriginFormsOnly === true, ...(typeof o2.providerHost === "string" ? { providerHost: o2.providerHost } : {}) };
+      const o2 = cardFillOf(await ask({ type: "cardFillOffers" }));
+      // [U21] pinned: the re-query diffs the reasons too — a late report from a provider's frame must surface its Fill,
+      // and a late one from the page's own form the line that says why the rows copy instead.
+      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin) {
+        cardFill = o2;
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
       }
@@ -419,6 +417,12 @@ async function loadUnlocked(): Promise<void> {
   startTotp();
   // Safari on iOS: no focus on the search field. It would raise the keyboard over the list the moment it appears.
   if (BUILD_TARGET !== "safari") el<HTMLInputElement>("search").focus();
+}
+
+/** The worker's card offer for the active tab, as the popup keeps it (nothing fillable when it did not answer). */
+function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof cardFill {
+  if (!offer) return { fillable: false, origin: null, pageFormOnly: false };
+  return { fillable: offer.fillable, origin: offer.origin, pageFormOnly: offer.pageFormOnly === true, ...(typeof offer.allowOrigin === "string" ? { allowOrigin: offer.allowOrigin } : {}) };
 }
 
 /** activeTab (granted by opening the popup) exposes the page URL on http/https only. */
@@ -959,8 +963,9 @@ async function tickTotp(): Promise<void> {
 /* ---- cards: copy group beneath the logins (cards design 2026-07-09; S3 in-page fill 2026-07-10)
  * Rows reuse the login-row styling. The row shows the masked identity line only; number/expiry/CVV
  * go straight from the SW to the clipboard (copyPassword's exact path), never into this DOM. When
- * the active tab has a same-origin card form (cardFillOffers), each row also offers a Fill button
- * that shows the target origin — the trusted, unspoofable surface for the egress grant ([A2]/R1). */
+ * the active tab holds a payment provider's card form (cardFillOffers; owner decision 2026-11-14),
+ * each row also offers a Fill button that shows the provider's origin — the trusted, unspoofable
+ * surface for the egress grant ([A2]/R1). */
 
 const cardsLabel = document.createElement("div");
 cardsLabel.className = "section-label";
@@ -969,33 +974,27 @@ cardsLabel.hidden = true;
 const cardsList = document.createElement("div");
 cardsList.className = "list";
 cardsList.hidden = true;
-/** Tier 2 §6 [U21] PSP explainer — capability-framed NEUTRAL copy, EXACT design sentence (never
- *  "this checkout…": the signal is attacker-assertable by any embedded frame and must not vouch
- *  the page is a checkout). Shown only while the SW reports crossOriginFormsOnly; the Fill
- *  button never renders in that state (the SW computes the two flags mutually exclusive, and
- *  cardRow gates Fill on `fillable` alone). */
+/** The one line that says why the rows copy instead of filling (owner decision 2026-11-14): the page takes the card in
+ *  its own fields, or a payment provider's form is there that andvari may not run in (its origin, to allow). Shown only
+ *  while the SW reports one of them; the Fill button never renders then (cardRow gates Fill on `fillable` alone). */
 const cardsPspNote = document.createElement("div");
 cardsPspNote.className = "empty slim";
-// F24: the brand is lowercase in running copy everywhere else in the product (and the popup's own
-// wordmark) — this was the single capitalized user-facing "Andvari" in the tree.
-cardsPspNote.textContent = "andvari can't auto-fill payment forms embedded from another site. Use the copy buttons instead.";
 cardsPspNote.hidden = true;
 el("all-list").after(cardsLabel, cardsPspNote, cardsList);
+
+/** What to do instead of a fill: the copy buttons, or in the Safari build (which copies no card number or code) the app. */
+function cardCopyRemedy(): string {
+  return copiesLongLivedSecrets() ? "Use the copy buttons instead." : "Copy what you need from the andvari app.";
+}
 
 /** Empty = hidden: login-only hoards see no Cards group at all. */
 function renderCards(items: CardItem[]): void {
   cardsLabel.hidden = items.length === 0;
   cardsList.hidden = items.length === 0;
-  // The explainer needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
-  cardsPspNote.hidden = items.length === 0 || !cardFill.crossOriginFormsOnly;
-  // Threat model case c: when the card is taken in a provider's frame, the explainer names its host; in the Safari
-  // build (which copies no card number or code) it points at the app.
-  if (cardFill.providerHost !== undefined) {
-    cardsPspNote.textContent = `This page takes the card in a payment form from ${cardFill.providerHost}, so andvari doesn't fill it. ` +
-      (copiesLongLivedSecrets() ? "Use the copy buttons instead." : "Copy what you need from the andvari app.");
-  } else if (!copiesLongLivedSecrets()) {
-    cardsPspNote.textContent = "andvari can't auto-fill payment forms embedded from another site. Copy what you need from the andvari app.";
-  }
+  // The line needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
+  const why = cardFill.fillable ? null : cardFill.allowOrigin !== undefined ? cardProviderNotAllowedCopy(cardFill.allowOrigin, BUILD_TARGET === "safari") : cardFill.pageFormOnly ? CARD_PAGE_FORM : null;
+  cardsPspNote.hidden = items.length === 0 || why === null;
+  if (why !== null) cardsPspNote.textContent = `${why} ${cardCopyRemedy()}`;
   cardsList.replaceChildren();
   for (const it of items) cardsList.append(cardRow(it));
 }
@@ -1099,9 +1098,8 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
     );
   } else {
     const code = r?.outcome?.code ?? r?.code;
-    const host = r?.providerHost ?? r?.outcome?.providerHost;
-    const remedy = code === "provider_frame" ? (copiesLongLivedSecrets() ? " Use the copy buttons instead." : " Copy what you need from the andvari app.") : "";
-    showMsg("err", cardFillErrorCopy(code, host) + remedy);
+    const remedy = code === "page_form" || code === "provider_not_allowed" ? ` ${cardCopyRemedy()}` : "";
+    showMsg("err", cardFillErrorCopy(code, r?.allowOrigin, BUILD_TARGET === "safari") + remedy);
   }
 }
 

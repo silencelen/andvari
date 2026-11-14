@@ -106,6 +106,9 @@ jobs:
           for f in options.html options.js connector.html connector.js offscreen.html offscreen.js INSTALL.txt; do
             test ! -e "$APP/PlugIns/AndvariSafari.appex/$f" || { echo "the Safari appex must not ship $f"; exit 1; }
           done
+          # The UI-test build's stand-in payment provider (extension/build.mjs, UITEST=1) is never in a release bundle:
+          # a card goes only to a listed provider's card form, and the test domain is no provider.
+          if grep -rl 'andvari-uitest' "$APP/PlugIns/AndvariSafari.appex"; then echo "the Safari appex names the UI-test domain"; exit 1; fi
           test -d "$APP/PlugIns/AndvariAutoFill.appex" || { echo "AutoFill extension missing"; exit 1; }
           for b in "$APP" "$APP/PlugIns/AndvariSafari.appex" "$APP/PlugIns/AndvariAutoFill.appex"; do
             exe="$b/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$b/Info.plist")"

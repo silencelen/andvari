@@ -49,7 +49,8 @@ jobs:
           java-version: "17"
 
       # Everything Gradle and npm produce for this job, keyed on every input they read. A change to the app's
-      # Swift or to the tests alone skips the Kotlin/Native link, which is most of a cold run.
+      # Swift or to the tests alone skips the Kotlin/Native link, which is most of a cold run. The Safari files are the
+      # UI-test build (UITEST=1, below), so the key says so: a cache of release files is never taken for them.
       - name: Restore the built core, Safari files and server
         id: built
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -59,7 +60,7 @@ jobs:
             app-ios/AndvariSafari/web
             server/build/libs/andvari-server.jar
             tools/uitest-seed/build/libs/andvari-uitest-seed.jar
-          key: uitest-built-${{ runner.os }}-${{ hashFiles('core/**', 'server/**', 'tools/uitest-seed/**', 'extension/**', 'spec/**', 'gradle/**', '*.gradle.kts', 'gradle.properties', 'docs/self-hosting.md', 'deploy/**', 'scripts/ci/build-libsodium-ios.sh', 'app-ios/scripts/prepare.sh') }}
+          key: uitest-built-uitestprovider-${{ runner.os }}-${{ hashFiles('core/**', 'server/**', 'tools/uitest-seed/**', 'extension/**', 'spec/**', 'gradle/**', '*.gradle.kts', 'gradle.properties', 'docs/self-hosting.md', 'deploy/**', 'scripts/ci/build-libsodium-ios.sh', 'app-ios/scripts/prepare.sh') }}
 
       - name: Restore libsodium
         if: steps.built.outputs.cache-hit != 'true'
@@ -75,9 +76,11 @@ jobs:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
 
+      # UITEST=1: the Safari extension's UI-test build, which adds the test site's stand-in payment provider to the
+      # card-entry origins (extension/build.mjs); ios-unsigned.yml checks that the release bundle names no test domain.
       - name: Kotlin framework and Safari files
         if: steps.built.outputs.cache-hit != 'true'
-        run: app-ios/scripts/prepare.sh iosSimulatorArm64
+        run: UITEST=1 app-ios/scripts/prepare.sh iosSimulatorArm64
 
       - name: Server and seeding tool
         if: steps.built.outputs.cache-hit != 'true'
@@ -101,8 +104,16 @@ jobs:
         run: |
           grep -q 'swift_name("SimulatorSoftwareQuickUnlockKey")' core/build/bin/iosSimulatorArm64/releaseFramework/AndvariCore.framework/Headers/AndvariCore.h
 
+      # A card is filled only into a payment provider's card form (owner decision 2026-11-14). The worker and the content
+      # script under test both carry the stand-in provider, or no card fill could be tested here.
+      - name: The Safari files are the UI-test build, with the stand-in payment provider
+        run: |
+          for f in background.js content.js; do
+            grep -q 'pay.andvari-uitest.test' "app-ios/AndvariSafari/web/$f" || { echo "$f does not list the stand-in provider"; exit 1; }
+          done
+
       - name: Names for the test site
-        run: echo "127.0.0.1 site.andvari-uitest.test other-uitest.test plainhttp-uitest.test" | sudo tee -a /etc/hosts
+        run: echo "127.0.0.1 site.andvari-uitest.test other-uitest.test plainhttp-uitest.test pay.andvari-uitest.test" | sudo tee -a /etc/hosts
 
       - name: Start the server, seed the account, serve the test site
         run: |
@@ -111,6 +122,7 @@ jobs:
           # The site answers under its names, with a certificate its CA vouches for: what Safari will ask of it.
           . app-ios/uitest/env.sh
           curl -fsS --cacert "$RUNNER_TEMP/uitest-backend/ca.pem" "$UITEST_SITE_ORIGIN/login.html" | grep -q "Sign in"
+          curl -fsS --cacert "$RUNNER_TEMP/uitest-backend/ca.pem" "$UITEST_PROVIDER_ORIGIN/pay/card.html" | grep -q "Card details"
           curl -fsS "$UITEST_HTTP_ORIGIN/login.html" | grep -q "Sign in"
 
       - name: Boot a fresh simulator
@@ -145,6 +157,7 @@ jobs:
               TEST_RUNNER_UITEST_SERVER_ORIGIN="$UITEST_SERVER_ORIGIN" \
               TEST_RUNNER_UITEST_EMAIL="$UITEST_EMAIL" \
               TEST_RUNNER_UITEST_PASSWORD="$UITEST_PASSWORD" \
+              TEST_RUNNER_UITEST_PROVIDER_ORIGIN="$UITEST_PROVIDER_ORIGIN" \
               TEST_RUNNER_UITEST_SITE_ORIGIN="$UITEST_SITE_ORIGIN" \
               TEST_RUNNER_UITEST_SITE_HOST="$UITEST_SITE_HOST" \
               TEST_RUNNER_UITEST_HTTP_ORIGIN="$UITEST_HTTP_ORIGIN" \

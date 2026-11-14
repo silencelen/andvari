@@ -45,7 +45,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=andvari uitest CA" 
   -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
   -keyout "$WORK/ca.key" -out "$WORK/ca.pem" 2> /dev/null
 openssl req -newkey rsa:2048 -nodes -subj "/CN=$UITEST_SITE_HOST" -keyout "$WORK/site.key" -out "$WORK/site.csr" 2> /dev/null
-printf 'subjectAltName=DNS:%s,DNS:'"$UITEST_OTHER_HOST"'\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' "$UITEST_SITE_HOST" > "$WORK/site.ext"
+printf 'subjectAltName=DNS:%s,DNS:'"$UITEST_OTHER_HOST"',DNS:'"$UITEST_PROVIDER_HOST"'\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n' "$UITEST_SITE_HOST" > "$WORK/site.ext"
 openssl x509 -req -in "$WORK/site.csr" -CA "$WORK/ca.pem" -CAkey "$WORK/ca.key" -CAcreateserial -days 2 \
   -extfile "$WORK/site.ext" -out "$WORK/site.pem" 2> /dev/null
 

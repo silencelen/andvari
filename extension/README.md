@@ -13,7 +13,7 @@ both versions;
 
 It is a full client, not a shim: pure-JS `@noble` crypto (no WASM, no `eval`) byte-identical to
 the fleet, member (shared-vault) grants, a Web-Worker KDF, a session that survives MV3
-service-worker death, and a detection + fill engine for logins and checkout card forms. It talks
+service-worker death, and a detection + fill engine for logins and payment providers' card forms. It talks
 only to the one andvari server you configure — your own instance or the shipped default — and
 holds decrypted items in service-worker memory only.
 
@@ -55,7 +55,7 @@ automated:
 - **`web/src/extension-pins.test.ts`** — the house pattern, stated at that file's top: because the
   extension has no suite of its own for cross-engine values, its safety-critical constants
   (`format.ts` format-version ceiling/floor, `card.ts` derivations, `detect.ts` CVV classification,
-  `messages.ts` card-target choice) are pinned **from the web vitest suite**; the proof that the
+  `cardrelease.ts` card-release rule) are pinned **from the web vitest suite**; the proof that the
   `@noble` + `tweetnacl` crypto is byte-identical to libsodium is the extension's own gated
   `src/crypto.vectors.test.ts` (`web/src/crypto/noble-extension-poc.test.ts` is an opt-in spike
   no default gate runs).
@@ -159,15 +159,20 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
   - **Cards** — the popup lists `type:"card"` items in a "Cards" group beneath the logins as a
     masked identity line only ("Visa ••4242"; the full number/CVV never enter the popup DOM), with
     copy buttons for number / expiry / security code behind the same explicit-reveal path as
-    passwords (`revealCardField`, popup-only — the SW refuses it from pages). **In-page fill** of
-    merchant-hosted checkout forms is wired too (`src/cardfill.ts` + `src/content.ts`), including
-    `<select>` expiry/type dropdowns, split-PAN boxes, radio card types, and billing ZIP. Every
-    card value crosses into page DOM only through a **one-shot `revealCardForFill` grant minted by
-    a popup click and redeemable by the exact frame that detected the form** — the frame-origin
-    egress contract. Cross-origin PSP iframes (Stripe Elements et al.) are **deliberately not
-    filled**: nothing can distinguish a merchant's PSP frame from an attacker's, so copy stays the
-    posture there. The C1 in-page chip carries zero data and mints no grant — it is a signpost that
-    opens the popup (design `2026-07-26-in-page-card-chip`). Item read ceiling is fv 2 with
+    passwords (`revealCardField`, popup-only — the SW refuses it from pages). **In-page fill** goes
+    only into a payment provider's card form (owner decision 2026-11-14; threat model in
+    `docs/design/2026-11-09-ios-app.md`, "Card fill threat model"): a document whose origin, as the
+    browser reports it for that frame, is a listed provider card-entry origin (`src/cardproviders.ts`,
+    each with its source), or a top-level page on one. A shop's own card form, its top frame and its
+    same-origin frames never receive card data; the popup copies instead and says why. Every card
+    value crosses into a provider's document only through a **one-shot `revealCardForFill` grant per
+    frame, minted by a popup click and redeemable only by the frame it names, at the provider origin
+    it was minted for** (`src/cardrelease.ts`); a split-field provider's sibling frames (same parent,
+    same origin, from `webNavigation`) receive their own fields only. Inside the provider's form the
+    fill engine (`src/cardfill.ts` + `src/content.ts`) handles `<select>` expiry/type dropdowns,
+    split-PAN boxes, radio card types and billing ZIP. The C1 in-page chip carries zero data, mints
+    no grant and shows only inside a provider's card form — a signpost that opens the popup (design
+    `2026-07-26-in-page-card-chip`). Item read ceiling is fv 2 with
     per-item carried re-seal fv; new logins still seal at fv 1 (`src/format.ts`, pinned by
     `web/src/extension-pins.test.ts`). A lone password-typed field whose name/id token-matches
     `cvv`/`cvc`/`csc` suppresses the save/update banner, so a checkout security code can't be

@@ -33,6 +33,14 @@ const noDefaultServer = {
   },
 };
 
+// UITEST=1, for the iOS UI-test lane and the Safari build only: the build gets the test site's stand-in payment provider
+// (cardproviders.ts), so a card fill can be tested in the simulator. Every other build defines it empty, and a Safari
+// build without UITEST fails if the test origin is anywhere in dist/ (checked at the end, and again in CI on the
+// release bundle).
+const UITEST_PROVIDER = "https://pay.andvari-uitest.test:8443";
+const uitest = process.env.UITEST === "1";
+if (uitest && target !== "safari") throw new Error("UITEST=1 is for the Safari build only");
+
 // The pages the Safari build does not ship: the server is chosen in the andvari app (no Options page), quick unlock is
 // the app's Face ID (no WebAuthn connector window), and Chrome's offscreen clipboard document has no use there. The
 // worker refuses their messages in that build too; the check at the end fails the build if any is left in dist/.
@@ -62,7 +70,7 @@ await esbuild.build({
   minify: release,
   sourcemap: !release,
   // buildtarget.ts reads this: the App Store-distributed Safari build has no self-update channel.
-  define: { __ANDVARI_TARGET__: JSON.stringify(target) },
+  define: { __ANDVARI_TARGET__: JSON.stringify(target), __ANDVARI_UITEST_PROVIDER__: JSON.stringify(uitest ? UITEST_PROVIDER : "") },
   plugins: target === "safari" ? [noDefaultServer] : [],
 });
 
@@ -102,5 +110,10 @@ if (target === "safari") {
   if (left.length > 0) throw new Error(`the Safari build must name no default server, but ${host} is in: ${left.join(", ")}`);
   const pages = walk("dist").filter((f) => DESKTOP_ONLY_PAGES.some((p) => f === join("dist", `${p}.html`) || f === join("dist", `${p}.js`)));
   if (pages.length > 0) throw new Error(`the Safari build must not ship ${pages.join(", ")}`);
+  if (!uitest) {
+    const testHost = new URL(UITEST_PROVIDER).hostname;
+    const leaked = walk("dist").filter((f) => !f.endsWith(".png") && readFileSync(f, "utf8").includes(testHost));
+    if (leaked.length > 0) throw new Error(`only the UI-test build may name ${testHost}, but it is in: ${leaked.join(", ")}`);
+  }
 }
-console.log(`built → dist/ (${target}${release ? ", release" : ""}; Load unpacked: extension/dist)`);
+console.log(`built → dist/ (${target}${release ? ", release" : ""}${uitest ? ", UI-test provider" : ""}; Load unpacked: extension/dist)`);

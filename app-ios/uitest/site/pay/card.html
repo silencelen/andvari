@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card details</title>
+<style>
+body { font: 18px -apple-system, sans-serif; margin: 8px; }
+h1 { font-size: 18px; margin: 0; }
+label { display: block; margin-top: 8px; }
+input { font: inherit; width: 100%; padding: 8px; box-sizing: border-box; }
+button { font: inherit; margin-top: 12px; padding: 10px 16px; }
+</style>
+</head>
+<body>
+<!-- The stand-in payment provider's card form (env.sh UITEST_PROVIDER_ORIGIN), the document a card is filled into.
+     Pay posts it to the test server, which answers with a digest of each value (serve-site.py). -->
+<h1>Card details</h1>
+<form method="post" action="submitted">
+<label for="cc-number">Card number</label>
+<input id="cc-number" name="cardnumber" type="text" inputmode="numeric" autocomplete="cc-number" aria-label="Card number">
+<label for="cc-exp">Expiry (MM / YY)</label>
+<input id="cc-exp" name="exp-date" type="text" inputmode="numeric" autocomplete="cc-exp" placeholder="MM / YY" aria-label="Expiry">
+<label for="cc-csc">Security code</label>
+<input id="cc-csc" name="cvc" type="text" inputmode="numeric" autocomplete="cc-csc" aria-label="Security code">
+<button id="pay" type="submit">Pay</button>
+</form>
+</body>
+</html>
