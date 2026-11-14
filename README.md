@@ -20,8 +20,8 @@ reference instance the shipped builds default to; it is not privileged in the pr
   the server holding bytes it cannot read.
 - **Shared household vaults.** A vault is granted to a member under their own identity key, so
   sharing never means handing anyone a password; membership changes re-key without a re-import.
-- **Autofill where you actually type**: the browser extension fills and saves logins and
-  checkout card forms on Chromium and Firefox, and the Android client is a system autofill
+- **Autofill where you actually type**: the browser extension fills and saves logins on
+  Chromium and Firefox and fills cards into payment providers' card forms, and the Android client is a system autofill
   service. Both offer to save what you submit, and both know when they already have it.
 - **Built-in TOTP** — second-factor codes live beside the login they belong to, and can be added
   from the extension.

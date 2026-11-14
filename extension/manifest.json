@@ -4,7 +4,7 @@
   "name": "andvari",
   "version": "0.29.1",
   "description": "Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your own in Options.",
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "offscreen", "contextMenus"],
+  "permissions": ["storage", "activeTab", "scripting", "alarms", "offscreen", "contextMenus", "webNavigation"],
   "host_permissions": ["https://andvari.monahanhosting.com/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "options_ui": { "page": "options.html", "open_in_tab": true },

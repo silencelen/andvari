@@ -141,7 +141,7 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
   totp: { ok: false },
   setTotp: { ok: false, code: "not_allowed", error: "popup only" },
   updateStatus: { current: "", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null },
-  cardFillOffers: { fillable: false, origin: null, crossOriginFormsOnly: false },
+  cardFillOffers: { fillable: false, origin: null, pageFormOnly: false },
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
   serverInfo: { url: "", trustedStore: false, block: null },
   setServerUrl: { ok: false, code: "not_allowed" },

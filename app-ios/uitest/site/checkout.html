@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkout</title>
+<style>
+body { font: 18px -apple-system, sans-serif; margin: 24px; }
+label { display: block; margin-top: 16px; }
+input { font: inherit; width: 100%; padding: 10px; box-sizing: border-box; }
+button { font: inherit; margin-top: 20px; padding: 12px 20px; }
+iframe { display: block; width: 100%; border: 1px solid #888; margin-top: 16px; }
+</style>
+</head>
+<body>
+<h1>Checkout</h1>
+<!-- The shop's own page. A card is filled only into the stand-in payment provider's frames below (owner decision
+     2026-11-14), never into the shop's own fields: the name on card here stays empty after a fill.
+     ?layout=card (the default): one provider frame holding the number, the expiry and the security code.
+     ?layout=split: one provider frame per field, siblings under this page.
+     ?layout=code: a security code alone (a saved card's re-authentication). -->
+<form method="post" action="submitted">
+<label for="email">Email</label>
+<input id="email" name="email" type="email" autocomplete="email" autocapitalize="none" aria-label="Email">
+<label for="ccname">Name on card</label>
+<input id="ccname" name="ccname" type="text" autocomplete="cc-name" aria-label="Name on card">
+<div id="provider"></div>
+<button id="submit" type="submit">Place order</button>
+</form>
+<p><a href="index.html">All test pages</a></p>
+<script>
+// The provider is the same test server under its own name (env.sh UITEST_PROVIDER_HOST), on this page's port.
+const provider = location.protocol + "//pay.andvari-uitest.test" + (location.port ? ":" + location.port : "");
+const layouts = {
+  card: [["card.html", "Card details", 330]],
+  split: [["field.html?kind=number", "Card number", 110], ["field.html?kind=expiry", "Expiry date", 110], ["field.html?kind=code", "Security code", 110]],
+  code: [["field.html?kind=code", "Security code", 110]],
+};
+const box = document.getElementById("provider");
+for (const [path, title, height] of layouts[new URLSearchParams(location.search).get("layout") || "card"] || []) {
+  const frame = document.createElement("iframe");
+  frame.src = provider + "/pay/" + path;
+  frame.title = title;
+  frame.height = String(height);
+  box.append(frame);
+}
+</script>
+</body>
+</html>

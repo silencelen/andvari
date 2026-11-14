@@ -28,6 +28,14 @@ That downloads the run's artifact and prints one line per test. The directory th
 
 The account's email and master password are in `env.sh`. They are fixtures for a server that lives for one job.
 
+A card is filled only into a payment provider's card form (owner decision 2026-11-14), so the test site has a
+stand-in provider: `https://pay.andvari-uitest.test:8443` (`UITEST_PROVIDER_ORIGIN` in `env.sh`), the same server
+under its own name, which the certificate carries too. Only the Safari extension's UI-test build lists it as a
+provider (`UITEST=1` in `prepare.sh`, which this workflow sets; `extension/build.mjs`), and `ios-unsigned.yml` fails
+when a release bundle names the test domain. `checkout.html` is a shop page that embeds the provider's card form:
+`pay/card.html` in one frame (`?layout=card`, the default), one `pay/field.html` frame per field (`?layout=split`), or
+a security code alone (`?layout=code`). The shop's own name-on-card field there is never filled.
+
 ## Adding a test
 
 Subclass `UITestCase`, write the test as `step("name") { … }` blocks (each ends with a screenshot), find

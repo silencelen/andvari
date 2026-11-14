@@ -301,20 +301,21 @@ test("cards are listed masked, and a card ask keeps only the fields that were as
   assert.equal(sent.filter((m) => m.type === "vaultSecret").length, 1);
 });
 
-test("the Safari worker fills a card only on https, only by the popup's grant, and asks the app only for the form's fields", () => {
+test("the Safari worker fills a card only into a payment provider's box, only by the popup's grants, and asks the app only for each frame's fields", () => {
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
   const fill = bg.slice(bg.indexOf("async function fillCardFromPopup("), bg.indexOf("async function revealCardForFill("));
-  assert.ok(fill.indexOf('if (APP_VAULT !== null && !top.startsWith("https://"))') > 0 && fill.indexOf('!top.startsWith("https://")') < fill.indexOf("cardGrants.set(tab.id"), "refused before any grant is minted");
+  // Owner decision 2026-11-14: grants are minted only for the provider frame holding the person's choice and its
+  // split-field siblings. Every provider origin is https (cardproviders.test.ts), so no card goes to a plain-http page.
+  assert.ok(fill.indexOf("chosenCardFrame(records(), Date.now())") > 0 && fill.indexOf("chosenCardFrame(records(), Date.now())") < fill.indexOf("cardGrants.set(tabId"), "no grant before a provider frame's choice");
+  assert.ok(fill.indexOf("cardFillTargets(records(), chosen, await frameTree(tabId))") < fill.indexOf("cardGrants.set(tabId"));
   const reveal = bg.slice(bg.indexOf("async function revealCardForFill("), bg.indexOf("// ---- capture → pending save → resolve ----"));
   assert.match(reveal, /await appVaultCard\(msg\.itemId, cardFieldsForKinds\(grant\.kinds\)\)/);
-  assert.ok(reveal.indexOf("const originOk = sender.origin === grant.origin;") < reveal.indexOf("await appVaultCard("), "the frame and origin checks come before anything is asked of the app");
-  assert.ok(reveal.indexOf("await appVaultCard(") < reveal.indexOf("if (cardGrants.get(tabId) !== grant || grant.expiresMs <= Date.now())"), "the grant is checked again after the app answered");
+  assert.ok(reveal.indexOf("if (!mayRedeem(grant, msg.itemId, sender, Date.now()))") > 0 && reveal.indexOf("if (!mayRedeem(grant, msg.itemId, sender, Date.now()))") < reveal.indexOf("await appVaultCard("), "the frame and origin checks come before anything is asked of the app");
+  assert.ok(reveal.indexOf("await appVaultCard(") < reveal.indexOf("if (cardGrants.get(tabId)?.get(frameId) !== grant || grant.expiresMs <= Date.now())"), "the grant is checked again after the app answered");
   const kinds = bg.slice(bg.indexOf("function cardFieldsForKinds("), bg.indexOf("function appVaultList("));
   assert.ok(kinds.includes('if (k.has("cardcvv")) out.push("cvv");'), "the CVV is asked for only when the form has a CVV field");
-  const offers = bg.slice(bg.indexOf("async function cardFillOffers("), bg.indexOf("function asCardFillOutcome("));
-  assert.ok(offers.includes('if (APP_VAULT !== null && !top.startsWith("https://")) return none;'));
-  const chip = bg.slice(bg.indexOf("async function cardChipOffer("), bg.indexOf("async function cardChipOffer(") + 900);
-  assert.ok(chip.includes('sender.origin.startsWith("https://")'));
+  const chip = bg.slice(bg.indexOf("async function cardChipOffer("), bg.indexOf("async function openPopupForCards("));
+  assert.ok(chip.includes("if (!isCardProviderOrigin(origin)) return no;"), "the chip shows only in a provider's box");
   const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf("function appVaultCards("));
   assert.match(lane, /case "revealCardField": \{[\s\S]*?if \(sender\.tab !== undefined\) return \{ ok: false, error: "not allowed from a page" \}/);
 });

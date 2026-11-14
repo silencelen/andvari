@@ -115,18 +115,18 @@ export interface CardFillFields {
 
 /** Why an in-page card fill wrote NOTHING (parity with FillFailCode; the copy lives in the
  *  surface). `no_form` = the granted frame had no live card form; `not_allowed` = a redemption
- *  origin/frame/top-origin check refused. */
+ *  origin/frame check refused. */
 export type CardFillFailCode =
   | "locked"
   | "not_allowed"
   | "no_form"
   | "no_fields"
   | "unreachable"
-  | "no_focus" //    no card field was chosen in the page: the fill does not guess which form is meant (round-5 C1)
-  | "not_visible" // the chosen field, or the frame it is in, cannot be seen (hidden, transparent, tiny, off screen, covered)
-  | "closed_form" // the page keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
-  | "provider_frame" // a frame (any source; on Safari, anything) lies over or under the chosen field or its form (round-8 H)
-  | "field_changed"; // the chosen field moved or restyled between the choice and the fill (round-7 H1)
+  | "no_focus" //    no card field was chosen in a payment provider's card box: the fill does not guess which is meant (round-5 C1)
+  | "not_visible" // the chosen field cannot be seen in its box (hidden, transparent, tiny, off screen, covered)
+  | "closed_form" // the box keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
+  | "page_form" //   the page takes the card in its own fields: andvari fills a card only into a payment provider's box (owner decision 2026-11-14)
+  | "provider_not_allowed"; // a payment provider's box is there, but andvari may not run in it (Safari asks per site)
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -141,8 +141,6 @@ export interface CardFillOutcome {
    *  into fields that pass the visibility rules, never into a hidden one). */
   unseenKinds?: CardFieldKind[];
   code?: CardFillFailCode;
-  /** With `provider_frame`, when the frame is a listed payment provider's: its host, which the popup names. */
-  providerHost?: string;
 }
 
 /** Cut M (v2 #14): why a fill wrote NOTHING — crosses the seam as a code (the user-facing
@@ -492,20 +490,17 @@ export type Req =
       type: "cardFormInfo";
       forms: CardFieldKind[][];
       /** Round-6 review M2: the index in [forms] of the form holding the field the person chose (a press on it, or a
-       *  Tab onto it), or null. A fill's grant is built from that form's kinds and sent to the frame that chose. */
+       *  Tab onto it), or null. Only a payment provider's card document chooses (owner decision 2026-11-14): a fill's
+       *  grant is built from that form's kinds and sent to the frame that chose. */
       anchor?: number | null;
-      /** Card-fill threat model, case c: the hosts of the payment providers' card-entry frames this document embeds
-       *  (paymentproviders.ts), hidden or not. Any of them in a tab, or card fields in a cross-origin frame, and no
-       *  card is filled into that tab's top frame or its same-origin frames. */
-      providers?: string[];
       /** Round-7 review L7: the person chose a field again since the last report (the worker stamps the time). */
       choseNow?: boolean;
     }
   /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
    *  literal — **no `host`, no `kinds`, no `frameId` member** ([A2]/[S7]). A page-controlled member
-   *  would be an offer-manufacture input; the gate reads only browser-set sender fields (origin ===
-   *  the recorded top-frame origin, frameId STRICTLY 0 — [S1] never the badge's fail-OPEN
-   *  `frameId === undefined ||` disjunct). Answers two booleans, nothing else. [S3]: `fillable`
+   *  would be an offer-manufacture input; the gate reads only browser-reported sender fields (the
+   *  frame's origin is a payment provider's card-entry origin, and that frame reported a card form:
+   *  owner decision 2026-11-14). Answers two booleans, nothing else. [S3]: `fillable`
    *  carries NO vault condition — chip presence is a function only of facts the page already has,
    *  or a hit-test on the closed-shadow host would become a live vault-state monitor. [K13]: joins
    *  PASSIVE_MSGS — page script can fire *trusted* focus at frame rate, so this stream is not user
@@ -526,18 +521,19 @@ export type Req =
    *  Firefox, where the content script's toolbar toast is the primary path). NON-passive. */
   | { type: "openPopupForSearch" }
   /** Popup ONLY (the SW refuses tab senders): may the Cards group show a Fill button for the
-   *  active tab, and to which origin? `fillable` iff a recorded card form's origin equals the
-   *  tab's CURRENT top-level origin (SW-derived from `tab.url` under `activeTab`, [A4]). */
+   *  active tab, and to which origin? `fillable` iff a payment provider's card document (by the
+   *  origin the browser reports for the frame) with a card form is in the tab. */
   | { type: "cardFillOffers" }
-  /** Popup ONLY: user clicked Fill on a card row → the SW mints a one-shot CARD grant (a store
-   *  SEPARATE from login `grants`, [A5]) bound to (tabId,itemId,frameId,origin) and forwards
-   *  {type:"fillCard"} to that ONE frame. */
+  /** Popup ONLY: user clicked Fill on a card row → the SW mints one one-shot CARD grant per frame the
+   *  fill reaches (a store SEPARATE from login `grants`, [A5]): the provider frame where the person
+   *  chose a field, and its split-field siblings (same parent, same origin), each bound to
+   *  (tabId,itemId,frameId,origin) with its own form's kinds; and sends {type:"fillCard"} to each. */
   | { type: "fillCardFromPopup"; itemId: string }
-  /** Content (S3 redemption): the granted frame redeems its card fill. The SW verifies, all
-   *  fail-closed-on-undefined ([A3]): a live card grant for (tabId,itemId); `sender.frameId ===
-   *  grant.frameId`; `sender.origin === grant.origin`; and `grant.origin` still equals the tab's
-   *  current top-level origin (re-fetched). Success consumes the grant and returns the declared
-   *  fields ONCE; any failure consumes nothing. */
+  /** Content (S3 redemption): a granted frame redeems ITS card grant. The SW verifies, all
+   *  fail-closed-on-undefined ([A3]): a live card grant for (tabId, sender.frameId, itemId); the
+   *  origin the browser reports for the frame now equals the grant's, a payment provider's
+   *  card-entry origin (cardrelease.ts mayRedeem). Success consumes the grant and returns the
+   *  declared fields ONCE; any failure consumes nothing. */
   | { type: "revealCardForFill"; itemId: string };
 
 export type Res<T extends Req["type"]> = T extends "status"
@@ -666,19 +662,19 @@ export type Res<T extends Req["type"]> = T extends "status"
                                         ? { ok: boolean }
                                         : T extends "cardFillOffers"
                                           ? {
+                                              /** A payment provider's card box is in the active tab: the rows offer Fill. */
                                               fillable: boolean;
+                                              /** The provider origin a Fill goes to (where the person chose, else the first). */
                                               origin: string | null;
-                                              /** Tier 2 §6 [U21]: the tab's registry holds ≥1 card form but NO frame is
-                                               *  origin-eligible (PSP-iframe checkout). SW-derived from browser-set
-                                               *  per-frame origins vs the top origin — never page data. The popup renders
-                                               *  the neutral explainer and NEVER a Fill button in this state. */
-                                              crossOriginFormsOnly: boolean;
-                                              /** Threat model case c: the card is taken in a provider's frame here
-                                               *  (its host): no Fill, the explainer names it and offers copy. */
-                                              providerHost?: string;
+                                              /** The page takes the card in its own fields only: no Fill; the popup says
+                                               *  andvari fills a card only into a payment provider's box, and copies. */
+                                              pageFormOnly: boolean;
+                                              /** A payment provider's frame the browser lists that andvari may not run in:
+                                               *  its origin, which the popup names to allow. */
+                                              allowOrigin?: string;
                                             }
                                           : T extends "fillCardFromPopup"
-                                            ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; providerHost?: string; error?: string }
+                                            ? { ok: boolean; outcome?: CardFillOutcome; code?: CardFillFailCode; allowOrigin?: string; error?: string }
                                             : T extends "revealCardForFill"
                                               ? { ok: boolean; fields?: CardFillFields; error?: string }
                                               : T extends "purgeServerData"
@@ -728,85 +724,17 @@ export type TabMsg =
   /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
    *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
    *  card values on this message. Tier 2 [U12]: `sig` is the grant's kind-signature
-   *  (`kinds.join(",")` of the chosen form) — the receiver fills the FIRST form (document order)
-   *  whose CURRENT signature equals it; no match → `no_form`, NEVER an index fallback. */
-  | { type: "fillCard"; itemId: string; sig: string }
-  /** SW → content (S3 §7, broadcast to ALL frames — [T5] popup fast-path): drop the sig sentinel
+   *  (`kinds.join(",")` of the frame's form). [chosen]: the frame where the person chose a field
+   *  fills the form holding it; a split-field sibling (chosen false) fills its one card form, and
+   *  only when its CURRENT signature equals [sig]; no match → `no_form`, NEVER an index fallback. */
+  | { type: "fillCard"; itemId: string; sig: string; chosen: boolean }
+  /** SW → content (S3 §7, broadcast to ALL frames — [T5] popup fast-path — or sent to the ONE
+   *  frame whose record the chip gate found missing, [S4b]): drop the sig sentinel
    *  and caches, then re-report the frame's card form NOW. [T4]: the receiver resets lastCardSig
    *  FIRST — bfcache restores JS state on a back-navigation, so without the reset the rescan's
    *  own report is swallowed by its own sig guard and the offer is lost for the document's life.
    *  Answers `{ok:true}` (delivery signal only — the report rides its own cardFormInfo). */
-  | { type: "rescanCardForms" }
-  /** SW → content frame 0 (C1 [S4b] repair nudge): re-send `pageInfo` NOW. `pageInfo` fires once at
-   *  content init, so the SW's recorded `topOrigin` — the chip gate's and the V4 badge's ONLY
-   *  origin source — is unrecoverable after an MV3 idle-death or a lock's `tabs.clear()` erase.
-   *  Sent (rate-limited, ≤1/tab/2 s) exactly when the gate fails for a MISSING record, never on a
-   *  refusal: a real cross-origin/stale-origin answer must not be retried into existence. Carries
-   *  no payload and needs no answer — the repair rides the frame's own `pageInfo` round-trip. */
-  | { type: "reportPageInfo" };
-
-/** Tier 2 §2 [U11] — the SW's grant-target choice over the eligible registry entries, factored
- *  PURE and exported here (background.ts is chrome-bound at module eval and has no test harness,
- *  so the suite imports the chooser from this chrome-free-at-import contract file — §9).
- *  Frame 0 wins whenever it holds ANY eligible form (Tier-1 rule, unchanged — a same-origin
- *  sub-frame must never out-bid the visible top checkout by kind-count); only when frame 0 has
- *  none does the richest eligible sub-frame win (most distinct kinds in its richest form; tie →
- *  lowest frameId). Richest-FORM selection (most distinct kinds; tie → first in document order)
- *  applies WITHIN the chosen frame. Empty input / no forms anywhere → null. */
-export function chooseCardTarget(
-  frames: ReadonlyArray<{ frameId: number; forms: CardFieldKind[][] }>,
-): { frameId: number; kinds: CardFieldKind[] } | null {
-  const richestForm = (forms: CardFieldKind[][]): CardFieldKind[] | null => {
-    let best: CardFieldKind[] | null = null;
-    let bestN = 0; // an empty form (0 distinct kinds) never wins — a grant with no kinds fills nothing
-    for (const f of forms) {
-      const n = new Set(f).size;
-      if (n > bestN) {
-        best = f;
-        bestN = n; // strict > keeps the FIRST on ties — document order
-      }
-    }
-    return best;
-  };
-  const top = frames.find((f) => f.frameId === 0 && f.forms.length > 0);
-  if (top) {
-    const kinds = richestForm(top.forms);
-    return kinds ? { frameId: 0, kinds } : null;
-  }
-  let chosen: { frameId: number; kinds: CardFieldKind[] } | null = null;
-  let chosenN = -1;
-  for (const f of [...frames].sort((a, b) => a.frameId - b.frameId)) {
-    const kinds = richestForm(f.forms);
-    if (kinds === null) continue;
-    const n = new Set(kinds).size;
-    if (n > chosenN) {
-      chosen = { frameId: f.frameId, kinds };
-      chosenN = n; // strict > + ascending sort keeps the LOWEST frameId on ties
-    }
-  }
-  return chosen;
-}
-
-/**
- * Round-6 review M2: the grant target when a frame reports the field the person chose ([anchor], an index into its
- * forms): the frame that chose most recently ([anchorAt]), with that form's kinds, whatever form is richest elsewhere.
- * Null when no frame has a chosen field in range; [chooseCardTarget] then picks as before, and the frame answers
- * that nothing was chosen.
- */
-export function chooseAnchoredCardTarget(
-  frames: ReadonlyArray<{ frameId: number; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number }>,
-): { frameId: number; kinds: CardFieldKind[] } | null {
-  let chosen: { frameId: number; kinds: CardFieldKind[]; at: number } | null = null;
-  for (const f of frames) {
-    const a = f.anchor;
-    if (typeof a !== "number" || !Number.isInteger(a) || a < 0 || a >= f.forms.length) continue;
-    const kinds = f.forms[a]!;
-    if (kinds.length === 0) continue;
-    const at = typeof f.anchorAt === "number" ? f.anchorAt : 0;
-    if (chosen === null || at > chosen.at) chosen = { frameId: f.frameId, kinds, at };
-  }
-  return chosen === null ? null : { frameId: chosen.frameId, kinds: chosen.kinds };
-}
+  | { type: "rescanCardForms" };
 
 /** Typed sendMessage helper both UIs use. */
 export function send<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promise<Res<T>> {

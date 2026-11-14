@@ -1,20 +1,14 @@
-// node --test. The card-fill threat model (docs/design/2026-11-09-ios-app.md, "Card fill threat model") and the rules
-// that enforce it: case c, no card into a page whose card entry is a provider's frame (a cross-origin frame with card
-// fields, or a provider's card-entry frame anywhere: paymentproviders.ts); case a, only the field the person chose and
-// can see, with no frame (any source, or none) over or under it or its form; case b, only the chosen form's kinds,
-// only into its fields that pass. The rules are pure where they can be (detect.ts visibilityOf and its helpers); the
-// DOM probe that feeds them and the fill path's use of them are pinned below.
+// node --test. The card-fill threat model (docs/design/2026-11-09-ios-app.md, "Card fill threat model"; owner decision
+// 2026-11-14): a card goes only into a payment provider's card document, by the origin the browser reports for it
+// (cardrelease.ts, cardproviders.ts, pinned in their own tests). Inside that document, the fill's visibility rules keep
+// the box's own hidden fields out: only the field the person chose and can see, and only the fields of its form that
+// pass. The rules are pure where they can be (detect.ts visibilityOf and its helpers); the DOM probe that feeds them and
+// the fill path's use of them are pinned below, and so is the absence of the page-geometry rules they replaced.
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  axisAligned,
-  boxContains,
-  boxesOverlap,
-  canHostShadow,
-  clipBox,
   colorAlpha,
-  extensionFrameSrc,
   filterOpacity,
   maskAlphaAt,
   MIN_FIELD_PX,
@@ -22,13 +16,11 @@ import {
   MIN_TEXT_ALPHA,
   paintsOver,
   samplePoints,
-  unionBox,
   visibilityOf,
   type InkFacts,
   type PaintFacts,
   type VisibilityFacts,
 } from "./detect.ts";
-import { chooseAnchoredCardTarget } from "./messages.ts";
 
 const shown = { display: "block", visibility: "visible", opacity: "1" };
 const page = { left: 0, top: 0, width: 390, height: 2400 };
@@ -180,35 +172,6 @@ test("at fill time every field must be on screen, and nothing may paint over any
   assert.equal(points.filter((p) => p.offCentre !== true).length, 1, "only the centre excuses nothing");
 });
 
-test("the frames rule passes over a browser extension's page, maps only axis-aligned frames; Safari excuses no shadow host (round-9)", () => {
-  assert.ok(extensionFrameSrc("chrome-extension://abcdefghijklmnop/menu.html"));
-  assert.ok(extensionFrameSrc("moz-extension://1234/menu.html") && extensionFrameSrc("safari-web-extension://ABCD/menu.html"));
-  assert.ok(!extensionFrameSrc("https://js.stripe.com/v3/elements-inner-card-0.html") && !extensionFrameSrc("") && !extensionFrameSrc("about:blank"));
-  assert.ok(axisAligned("none") && axisAligned("matrix(1, 0, 0, 1, 12, 40)") && axisAligned("matrix(0.5, 0, 0, 2, 0, 0)"));
-  assert.ok(axisAligned("matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 0, 1)"), "translateZ(0) and the like");
-  assert.ok(!axisAligned("matrix(-1, 0, 0, -1, 0, 0)"), "a half turn");
-  assert.ok(!axisAligned("matrix(0.7071, 0.7071, -0.7071, 0.7071, 0, 0)"), "a rotation");
-  assert.ok(!axisAligned("matrix(1, 0, 0.5, 1, 0, 0)"), "a skew");
-  assert.ok(!axisAligned("matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -0.002, 0, 0, 0, 1)"), "a perspective");
-  assert.ok(!axisAligned("rotate(10deg)") && !axisAligned("matrix(1, 0, 0, 1, x, 0)"), "anything not read is refused");
-  for (const tag of ["div", "SPAN", "p", "section", "x-card-field"]) assert.ok(canHostShadow(tag), tag);
-  for (const tag of ["label", "IMG", "svg", "input", "button", "i", "b"]) assert.ok(!canHostShadow(tag), tag);
-});
-
-test("the frames rule's geometry: an area shared, a point inside, the boxes of a form, a frame's child clipped to it (round-8 H)", () => {
-  const field = { left: 20, top: 300, width: 240, height: 36 };
-  assert.ok(boxesOverlap(field, { left: 200, top: 320, width: 100, height: 100 }), "overlapping");
-  assert.ok(!boxesOverlap(field, { left: 260, top: 300, width: 100, height: 36 }), "touching is not overlapping");
-  assert.ok(!boxesOverlap(field, { left: 0, top: 0, width: 390, height: 0 }), "a box with no area (display: none) is never against anything");
-  assert.ok(!boxesOverlap(field, { left: 0, top: 0, width: 390, height: 1 }), "a hidden controller frame across the top of the page is not against a form below it");
-  assert.ok(boxContains(field, { x: 20, y: 300 }) && !boxContains(field, { x: 260, y: 300 }));
-  assert.ok(!boxContains({ left: 0, top: 0, width: 0, height: 0 }, { x: 0, y: 0 }));
-  assert.deepEqual(unionBox([field, { left: 20, top: 360, width: 110, height: 36 }, { left: 0, top: 0, width: 0, height: 0 }]), { left: 20, top: 300, width: 240, height: 96 }, "the form's box: its fields', empty ones aside");
-  assert.equal(unionBox([{ left: 5, top: 5, width: 0, height: 10 }]), null);
-  assert.deepEqual(clipBox({ left: 0, top: 0, width: 500, height: 500 }, field), field);
-  assert.equal(clipBox({ left: 0, top: 0, width: 10, height: 10 }, field), null);
-});
-
 test("a cover is something that paints: an opaque background, an image, a backdrop filter, replaced content; a pseudo-element at its own opacity and size", () => {
   const p = (over: Partial<PaintFacts>): boolean =>
     paintsOver({ opacity: 1, background: "rgba(0, 0, 0, 0)", backgroundImage: "none", backdrop: "none", replaced: false, pseudo: [], ...over });
@@ -225,21 +188,6 @@ test("a cover is something that paints: an opaque background, an image, a backdr
   assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none", opacity: "0" }] }), false);
   assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none", width: "240px", height: "1px" }] }), false);
   assert.equal(p({ pseudo: [{ background: "rgb(0, 0, 0)", backgroundImage: "none", opacity: "1", width: "240px", height: "36px" }] }), true);
-});
-
-test("the grant follows the form holding the chosen field, in the frame that chose last (round-6 M2)", () => {
-  const number = ["cardnumber", "cardexpiry", "cardcvv"] as const;
-  const saved = ["cardcvv"] as const;
-  // The frame's richest form is the new-card one; the person chose the saved card's security code.
-  assert.deepEqual(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number], [...saved]], anchor: 1, anchorAt: 5 }]), { frameId: 0, kinds: ["cardcvv"] });
-  // A sub-frame where the person chose wins over a top frame where nobody did.
-  assert.deepEqual(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: null }, { frameId: 4, forms: [[...saved]], anchor: 0, anchorAt: 9 }]), { frameId: 4, kinds: ["cardcvv"] });
-  // The latest choice wins.
-  assert.deepEqual(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: 0, anchorAt: 9 }, { frameId: 4, forms: [[...saved]], anchor: 0, anchorAt: 5 }]), { frameId: 0, kinds: [...number] });
-  // Nothing chosen, or an index out of range: no anchored target (the old chooser picks, and the frame says so).
-  assert.equal(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]] }]), null);
-  assert.equal(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: 3, anchorAt: 1 }]), null);
-  assert.equal(chooseAnchoredCardTarget([{ frameId: 0, forms: [[...number]], anchor: 0.5, anchorAt: 1 }]), null);
 });
 
 // ---- wiring: detection and fill use the rules (detect.ts and content.ts need a DOM, so these pin the source) ----
@@ -268,20 +216,20 @@ test("the hit test looks at nine points: the field itself at the centre; elsewhe
   assert.match(detect, /if \(node\.querySelectorAll\(CONTROLS\)\.length !== 1\) break;/, "a wrapper holds no other control");
 });
 
-test("only the person chooses the card field, and the choice is held to the fill rules (round-7 H1, M2-tab, regression 6)", () => {
+test("only the person chooses the card field, only in a provider's card document, held to the fill rules (round-7 H1, M2-tab, regression 6)", () => {
+  assert.match(content, /const cardBox = isCardProviderOrigin\(location\.origin\);/);
   const choose = content.slice(content.indexOf("function chooseIfPersonPut("), content.indexOf("/** The innermost element focus is on"));
+  assert.match(choose, /if \(filling \|\| !cardBox\) return;/, "a press in any other document never chooses a card field");
   assert.match(choose, /const onField = press !== null && press\.target === t && now - press\.at < CHOOSE_PRESS_MS;/, "a press on that very field");
   assert.match(choose, /const nearField = press !== null && press\.sameTask && target !== null && \(labels\.some\(\(l\) => l === target \|\| l\.contains\(target\)\) \|\| \(wrapper !== null && wrapper\.contains\(target\)\)\);/, "or on its label or wrapper, focusing it in the same task");
   assert.match(choose, /const tabbed = focus !== undefined && tab !== null && now - tab\.at < CHOOSE_TAB_MS && tab\.moves === focusMoves && from !== null && from === tab\.from;/, "a Tab from the field focused at keydown, nothing moved in between");
   // Round-8 L: whether the page prevented the Tab is read once the keydown is done, with focus still there and moved nowhere else.
   assert.match(choose, /setTimeout\(\(\) => \{\s*if \(tab\.event\.defaultPrevented \|\| focusMoves !== moves \|\| deepActiveElement\(\) !== t\) return;\s*chooseIfFits\(t\);\s*\}, 0\);/);
   assert.ok(choose.indexOf("tab.event.defaultPrevented") > choose.indexOf("setTimeout("), "never read while the keydown may still be dispatching");
-  assert.match(choose, /const from = focus\?\.relatedTarget instanceof Element \? focus\.relatedTarget : null;/);
   assert.match(choose, /if \(onField \|\| nearField\) \{\s*chooseIfFits\(t\);/);
   const fits = content.slice(content.indexOf("function chooseIfFits("), content.indexOf("/** The innermost element focus is on"));
-  assert.match(fits, /if \(filling \|\| !userActivated\(\)\) return;/);
-  assert.match(fits, /if \(!chosenFieldSeen\(t\)\) return;/, "a field that cannot be seen is not chosen");
-  assert.match(fits, /const against = cardFillAgainst\(t, form\);\s*if \(against !== null\) \{\s*refusedChoice = \{ field: t, host: against\.host \};\s*return;\s*\}\s*setCardFocus\(t\);/, "nor one a frame stands against (round-8 H)");
+  assert.match(fits, /if \(filling \|\| !cardBox \|\| !userActivated\(\)\) return;/);
+  assert.match(fits, /if \(!chosenFieldSeen\(t\)\) return;\s*setCardFocus\(t\);/, "a field that cannot be seen is not chosen");
   assert.ok(!/cardFocus = t/.test(choose + fits), "a focus alone never sets it");
   assert.match(content, /return ua\?\.isActive === true;/, "no activation API, no choice");
   assert.match(content, /for \(const type of \["pointerdown", "touchstart", "mousedown", "click"\]\) document\.addEventListener\(type, notePress, \{ capture: true, passive: true \}\);/);
@@ -289,94 +237,66 @@ test("only the person chooses the card field, and the choice is held to the fill
   assert.match(content, /lastTab = \{ event: e, from: document\.activeElement, moves: focusMoves, at: performance\.now\(\) \};/);
   assert.match(content, /noteCardFocus\(t, e\);\s*maybeOpen\(t\);/, "every trusted focusin is looked at");
   assert.match(content, /try \{\s*chooseIfPersonPut\(t, focus\);\s*\} finally \{\s*if \(focus !== undefined\) focusMoves\+\+;\s*\}/, "and counted after it is looked at");
-  // Let go when focus moves elsewhere in the page; kept when the page loses focus to the popup, and then measured
-  // again once the blur has settled (round-8 M: a page's validation may move the form on blur).
-  assert.match(content, /if \(!document\.hasFocus\(\)\) \{\s*remeasureAfterBlur\(\);\s*return;\s*\}\s*if \(deepActiveElement\(\) !== cardFocus\) setCardFocus\(null\);/);
-  assert.match(content, /const BLUR_SETTLE_MS = \[150, 500\] as const;/);
-  assert.match(content, /chosenAs = \{ place: contentPositionOf\(field\), digest: chosenAs\.digest \};/, "the place only; the styles stay those of the choice");
-  // The place and styles at the choice; a fill refuses if either changed. No text colour (a blur check recolours it;
-  // the fill checks the text's alpha anyway).
-  assert.match(content, /chosenAs = \{ place: contentPositionOf\(next\), digest: styleDigest\(next\) \};/);
-  assert.match(content, /return JSON\.stringify\(\[chain, f\.ink === null \? null : f\.ink\.fontSize\]\);/);
+  // Owner decision 2026-11-14: the choice is let go only when ANOTHER element of this document takes focus; focus going
+  // to the body (iOS's keyboard Done) or out of the window (the popup) keeps it, and so does nothing but its expiry.
+  const left = content.slice(content.indexOf("function noteFocusLeft("), content.indexOf("/** [U12] a FRESH scan"));
+  assert.match(left, /if \(filling \|\| cardFocus === null \|\| !document\.hasFocus\(\)\) return;/);
+  assert.match(left, /if \(now === null \|\| now === cardFocus \|\| now === document\.body \|\| now === document\.documentElement\) return;\s*setCardFocus\(null\);/);
+  assert.match(content, /if \(!cardFocus\.isConnected \|\| performance\.now\(\) - chosenAt > CHOICE_TTL_MS\) \{/, "the choice expires");
+  assert.match(content, /const CHOICE_TTL_MS = 10 \* 60 \* 1000;/, "as the worker's does (cardrelease.ts)");
 });
 
-test("a card fill: never where a frame is against the chosen field or its form; only the chosen form's fields that can be seen", () => {
+test("a card fill: only in a provider's card document, only the chosen form's fields, or a sibling's one form, that can be seen", () => {
   const fill = content.slice(content.indexOf("async function fillCardIntoForm("), content.indexOf("// ---- G2 save-card capture"));
-  assert.ok(!content.includes("cardFormBySig"), "no more \"the first form with the grant's signature\"");
-  assert.ok(!content.includes("providerFramesHere") && !content.includes("providerFrameHost"), "no gate on a frame's src (round-8 H)");
-  const focus = fill.indexOf('if (refusedChoice !== null && refusedChoice.field.isConnected) return framed(refusedChoice);');
-  const closed = fill.indexOf('return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");');
-  const frames = fill.indexOf("if (against !== null) return framed(against);");
-  const changedBefore = fill.indexOf('if (before === "changed") return nothing("field_changed");');
-  const before = fill.indexOf('if (before === null) return nothing("not_visible");');
+  assert.match(fill, /if \(typeof sig !== "string" \|\| !cardBox\) return nothing\("no_form"\);/);
+  assert.match(fill, /if \(chosen === true\) \{\s*\/\/[^\n]*\n\s*anchor = chosenField\(\);/);
+  assert.match(fill, /if \(anchor === null\) return nothing\(cardFormsAllClosed\(\) \? "closed_form" : "no_focus"\);/);
+  assert.match(fill, /const forms = freshCardForms\(\);\s*return forms\.length === 1 \? forms\[0\]! : null;/, "a sibling fills its one card form, never one of several");
+  const sig = fill.indexOf('if (!form || cardSigOf(form) !== sig) return nothing("no_form");');
+  const before = fill.indexOf('if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");');
   const reveal = fill.indexOf('await safeSend({ type: "revealCardForFill", itemId })');
-  const framesAfter = fill.indexOf("if (againstLate !== null) return framed(againstLate);");
+  const sigAfter = fill.indexOf('if (!now || cardSigOf(now) !== sig) return nothing("no_form");');
   const after = fill.indexOf('if (seen === null) return nothing("not_visible");');
   const write = fill.indexOf("return applyCardFill(now, r.fields, seen);");
-  assert.ok(focus > 0 && focus < closed && closed < frames && frames < changedBefore && changedBefore < before && before < reveal && reveal < framesAfter && framesAfter < after && after < write, "checked before the card is asked for and again before it is written");
-  assert.match(fill, /const against = cardFillAgainst\(anchor, form\);/);
-  assert.match(fill, /const againstLate = cardFillAgainst\(anchor, now\);/, "the form of the fresh scan, after the round trip");
-  // The rule: any frame element, any source or none, in every scope and child document this script can reach, against
-  // the field's box, the form's box or the field's sample points; up the frame chain too; on Safari, any overlap.
-  const against = content.slice(content.indexOf("function framesAgainst("), content.indexOf("/** Whether [t] passes the full fill rules"));
-  assert.match(against, /const all = everyElement\(doc\);\s*if \(all === null\) return \{ host: null \};/, "a page too large to walk is refused, never half-walked");
-  assert.match(against, /if \(el === exclude \|\| !FRAME_TAGS\.has\(el\.tagName\.toUpperCase\(\)\) \|\| extensionFrameSrc\(frameSrc\(el\)\)\) continue;/, "any frame but a browser extension's page");
-  assert.match(against, /const onFields = \(box: Box\): boolean => area\.fields\.some\(\(b\) => boxesOverlap\(box, b\)\) \|\| underPoint\(box\);/);
-  assert.match(against, /const hits = fixedOnScreen\(el\) \? onFields : \(b: Box\): boolean => onFields\(b\) \|\| \(area\.form !== null && boxesOverlap\(b, area\.form\)\);/, "a frame fixed on screen only against the fields' own boxes");
-  assert.match(against, /for \(const inner of framesInside\(el, box\)\) if \(hits\(inner\.box\)\) return \{ host: frameHost\(inner\.el\) \};/, "and the frames of child documents it can read");
-  assert.match(against, /for \(const at of doc\.elementsFromPoint\(x, y\)\) \{\s*if \(at !== exclude && FRAME_TAGS\.has\(at\.tagName\.toUpperCase\(\)\) && !extensionFrameSrc\(frameSrc\(at\)\)\) return \{ host: frameHost\(at\) \};/, "and what lies under the sample points");
-  assert.match(against, /const area: CardArea = \{ fields: \[fieldBox, \.\.\.fields\], form: unionBox\(fields\) \?\? fieldBox \};/);
-  assert.match(against, /const here = framesAgainst\(field\.ownerDocument, area, points, null\);/);
-  assert.match(against, /if \(__ANDVARI_TARGET__ === "safari"\) \{/);
-  assert.match(against, /if \(el === field \|\| ancestors\.has\(el\) \|\| field\.contains\(el\)\) continue;\s*if \(wrapper !== null && wrapper\.contains\(el\) && !canHostShadow\(el\.tagName\)\) continue;\s*if \(boxesOverlap\(boxOf\(el\.getBoundingClientRect\(\)\), fieldBox\)\) return \{ host: null \};/, "Safari: a closed root's host over the field; only a wrapper's element that cannot host a root is excused");
-  assert.match(against, /return framesUpChain\(fieldBox\);/);
-  assert.match(against, /const map = frameContentMapping\(frame as HTMLElement, r\);\s*if \(map === null\) return \{ host: null \};/, "a frame that cannot be mapped refuses");
-  assert.match(against, /const against = framesAgainst\(parentDoc, \{ fields: \[mapped\], form: mapped \}, samplePoints\(mapped\), frame\);/, "in each parent, around this frame's place");
-  const mapping = content.slice(content.indexOf("function frameContentMapping("), content.indexOf("/** The frames of [frame]'s own document"));
-  assert.match(mapping, /if \(!axisAligned\(view\.getComputedStyle\(a\)\.transform\)\) return null;/, "a rotation, skew or perspective anywhere around the frame");
-  const chainSeen = content.slice(content.indexOf("function frameChainSeen("), content.indexOf("/** Whether every card form this frame found"));
-  assert.match(chainSeen, /const map = frameContentMapping\(el, boxOf\(el\.getBoundingClientRect\(\)\)\);\s*if \(map === null\) return false;/);
-  const walk = content.slice(content.indexOf("function everyElement("), content.indexOf("function boxOf("));
-  assert.match(walk, /if \(out\.length > FRAME_SCAN_MAX\) return false;/);
-  assert.match(walk, /const sr = shadowRootOf\(el\);/, "every root it can open, not the scan's capped list");
-  assert.ok(!walk.includes("shadowRoots") && !walk.includes("SHADOW_MAX_ROOTS"));
-  const host = content.slice(content.indexOf("function frameHost("), content.indexOf("function framesInside("));
-  assert.match(host, /return paymentProviderHost\(new URL\(src, el\.ownerDocument\.baseURI\)\.href\);/, "the list only names the provider");
-  const seen = content.slice(content.indexOf("function cardFieldsSeen("), content.indexOf("function frameChainSeen("));
-  assert.match(seen, /if \(!live\.some\(\(f\) => f\.input === anchor\) \|\| !chosenFieldSeen\(anchor\)\) return null;/, "the chosen field, full rules");
-  assert.match(seen, /if \(moved \|\| styleDigest\(anchor\) !== chosenAs\.digest\) return "changed";/, "where and as it was at the choice");
+  assert.ok(sig > 0 && sig < before && before < reveal && reveal < sigAfter && sigAfter < after && after < write, "checked before the card is asked for and again before it is written");
+  const seen = content.slice(content.indexOf("function cardFieldsSeen("), content.indexOf("/** Whether every card form this frame found"));
+  assert.match(seen, /if \(anchor !== null && \(!live\.some\(\(f\) => f\.input === anchor\) \|\| !chosenFieldSeen\(anchor\)\)\) return null;/, "the chosen field, full rules");
   assert.match(seen, /visibilityOf\(probeVisibility\(f\.input, \{ onScreen: true, hitTest: true, fill: true, ignore: isOwnUiHost \}\), proxiedAtFill\(f\.input, f\.kind\), MIN_OPACITY\) === "ok"/, "every other field: on screen, hit-tested, full rules but the proxy's");
-  assert.match(seen, /if \(!frameChainSeen\(\{ x: r\.left \+ r\.width \/ 2, y: r\.top \+ r\.height \/ 2 \}\)\) return null;/, "and the frame it is in");
-  const chain = content.slice(content.indexOf("function frameChainSeen("), content.indexOf("function cardFormsAllClosed("));
-  assert.match(chain, /frame = win\.frameElement;/);
-  assert.match(chain, /if \(frame === null \|\| parent === null/, "a frame element that cannot be reached fails");
-  assert.match(chain, /visibilityOf\(\{ \.\.\.facts, ink: null, hit: whatShowsAt\(el, \[mapped\]\) \}, false, MIN_OPACITY\) !== "ok"/);
   const apply = content.slice(content.indexOf("function applyCardFill("), content.indexOf("/** Popup-granted card fill"));
   assert.match(apply, /if \(!seen\.has\(input\)\) \{\s*unseen\(kind\);\s*continue;/, "a field that cannot be seen is never written");
   assert.match(apply, /if \(splitRan && panBoxes\.some\(\(b\) => !seen\.has\(b\)\)\) \{\s*unseen\("cardnumber"\);/, "a split number goes in whole or not at all");
-  // No chip where no fill would go.
-  assert.match(content, /if \(cardFillAgainst\(target, chipForm\) !== null\) return;/);
+  // The chip shows only where a fill can go.
+  assert.match(content, /if \(!cardBox\) return;\s*if \(!\(target instanceof HTMLInputElement \|\| target instanceof HTMLSelectElement\)\) return;/);
+  // A form without a card number is a card form only in a provider's card document (a security code alone, one field of
+  // a split form); everywhere else detection is as it was.
+  assert.match(content, /findCardForms\(s, \{ numberless: cardBox \}\)/);
+  assert.match(detect, /if \(!numberless && !fields\.some\(\(f\) => f\.cardKind === "cardnumber"\)\) return null;/);
+  // The page-geometry rules the owner's decision replaced are gone, not left unused.
+  for (const gone of ["framesAgainst", "cardFillAgainst", "framesUpChain", "frameChainSeen", "frameContentMapping", "providerCardFramesHere", "cardEntryHost", "styleDigest", "remeasureAfterBlur", "refusedChoice", "everyElement", "paymentProvider"]) {
+    assert.ok(!content.includes(gone), `content.ts: ${gone}`);
+  }
+  for (const gone of ["canHostShadow", "extensionFrameSrc", "axisAligned", "boxesOverlap", "FRAME_TAGS", "contentPositionOf", "unionBox", "clipBox"]) {
+    assert.ok(!detect.includes(gone), `detect.ts: ${gone}`);
+  }
 });
 
-test("the worker: no card where the card is taken in a provider's frame (case c); the grant from the chosen form", () => {
-  const entry = background.slice(background.indexOf("function providerCardEntry("), background.indexOf("function eligibleCardFrames("));
-  assert.match(entry, /if \(Array\.isArray\(f\.providers\) && f\.providers\.length > 0\) return f\.providers\[0\]!;/, "a provider's card-entry frame anywhere in the tab");
-  assert.match(entry, /if \(Array\.isArray\(f\.forms\) && f\.forms\.length > 0 && f\.origin !== top\)/, "card fields in a frame of another origin");
-  assert.match(background, /if \(providerCardEntry\(tabId, top\) !== null\) return no; \/\/ threat model case c/, "no chip");
-  assert.match(background, /const providerHost = providerCardEntry\(tab\.id, top\);\s*if \(providerHost !== null\) return \{ fillable: false, origin: null, crossOriginFormsOnly: true, providerHost \};/, "cardFillOffers: the explainer, never Fill");
-  assert.match(background, /const providerHost = providerCardEntry\(tab\.id, top\);\s*if \(providerHost !== null\) return \{ ok: false, code: "provider_frame", providerHost,/, "fillCardFromPopup");
-  assert.match(background, /if \(providerCardEntry\(tabId, top\) !== null\) return \{ ok: false, error: "a payment provider's frame takes the card on this page" \};/, "and none at the redemption");
-  const report = content.slice(content.indexOf("function reportCardForm("), content.indexOf("/** Bumped by every choice"));
-  assert.match(report, /const providers = providerCardFramesHere\(\);/);
-  assert.match(report, /void safeSend\(\{ type: "cardFormInfo", forms, anchor, providers, choseNow \}\);/);
-  const here = content.slice(content.indexOf("function providerCardFramesHere("), content.indexOf("function cardEntryHost("));
-  assert.match(here, /const all = everyElement\(document\) \?\? \[\];/, "the whole document, every root it can open, hidden frames too");
-  assert.match(here, /for \(const inner of framesInside\(el, boxOf\(el\.getBoundingClientRect\(\)\)\)\)/, "and child documents it can read");
-  assert.match(here, /const target = el\.getAttribute\("target"\);\s*if \(target === null \|\| !named\.has\(target\)\) continue;/, "and a frame a form posts a provider's card entry into");
-  assert.match(background, /const target = chooseAnchoredCardTarget\(eligible\) \?\? chooseCardTarget\(eligible\);/);
+test("the worker: a card only to a provider's card document, by the origin the browser reports; grants per frame", () => {
   const info = background.slice(background.indexOf("async function cardFormInfo("), background.indexOf("function broadcastRescanCardForms("));
+  assert.match(info, /const origin = frameOriginOf\(sender\);/, "the frame's identity is the browser's report");
   assert.match(info, /const anchor = typeof a === "number" && Number\.isInteger\(a\) && a >= 0 && a < msg\.forms\.length \? a : null;/, "an index out of range is no choice");
   assert.match(info, /msg\.choseNow === true \|\| was\?\.anchor !== anchor \|\| was\.anchorAt === undefined \? Date\.now\(\) : was\.anchorAt/, "L7: every choice is stamped");
+  assert.ok(!info.includes("providers"), "no page-reported frames");
+  const chip = background.slice(background.indexOf("async function cardChipOffer("), background.indexOf("async function openPopupForCards("));
+  assert.match(chip, /if \(!isCardProviderOrigin\(origin\)\) return no;/);
+  assert.match(chip, /if \(rec\.origin !== origin \|\| !mayReceiveCard\(rec\)\) return no;/);
+  const fill = background.slice(background.indexOf("async function fillCardFromPopup("), background.indexOf("async function revealCardForFill("));
+  assert.match(fill, /const targets = cardFillTargets\(records\(\), chosen, await frameTree\(tabId\)\);/);
+  assert.match(fill, /if \(outcome\.filled === "nothing"\) return \{ ok: false, outcome,/, "a fill the chosen frame refuses fills no sibling");
+  assert.match(fill, /\} finally \{\s*\/\/[^\n]*\n\s*cardGrants\.delete\(tabId\);/, "every grant not redeemed is voided when the round trip ends");
+  assert.ok(!fill.includes("topOrigin("), "the shop's top origin decides nothing");
+  const reveal = background.slice(background.indexOf("async function revealCardForFill("), background.indexOf("// ---- capture → pending save → resolve ----"));
+  assert.match(reveal, /const grant = cardGrants\.get\(tabId\)\?\.get\(frameId\);\s*if \(!mayRedeem\(grant, msg\.itemId, sender, Date\.now\(\)\)\) return \{ ok: false, error: "no card grant" \};/, "each frame redeems its own grant");
+  assert.match(reveal, /cardGrants\.get\(tabId\)\?\.delete\(frameId\); \/\/ one-shot/);
 });
 
 test("the Safari lane releases no card number or security code to an extension page", () => {

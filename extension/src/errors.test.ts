@@ -228,11 +228,19 @@ test("lock notice: verbatim web format.ts rounding (AM3 — minutes at ≥ 60 s)
   assert.equal(lockNoticeCopy(0), "Locked after 1 second of inactivity."); // clamp ≥ 1 s
 });
 
-test("a card fill that wrote nothing says why: no focused field, or a field that cannot be seen (round-5 C1)", () => {
-  assert.equal(cardFillErrorCopy("no_focus"), "Tap the card number field on the page first, then fill again.");
+test("a card fill that wrote nothing says why: no chosen field, one that cannot be seen, or no provider's box to fill (round-5 C1)", () => {
+  assert.equal(cardFillErrorCopy("no_focus"), "Tap the card field in the payment form first, then fill again.");
   assert.match(cardFillErrorCopy("not_visible"), /can't be seen on the page, so nothing was filled/);
   // Round-6 M2: a form in a closed shadow root never gets a chosen field; "tap it" would not help.
-  assert.match(cardFillErrorCopy("closed_form"), /can't tell which field you tapped, so nothing was filled/);
+  assert.match(cardFillErrorCopy("closed_form"), /can't tell which one you tapped, so nothing was filled/);
+  // Owner decision 2026-11-14: a card goes only into a payment provider's card form.
+  assert.equal(cardFillErrorCopy("page_form"), "andvari fills a card only into a payment provider's card form, and this page takes the card itself.");
+  assert.equal(
+    cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com", true),
+    "The card form comes from js.stripe.com, where Safari doesn't let andvari run yet. To fill it, allow andvari on js.stripe.com or on Every Website in Safari's extension settings.",
+  );
+  assert.match(cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com"), /allow andvari on js\.stripe\.com in the extension's site access/);
+  assert.match(cardFillErrorCopy("provider_not_allowed", undefined, true), /the payment provider's site/);
   assert.equal(cardFillErrorCopy("locked"), fillErrorCopy("locked"), "the rest as for a login fill");
   assert.equal(cardFillErrorCopy(undefined), fillErrorCopy(undefined));
 });
