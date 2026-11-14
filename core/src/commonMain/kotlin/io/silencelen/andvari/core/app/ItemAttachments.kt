@@ -263,8 +263,9 @@ class InMemoryBlobs : BlobStore {
  * make ([Account.sealLocalRecord], round-9 review 2), so one written by anyone else is never read. It is kept on disk
  * ([disk], [diskBlobs]) when the origin's policy allows an offline cache ([durable], read when it is kept), and only in
  * memory otherwise, as the save queue is (design 2026-11-09, "Saving"). Both are read, so a save kept before the policy
- * changed is still found with its files ([leaveDisk] moves the disk's into memory when it forbids them, locked or not).
- * The lists are read and written only while unlocked, after [unlocked] has run; an empty list removes its log.
+ * changed is still found with its files ([leaveDisk] moves the disk's into memory when it forbids them: at once while
+ * unlocked, at the next unlock while locked). The lists are read and written only while unlocked, after [unlocked] has
+ * run; an empty list removes its log.
  */
 internal class PendingSaves(private val disk: FillSnapshotStore, private val diskBlobs: BlobStore, private val durable: () -> Boolean) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -272,8 +273,14 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
     private val memoryLog = InMemoryFillSnapshots()
     private val memoryBlobs = InMemoryBlobs()
 
-    /** Sealed records taken off the disk while locked ([leaveDisk]): opaque until the next unlock opens them ([unlocked]). */
+    /**
+     * A copy of the sealed record on disk, made when a policy that forbids keeping data was seen while locked ([leaveDisk]):
+     * opaque, and only a cache. The record itself stays on disk until the next unlock moves it ([unlocked]).
+     */
     private val held = ArrayList<ByteArray>()
+
+    /** A policy that forbids keeping data was seen while locked: the next unlock moves what is on disk into memory. */
+    private var leaveAtUnlock = false
 
     /** The saves [record] holds, when this account wrote it for kept saves; null otherwise. */
     private fun open(account: Account, record: ByteArray): List<PendingSave>? {
@@ -307,30 +314,41 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
     class Found(val movedToMemory: Int, val unreadable: Int)
 
     /**
-     * At an unlock, before anything reads the kept saves: the records taken off the disk while locked (a policy that
-     * forbids keeping data, round-10 review 2) are opened and join the ones in memory, and a record on disk this version
-     * cannot read (an earlier version's, round-10 review 3) is removed. Both are counted, for the notices that say so:
-     * nothing kept goes unsaid.
+     * At an unlock, before anything reads the kept saves. A record on disk this version cannot read (an earlier
+     * version's, round-10 review 3) is removed. When a policy that forbids keeping data was seen while locked (round-10
+     * review 2), what stayed on disk for this moment moves into memory now, files and all ([leaveDisk]); should the disk's
+     * record be gone by then, the copy taken while locked is opened instead. Both are counted, for the notices that say
+     * so: nothing kept goes unsaid.
      */
     fun unlocked(account: Account): Found {
         var moved = 0
         var unreadable = 0
-        val records = held.toList()
+        val cached = held.toList()
         held.clear()
-        for (record in records) {
-            val saves = open(account, record)
-            if (saves == null) {
-                unreadable += countUnreadable(account, record)
-            } else if (saves.isNotEmpty()) {
-                val kept = read(memoryLog, account).filter { m -> saves.none { it.id == m.id } }
-                if (write(memoryLog, account, kept + saves)) moved += saves.size else unreadable += saves.size
-            }
-            record.fill(0)
-        }
         val onDisk = runCatching { disk.read() }.getOrNull()
         if (onDisk != null && open(account, onDisk) == null) {
             unreadable += countUnreadable(account, onDisk)
             runCatching { disk.delete() }
+        } else if (onDisk == null) {
+            for (record in cached) {
+                val saves = open(account, record)
+                if (saves == null) {
+                    unreadable += countUnreadable(account, record)
+                } else if (saves.isNotEmpty()) {
+                    val kept = read(memoryLog, account).filter { m -> saves.none { it.id == m.id } }
+                    if (write(memoryLog, account, kept + saves)) moved += saves.size else unreadable += saves.size
+                }
+            }
+        }
+        cached.forEach { it.fill(0) }
+        if (leaveAtUnlock) {
+            leaveAtUnlock = false
+            if (!durable()) {
+                moved += leaveDisk(account)
+            } else {
+                // The policy allows keeping data again: the disk keeps what it holds, and the copies taken while locked go.
+                for (id in runCatching { diskBlobs.ids() }.getOrDefault(emptyList())) memoryBlobs.delete(id)
+            }
         }
         return Found(moved, unreadable)
     }
@@ -391,39 +409,44 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
     }
 
     /**
-     * The policy no longer allows keeping data on this device (round-9 review 8): what is kept on disk goes, moved into
-     * memory first, so the saves are still finished while the app runs. Unlocked, the saves of [account] are moved with
-     * their files, and how many is returned for the notice that says so. Locked ([account] null, a policy probe at
-     * launch or on return, round-10 review 2), nothing can be opened and nothing is deleted unseen: the sealed record
-     * and every file, encrypted as they are, move into memory as opaque bytes, and the next unlock opens them and says
-     * so ([unlocked]).
+     * The policy no longer allows keeping data on this device (round-9 review 8): what is kept on disk moves into memory,
+     * so the saves are still finished while the app runs. Unlocked, the saves of [account] move, every file set aside
+     * moves with them (an open editor's too, which no kept save names yet: round-11 review), the disk's copies go, and how
+     * many saves moved is returned for the notice that says so. Locked ([account] null: a policy probe at launch or on
+     * return, round-10 review 2), nothing can be opened, so nothing moves yet: the sealed record and the files stay on
+     * disk until the next unlock moves them ([unlocked]), since a copy only in memory would be lost if the system ended
+     * the process first (round-11 review). A copy is taken into memory only as a cache.
      */
     fun leaveDisk(account: Account?): Int {
+        if (account == null) {
+            held.forEach { it.fill(0) }
+            held.clear()
+            // A copy: the store may hand back its own bytes, and the record must stay as it is on disk.
+            runCatching { disk.read() }.getOrNull()?.let { held += it.copyOf() }
+            copyBlobsToMemory()
+            leaveAtUnlock = true
+            return 0
+        }
         var moved = 0
-        if (account != null) {
-            val onDisk = runCatching { read(disk, account) }.getOrDefault(emptyList())
-            if (onDisk.isNotEmpty()) {
-                for (id in onDisk.flatMap { it.newFiles }) {
-                    diskBlobs.get(id)?.let { bytes ->
-                        memoryBlobs.put(id, bytes)
-                        bytes.fill(0)
-                    }
-                }
-                val kept = read(memoryLog, account).filter { m -> onDisk.none { it.id == m.id } }
-                if (write(memoryLog, account, kept + onDisk)) moved = onDisk.size
-            }
-        } else {
-            runCatching { disk.read() }.getOrNull()?.let { held += it }
-            for (id in runCatching { diskBlobs.ids() }.getOrDefault(emptyList())) {
-                runCatching { diskBlobs.get(id) }.getOrNull()?.let { bytes ->
-                    memoryBlobs.put(id, bytes)
-                    bytes.fill(0)
-                }
-            }
+        val onDisk = runCatching { read(disk, account) }.getOrDefault(emptyList())
+        copyBlobsToMemory()
+        if (onDisk.isNotEmpty()) {
+            val kept = read(memoryLog, account).filter { m -> onDisk.none { it.id == m.id } }
+            if (write(memoryLog, account, kept + onDisk)) moved = onDisk.size
         }
         runCatching { disk.delete() }
         runCatching { diskBlobs.clear() }
         return moved
+    }
+
+    /** Every file set aside on disk, copied into memory as it is (encrypted). */
+    private fun copyBlobsToMemory() {
+        for (id in runCatching { diskBlobs.ids() }.getOrDefault(emptyList())) {
+            runCatching { diskBlobs.get(id) }.getOrNull()?.let { bytes ->
+                memoryBlobs.put(id, bytes)
+                bytes.fill(0)
+            }
+        }
     }
 
     /** The account is going: every kept save and file goes, on disk and in memory. */
@@ -434,6 +457,7 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
         memoryBlobs.clear()
         held.forEach { it.fill(0) }
         held.clear()
+        leaveAtUnlock = false
     }
 
     companion object {

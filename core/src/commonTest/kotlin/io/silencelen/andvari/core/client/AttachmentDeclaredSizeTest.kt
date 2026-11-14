@@ -49,6 +49,14 @@ class AttachmentDeclaredSizeTest {
         }
     }
 
+    /** Round-11 review: a backup names what it skipped as every app shows a file's name, never as its uploader typed it. */
+    @Test
+    fun planAttachments_namesWhatItSkipsAsEveryAppShowsAName() {
+        val rlo = "\u202E" // right-to-left override
+        val plan = ExportPlanner.planAttachments(listOf(item(ref("invoice${rlo}fdp.exe", -1)), item(ref("a/b/../  report:2.pdf", cap + 1))))
+        assertEquals(listOf("invoicefdp.exe", "report-2.pdf"), plan.overCap)
+    }
+
     @Test
     fun wireLength_isTheExactUploadedLength() {
         for (n in listOf(1, 100, Attachments.CHUNK - 1, Attachments.CHUNK, Attachments.CHUNK + 1, 3 * Attachments.CHUNK + 7)) {

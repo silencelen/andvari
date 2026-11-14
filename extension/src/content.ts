@@ -354,15 +354,6 @@ async function scheduleClipboardClear(): Promise<void> {
  *  is a card form. The worker checks the origin the browser reports before anything is filled. */
 const cardBox = isCardProviderOrigin(location.origin);
 
-/** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
- *  (`location.ancestorOrigins`; the page around this frame cannot change the list). Null where the browser has no such
- *  list (Firefox): the worker then fills this frame alone, one field per Fill. */
-const ancestorChain: string[] | null = (() => {
-  const list = (location as Location & { ancestorOrigins?: DOMStringList }).ancestorOrigins;
-  if (list === undefined || list === null) return null;
-  return Array.from({ length: list.length }, (_, i) => list.item(i) ?? "null");
-})();
-
 /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own word, so
  *  only a hint for the popup's line (which site to allow andvari on); the worker never decides a fill from it. */
 function providerOriginsShown(): string[] {
@@ -407,7 +398,7 @@ function reportCardForm(): void {
   lastCardSig = sig;
   reportedChoice = chosenSeq;
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
-  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow, ancestors: ancestorChain, ...(isTop ? { providerOrigins } : {}) });
+  void safeSend({ type: "cardFormInfo", forms, anchor, choseNow, ...(isTop ? { providerOrigins } : {}) });
 }
 
 /** Bumped by every choice of a card field, so a report tells the worker a new choice was made ([reportCardForm]). */
@@ -480,6 +471,39 @@ function setCardFocus(next: FillableControl | null): void {
   reportCardForm();
 }
 
+/**
+ * Whether [el] shows in the top-level viewport (round-11 review), asked from inside this frame of IntersectionObserver
+ * with the implicit root, which every engine measures against the top-level page's viewport through every frame around
+ * this one: at least half of it there, not clipped away. Where the engine has IntersectionObserver v2 (Chrome), it must
+ * also be visible: not covered by anything, and not faded, filtered or transformed by this frame or any around it. No
+ * answer in time is a no.
+ */
+function shownInTopViewport(el: Element): Promise<boolean> {
+  return new Promise((resolve) => {
+    const v2 = typeof IntersectionObserverEntry !== "undefined" && "isVisible" in IntersectionObserverEntry.prototype;
+    const options = (v2 ? { threshold: [0, 0.5, 1], trackVisibility: true, delay: 100 } : { threshold: [0, 0.5, 1] }) as IntersectionObserverInit;
+    let settled = false;
+    const finish = (shown: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      io.disconnect();
+      resolve(shown);
+    };
+    const io = new IntersectionObserver((entries) => {
+      const e = entries[entries.length - 1];
+      if (e === undefined) return;
+      const inView = e.isIntersecting && e.intersectionRatio >= 0.5;
+      finish(inView && (!v2 || (e as IntersectionObserverEntry & { isVisible?: boolean }).isVisible === true));
+    }, options);
+    const timer = setTimeout(() => finish(false), SHOWN_TIMEOUT_MS);
+    io.observe(el);
+  });
+}
+
+/** How long the top-level viewport may take to answer ([shownInTopViewport]). */
+const SHOWN_TIMEOUT_MS = 1500;
+
 /** Whether [t] passes the full fill rules on its own now: what a choice and a fill both require of the chosen field. */
 function chosenFieldSeen(t: FillableControl): boolean {
   return visibilityOf(probeVisibility(t, { onScreen: true, hitTest: true, fill: true, ignore: isOwnUiHost }), false, MIN_OPACITY) === "ok";
@@ -522,13 +546,20 @@ function chooseIfPersonPut(t: EventTarget | null, focus: FocusEvent | undefined)
   }, 0);
 }
 
-/** The person put [t] there: it is chosen when the page holds their activation and it passes the fill rules. */
+/**
+ * The person put [t] there: it is chosen when the page holds their activation, it passes the fill rules, and it shows in
+ * the top-level viewport (round-11 review: asked of the browser, which answers a moment later; by then the field must
+ * still be the one focused).
+ */
 function chooseIfFits(t: FillableControl): void {
   if (filling || !cardBox || !userActivated()) return;
   if (cardFormForInput(t) === null) return;
   // The choice is held to the same rules as the fill (round-7 review H1): a field that cannot be seen is not chosen.
   if (!chosenFieldSeen(t)) return;
-  setCardFocus(t);
+  void shownInTopViewport(t).then((shown) => {
+    if (!shown || filling || !t.isConnected || deepActiveElement() !== t) return;
+    setCardFocus(t);
+  });
 }
 
 /** The innermost element focus is on, through open and (where the browser lets this script see them) closed roots. */
@@ -741,34 +772,28 @@ function applyCardFill(form: CardForm, values: CardFillFields, seen: ReadonlySet
 }
 
 /** Popup-granted card fill: redeem this frame's one-shot grant (the SW verifies the frame and the provider origin the
- *  browser reports for it), then write the returned fields. The card values never persist past this call.
- *  [U12]/[A3]: `sig` is the grant's kind-signature — a non-string (a mid-update mixed-version SW) refuses rather than
- *  guesses, same fail-closed law as the SW side. [chosen]: this is the frame where the person chose a field, and the
- *  form holding it is filled; otherwise this frame is a split-field sibling of that one, and its one card form is,
- *  when its signature is still [sig]. */
-async function fillCardIntoForm(itemId: string, sig: unknown, chosen: unknown): Promise<CardFillOutcome> {
+ *  browser reports for it), then write the returned fields. The card values never persist past this call. Only a frame
+ *  where the person chose a card field is ever sent this (round-11 review), and the form holding that field is filled:
+ *  only its fields that can be seen, and only while it shows in the top-level viewport, asked before the card is asked
+ *  for and again before it is written. [U12]/[A3]: `sig` is the grant's kind-signature — a non-string (a mid-update
+ *  mixed-version SW) refuses rather than guesses, same fail-closed law as the SW side. */
+async function fillCardIntoForm(itemId: string, sig: unknown): Promise<CardFillOutcome> {
   const nothing = (code: CardFillOutcome["code"]): CardFillOutcome => ({ filled: "nothing", filledKinds: [], missedKinds: [], code });
   if (typeof sig !== "string" || !cardBox) return nothing("no_form");
-  let anchor: FillableControl | null = null;
-  const formNow = (): CardForm | null => {
-    if (anchor !== null) return cardFormHolding(anchor);
-    const forms = freshCardForms();
-    return forms.length === 1 ? forms[0]! : null;
-  };
-  if (chosen === true) {
-    // C1 / H1: only the form holding the field the person chose, and only the fields of it that can be seen.
-    anchor = chosenField();
-    // A card form inside a closed shadow root never gets a chosen field (round-6 review M2): said so, not "tap it".
-    if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");
-  }
-  const form = formNow();
+  // C1 / H1: only the form holding the field the person chose, and only the fields of it that can be seen.
+  const anchor = chosenField();
+  // A card form inside a closed shadow root never gets a chosen field (round-6 review M2): said so, not "tap it".
+  if (anchor === null) return nothing(cardFormsAllClosed() ? "closed_form" : "no_focus");
+  const form = cardFormHolding(anchor);
   if (!form || cardSigOf(form) !== sig) return nothing("no_form");
   if (cardFieldsSeen(form, anchor) === null) return nothing("not_visible");
+  if (!(await shownInTopViewport(anchor))) return nothing("not_visible");
   const r = await safeSend({ type: "revealCardForFill", itemId });
   if (!r) return nothing("unreachable");
   if (!r.ok || !r.fields) return nothing("not_allowed");
   // The page had a round trip to change things: look again before anything is written.
-  const now = formNow();
+  if (!(await shownInTopViewport(anchor))) return nothing("not_visible");
+  const now = cardFormHolding(anchor);
   if (!now || cardSigOf(now) !== sig) return nothing("no_form");
   const seen = cardFieldsSeen(now, anchor);
   if (seen === null) return nothing("not_visible");
@@ -1640,12 +1665,11 @@ function init(): void {
         return true; // keep the channel open for the async outcome
       }
       if (msg.type === "fillCard") {
-        // S3: the SW sent this to THIS frame only (frameId-targeted). We redeem this frame's one-shot
-        // card grant and write the returned fields; the SW re-verifies the frameId and the provider
-        // origin the browser reports for this frame. [U12]: the chosen frame fills the form holding
-        // the chosen field, a split-field sibling its one card form, each only while its sig is
-        // msg.sig; otherwise no_form.
-        void fillCardIntoForm(msg.itemId, msg.sig, msg.chosen).then(sendResponse);
+        // S3: the SW sent this to THIS frame only (frameId-targeted), one where the person chose a card
+        // field. We redeem this frame's one-shot card grant and write the returned fields; the SW
+        // re-verifies the frameId and the provider origin the browser reports for this frame. [U12]:
+        // the form holding the chosen field, only while its sig is msg.sig; otherwise no_form.
+        void fillCardIntoForm(msg.itemId, msg.sig).then(sendResponse);
         return true; // keep the channel open for the async outcome
       }
       if (msg.type === "rescanCardForms") {
@@ -1657,6 +1681,12 @@ function init(): void {
         formsCache = null;
         cardFormsCache = null;
         reportCardForm();
+        sendResponse({ ok: true });
+        return undefined;
+      }
+      if (msg.type === "dropCardChoice") {
+        // Round-11 review: a newer choice in another frame covers a kind of this frame's chosen form.
+        setCardFocus(null);
         sendResponse({ ok: true });
         return undefined;
       }

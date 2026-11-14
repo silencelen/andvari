@@ -127,7 +127,8 @@ export type CardFillFailCode =
   | "closed_form" // the box keeps its card form in a closed shadow root, where no field can be chosen (round-6 M2)
   | "page_form" //   the page takes the card in its own fields: andvari fills a card only into a payment provider's box (owner decision 2026-11-14)
   | "provider_not_allowed" // a payment provider's box is there, but andvari may not run in it (Safari asks per site)
-  | "duplicate_fields"; // two frames of the box would take the same card detail (one the page added): nothing is filled
+  | "duplicate_fields" // two provider card frames in the tab ask for the same card detail: nothing is filled (round-11 review)
+  | "changed"; //       the frames to fill are not the ones the popup showed: the page changed since
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
  *  landed (read-back verified); `partial` = some landed, some didn't; `nothing` as before. A kind
@@ -496,10 +497,6 @@ export type Req =
       anchor?: number | null;
       /** Round-7 review L7: the person chose a field again since the last report (the worker stamps the time). */
       choseNow?: boolean;
-      /** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
-       *  (`location.ancestorOrigins`); null where the browser has no such list (Firefox). A split-field provider's
-       *  siblings are the frames of its origin with the same list (cardrelease.ts cardFillPlan). */
-      ancestors?: string[] | null;
       /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own
        *  word, so only a HINT for the popup (which site to allow andvari on); it never decides where a card goes. */
       providerOrigins?: string[];
@@ -533,11 +530,11 @@ export type Req =
    *  origin the browser reports for the frame) with a card form is in the tab. */
   | { type: "cardFillOffers" }
   /** Popup ONLY: user clicked Fill on a card row → the SW mints one one-shot CARD grant per frame the
-   *  fill reaches (a store SEPARATE from login `grants`, [A5]): the provider frame where the person
-   *  chose a field, and its split-field siblings (same origin, same ancestor origins, one frame per
-   *  field kind), each bound to (tabId,itemId,frameId,origin) with its own form's kinds; and sends
-   *  {type:"fillCard"} to each. */
-  | { type: "fillCardFromPopup"; itemId: string }
+   *  fill reaches (a store SEPARATE from login `grants`, [A5]): every provider frame where the person
+   *  chose a card field, each bound to (tabId,itemId,frameId,origin) with the form holding its chosen
+   *  field; and sends {type:"fillCard"} to each. [frames]: the frames and origins the popup showed
+   *  (cardFillOffers): the fill goes to exactly those, or to none (round-11 review). */
+  | { type: "fillCardFromPopup"; itemId: string; frames: { frameId: number; origin: string }[] }
   /** Content (S3 redemption): a granted frame redeems ITS card grant. The SW verifies, all
    *  fail-closed-on-undefined ([A3]): a live card grant for (tabId, sender.frameId, itemId); the
    *  origin the browser reports for the frame now equals the grant's, a payment provider's
@@ -675,6 +672,12 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               fillable: boolean;
                                               /** The provider origin a Fill goes to (where the person chose, else the first). */
                                               origin: string | null;
+                                              /** The provider frames where the person chose a card field: what a Fill reaches,
+                                               *  sent back with it so it reaches exactly those. */
+                                              frames: { frameId: number; origin: string }[];
+                                              /** Two provider card frames ask for the same card detail: no Fill, and the popup
+                                               *  says why. */
+                                              doubled?: boolean;
                                               /** The page takes the card in its own fields only: no Fill; the popup says
                                                *  andvari fills a card only into a payment provider's box, and copies. */
                                               pageFormOnly: boolean;
@@ -736,10 +739,12 @@ export type TabMsg =
   /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
    *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
    *  card values on this message. Tier 2 [U12]: `sig` is the grant's kind-signature
-   *  (`kinds.join(",")` of the frame's form). [chosen]: the frame where the person chose a field
-   *  fills the form holding it; a split-field sibling (chosen false) fills its one card form, and
-   *  only when its CURRENT signature equals [sig]; no match → `no_form`, NEVER an index fallback. */
-  | { type: "fillCard"; itemId: string; sig: string; chosen: boolean }
+   *  (`kinds.join(",")` of the form holding the field the person chose in this frame), which must
+   *  still be that form's CURRENT signature; no match → `no_form`, NEVER an index fallback. */
+  | { type: "fillCard"; itemId: string; sig: string }
+  /** SW → content (round-11 review): a newer choice in another frame covers a kind of this frame's chosen form, so this
+   *  frame lets its choice go. */
+  | { type: "dropCardChoice" }
   /** SW → content (S3 §7, broadcast to ALL frames — [T5] popup fast-path — or sent to the ONE
    *  frame whose record the chip gate found missing, [S4b]): drop the sig sentinel
    *  and caches, then re-report the frame's card form NOW. [T4]: the receiver resets lastCardSig

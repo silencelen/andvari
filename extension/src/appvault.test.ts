@@ -304,10 +304,12 @@ test("cards are listed masked, and a card ask keeps only the fields that were as
 test("the Safari worker fills a card only into a payment provider's box, only by the popup's grants, and asks the app only for each frame's fields", () => {
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
   const fill = bg.slice(bg.indexOf("async function fillCardFromPopup("), bg.indexOf("async function revealCardForFill("));
-  // Owner decision 2026-11-14: grants are minted only for the provider frame holding the person's choice and its
-  // split-field siblings. Every provider origin is https (cardproviders.test.ts), so no card goes to a plain-http page.
-  assert.ok(fill.indexOf("chosenCardFrame(records(), Date.now())") > 0 && fill.indexOf("chosenCardFrame(records(), Date.now())") < fill.indexOf("cardGrants.set(tabId"), "no grant before a provider frame's choice");
-  assert.ok(fill.indexOf("cardFillTargets(records(), chosen, await frameTree(tabId))") < fill.indexOf("cardGrants.set(tabId"));
+  // Owner decision 2026-11-14, round-11 review: grants are minted only for the provider frames holding the person's
+  // choices, and only when they are the frames the popup showed. Every provider origin is https (cardproviders.test.ts),
+  // so no card goes to a plain-http page.
+  const plan = fill.indexOf("let plan = cardFillPlan(records(), Date.now());");
+  assert.ok(plan > 0 && plan < fill.indexOf("cardGrants.set(tabId"), "no grant before the plan of chosen frames");
+  assert.ok(fill.indexOf("if (!sameFrames(shown, plan.targets))") < fill.indexOf("cardGrants.set(tabId"), "nor for frames the popup did not show");
   const reveal = bg.slice(bg.indexOf("async function revealCardForFill("), bg.indexOf("// ---- capture → pending save → resolve ----"));
   assert.match(reveal, /await appVaultCard\(msg\.itemId, cardFieldsForKinds\(grant\.kinds\)\)/);
   assert.ok(reveal.indexOf("if (!mayRedeem(grant, msg.itemId, sender, Date.now()))") > 0 && reveal.indexOf("if (!mayRedeem(grant, msg.itemId, sender, Date.now()))") < reveal.indexOf("await appVaultCard("), "the frame and origin checks come before anything is asked of the app");
