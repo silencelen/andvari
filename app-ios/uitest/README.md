@@ -82,12 +82,12 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | Two-step setup survives a trip to the Settings app (the same key at the confirm step after the unlock); the authenticator's code turns it on, a later one off | Works | `T4…test07` |
 | A password typed into the login editor a key at a time keeps the keyboard and is saved as typed | Skipped: app defect (below) | `T4…test08` |
 | Every card test page (extension/test-pages/card-*.html: the review rounds' attacks and first-party card forms): no Fill, and the popup's line says to copy from the app; the skimmer's hidden form receives nothing | Works | `T5…test01` |
-| checkout.html with the provider's frame Safari keeps the extension out of (Other Websites: Ask): no Fill; with every website allowed in Safari's settings, a Fill into the provider's origin | Works; the line naming the provider's site to allow is missing (finding below), so the test ends skipped with it | `T5…test02` |
+| checkout.html with the provider's frame Safari keeps the extension out of (Other Websites: Ask): no Fill, and the popup names the provider's site to allow; with every website allowed in Safari's settings, a Fill into the provider's origin | Works | `T5…test02` |
 | `?layout=card`: a tap on the number in the provider's frame, then Fill: number, expiry and code in the provider's form, the shop's own name-on-card field empty | Works | `T5…test03` |
-| `?layout=split`: one provider frame per field; each sibling frame receives its own field | Works | `T5…test04` |
+| `?layout=split`: one provider frame per field. A fill reaches only the frames tapped in (round 11): the number alone fills the number alone; a tap in each frame, then one Fill, fills all three | Works | `T5…test04` |
 | `?layout=code`: a security code alone in the provider's frame | Works | `T5…test05` |
 | The choice survives the keyboard's Done | Works | `T5…test06` |
-| `?layout=twice`: a second card-number frame beside the first; nothing is filled | Skipped until the extension matches sibling frames by `location.ancestorOrigins` with one frame per field kind (coming on ios-ui); the workflow reads which rule the build has from its manifest | `T5…test07` |
+| `?layout=twice`: a second card-number frame beside the first: no Fill, the popup says the page shows more than one payment form asking for the same card detail and to copy from the app; nothing is filled | Works | `T5…test07` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
@@ -113,12 +113,6 @@ assertion.
   `SecretTextField` without `focused`, which defaults to false, and every update of the field (each key changes
   the draft) runs `updateUIView`, which resigns the first responder of a field that is not `focused`
   (`Support/SecretFields.swift`, since bfd0b412). `InputField` passes its focus and is not affected.
-
-- **No word in the popup when Safari keeps the extension out of the provider's frame** (found 2026-11-14). With
-  Safari's default for other websites (Ask), the popup on checkout.html lists the cards with no Fill and no line;
-  the design has it name the provider's site to allow ("The card form comes from pay.andvari-uitest.test:8443,
-  where Safari doesn't let andvari run yet…"). Safari may not report to the extension a frame it keeps the
-  extension out of. Once every website is allowed, the Fill is offered.
 
 - **Card fill into merchant pages, before 2026-11-14** (overtaken by the owner's redesign: a card goes only into a
   payment provider's card form). Under the earlier design the tests found that closing the keyboard with its Done
