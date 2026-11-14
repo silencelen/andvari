@@ -29,6 +29,7 @@ import io.silencelen.andvari.core.client.session.SecretStore
 import io.silencelen.andvari.core.client.session.SessionPersistence
 import io.silencelen.andvari.core.client.session.httpsOnly
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.Dispatchers
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
@@ -156,13 +157,9 @@ internal class IosSeams(
     private val own = UserDefaultsPrefs(config.defaultsSuite)
 
     init {
-        val fm = NSFileManager.defaultManager
-        if (!fm.fileExistsAtPath(installMarker) && protectedDataAvailable()) {
+        if (!NSFileManager.defaultManager.fileExistsAtPath(installMarker) && protectedDataAvailable()) {
             if (PRIVATE_STATE_KEYS.all { own.getString(it) == null }) runCatching { dropStaleInstall() }
-            runCatching {
-                fm.createDirectoryAtPath(installMarker.substringBeforeLast('/'), withIntermediateDirectories = true, attributes = null, error = null)
-                fm.createFileAtPath(installMarker, contents = null, attributes = null)
-            }
+            markInstalled(installMarker)
         }
     }
 
@@ -195,6 +192,16 @@ internal class IosSeams(
     private companion object {
         /** What says the private store holds anything ([PrefsSessionPersistence]'s server, pending server and session). */
         val PRIVATE_STATE_KEYS = listOf("baseUrl", "pendingServer", "session")
+    }
+}
+
+/** Write the install marker at [path] (an empty file), and its directory when the app's container has none yet. */
+@OptIn(ExperimentalForeignApi::class) // createDirectoryAtPath's error out-parameter, passed as null
+private fun markInstalled(path: String) {
+    runCatching {
+        val fm = NSFileManager.defaultManager
+        fm.createDirectoryAtPath(path.substringBeforeLast('/'), withIntermediateDirectories = true, attributes = null, error = null)
+        fm.createFileAtPath(path, contents = null, attributes = null)
     }
 }
 
