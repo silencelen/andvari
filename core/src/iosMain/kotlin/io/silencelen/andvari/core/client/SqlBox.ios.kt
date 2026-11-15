@@ -14,6 +14,14 @@ import platform.Foundation.stringByDeletingLastPathComponent
 /** SQLite's "copy this buffer" destructor sentinel; the C macro does not cross cinterop. */
 private val TRANSIENT = (-1L).toCPointer<CFunction<(COpaquePointer?) -> Unit>>()
 
+/**
+ * Apple's SQLite open flag SQLITE_OPEN_FILEPROTECTION_COMPLETEUNLESSOPEN (its sqlite3.h): the database and the journals
+ * SQLite creates for it get NSFileProtectionCompleteUnlessOpen, whatever the app's default class. The vault cache is
+ * opened at the unlock and stays open, and a save in the upload grace writes to it while the device may be locked
+ * (IosStorage.kt FileClasses).
+ */
+private const val OPEN_FILEPROTECTION_COMPLETEUNLESSOPEN = 0x00200000
+
 /** iOS actual over the system SQLite. Same connection settings as the JDBC actual. */
 private class NativeSqlBox(path: String) : SqlBox {
     private val db: CPointer<sqlite3>
@@ -25,7 +33,7 @@ private class NativeSqlBox(path: String) : SqlBox {
         }
         db = memScoped {
             val out = alloc<CPointerVar<sqlite3>>()
-            val rc = sqlite3_open_v2(path, out.ptr, SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE or SQLITE_OPEN_FULLMUTEX, null)
+            val rc = sqlite3_open_v2(path, out.ptr, SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE or SQLITE_OPEN_FULLMUTEX or OPEN_FILEPROTECTION_COMPLETEUNLESSOPEN, null)
             val handle = out.value
             if (rc != SQLITE_OK || handle == null) {
                 if (handle != null) sqlite3_close_v2(handle)
