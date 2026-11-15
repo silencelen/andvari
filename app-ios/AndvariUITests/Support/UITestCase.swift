@@ -60,6 +60,8 @@ class UITestCase: XCTestCase {
     override class func setUp() {
         super.setUp()
         Recorder.shared.register()
+        // What the class before left the app as (signed out, another account, Face ID off) is not this class's state.
+        SystemState.appReadyForFilling = false
     }
 
     override func setUp() {

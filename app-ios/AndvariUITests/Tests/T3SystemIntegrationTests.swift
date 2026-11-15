@@ -31,6 +31,7 @@ final class T3SystemIntegrationTests: UITestCase {
             settingsApp.terminate()
             relaunchAndUnlock()
             SystemState.providerEnabled = true
+            SystemState.appReadyForFilling = true
         }
     }
 

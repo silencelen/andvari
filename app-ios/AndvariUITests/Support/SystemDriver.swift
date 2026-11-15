@@ -668,9 +668,20 @@ extension UITestCase {
     // MARK: - Shared setup for the AutoFill tests
 
     /// andvari turned on under AutoFill From, with the app unlocked since, so its suggestions are in the system's
-    /// store. Done once per run; a test that needs it and cannot have it fails with the reason, it does not pass.
+    /// store. The switch is turned on once per run and the app made ready once per class; a test that needs it and
+    /// cannot have it fails with the reason, it does not pass.
     func requireAutoFillProvider() {
-        if SystemState.providerEnabled { return }
+        if SystemState.providerEnabled {
+            // The switch in Settings stays on, but the class before may have left the app signed out (the account
+            // deletion test ends on the server screen), signed in to another account or with Face ID off, and the
+            // extensions then have nothing to fill from. Once per class, the app is made ready again.
+            if !SystemState.appReadyForFilling {
+                prepareAppForFilling()
+                relaunchAndUnlock()
+                SystemState.appReadyForFilling = true
+            }
+            return
+        }
         prepareAppForFilling()
         XCTAssertTrue(openAutoFillSettings(), "Settings has no AutoFill & Passwords screen")
         let toggle = autoFillProviderSwitch
@@ -684,6 +695,7 @@ extension UITestCase {
         settingsApp.terminate()
         relaunchAndUnlock()
         SystemState.providerEnabled = true
+        SystemState.appReadyForFilling = true
     }
 
     /// Everything on screen that is not the page: Safari's own tree and SpringBoard's, where system sheets live.
@@ -752,6 +764,9 @@ enum SystemState {
     static var queueLog: [String] = []
     static var queueSnapshots: [[String]] = []
     static var providerEnabled = false
+    /// The app is signed in to the seeded account with Face ID on and unlocked since, as the extensions need it:
+    /// made so once per test class, whatever the class before left.
+    static var appReadyForFilling = false
     static var extensionEnabled = false
     static var everyWebsiteAllowed = false
 }
