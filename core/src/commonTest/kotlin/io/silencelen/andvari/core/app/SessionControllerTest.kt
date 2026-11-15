@@ -2736,7 +2736,7 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Sheet", "me", "=HYPERLINK(1)", listOf("https://sheet.example"), "", "", false)))
         assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Shopping", "milk", false)))
         assertEquals(ActionResult.Ok, controller.openExport(ExportKind.CSV))
-        val screen = assertNotNull(controller.state.export)
+        val screen = assertNotNull(controller.state.exporting)
         assertEquals(ExportKind.CSV, screen.kind)
         assertNull(screen.offlineNote, "the sync reached the server")
         assertTrue(screen.vaults.single().personal && screen.vaults.single().included)
@@ -2745,7 +2745,7 @@ open class SessionControllerTest {
         assertEquals(listOf("Password of \u201CSheet\u201D"), screen.formulaCells)
 
         assertNull(controller.csvFile(acknowledged = false), "not without the tick")
-        assertEquals(ExportCopy.FORMULA_ACK_NEEDED, controller.state.export?.error)
+        assertEquals(ExportCopy.FORMULA_ACK_NEEDED, controller.state.exporting?.error)
         val file = assertNotNull(controller.csvFile(acknowledged = true))
         assertTrue(Regex("andvari-export-\\d{4}-\\d{2}-\\d{2}\\.csv").matches(file.fileName), file.fileName)
         val text = file.bytes.decodeToString()
@@ -2753,20 +2753,20 @@ open class SessionControllerTest {
         assertTrue(text.contains("Sheet,https://sheet.example,me,=HYPERLINK(1),"), "written as is, never mangled")
         assertFalse(text.contains("Shopping"))
         controller.exportSaved(file.fileName, "On My iPhone")
-        assertEquals(ExportCopy.csvSaved(file.fileName, "On My iPhone", 2), controller.state.export?.done)
+        assertEquals(ExportCopy.csvSaved(file.fileName, "On My iPhone", 2), controller.state.exporting?.done)
 
         // A vault that changed after the tick: nothing is made, and the screen lists the cells again.
         assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Sum", "+SUM(A1)", "pw", emptyList(), "", "", false)))
         assertNull(controller.csvFile(acknowledged = true))
-        val again = assertNotNull(controller.state.export)
+        val again = assertNotNull(controller.state.exporting)
         assertEquals(ExportCopy.VAULT_CHANGED, again.error)
         assertEquals(2, again.formulaCells.size)
         assertNotNull(controller.csvFile(acknowledged = true), "acknowledged again, for the cells now listed")
         controller.exportNotSaved(written = true)
-        assertEquals(ExportCopy.READ_BACK_FAILED, controller.state.export?.error)
+        assertEquals(ExportCopy.READ_BACK_FAILED, controller.state.exporting?.error)
 
         controller.lock()
-        assertNull(controller.state.export, "a lock closes the export screen")
+        assertNull(controller.state.exporting, "a lock closes the export screen")
     }
 
     /**
@@ -2781,17 +2781,17 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Shopping", "milk", false)))
         routes["/sync"] = { throw IOException("unreachable") }
         assertEquals(ActionResult.Ok, controller.openExport(ExportKind.BACKUP))
-        val screen = assertNotNull(controller.state.export)
+        val screen = assertNotNull(controller.state.exporting)
         assertNotNull(screen.offlineNote, "offline: the vault as of the last sync")
         assertEquals(2, screen.count, "Example and Shopping")
 
         val good = "Brisk-Otter-Lamp-41-Quiet-Maple"
         assertNull(controller.backupFile("", ""))
-        assertEquals(ExportCopy.PASSPHRASE_REQUIRED, controller.state.export?.error)
+        assertEquals(ExportCopy.PASSPHRASE_REQUIRED, controller.state.exporting?.error)
         assertNull(controller.backupFile(good, good + "x"))
-        assertEquals(ExportCopy.PASSPHRASES_DIFFER, controller.state.export?.error)
+        assertEquals(ExportCopy.PASSPHRASES_DIFFER, controller.state.exporting?.error)
         assertNull(controller.backupFile("password", "password"))
-        assertEquals(ExportCopy.PASSPHRASE_WEAK, controller.state.export?.error)
+        assertEquals(ExportCopy.PASSPHRASE_WEAK, controller.state.exporting?.error)
 
         val file = assertNotNull(controller.backupFile(good, good))
         assertTrue(file.fileName.startsWith("andvari-backup-") && file.fileName.endsWith(".andvari"))
@@ -2800,9 +2800,9 @@ open class SessionControllerTest {
         assertEquals(reg.userId, opened.payload.userId)
         assertTrue(runCatching { io.silencelen.andvari.core.client.Backup.open(crypto, "Another-Passphrase-99-Long", file.bytes) }.isFailure, "only under its passphrase")
         controller.exportSaved(file.fileName, "iCloud Drive")
-        assertEquals(ExportCopy.backupSaved(file.fileName, "iCloud Drive", 2, 1, 0), controller.state.export?.done)
+        assertEquals(ExportCopy.backupSaved(file.fileName, "iCloud Drive", 2, 1, 0), controller.state.exporting?.done)
         controller.closeExport()
-        assertNull(controller.state.export)
+        assertNull(controller.state.exporting)
     }
 
     // ---- vaults: where a new item goes, moving and copying ----
