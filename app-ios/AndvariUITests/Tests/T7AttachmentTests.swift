@@ -12,7 +12,7 @@ final class T7AttachmentTests: UITestCase {
     /// A note with a text file, a PDF and an image chosen in Files: each is listed in the item, opens as what it is,
     /// and Save to Files writes back the bytes that were added.
     func test01_FilesFromFilesOpenAndSaveBack() {
-        let note = "Files \(stamp)"
+        let item = "Files \(stamp)"
         let words = "andvari UI test text file \(stamp)"
         let pdfWords = "andvari UI test PDF \(stamp)"
         let text = (name: "uitest-text-\(stamp).txt", data: Data((words + "\nsecond line\n").utf8))
@@ -27,16 +27,16 @@ final class T7AttachmentTests: UITestCase {
         }
         step("new-note") {
             freshVault()
-            openNewNote(note)
+            openNewNote(item)
         }
         step("files-chosen") {
             addFromFiles(files.map { $0.name }, tag: "three")
         }
         step("saved") {
-            saveNote(note)
+            saveNote(item)
         }
         step("listed-in-the-item") {
-            openAnyItem(note)
+            openAnyItem(item)
             for file in files {
                 XCTAssertTrue(scrollToComfort(detailFile(file.name)), "\(file.name) is not among the item's files")
             }
@@ -72,11 +72,11 @@ final class T7AttachmentTests: UITestCase {
     /// A note with a picture chosen in the photo picker: it is listed under the name Photos gives it and opens as an
     /// image.
     func test02_PictureFromThePhotoPicker() {
-        let note = "Photo \(stamp)"
+        let item = "Photo \(stamp)"
         var name = ""
         step("new-note") {
             freshVault()
-            openNewNote(note)
+            openNewNote(item)
         }
         step("picture-chosen") {
             openAddMenu("Photo or video")
@@ -91,10 +91,10 @@ final class T7AttachmentTests: UITestCase {
             note("the picture from Photos was added as \(name)")
         }
         step("saved") {
-            saveNote(note)
+            saveNote(item)
         }
         step("shown-as-an-image") {
-            openAnyItem(note)
+            openAnyItem(item)
             openFile(name)
             let picture = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Image'")).firstMatch
             XCTAssertTrue(waitUntil(15) { picture.exists }, "the picture is not shown: \(previewWords())")
@@ -120,7 +120,7 @@ final class T7AttachmentTests: UITestCase {
     /// going up, and comes back. The note is then in the vault once, with its three files, and one saved back to Files
     /// is the file that was added.
     func test04_SaveStillSendingFilesWhenTheAppLeaves() {
-        let note = "Upload \(stamp)"
+        let item = "Upload \(stamp)"
         let files = (1...3).map { index in (name: "uitest-big-\(index)-\(stamp).bin", data: Self.random(20 * 1024 * 1024)) }
         step("large-files-in-on-my-iphone") {
             requireFilesStorage()
@@ -130,7 +130,7 @@ final class T7AttachmentTests: UITestCase {
         }
         step("new-note-with-the-files") {
             freshVault()
-            openNewNote(note)
+            openNewNote(item)
             addFromFiles(files.map { $0.name }, tag: "large", timeout: 240)
         }
         var setAside = 0
@@ -160,18 +160,18 @@ final class T7AttachmentTests: UITestCase {
             reachVaultAnyWay()
         }
         step("note-saved-once-with-its-files") {
-            let rows = app.descendants(matching: .any).matching(identifier: "vault.item." + note)
-            if !findInVault(note, timeout: 150) {
+            let rows = app.descendants(matching: .any).matching(identifier: "vault.item." + item)
+            if !findInVault(item, timeout: 150) {
                 dumpTree(app, as: "note-not-saved")
-                XCTFail("\(note) is not in the vault after the app came back. The vault says: \(vaultWords())")
+                XCTFail("\(item) is not in the vault after the app came back. The vault says: \(vaultWords())")
             }
             let cutShort = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'cut short'")).firstMatch
             if cutShort.exists {
                 note("the vault says: \(cutShort.label)")
             }
-            XCTAssertEqual(rows.count, 1, "\(note) is in the vault \(rows.count) times")
+            XCTAssertEqual(rows.count, 1, "\(item) is in the vault \(rows.count) times")
             XCTAssertTrue(waitUntil(60) { LocalState.filesSetAside().isEmpty }, "files of the save are still set aside on the device after it was done: \(LocalState.filesSetAside())")
-            openAnyItem(note)
+            openAnyItem(item)
             for file in files {
                 XCTAssertTrue(scrollToComfort(detailFile(file.name)), "\(file.name) is not among the item's files")
             }
