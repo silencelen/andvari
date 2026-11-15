@@ -5,6 +5,7 @@ import io.ktor.client.engine.darwin.Darwin
 import io.silencelen.andvari.core.app.ActionResult
 import io.silencelen.andvari.core.app.AutofillVault
 import io.silencelen.andvari.core.app.BlobStore
+import io.silencelen.andvari.core.app.ExportFile
 import io.silencelen.andvari.core.app.FillAvailability
 import io.silencelen.andvari.core.app.FillCard
 import io.silencelen.andvari.core.app.FillCredential
@@ -32,6 +33,7 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.Dispatchers
 import platform.Foundation.NSData
+import platform.Foundation.NSMutableData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSURLRequestReloadIgnoringLocalCacheData
 import platform.UIKit.UIApplication
@@ -128,7 +130,29 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     /** A CSV export the person chose, read whole by the app ([importCsv]): parsed and planned here, nothing sent yet. */
     @Throws(CancellationException::class)
     suspend fun importCsvData(data: NSData): ActionResult = importCsv(data.toByteArray())
+
+    /**
+     * The CSV for the folder the person chose ([csvFile]), as the bytes the app writes there once; core's copy is zeroed.
+     * Null when nothing is to be written (the export screen says why).
+     */
+    fun exportCsvData(acknowledged: Boolean): ExportData? = csvFile(acknowledged)?.let(::exportData)
+
+    /** The backup for the folder the person chose ([backupFile]), made, opened again and checked; core's copy is zeroed. */
+    @Throws(CancellationException::class)
+    suspend fun exportBackupData(passphrase: String, confirm: String): ExportData? = backupFile(passphrase, confirm)?.let(::exportData)
+
+    private fun exportData(file: ExportFile): ExportData = try {
+        ExportData(file.fileName, file.bytes.toNSMutableData())
+    } finally {
+        file.bytes.fill(0)
+    }
 }
+
+/**
+ * A made export for the app to write to the folder the person chose: its file name and bytes, mutable so the app zeroes
+ * them once written (a CSV is plaintext).
+ */
+class ExportData(val fileName: String, val data: NSMutableData)
 
 /** One file of an item as the app shows it or saves it to Files: its bytes in memory, or why there are none (neither: locked). */
 class AttachmentFile(val name: String, val data: NSData?, val error: String?)

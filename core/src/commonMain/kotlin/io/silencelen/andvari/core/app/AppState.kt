@@ -86,6 +86,8 @@ data class AppState(
     val health: HealthView? = null,
     /** A CSV export being imported, from its file being read until the screen closes ([SessionController.importCsv]). */
     val csvImport: CsvImportView? = null,
+    /** The export screen ([SessionController.openExport]): a backup, or a CSV for another password manager. */
+    val export: ExportView? = null,
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
