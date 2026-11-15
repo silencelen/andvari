@@ -247,6 +247,13 @@ if [ "${EXT_PASS:-0}" -lt 200 ]; then
 fi
 echo "    $EXT_PASS tests passed across $EXT_FILES files"
 
+echo "==> Extension: the release packaging's checks (every target built as it ships; content.js under its cap)"
+# The 0.30.0 release check: package.mjs refused the Chrome and Firefox builds (dist/content.js over CONTENT_JS_CAP)
+# while this gate was green, because nothing here built them the way the packaging does. `--check` builds every
+# target with RELEASE=1, Safari's too, and applies the packaging's refusals without zipping (the tests ran above; the
+# A15 release check stays the packaging's own, see releasegate.test.ts).
+(cd "$REPO_DIR/extension" && node package.mjs --check)
+
 # Tag state — ADVISORY (never fails the gate; it is offline and says nothing about the code).
 # Releases were being tagged from somewhere other than the build host and never fetched back, so
 # this clone — the one that runs every release script — could not answer "what is released" from
