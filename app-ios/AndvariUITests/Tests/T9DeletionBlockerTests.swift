@@ -1,10 +1,11 @@
 import XCTest
 
 /// Deleting an account that owns a shared vault someone else still uses. The preview names the vault and offers no
-/// confirmation while it stands; once the vault is deleted in Shared vaults the account can be deleted, the app stands
-/// on the server screen, and nothing of the account is left on the device, in a new process either. The account is a
-/// throwaway one the seed tool makes for this test (tools/uitest-seed `share`): it owns a vault the seeded account
-/// reads. Runs last: it signs the seeded account out, and in again at its end.
+/// confirmation while it stands; once the vault is deleted in Shared vaults the account can be deleted, and the app is
+/// then as a fresh install is: on the server screen, in a new process too, with no file, no preference and no Keychain
+/// item of the account or of its server left on the simulator's disk. The account is a throwaway one the seed tool
+/// makes for this test (tools/uitest-seed `share`): it owns a vault the seeded account reads. Runs last: it signs the
+/// seeded account out, and in again at its end.
 final class T9DeletionBlockerTests: UITestCase {
     private let stamp = Int(Date().timeIntervalSince1970) % 100000
 
@@ -22,12 +23,9 @@ final class T9DeletionBlockerTests: UITestCase {
                 "the owner's account and the vault it shares with the seeded account could not be made"
             )
         }
-        // What the device keeps while nobody is signed in, before the owner's account ever touches it.
-        var before: Set<String> = []
         step("seeded-account-signed-out") {
             freshVault()
             signOutFromVault()
-            before = Set(LocalState.accountFiles())
         }
         step("owner-signed-in") {
             clearField(emailField)
@@ -39,6 +37,14 @@ final class T9DeletionBlockerTests: UITestCase {
             expectScreen(.vault, timeout: 90)
             confirmPersonalVaultIfAsked()
             require(vaultRow(item), "the owner's login in the vault it shares", timeout: 30)
+        }
+        // Whether the simulator's Keychain can be read for andvari's items at all: it holds the session's tokens now.
+        var keychainRead = false
+        step("what-the-device-holds-while-signed-in") {
+            let keychain = SimulatorKeychain.andvariRows()
+            keychainRead = keychain.problem == nil && !keychain.rows.isEmpty
+            note("signed in, the simulator's Keychain shows \(keychain.rows.count) andvari rows" + (keychain.problem.map { " (\($0))" } ?? "") + (keychainRead ? "" : ": it cannot be checked after the deletion"))
+            XCTAssertFalse(LocalState.accountFiles().isEmpty, "the test sees none of the files andvari keeps for a signed-in account, so it could not tell when they are gone")
         }
         step("preview-names-the-vault-and-takes-no-confirmation") {
             openSettings()
@@ -110,7 +116,7 @@ final class T9DeletionBlockerTests: UITestCase {
             _ = waitUntil(5) { !self.app.keyboards.firstMatch.exists }
             let delete = element("button.delete-account")
             require(delete, "Delete account", timeout: 10)
-            if !scrollToComfort(delete) {
+            if !scrollToComfort(delete, lowest: 0.93) {
                 dumpTree(app, as: "no-delete-button")
                 XCTFail("the Delete account button could not be brought on screen")
             }
@@ -130,16 +136,30 @@ final class T9DeletionBlockerTests: UITestCase {
             }
             let said = app.staticTexts["The account \(owner) was deleted, with everything this iPhone kept for it."]
             let seen = waitUntil(3) { said.exists }
-            XCTContext.runActivity(named: seen ? "the server screen says the account was deleted" : "the server screen shows no notice of the deletion") { _ in }
+            note(seen ? "the server screen says the account was deleted" : "the server screen shows no notice of the deletion")
         }
+        // Deleting the account leaves the app as a fresh install is (owner decision 2026-11-15): nothing of the account
+        // and nothing of the server stays on the device. A new process shows what was kept, not what the last one knew.
         step("nothing-left-in-a-new-process") {
             app.terminate()
             launchApp()
-            XCTAssertEqual(waitForScreen(), .chooseServer, "a new process of the app does not start on the server screen")
-            let files = LocalState.accountFiles()
-            XCTAssertEqual(files.filter { !before.contains($0) }, [], "the deleted account left files on the device")
-            XCTAssertEqual(files.filter { $0.contains("/vault-") }, [], "a vault cache is still on the device")
-            XCTAssertNil(LocalState.signedInEmail(), "the snapshot the extensions read is still on the device")
+            let screen = waitForScreen()
+            let server = Fixture.serverOrigin.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
+            // The system writes preferences to disk a little after the app changes them.
+            var preferences: [String] = []
+            _ = waitUntil(12) {
+                preferences = LocalState.accountPreferences(naming: [server, owner, Fixture.email])
+                return preferences.isEmpty
+            }
+            var left = LocalState.accountFiles().map { "file " + $0 } + preferences.map { "preference " + $0 }
+            if keychainRead {
+                left += SimulatorKeychain.andvariRows().rows.map { "Keychain " + $0 }
+            }
+            if !left.isEmpty {
+                note("left on the device after the account was deleted: " + left.joined(separator: "; "))
+            }
+            XCTAssertEqual(screen, .chooseServer, "a new process of the app does not start on the server screen: the server is still remembered")
+            XCTAssertEqual(left, [], "the device still holds something of the deleted account or of its server" + (keychainRead ? "" : " (the Keychain could not be read)"))
         }
         step("seeded-account-in-again-without-the-vault") {
             reachVault()
@@ -154,7 +174,7 @@ final class T9DeletionBlockerTests: UITestCase {
     private func confirmOwnershipIfAsked(of vault: String, password: String) {
         let ask = app.buttons["Confirm I own “\(vault)”…"]
         guard waitUntil(3, { ask.exists }) else { return }
-        XCTContext.runActivity(named: "the vault's screen asked the owner to confirm it owns “\(vault)”") { _ in }
+        note("the vault's screen asked the owner, on a new device, to confirm that it owns “\(vault)”")
         scrollToComfort(ask)
         ask.tap()
         let field = app.secureTextFields["Master password (required)"]

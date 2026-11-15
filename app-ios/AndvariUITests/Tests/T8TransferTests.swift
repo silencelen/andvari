@@ -30,14 +30,14 @@ final class T8TransferTests: UITestCase {
         }
         step("imported") {
             let start = app.buttons["Import 3 items"]
-            XCTAssertTrue(scrollToComfort(start), "the screen offers no Import 3 items: \(importWords())")
+            XCTAssertTrue(scrollToComfort(start, lowest: 0.93), "the screen offers no Import 3 items: \(importWords())")
             start.tap()
             let added = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Added 3 items to '")).firstMatch
             if !waitUntil(90, { added.exists }) {
                 dumpTree(app, as: "import-not-done")
                 XCTFail("the import did not say it added 3 items: \(importWords())")
             }
-            XCTContext.runActivity(named: added.label) { _ in }
+            note(added.label)
             closeImport()
         }
         step("logins-in-the-vault-as-in-the-file") {
@@ -55,7 +55,7 @@ final class T8TransferTests: UITestCase {
             XCTAssertTrue(app.staticTexts["0 items to import"].exists, "the same file again would still add something: \(importWords())")
             XCTAssertTrue(says("Already in the vault, not imported: 3").exists, "the screen does not say the three are already in the vault: \(importWords())")
             let cancel = app.buttons["Cancel"]
-            scrollToComfort(cancel)
+            scrollToComfort(cancel, lowest: 0.93)
             cancel.tap()
             leaveSettingsScreen()
         }
@@ -83,7 +83,7 @@ final class T8TransferTests: UITestCase {
             _ = waitUntil(10) { self.safelyHittable(self.settingsButton) }
             openImport(of: file, tag: "weak")
             let start = app.buttons["Import 2 items"]
-            XCTAssertTrue(scrollToComfort(start), "the screen offers no Import 2 items: \(importWords())")
+            XCTAssertTrue(scrollToComfort(start, lowest: 0.93), "the screen offers no Import 2 items: \(importWords())")
             start.tap()
             let added = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Added 2 items to '")).firstMatch
             if !waitUntil(90, { added.exists }) {
@@ -121,7 +121,7 @@ final class T8TransferTests: UITestCase {
             freshVault()
             openImport(of: file, tag: "roundtrip")
             let start = app.buttons["Import 1 item"]
-            XCTAssertTrue(scrollToComfort(start), "the screen offers no Import 1 item: \(importWords())")
+            XCTAssertTrue(scrollToComfort(start, lowest: 0.93), "the screen offers no Import 1 item: \(importWords())")
             start.tap()
             let added = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Added 1 item to '")).firstMatch
             if !waitUntil(90, { added.exists }) {
@@ -142,7 +142,7 @@ final class T8TransferTests: UITestCase {
             // A login whose field starts like a formula (a generated password can) asks for a tick first.
             let tick = app.switches.matching(NSPredicate(format: "label CONTAINS 'a spreadsheet would run these cells as formulas'")).firstMatch
             if tick.exists {
-                scrollToComfort(tick)
+                scrollToComfort(tick, lowest: 0.93)
                 if !isOn(tick) { flip(tick) }
                 XCTAssertTrue(waitUntil(5) { self.isOn(tick) }, "the formula acknowledgement could not be ticked")
             }
@@ -192,7 +192,6 @@ final class T8TransferTests: UITestCase {
             let again = app.secureTextFields["field.backup-passphrase-again"]
             XCTAssertTrue(scrollFormTo(first), "the passphrase field could not be brought on screen")
             var typed = typeKeyByKey(passphrase, into: first, what: "the backup passphrase field")
-            dumpTree(app, as: "backup-passphrase-typed")
             XCTAssertEqual(typed, passphrase.count, "the backup passphrase field let go of the keyboard after \(typed) of \(passphrase.count) characters")
             if let dots = hiddenLength(of: first) {
                 XCTAssertEqual(dots, passphrase.count, "the backup passphrase field shows \(dots) dots for \(passphrase.count) characters typed")
@@ -290,14 +289,14 @@ final class T8TransferTests: UITestCase {
             guard tile.exists else { continue }
             counts[label] = Int(tile.label.dropFirst(label.count + 2).prefix { $0.isNumber })
         }
-        XCTContext.runActivity(named: "vault health counts \(counts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))") { _ in }
+        note("vault health counts " + counts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
         return counts
     }
 
     /// What vault health's Passwords list says of the login [name]: its "Strength: …" line.
     private func healthLine(of name: String) -> String? {
         let title = app.staticTexts[name]
-        if !scrollToComfort(title) {
+        if !scrollToComfort(title, lowest: 0.93) {
             dumpTree(app, as: "no-health-row")
             return nil
         }
@@ -331,7 +330,7 @@ final class T8TransferTests: UITestCase {
     /// Choose a folder…, On My iPhone in the picker, and the name of the file the screen then says it saved there.
     private func exportIntoOnMyIPhone(marker: String, tag: String, timeout: TimeInterval = 60) -> String {
         let choose = app.buttons["Choose a folder…"]
-        if !scrollToComfort(choose) {
+        if !scrollToComfort(choose, lowest: 0.93) {
             dumpTree(app, as: "no-choose-a-folder")
             XCTFail("the export screen has no Choose a folder… to tap")
         }
@@ -344,7 +343,7 @@ final class T8TransferTests: UITestCase {
             XCTFail("the export screen did not say it saved the file: \(exportWords())")
             return ""
         }
-        XCTContext.runActivity(named: done.label) { _ in }
+        note(done.label)
         // Saved “name” to folder: …
         let line = done.label
         guard let open = line.firstIndex(of: "“"), let close = line.firstIndex(of: "”"), open < close else {

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SQLite3
 
 /// The job's test site doubles as a remote control for what other devices and other people do
 /// (app-ios/uitest/serve-site.py, tools/uitest-seed `vault` and `share`): the app then learns of it at its next sync.
@@ -28,7 +29,23 @@ enum OtherDevice {
         control("server-stall", ["seconds": String(seconds)])
     }
 
+    /// The test account, an admin, invites [email], as the web app's Administration does: the invite's code, for a test
+    /// that enrolls with it in the app. Nil when it failed, with the reason in [problem].
+    static func invite(_ email: String) -> (code: String?, problem: String?) {
+        let answer = ask("invite", ["email": email])
+        guard answer.ok else { return (nil, answer.text) }
+        let line = answer.text.split(separator: "\n").last { $0.hasPrefix("invite: ") }
+        guard let line else { return (nil, "the answer names no invite: " + String(answer.text.suffix(200))) }
+        return (String(line.dropFirst("invite: ".count)).trimmingCharacters(in: .whitespacesAndNewlines), nil)
+    }
+
     private static func control(_ action: String, _ query: [String: String]) -> String? {
+        let answer = ask(action, query)
+        return answer.ok ? nil : answer.text
+    }
+
+    /// One control request: whether it worked, and what it answered (the error, when it did not).
+    private static func ask(_ action: String, _ query: [String: String]) -> (ok: Bool, text: String) {
         // Plain http to the loopback address first; the https name (trusted in the simulator) only when that one gave
         // no answer at all, so an action that answered with an error is never run twice.
         var last = "not tried"
@@ -51,11 +68,11 @@ enum OtherDevice {
                 last = "\(origin): no answer"
                 continue
             }
-            if status == 200 { return nil }
+            if status == 200 { return (true, text) }
             last = "\(origin): \(status) \(text.suffix(300))"
-            if status != 0 { return last }
+            if status != 0 { return (false, last) }
         }
-        return last
+        return (false, last)
     }
 }
 
@@ -182,6 +199,92 @@ enum LocalState {
     /// The sealed files of saves that are kept until their upload is done (Application Support/andvari/pending-files).
     static func filesSetAside() -> [String] {
         accountFiles().filter { $0.hasPrefix("app/pending-files/") }
+    }
+
+    /// What andvari's preferences hold on disk, its own ("app/<key>") and its App Group's ("group/<key>"), each value
+    /// as text. The system writes them to disk a little after the app sets them.
+    static func preferences() -> [String: String] {
+        var out: [String: String] = [:]
+        let files: [(place: String, url: URL?)] = [
+            (place: "app", url: SimulatorDisk.data(of: "com.silencelen.andvari")?.appendingPathComponent("Library/Preferences/com.silencelen.andvari.plist")),
+            (place: "group", url: SimulatorDisk.group(appGroup)?.appendingPathComponent("Library/Preferences/" + appGroup + ".plist")),
+        ]
+        for file in files {
+            guard let url = file.url, let plist = NSDictionary(contentsOf: url) as? [String: Any] else { continue }
+            for (key, value) in plist {
+                out[file.place + "/" + key] = String(describing: value)
+            }
+        }
+        return out
+    }
+
+    /// The preferences that are an account's or a server's: the session and the server address, whatever is kept by
+    /// server ("ns.<server>.…": its policy, an account's keys there, pins), and any other key or value that names one
+    /// of [markers] (the server's address, an account's email). Each as "place/key = value" (the value's beginning).
+    /// What the device keeps for itself (the appearance, the keyboards switch) is not among them.
+    static func accountPreferences(naming markers: [String]) -> [String] {
+        let own: Set<String> = ["baseUrl", "pendingServer", "session", "mustChangePassword", "lastSyncAt"]
+        var out: [String] = []
+        for (place, value) in preferences() {
+            let key = place.split(separator: "/", maxSplits: 1).last.map { String($0) } ?? place
+            let named = markers.contains { !$0.isEmpty && (key.contains($0) || value.contains($0)) }
+            if own.contains(key) || key.hasPrefix("ns.") || named {
+                out.append(place + " = " + String(value.prefix(80)))
+            }
+        }
+        return out.sorted()
+    }
+}
+
+/// The simulator's Keychain, read from its database on the simulator's disk. An item's secret is sealed there; the
+/// access group it belongs to is not, so a test can say whether andvari has any item left, though not which.
+enum SimulatorKeychain {
+    /// The rows that belong to an access group of andvari's (its own, and its App Group's, which holds the quick-unlock
+    /// key), each as "table row N in <group>". [problem] says why the database could not be read, when it could not.
+    static func andvariRows() -> (rows: [String], problem: String?) {
+        let fm = FileManager.default
+        // <device>/data: the runner's home is <device>/data/Containers/Data/Application/<id>.
+        var device = URL(fileURLWithPath: NSHomeDirectory())
+        for _ in 0..<4 { device.deleteLastPathComponent() }
+        let folder = device.appendingPathComponent("Library/Keychains", isDirectory: true)
+        guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else {
+            return ([], "there is no Library/Keychains in the simulator at " + folder.path)
+        }
+        guard let name = names.filter({ $0.hasPrefix("keychain-2") && $0.hasSuffix(".db") }).sorted().first else {
+            return ([], "Library/Keychains holds no keychain database, only \(names)")
+        }
+        // A copy, with its write-ahead log: the system has the database open, and a copy is read at leisure.
+        let copy = fm.temporaryDirectory.appendingPathComponent("uitest-keychain-" + UUID().uuidString, isDirectory: true)
+        try? fm.createDirectory(at: copy, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: copy) }
+        for suffix in ["", "-wal", "-shm"] {
+            let from = folder.appendingPathComponent(name + suffix)
+            if fm.fileExists(atPath: from.path) {
+                try? fm.copyItem(at: from, to: copy.appendingPathComponent(name + suffix))
+            }
+        }
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(copy.appendingPathComponent(name).path, &handle, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db = handle else {
+            if let handle { sqlite3_close(handle) }
+            return ([], "the copy of " + name + " could not be opened")
+        }
+        defer { sqlite3_close(db) }
+        var rows: [String] = []
+        var problems: [String] = []
+        for table in ["genp", "inet", "keys", "cert"] {
+            var prepared: OpaquePointer?
+            let sql = "SELECT agrp, rowid FROM " + table + " WHERE agrp LIKE '%silencelen.andvari%'"
+            guard sqlite3_prepare_v2(db, sql, -1, &prepared, nil) == SQLITE_OK, let statement = prepared else {
+                problems.append(table + ": " + String(cString: sqlite3_errmsg(db)))
+                continue
+            }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let group = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? "?"
+                rows.append(table + " row \(sqlite3_column_int64(statement, 1)) in " + group)
+            }
+            sqlite3_finalize(statement)
+        }
+        return (rows, problems.isEmpty ? nil : problems.joined(separator: "; "))
     }
 }
 

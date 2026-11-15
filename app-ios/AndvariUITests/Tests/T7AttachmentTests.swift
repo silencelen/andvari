@@ -56,8 +56,7 @@ final class T7AttachmentTests: UITestCase {
             // PDFKit reads a page's text out to accessibility on some versions: noted when it does, not required.
             let page = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", pdfWords, pdfWords)).firstMatch
             let read = waitUntil(5) { page.exists }
-            XCTContext.runActivity(named: read ? "the PDF's words are readable in the preview" : "the PDF is shown; its words are not in the accessibility tree") { _ in }
-            dumpTree(app, as: "pdf-preview")
+            note(read ? "the PDF's words are readable in the opened file" : "the PDF is shown; its words are not in the accessibility tree")
             XCTAssertEqual(saveOpenFileToFiles(pdf.name), pdf.data, "the PDF saved to Files is not the file that was added")
             closeFile(pdf.name)
         }
@@ -89,7 +88,7 @@ final class T7AttachmentTests: UITestCase {
                 return
             }
             name = String(added.firstMatch.label.dropFirst("Remove ".count))
-            XCTContext.runActivity(named: "the picture was added as \(name)") { _ in }
+            note("the picture from Photos was added as \(name)")
         }
         step("saved") {
             saveNote(note)
@@ -110,10 +109,8 @@ final class T7AttachmentTests: UITestCase {
             freshVault()
             openNewItemEditor("New note")
             require(app.navigationBars["New note"], "the note editor")
-            let menu = element("editor.add-file")
-            XCTAssertTrue(scrollFormTo(menu), "the editor has no Add a file")
-            menu.tap()
-            require(app.buttons["Choose a file"], "the Add a file menu", timeout: 5)
+            openAddFileMenu()
+            XCTAssertTrue(app.buttons["Photo or video"].exists, "the Add a file menu has no Photo or video")
             offered = app.buttons["Scan a document"].exists
         }
         try skip("The document scanner is not available in the iOS simulator: it has no camera, and VNDocumentCameraViewController.isSupported is false there. The Add a file menu \(offered ? "still offers Scan a document, which cannot make a scan here" : "accordingly offers no Scan a document (checked above), only Choose a file and Photo or video"). A scan needs a real iPhone.")
@@ -144,12 +141,12 @@ final class T7AttachmentTests: UITestCase {
             XCUIDevice.shared.press(.home)
             setAside = LocalState.filesSetAside().count
             XCTAssertGreaterThan(setAside, 0, "no file of the save was still set aside on the device when the app left: the save had already finished")
-            XCTContext.runActivity(named: "the app left with \(setAside) files of the save still set aside") { _ in }
+            note("the app left the screen with \(setAside) files of the save still set aside on the device")
         }
         step("away") {
             // Longer than the stall, shorter than the half minute a lock waits for an upload.
             Thread.sleep(forTimeInterval: 14)
-            XCTContext.runActivity(named: "after 14 s away, \(LocalState.filesSetAside().count) files are still set aside") { _ in }
+            note("after 14 s away, \(LocalState.filesSetAside().count) files were still set aside")
         }
         step("back") {
             app.activate()
@@ -159,7 +156,7 @@ final class T7AttachmentTests: UITestCase {
                 XCTFail("the app showed neither the unlock screen nor the vault within 150 s of coming back")
             }
             let came = currentScreen()
-            XCTContext.runActivity(named: "the app came back on \(came?.rawValue ?? "no known screen")") { _ in }
+            note("the app came back on the \(came?.rawValue ?? "unknown") screen")
             reachVaultAnyWay()
         }
         step("note-saved-once-with-its-files") {
@@ -170,7 +167,7 @@ final class T7AttachmentTests: UITestCase {
             }
             let cutShort = app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'cut short'")).firstMatch
             if cutShort.exists {
-                XCTContext.runActivity(named: "the vault says: \(cutShort.label)") { _ in }
+                note("the vault says: \(cutShort.label)")
             }
             XCTAssertEqual(rows.count, 1, "\(note) is in the vault \(rows.count) times")
             XCTAssertTrue(waitUntil(60) { LocalState.filesSetAside().isEmpty }, "files of the save are still set aside on the device after it was done: \(LocalState.filesSetAside())")
@@ -192,18 +189,31 @@ final class T7AttachmentTests: UITestCase {
 
     // MARK: - The editor's files
 
-    /// The editor's Add a file menu, scrolled to and opened on [entry].
-    private func openAddMenu(_ entry: String) {
-        let menu = element("editor.add-file")
-        if !scrollFormTo(menu) {
+    /// The editor's Add a file menu, scrolled to and opened: its entries are then on screen. The menu is the label at
+    /// the row's leading end; the rest of the row is not part of it, so a tap on the row's middle opens nothing.
+    private func openAddFileMenu() {
+        let row = app.buttons["editor.add-file"]
+        if !scrollFormTo(row) {
             dumpTree(app, as: "no-add-a-file")
             XCTFail("the editor has no Add a file to tap")
         }
-        let item = app.buttons[entry]
-        for _ in 0..<3 where !item.exists {
-            menu.tap()
-            _ = waitUntil(4) { item.exists }
+        let label = row.buttons.firstMatch
+        let entry = app.buttons["Choose a file"]
+        for _ in 0..<3 where !entry.exists {
+            if label.exists {
+                label.tap()
+            } else {
+                row.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).tap()
+            }
+            _ = waitUntil(4) { entry.exists }
         }
+        require(entry, "the Add a file menu's entries", timeout: 5)
+    }
+
+    /// The Add a file menu's [entry], chosen.
+    private func openAddMenu(_ entry: String) {
+        openAddFileMenu()
+        let item = app.buttons[entry]
         require(item, "\(entry) in the Add a file menu", timeout: 5)
         item.tap()
     }
@@ -315,7 +325,7 @@ final class T7AttachmentTests: UITestCase {
             XCTFail("the file is said to be saved, but nothing new is in On My iPhone, which holds \(FilesApp.files())")
             return nil
         }
-        XCTContext.runActivity(named: "Save to Files wrote \(landed)") { _ in }
+        note("Save to Files wrote \(landed)")
         return FilesApp.read(landed)
     }
 

@@ -136,6 +136,13 @@ class UITestCase: XCTestCase {
         throw XCTSkip(reason)
     }
 
+    /// Something the test saw that a reader of the run should know, pass or fail: in the result bundle as an activity,
+    /// and in the summary under the test, which the job prints.
+    func note(_ text: String) {
+        XCTContext.runActivity(named: "note: " + text) { _ in }
+        Recorder.shared.note(text, for: self)
+    }
+
     /// The UI tree of an app, as text, in the result bundle and beside the screenshots: what a failed query saw.
     func dumpTree(_ application: XCUIApplication, as name: String) {
         let text = application.debugDescription
@@ -204,6 +211,7 @@ class UITestCase: XCTestCase {
                 return
             }
             if loose.exists && app.staticTexts["Save Password?"].exists {
+                note("iOS put its own \"Save Password?\" over andvari, for a password just typed in a hidden field; answered Not Now")
                 tapWhereItIs(loose, in: app)
                 return
             }
@@ -279,8 +287,10 @@ class UITestCase: XCTestCase {
     /// Scroll [application]'s list until [element] sits in the middle part of the screen, clear of the bars above and
     /// the floating search bar below: a row partly behind one of them is "hittable" and still takes no tap. A row the
     /// list has not built yet is taken to be further down.
+    /// [lowest] is how far down the screen its foot may sit (a share of the screen's height): the last rows of a form
+    /// that has no bar floating over it never come higher than near the foot, and are asked for with 0.93.
     @discardableResult
-    func scrollToComfort(_ element: XCUIElement, in application: XCUIApplication? = nil, tries: Int = 12) -> Bool {
+    func scrollToComfort(_ element: XCUIElement, in application: XCUIApplication? = nil, tries: Int = 12, lowest: CGFloat = 0.8) -> Bool {
         let application = application ?? app
         let height = application.windows.firstMatch.frame.height
         let at = { (y: CGFloat) in application.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: y)) }
@@ -288,7 +298,7 @@ class UITestCase: XCTestCase {
         for _ in 0..<tries {
             if element.exists {
                 let frame = element.frame
-                let placed = frame.minY > height * 0.18 && frame.maxY < height * 0.8
+                let placed = frame.minY > height * 0.18 && frame.maxY < height * lowest
                 if placed && safelyHittable(element) { return true }
                 if placed && !asked {
                     // Where it should be and still not to be tapped: something is over it. iOS puts questions of its

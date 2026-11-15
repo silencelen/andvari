@@ -1,7 +1,8 @@
 import Foundation
 import XCTest
 
-/// What the job reads afterwards: one entry per test with its status, failure text and the screenshots it took.
+/// What the job reads afterwards: one entry per test with its status, failure text, the screenshots it took and what
+/// it noted on the way.
 /// Written to `UITEST_OUT_DIR/uitest-summary.json` after every test, so a run that dies keeps what it had.
 final class Recorder: NSObject, XCTestObservation {
     static let shared = Recorder()
@@ -12,12 +13,15 @@ final class Recorder: NSObject, XCTestObservation {
         var message: String?
         var seconds: Double
         var screenshots: [String]
+        /// What the test saw on the way that a reader should know, pass or fail (UITestCase.note).
+        var notes: [String]
     }
 
     private var entries: [Entry] = []
     private var failures: [String: [String]] = [:]
     private var skips: [String: String] = [:]
     private var shots: [String: [String]] = [:]
+    private var notes: [String: [String]] = [:]
     private var registered = false
 
     /// The directory on the Mac that runs the simulator. A simulator process can write there.
@@ -47,6 +51,12 @@ final class Recorder: NSObject, XCTestObservation {
         skips[Recorder.name(of: test)] = reason
     }
 
+    /// An observation of the test's, said once.
+    func note(_ text: String, for test: XCTestCase) {
+        let name = Recorder.name(of: test)
+        if notes[name]?.contains(text) != true { notes[name, default: []].append(text) }
+    }
+
     func testCase(_ testCase: XCTestCase, didRecord issue: XCTIssue) {
         var text = issue.compactDescription
         if let location = issue.sourceCodeContext.location {
@@ -70,7 +80,7 @@ final class Recorder: NSObject, XCTestObservation {
             // XCTest appends whole UI trees to some failures; the result bundle keeps them.
             message = failures[name]?.map { String($0.prefix(1500)) }.joined(separator: "\n") ?? "failed"
         }
-        entries.append(Entry(test: name, status: status, message: message, seconds: run?.totalDuration ?? 0, screenshots: shots[name] ?? []))
+        entries.append(Entry(test: name, status: status, message: message, seconds: run?.totalDuration ?? 0, screenshots: shots[name] ?? [], notes: notes[name] ?? []))
         write()
     }
 

@@ -4,7 +4,8 @@
 usage: summarize.py <uitest-summary.json> [--markdown]
 
 The file is written by the tests themselves (AndvariUITests/Support/Recorder.swift): a list of
-{"test", "status", "message", "seconds", "screenshots"}. Exit status 1 when it is missing or empty.
+{"test", "status", "message", "seconds", "screenshots", "notes"}; a note is something the test saw that a reader
+should know, pass or fail. Exit status 1 when it is missing or empty.
 """
 import json
 import sys
@@ -40,7 +41,9 @@ def main():
         print("| Test | Status | Seconds | Screenshots | Message |")
         print("|---|---|---|---|---|")
         for entry in entries:
-            message = brief(entry.get("message")).replace("\n", "<br>").replace("|", "\\|")
+            lines = [brief(entry.get("message"))] if entry.get("message") else []
+            lines += ["note: " + note for note in entry.get("notes") or []]
+            message = "\n".join(lines).replace("\n", "<br>").replace("|", "\\|")
             print("| %s | %s | %.0f | %d | %s |" % (entry["test"], entry["status"], entry.get("seconds", 0), len(entry.get("screenshots", [])), message))
     else:
         print(totals)
@@ -49,6 +52,8 @@ def main():
             print("%-8s %-*s %4.0fs %2d shots" % (entry["status"], width, entry["test"], entry.get("seconds", 0), len(entry.get("screenshots", []))))
             for line in brief(entry.get("message")).splitlines():
                 print("         %s" % line)
+            for note in entry.get("notes") or []:
+                print("         note: %s" % note)
     return 0
 
 
