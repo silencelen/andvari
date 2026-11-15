@@ -44,7 +44,11 @@ final class T4SharingTests: UITestCase {
                 app.navigationBars.buttons.element(boundBy: 0).tap()
                 require(app.navigationBars[title], "back on \(title)", timeout: 15)
             }
-            require(element("settings.done"), "the settings sheet", timeout: 10)
+            // Settings again from its top: the list still stands where Shared vaults was, below the rows near the top,
+            // and a list builds only the rows near what it shows.
+            element("settings.done").tap()
+            require(vaultRow(Fixture.siteItem), "the vault list", timeout: 15)
+            openSettings()
         }
         step("verified-people") {
             settingsControl("People you verified", "People you verified in Settings").tap()
