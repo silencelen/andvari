@@ -82,6 +82,8 @@ data class AppState(
     val ownershipClaim: OwnershipClaimView? = null,
     /** Settings › Delete account while its screen is open ([SessionController.openAccountDeletion]); null otherwise. */
     val accountDeletion: AccountDeletionView? = null,
+    /** Vault health while its screen is open ([SessionController.openHealth]); null otherwise. */
+    val health: HealthView? = null,
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */

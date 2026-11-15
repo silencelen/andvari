@@ -19,6 +19,10 @@ import io.silencelen.andvari.core.client.VaultKeyNotVerifiedException
 import io.silencelen.andvari.core.client.PendingInvitation
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.ClientPolicyClamps
+import io.silencelen.andvari.core.client.Duplicates
+import io.silencelen.andvari.core.client.Staleness
+import io.silencelen.andvari.core.client.UsageLedger
+import io.silencelen.andvari.core.client.VaultHealth
 import io.silencelen.andvari.core.client.CoHolder
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
@@ -90,6 +94,7 @@ import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.model.AccountDeleteBlocker
 import io.silencelen.andvari.core.model.AccountDeletePreview
 import io.silencelen.andvari.core.model.AccountDeleteRequest
+import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.MemberRecovery
@@ -2855,6 +2860,365 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- vault health (design 2026-08-23; the Android app's health screen) ----
+    //
+    // Every ranking, cluster, survivor and refusal is core's (VaultHealth, Duplicates, Staleness); this carries them to the
+    // screen and writes only what they plan, each write an ordinary save or delete of the item in its own vault. A breach
+    // check sends the server the first 5 hex characters of each distinct password's SHA-1 and nothing more: the server
+    // fetches that range of the breach list for this device and the match is made here. The verdicts stay in memory, by
+    // item, for the session. andvari never tries a password anywhere: a person signs in and says what happened.
+
+    /** What the health screen holds while it is open. */
+    private var health: HealthSession? = null
+
+    /** The last breach check of this session; a lock forgets it. */
+    private var breaches: BreachVerdicts? = null
+
+    /** Open vault health ([AppState.health]). The usage record (when each login was last used) is read in the background. */
+    fun openHealth() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = HealthSession()
+            health = h
+            publishHealth(live)
+            readUsage(live, h)
+        }
+    }
+
+    fun closeHealth() {
+        health = null
+        update { it.copy(health = null) }
+    }
+
+    /** The screen again from the vault as it is now (an item opened from it may have changed). */
+    fun refreshHealth() {
+        guarded({}) { session.get()?.let(::publishHealth) }
+    }
+
+    /** List the logins snoozed for now too. The counts at the top never change with it. */
+    fun setHealthShowSnoozed(show: Boolean) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.showSnoozed = show
+            publishHealth(live)
+        }
+    }
+
+    fun dismissHealthMessage() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.message = null
+            publishHealth(live)
+        }
+    }
+
+    private fun publishHealth(live: VaultSession.Unlocked) {
+        val view = healthNow(live) ?: return
+        update { it.copy(health = view) }
+    }
+
+    /** The open health screen as the vault is now; null when it is closed. A run whose login is gone ends. */
+    private fun healthNow(live: VaultSession.Unlocked): HealthView? {
+        val h = health ?: return null
+        val names = vaultList(live).associate { it.vaultId to it.name }
+        fun build() = healthView(
+            h, live.engine.items(), runCatching { live.engine.pendingSyncItemIds() }.getOrDefault(emptySet()), breaches,
+            { live.account.roleFor(it) }, { names[it] ?: "Shared" }, clocks.wallMs(),
+        )
+        val view = build()
+        if (!h.running || view.run != null) return view
+        h.queue = emptyList()
+        h.index = 0
+        return build()
+    }
+
+    /** The usage record, for "last used" (other devices record uses). A ranking hint: nothing is said when it can't be read. */
+    private fun readUsage(live: VaultSession.Unlocked, h: HealthSession) {
+        scope.launch {
+            val read = try {
+                val sealed = runBounded(BoundedOps.FLAT_MS) { live.api.usage() }.sealedUsage
+                if (sealed == null) emptyMap() else UsageLedger.parse(live.account.openUsage(sealed).decodeToString())
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                return@launch
+            }
+            if (session.get() !== live || health !== h) return@launch
+            h.usage = read
+            publishHealth(live)
+        }
+    }
+
+    /**
+     * Check every login's password against known breaches (spec 03 §8, k-anonymity). Each distinct password is hashed
+     * here, and only the first 5 hex characters of its SHA-1 go to the server, which fetches that range for this device;
+     * the match is made here. A range that can't be fetched leaves its logins without a verdict, never "none", and a check
+     * in which no range came back keeps the last verdicts. Closing the screen or locking stops it, keeping nothing.
+     */
+    @Throws(CancellationException::class)
+    suspend fun checkBreaches(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val h = health ?: return@action ActionResult.NotDone(null)
+        if (h.scan != null) return@action ActionResult.NotDone(null)
+        val items = live.engine.items()
+        val rows = VaultHealth.healthRows(items)
+        if (rows.isEmpty()) return@action ActionResult.Ok
+        // The revision each verdict is about, taken with the passwords: a sync during the check must not pair the two.
+        val revs = items.associate { it.itemId to it.rev }
+        val crypto = live.account.cryptoProvider()
+        val hashes = withContext(Dispatchers.Default) { rows.map { it.password }.distinct().associateWith { Hibp.sha1UpperHex(crypto, it) } }
+        val byPrefix = hashes.entries.groupBy({ Hibp.prefix(it.value) }, { it.key })
+        h.message = null
+        h.scan = ScanProgressView(0, byPrefix.size)
+        publishHealth(live)
+        val counts = HashMap<String, Long>()
+        var failed = 0
+        var done = 0
+        for ((prefix, passwords) in byPrefix) {
+            val range = try {
+                runBounded(BoundedOps.FLAT_MS) { live.api.hibpRange(prefix) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                null
+            }
+            if (session.get() !== live || health !== h) return@action ActionResult.NotDone(null)
+            if (range == null) failed++ else for (pw in passwords) counts[pw] = Hibp.countInRange(range, hashes.getValue(pw))
+            done++
+            h.scan = ScanProgressView(done, byPrefix.size)
+            publishHealth(live)
+        }
+        h.scan = null
+        if (failed == byPrefix.size) {
+            h.message = HealthCopy.SCAN_FAILED
+        } else {
+            val byItem = rows.mapNotNull { r -> counts[r.password]?.let { r.itemId to it } }.toMap()
+            breaches = BreachVerdicts(byItem, byItem.keys.mapNotNull { id -> revs[id]?.let { id to it } }.toMap(), incomplete = failed > 0)
+            h.message = if (failed > 0) HealthCopy.SCAN_INCOMPLETE else HealthCopy.scanDone(rows.count { (byItem[it.itemId] ?: 0L) > 0L })
+        }
+        publishHealth(live)
+        ActionResult.Ok
+    }
+
+    /** One health action: a refusal or failure is said on the health screen, where it was asked for. */
+    private suspend fun healthAction(block: suspend (VaultSession.Unlocked, HealthSession) -> ActionResult): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val h = health ?: return@action ActionResult.NotDone(null)
+        val result = try {
+            block(live, h)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            failure(t, HouseholdCopy::forSaveError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (health === h && result is ActionResult.Failed) h.message = result.message
+        update { it.copy(busy = false, items = summaries(it.query), health = healthNow(live) ?: it.health) }
+        writeFillSnapshot()
+        result
+    }
+
+    private fun clusterOf(live: VaultSession.Unlocked, signature: String): Duplicates.DuplicateCluster? =
+        Duplicates.duplicateClusters(live.engine.items()) { live.account.roleFor(it) }.firstOrNull { it.signature == signature }
+
+    private suspend fun saveIn(live: VaultSession.Unlocked, itemId: String, doc: ItemDoc) {
+        // INV-EDIT: in the vault the item is in now; core refuses a save that would move it.
+        val vaultId = live.engine.item(itemId)?.vaultId
+        saves.exclusive { live.engine.save(itemId, doc, vaultId) }
+    }
+
+    private suspend fun trash(live: VaultSession.Unlocked, itemId: String) {
+        saves.exclusive { live.engine.remove(itemId).also { if (session.get() === live) runCatching { saves.itemDeletedLocked(live, itemId) } } }
+    }
+
+    /**
+     * Save the survivor core composed, then move the other copies to the trash. The survivor goes first, so nothing is
+     * removed before what it carries has landed; a failure after it is a partial state, and [partial] says so.
+     */
+    private suspend fun runMerge(live: VaultSession.Unlocked, h: HealthSession, plan: Duplicates.MergePlan, success: (Int) -> String, partial: String): ActionResult {
+        busy()
+        saveIn(live, plan.survivorId, plan.doc)
+        try {
+            for (id in plan.loserIds) trash(live, id)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return ActionResult.Failed(partial)
+        }
+        h.message = success(plan.loserIds.size)
+        return ActionResult.Ok
+    }
+
+    /** Merge copies that have the same password (core's plan: saved sites from every copy are kept). */
+    @Throws(CancellationException::class)
+    suspend fun mergeDuplicates(signature: String): ActionResult = healthAction { live, h ->
+        val cluster = clusterOf(live, signature)
+        val plan = cluster?.merge ?: return@healthAction ActionResult.Failed(cluster?.mergeRefusal ?: HealthCopy.GROUP_CHANGED)
+        runMerge(live, h, plan, HealthCopy::merged, HealthCopy.MERGE_DIDNT_FINISH)
+    }
+
+    /**
+     * Keep one of copies with different passwords, the one the person found still works: the others go to the trash, and
+     * their passwords into the kept login's password history first.
+     */
+    @Throws(CancellationException::class)
+    suspend fun keepDuplicate(signature: String, keepId: String): ActionResult = healthAction { live, h ->
+        val cluster = clusterOf(live, signature) ?: return@healthAction ActionResult.Failed(HealthCopy.GROUP_CHANGED)
+        val plan = Duplicates.planKeep(live.engine.items(), cluster.members.map { it.itemId }, keepId, { live.account.roleFor(it) }, clocks.wallMs())
+        val keep = plan.keep ?: return@healthAction ActionResult.Failed(plan.keepRefusal ?: HealthCopy.GROUP_CHANGED)
+        runMerge(live, h, keep, HealthCopy::kept, HealthCopy.KEEP_DIDNT_FINISH)
+    }
+
+    /** "Not duplicates": every copy is marked with the group as it is, so it stays quiet until one of them changes. */
+    @Throws(CancellationException::class)
+    suspend fun markNotDuplicates(signature: String): ActionResult = acknowledgeCluster(signature, restoring = false)
+
+    /** Put a group marked "not duplicates" back on the list. */
+    @Throws(CancellationException::class)
+    suspend fun restoreDuplicates(signature: String): ActionResult = acknowledgeCluster(signature, restoring = true)
+
+    private suspend fun acknowledgeCluster(signature: String, restoring: Boolean): ActionResult = healthAction { live, h ->
+        val cluster = clusterOf(live, signature) ?: return@healthAction ActionResult.Failed(HealthCopy.GROUP_CHANGED)
+        val plan = Duplicates.planDismiss(live.engine.items(), cluster.members.map { it.itemId }, if (restoring) "" else cluster.signature) { live.account.roleFor(it) }
+        val writes = plan.writes ?: return@healthAction ActionResult.Failed(plan.dismissRefusal ?: HealthCopy.GROUP_CHANGED)
+        busy()
+        var written = 0
+        try {
+            for (w in writes) {
+                saveIn(live, w.itemId, w.doc)
+                written++
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (written == 0) throw t // nothing landed: the ordinary save failure is the honest sentence
+            return@healthAction ActionResult.Failed(HealthCopy.NOT_EVERY_COPY)
+        }
+        h.message = if (restoring) HealthCopy.BACK_ON_THE_LIST else HealthCopy.NOT_DUPLICATES
+        ActionResult.Ok
+    }
+
+    /** Check logins one at a time, from the list as it is shown: all of them, worst first, or only the never-checked. */
+    fun startCheckRun(neverCheckedOnly: Boolean) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = health ?: return@guarded
+            val rows = healthNow(live)?.staleness.orEmpty().filter { !neverCheckedOnly || it.neverChecked }
+            beginRun(live, h, rows.map { it.itemId })
+        }
+    }
+
+    /** Check one login. */
+    fun checkLogin(itemId: String) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = health ?: return@guarded
+            beginRun(live, h, listOf(itemId))
+        }
+    }
+
+    private fun beginRun(live: VaultSession.Unlocked, h: HealthSession, queue: List<String>) {
+        if (queue.isEmpty()) return
+        h.queue = queue
+        h.index = 0
+        h.message = null
+        h.offerDelete = null
+        h.offerBad = null
+        publishHealth(live)
+    }
+
+    /** Move on without a verdict: "I didn't check this" is not one, so nothing is written. */
+    fun skipCheck() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.let(::advanceRun)
+            publishHealth(live)
+        }
+    }
+
+    fun stopCheckRun() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.let { it.queue = emptyList(); it.index = 0 }
+            publishHealth(live)
+        }
+    }
+
+    private fun advanceRun(h: HealthSession) {
+        val next = h.index + 1
+        if (next < h.queue.size) {
+            h.index = next
+            return
+        }
+        h.queue = emptyList()
+        h.index = 0
+        h.message = HealthCopy.RUN_FINISHED
+    }
+
+    /**
+     * What the person found when they signed in at the site themselves: "ok", "bad", "gone", or "blocked" (couldn't
+     * finish, which also snoozes the login for 30 days). Only the verdict is written, on the item. A refusal keeps the
+     * run where it is; a verdict on the login the run stands on moves it on. "gone" offers the trash, "bad" a new password.
+     */
+    @Throws(CancellationException::class)
+    suspend fun recordCheck(itemId: String, result: String): ActionResult = healthAction { live, h ->
+        if (result !in HealthCopy.CHECK_RESULTS) return@healthAction ActionResult.Failed(HealthCopy.CHOOSE_RESULT)
+        val snooze = if (result == "blocked") Staleness.SNOOZE_MS else null
+        val plan = Staleness.planCheck(live.engine.items(), itemId, result, clocks.wallMs(), { live.account.roleFor(it) }, snooze)
+        val write = plan.write ?: return@healthAction ActionResult.Failed(plan.refusal ?: HealthCopy.GROUP_CHANGED)
+        busy()
+        h.message = null
+        saveIn(live, write.itemId, write.doc)
+        h.offerDelete = if (result == "gone") itemId else null
+        h.offerBad = if (result == "bad") itemId else null
+        if (h.running && h.queue.getOrNull(h.index) == itemId) advanceRun(h)
+        ActionResult.Ok
+    }
+
+    /** Bring a snoozed login back into the list now; its verdict stays. */
+    @Throws(CancellationException::class)
+    suspend fun unsnoozeLogin(itemId: String): ActionResult = healthAction { live, h ->
+        val plan = Staleness.planUnsnooze(live.engine.items(), itemId) { live.account.roleFor(it) }
+        val write = plan.write ?: return@healthAction plan.refusal?.let { ActionResult.Failed(it) } ?: ActionResult.Ok
+        busy()
+        saveIn(live, write.itemId, write.doc)
+        h.message = HealthCopy.BACK_ON_THE_LIST
+        ActionResult.Ok
+    }
+
+    /** The login just marked as gone, to the trash (it can be restored from there for 30 days). */
+    @Throws(CancellationException::class)
+    suspend fun trashGoneLogin(): ActionResult = healthAction { live, h ->
+        val itemId = h.offerDelete ?: return@healthAction ActionResult.NotDone(null)
+        busy()
+        trash(live, itemId)
+        h.offerDelete = null
+        h.message = HealthCopy.TRASHED
+        ActionResult.Ok
+    }
+
+    /** "Keep it": the verdict stays recorded; only the offer goes. */
+    fun keepGoneLogin() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.offerDelete = null
+            publishHealth(live)
+        }
+    }
+
+    /**
+     * The offer after "bad", answered. Taken ([opening]): the person is about to change that password, so the run ends
+     * here rather than waiting behind them. Declined: only the offer goes. Nothing is written either way.
+     */
+    fun answerBadOffer(opening: Boolean) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = health ?: return@guarded
+            h.offerBad = null
+            if (opening) {
+                h.offerDelete = null
+                h.queue = emptyList()
+                h.index = 0
+            }
+            publishHealth(live)
+        }
+    }
+
     /** Sync now. */
     @Throws(CancellationException::class)
     suspend fun refresh(): ActionResult = action {
@@ -2873,7 +3237,7 @@ open class SessionController(
         update {
             it.copy(
                 busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations, ownershipOffers = offers,
-                legacyReviews = reviews, notice = SYNCED,
+                legacyReviews = reviews, health = healthNow(live) ?: it.health, notice = SYNCED,
             )
         }
         writeFillSnapshot()
@@ -3629,6 +3993,8 @@ open class SessionController(
         reviewOwners.clear()
         reviewOwnerAsks.clear()
         claim = null
+        health = null
+        breaches = null
     }
 
     private fun lock(reason: String?) {
@@ -3691,7 +4057,7 @@ open class SessionController(
                     update {
                         it.copy(
                             syncing = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations, ownershipOffers = offers,
-                            legacyReviews = reviews,
+                            legacyReviews = reviews, health = healthNow(live) ?: it.health,
                         )
                     }
                 } else {
@@ -3718,7 +4084,7 @@ open class SessionController(
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
         attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
-        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null,
+        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null,
     )
 
     private companion object {

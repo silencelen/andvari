@@ -123,6 +123,11 @@ struct SettingsView: View {
                         Label("Shared vaults", systemImage: "person.2")
                     }
                     NavigationLink {
+                        VaultHealthView()
+                    } label: {
+                        Label("Vault health", systemImage: "checkmark.shield")
+                    }
+                    NavigationLink {
                         TrashView()
                     } label: {
                         Label("Trash", systemImage: "trash")
