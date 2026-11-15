@@ -22,7 +22,7 @@ import {
 import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { bumpLabelGeneration, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
+import { bumpLabelGeneration, chooseEnteredCapture, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { isCardEntryDocument, isCardProviderOrigin, providerAccountOf } from "./cardproviders";
 import { frameCounts } from "./cardrelease";
 import { CARD_FILL } from "./cardfillflag";
@@ -167,7 +167,8 @@ function formFor(input: HTMLInputElement): LoginForm | null {
     // H04: the capture field joins the membership test — on the hintless change-password shape it
     // is passwords[1], which is neither the fill target nor in newPasswords, and a field formFor
     // does not know is a field whose keystrokes never snapshot and whose Enter never captures.
-    scanForms().find((f) => f.username === input || f.password === input || f.capturePassword === input || f.newPasswords.includes(input)) ?? null
+    // And every password field of the form: the capture reads the one the person entered (captureField), whichever it is.
+    scanForms().find((f) => f.username === input || f.password === input || f.capturePassword === input || f.newPasswords.includes(input) || f.passwords.includes(input)) ?? null
   );
 }
 
@@ -304,6 +305,7 @@ function fillForm(f: LoginForm, s: RevealedSecret): FillOutcome {
     }
     if (live.password && s.password && !(guard && isCardField(live.password))) {
       setValue(live.password, s.password);
+      entered.add(live.password); // the person's own choice of login: the capture reads this field, not a trap beside it
       wrotePass = true;
     }
   } finally {
@@ -1227,7 +1229,10 @@ async function useStrongPassword(f: LoginForm): Promise<void> {
   }
   filling = true;
   try {
-    for (const t of targets) setValue(t, r.password);
+    for (const t of targets) {
+      setValue(t, r.password);
+      entered.add(t); // the password the person asked for: the capture reads it, not a trap beside it
+    }
   } finally {
     filling = false;
   }
@@ -1312,6 +1317,20 @@ function snapKey(f: LoginForm): object {
   return f.form ?? f.container;
 }
 
+/** The fields the person ENTERED a value into: a trusted input event (typed, pasted, the browser's own autofill; the input
+ *  listener records it), or an andvari fill or generated password they asked for (fillForm, useStrongPassword). Nobody
+ *  enters anything into a honeypot trap, which is why the capture prefers these ([chooseEnteredCapture]). A page's own
+ *  scripted value never lands here: its events are not trusted. */
+const entered = new WeakSet<HTMLInputElement>();
+
+/** The password field the capture reads now: among the form's password fields, which passed the detection visibility rules
+ *  when it was scanned (every frame), the one the person entered ([chooseEnteredCapture]); detection's pick when they entered
+ *  none. Read at each snapshot, so a keystroke this frame counts even where the form scan is a frame old. */
+function captureField(f: LoginForm): HTMLInputElement | null {
+  if (f.password === null) return f.capturePassword;
+  return chooseEnteredCapture(f.passwords, f.newPasswords, f.password, (el) => entered.has(el));
+}
+
 function updateSnapshot(f: LoginForm): void {
   const key = snapKey(f);
   const s = snapshots.get(key) ?? { username: "", password: "" };
@@ -1321,7 +1340,9 @@ function updateSnapshot(f: LoginForm): void {
   // the OLD password — and the generator's value, written only into newPasswords, never reached
   // the banner at all. Every capture path (Enter, submit, click, the post-fill/post-generate
   // snapshots) funnels through here, so this is the one read that has to be right.
-  const p = f.capturePassword?.value ?? "";
+  // 0.30.0 release check: and the field the person ENTERED, among the form's passwords. A trap drawn under another field
+  // passes the detection rules, and two of them beside the real password made the capture read the second field: a trap.
+  const p = captureField(f)?.value ?? "";
   if (u !== "") s.username = u;
   if (p !== "") s.password = p;
   snapshots.set(key, s);
@@ -1598,6 +1619,7 @@ function init(): void {
     (e) => {
       const t = e.composedPath()[0] ?? e.target;
       if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
+      entered.add(t); // the person entered this field (captureField prefers it); recorded before the snapshot reads it
       const f = formFor(t);
       if (f) updateSnapshot(f);
     },
