@@ -2,7 +2,6 @@ package io.silencelen.andvari.uitestseed
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.java.Java
-import io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.CardData
@@ -17,15 +16,7 @@ import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.InviteRequest
 import io.silencelen.andvari.core.model.LoginRequest
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import java.io.File
-import java.net.URI
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import kotlin.system.exitProcess
 
 /**
@@ -43,9 +34,10 @@ import kotlin.system.exitProcess
  *   vault <create|delete|restore> <origin> <email> <master password> <vault name>
  *                                       sign in as another device of the account and create, delete or restore one of
  *                                       its shared vaults: what the app on the simulator then learns at its next sync
- *   share <origin> <email> <master password> <vault name> <item name>
+ *   share <origin> <email> <master password> <vault name> <item name> [<sharer email> <sharer master password>]
  *                                       a second account shares a vault holding one login READ-ONLY with the account,
- *                                       and another device of the account accepts it (see [share])
+ *                                       and another device of the account accepts it (see [share]); with the last two,
+ *                                       that account has this address and password, so a test can sign in as it
  *
  * Nothing here is a backdoor: the server is unmodified and every call is one the apps make.
  */
@@ -58,7 +50,11 @@ fun main(args: Array<String>) {
             else -> usage()
         }
         "vault" -> if (args.size == 6 && args[1] in setOf("create", "delete", "restore")) vault(args[1], args[2], args[3], args[4], args[5]) else usage()
-        "share" -> if (args.size == 6) share(args[1], args[2], args[3], args[4], args[5]) else usage()
+        "share" -> when (args.size) {
+            6 -> share(args[1], args[2], args[3], args[4], args[5], null)
+            8 -> share(args[1], args[2], args[3], args[4], args[5], args[6] to args[7])
+            else -> usage()
+        }
         else -> usage()
     }
 }
@@ -66,7 +62,8 @@ fun main(args: Array<String>) {
 private fun usage(): Nothing {
     System.err.println(
         "usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site> [<throwaway email> <throwaway password>] | " +
-            "vault <create|delete|restore> <origin> <email> <password> <vault name> | share <origin> <email> <password> <vault name> <item name>",
+            "vault <create|delete|restore> <origin> <email> <password> <vault name> | " +
+            "share <origin> <email> <password> <vault name> <item name> [<sharer email> <sharer password>]",
     )
     exitProcess(2)
 }
@@ -189,17 +186,19 @@ private fun vault(action: String, origin: String, email: String, password: Strin
  * creates the shared vault [vaultName] holding the login [itemName], checks the test account's identity code and adds
  * it as a reader. Another device of the test account then accepts the invitation, typing the sharer's identity code.
  * Accepting posts the account's own wrap of the vault key, so the app on the simulator adopts the vault at its next
- * sync without an invitation screen of its own.
+ * sync without an invitation screen of its own. With [sharerLogin], the second account has that address and master
+ * password: a test can then sign in as the owner of a vault that someone else uses.
  */
-private fun share(origin: String, email: String, password: String, vaultName: String, itemName: String): Unit = runBlocking {
+private fun share(origin: String, email: String, password: String, vaultName: String, itemName: String, sharerLogin: Pair<String, String>?): Unit = runBlocking {
     val crypto = createCryptoProvider()
     val (api, account) = signIn(origin, email, password, crypto)
     val engine = SyncEngine(api, account, InMemoryVaultCache())
     engine.sync()
 
-    val sharerEmail = "sharer-${Bytes.toHexLower(crypto.randomBytes(4))}@andvari-uitest.test"
-    val sharerPassword = "sharer ${Bytes.toHexLower(crypto.randomBytes(16))}"
-    val inviteToken = adminInvite(origin, api.currentTokens()?.accessToken ?: error("the sign-in kept no session"), sharerEmail)
+    val sharerEmail = sharerLogin?.first ?: "sharer-${Bytes.toHexLower(crypto.randomBytes(4))}@andvari-uitest.test"
+    val sharerPassword = sharerLogin?.second ?: "sharer ${Bytes.toHexLower(crypto.randomBytes(16))}"
+    // Invited by the test account, an admin, through the route the web app's Administration uses.
+    val inviteToken = api.adminInvite(InviteRequest(email = sharerEmail, ttlMinutes = 120)).inviteToken
     val sharerApi = AndvariApi(origin, HttpClient(Java), platform = "linux")
     val policy = sharerApi.clientPolicy()
     val (request, sharer) = Account.enroll(
@@ -237,23 +236,4 @@ private fun share(origin: String, email: String, password: String, vaultName: St
     // runner a key derivation.
     println("share: \"$vaultName\" shared read-only by $sharerEmail and accepted")
     exitProcess(0)
-}
-
-/** POST /api/v1/admin/users as the admin page sends it (no email: the invite token is used here at once). */
-private fun adminInvite(origin: String, accessToken: String, email: String): String {
-    val body = buildJsonObject {
-        put("email", email)
-        put("isAdmin", false)
-        put("sendEmail", false)
-        put("escrowPolicy", "required")
-    }.toString()
-    val request = HttpRequest.newBuilder(URI.create("$origin/api/v1/admin/users"))
-        .header("Content-Type", "application/json")
-        .header("Authorization", "Bearer $accessToken")
-        .header("X-Andvari-Client", "linux/$ANDVARI_CLIENT_VERSION")
-        .POST(HttpRequest.BodyPublishers.ofString(body))
-        .build()
-    val response = java.net.http.HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
-    check(response.statusCode() == 200) { "the server refused the invite: ${response.statusCode()} ${response.body()}" }
-    return Json.parseToJsonElement(response.body()).jsonObject["inviteToken"]?.jsonPrimitive?.content ?: error("the invite response has no token")
 }

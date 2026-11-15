@@ -16,6 +16,12 @@ enum OtherDevice {
         control("share-read-only", ["name": vault, "item": item])
     }
 
+    /// As above, the second account made with [email] and [password] (no "+" in either: the query would read it as a
+    /// space), so a test can sign in as the owner of a vault the test account uses.
+    static func shareReadOnly(vault: String, item: String, ownerEmail email: String, ownerPassword password: String) -> String? {
+        control("share-read-only", ["name": vault, "item": item, "email": email, "password": password])
+    }
+
     private static func control(_ action: String, _ query: [String: String]) -> String? {
         // Plain http to the loopback address first; the https name (trusted in the simulator) only when that one gave
         // no answer at all, so an action that answered with an error is never run twice.
@@ -44,6 +50,57 @@ enum OtherDevice {
             if status != 0 { return last }
         }
         return last
+    }
+}
+
+/// The simulator's Files app, "On My iPhone". Its storage is a plain folder on the simulator's disk, and the runner is a
+/// simulator process: a test puts a file there for the system's file picker to offer, and reads back a file the app
+/// saved or exported there.
+enum FilesApp {
+    /// The folder behind "On My iPhone": the File Provider Storage of the group com.apple.FileProvider.LocalStorage.
+    /// Nil until the simulator has made it (opening the Files app once does).
+    static func localStorage() -> URL? {
+        let fm = FileManager.default
+        // The runner's home is <device>/data/Containers/Data/Application/<id>; the groups are in …/Containers/Shared/AppGroup.
+        let containers = URL(fileURLWithPath: NSHomeDirectory()).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let groups = containers.appendingPathComponent("Shared/AppGroup", isDirectory: true)
+        guard let dirs = try? fm.contentsOfDirectory(at: groups, includingPropertiesForKeys: nil) else { return nil }
+        for dir in dirs {
+            let meta = NSDictionary(contentsOf: dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist"))
+            guard (meta?["MCMMetadataIdentifier"] as? String) == "group.com.apple.FileProvider.LocalStorage" else { continue }
+            let storage = dir.appendingPathComponent("File Provider Storage", isDirectory: true)
+            try? fm.createDirectory(at: storage, withIntermediateDirectories: true)
+            return storage
+        }
+        return nil
+    }
+
+    /// Write [data] as [name] at the top of "On My iPhone". False when the folder is not there or the write failed.
+    @discardableResult
+    static func put(_ name: String, _ data: Data) -> Bool {
+        guard let storage = localStorage() else { return false }
+        return (try? data.write(to: storage.appendingPathComponent(name), options: .atomic)) != nil
+    }
+
+    /// Every file under "On My iPhone", as paths from its top ("folder/name.csv").
+    static func files() -> [String] {
+        guard let storage = localStorage(), let walker = FileManager.default.enumerator(at: storage, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
+        var out: [String] = []
+        for case let url as URL in walker {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            let path = url.path.replacingOccurrences(of: storage.path + "/", with: "")
+            if !path.hasPrefix(".") && !path.contains("/.") { out.append(path) }
+        }
+        return out.sorted()
+    }
+
+    static func read(_ path: String) -> Data? {
+        localStorage().flatMap { try? Data(contentsOf: $0.appendingPathComponent(path)) }
+    }
+
+    static func remove(_ path: String) {
+        guard let storage = localStorage() else { return }
+        try? FileManager.default.removeItem(at: storage.appendingPathComponent(path))
     }
 }
 

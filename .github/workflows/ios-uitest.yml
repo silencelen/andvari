@@ -7,8 +7,9 @@ name: iOS UI tests
 on:
   push:
     # ios-ui, the iOS branch the suite was merged into, runs it on every push (the newest push only: the concurrency
-    # group below is per ref, and a push's inputs.ref is empty, so a newer push cancels an older run).
-    branches: [ios-uitest, ios-ui]
+    # group below is per ref, and a push's inputs.ref is empty, so a newer push cancels an older run). ios-uitest-3
+    # carries the next batch of tests until ios-ui takes it.
+    branches: [ios-uitest, ios-ui, ios-uitest-3]
   workflow_dispatch:
     inputs:
       ref:
@@ -131,7 +132,8 @@ jobs:
 
       - name: Boot a fresh simulator
         run: |
-          UDID="$(app-ios/uitest/boot-simulator.sh "$RUNNER_TEMP/uitest-backend/ca.pem" | tail -1)"
+          # The second argument is a picture for the simulator's Photos, for the test that adds one from the photo picker.
+          UDID="$(app-ios/uitest/boot-simulator.sh "$RUNNER_TEMP/uitest-backend/ca.pem" app-ios/Andvari/Assets.xcassets/AppIcon.appiconset/icon-1024.png | tail -1)"
           echo "UITEST_UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl list devices booted
 
@@ -154,6 +156,15 @@ jobs:
       - name: Run the UI tests
         run: |
           . app-ios/uitest/env.sh
+          # app-ios/uitest/only-testing.txt, when a branch carries one, names the test classes (or Class/test) to run, one a
+          # line: for working on a few tests without the hour the whole suite takes. No file: every test.
+          only=()
+          if [ -f app-ios/uitest/only-testing.txt ]; then
+            while read -r name; do
+              [ -n "$name" ] && only+=("-only-testing:AndvariUITests/$name")
+            done < <(grep -v '^#' app-ios/uitest/only-testing.txt)
+            echo "running only: ${only[*]}"
+          fi
           set +e
           # TEST_RUNNER_X reaches the test runner as X. The runner is a simulator process and writes its
           # screenshots and summary straight into out/.
@@ -172,7 +183,7 @@ jobs:
               TEST_RUNNER_UITEST_CONTROL_ORIGIN="http://127.0.0.1:$UITEST_HTTP_PORT" \
             xcodebuild test-without-building -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
               -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
-              -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult \
+              -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult "${only[@]}" \
               > out/xcodebuild-test.log 2>&1
           status=$?
           grep -E "^Test Case .* (passed|failed|skipped)|error:" out/xcodebuild-test.log | head -200

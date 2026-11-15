@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Creates and boots a fresh iPhone simulator on the newest installed iOS, trusts the test site's CA in it,
-# and enrolls its Face ID. Prints the device's UDID on the last line. macOS only.
-# Usage: app-ios/uitest/boot-simulator.sh <ca.pem>
+# and enrolls its Face ID. With a picture, puts it into the simulator's Photos. Prints the device's UDID on the last
+# line. macOS only.
+# Usage: app-ios/uitest/boot-simulator.sh <ca.pem> [<picture>]
 set -euo pipefail
-CA="${1:?usage: boot-simulator.sh <ca.pem>}"
+CA="${1:?usage: boot-simulator.sh <ca.pem> [<picture>]}"
+PHOTO="${2:-}"
 NAME="andvari-uitest"
 
 xcrun simctl delete "$NAME" > /dev/null 2>&1 || true
@@ -23,6 +25,8 @@ UDID="$(xcrun simctl create "$NAME" "$DEVICE_TYPE" "$RUNTIME")"
 xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b >&2
 xcrun simctl keychain "$UDID" add-root-cert "$CA"
+# A picture in Photos, for the photo picker (the tests add it to an item).
+if [ -n "$PHOTO" ]; then xcrun simctl addmedia "$UDID" "$PHOTO" >&2; fi
 # The keyboard's one-time swipe-typing lesson covers the keys the tests type on.
 for domain in com.apple.keyboard.preferences com.apple.Preferences; do
   xcrun simctl spawn "$UDID" defaults write "$domain" DidShowContinuousPathIntroduction -bool true || true

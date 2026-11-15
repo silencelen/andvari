@@ -10,7 +10,8 @@ to follow, and a test can check what was submitted without the page showing a va
 POST /control/vault-create|vault-delete|vault-restore?name=… let a test act as another device of the test
 account (tools/uitest-seed `vault`), and POST /control/share-read-only?name=…&item=… as a second account that
 shares a vault read-only with it, accepted on another device (tools/uitest-seed `share`), to see what the app
-learns at its next sync. Both ports listen on loopback only and the accounts are throwaway ones.
+learns at its next sync; with &email=…&password=… the second account has that address and master password, for a
+test that signs in as it. Both ports listen on loopback only and the accounts are throwaway ones.
 
 GET <page>.html?uitest-events serves the page with a passive event log at the end of its body (presses, focus
 moves with the page's user activation and focus, window focus), so a test can read what the page saw.
@@ -118,6 +119,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             args = ["vault", vault_action] + account + [name]
         elif parsed.path == "/control/share-read-only" and name and item:
             args = ["share"] + account + [name, item]
+            # The sharer's own address and master password, when the test is to sign in as it afterwards.
+            sharer = [(query.get(key) or [""])[0] for key in ("email", "password")]
+            if all(sharer):
+                args += sharer
         else:
             self.send_error(404)
             return
