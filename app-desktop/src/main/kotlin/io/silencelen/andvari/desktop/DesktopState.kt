@@ -2976,6 +2976,9 @@ class DesktopState(
         requireNotNull(engine) { "locked" }.acceptLegacyVault(vaultId)
     }
 
+    /** What tells [vaultId] from another vault of the same name (item count, dates, id tail), from this device's copy. */
+    fun vaultFacts(vaultId: String): String = engine?.let { io.silencelen.andvari.core.client.PersonalVaultCopy.facts(it, vaultId) }.orEmpty()
+
     /** A vault's display name for the personal-vault notices. */
     fun vaultDisplayName(vaultId: String): String =
         engine?.vaultInfos()?.firstOrNull { it.vaultId == vaultId }?.name ?: engine?.personalChoiceInfo(vaultId)?.name ?: "another vault"

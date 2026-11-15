@@ -25,6 +25,35 @@ object PersonalVaultCopy {
     const val DIFFERENT_VAULTS = "These are two different vaults."
 
     /**
+     * The PROPOSED notice as the Android and desktop apps word it, from its two records: [currentVaultId] the account's
+     * record ("" when it names none), [servedVaultId] the server's, and their names. Since a first sign-in's proposal is
+     * described against the account's record once that is read ([Account.describeProposalAgainst]), the two routinely name
+     * the SAME vault on a new device: that is one vault to confirm, with nothing to keep, never "Your account's personal
+     * vault is Personal, but the server sent Personal". No record leaves the server's word alone; two different vaults are
+     * said to be two, and the account's is the one to keep.
+     */
+    fun proposedNotice(currentVaultId: String, servedVaultId: String, currentName: String?, servedName: String): ProposedNotice = when {
+        currentVaultId == servedVaultId -> ProposedNotice(
+            sameVaultTitle(servedName),
+            sameVaultBody(servedVaultId) + " Until you confirm, new items need a vault picked by hand.",
+            keepName = null,
+        )
+        currentVaultId.isEmpty() -> ProposedNotice(
+            "The server says your personal vault is $servedName.",
+            "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items need a vault picked by hand.",
+            keepName = null,
+        )
+        else -> {
+            val kept = currentName ?: "another vault"
+            ProposedNotice(
+                "Your account's personal vault is $kept, but the server sent $servedName.",
+                "$DIFFERENT_VAULTS Another of your devices chose $kept, or the server sent an older record. This device uses no personal vault until you decide.",
+                keepName = kept,
+            )
+        }
+    }
+
+    /**
      * What tells one vault from another when their names are the same: how much is in it, when it was created and last
      * changed (UTC days), and the end of its id. Unknown dates are left out.
      */
@@ -45,3 +74,7 @@ object PersonalVaultCopy {
 
     private fun day(ms: Long): String = kotlinx.datetime.Instant.fromEpochMilliseconds(ms).toString().take(10)
 }
+
+/** What a PROPOSED personal-vault notice says ([PersonalVaultCopy.proposedNotice]); [keepName] names the vault "Keep" keeps (the
+ *  account's record), null when there is no other vault to keep. */
+class ProposedNotice(val title: String, val body: String, val keepName: String?)

@@ -345,29 +345,20 @@ fun PersonalVaultBanner(vm: AndvariViewModel, onChanged: () -> Unit) {
             runCatching { vm.describePersonalChange() }.onSuccess { details = it; lookupFailed = false }.onFailure { lookupFailed = true }
         }
         val newName = details?.servedName ?: vm.vaultDisplayName(change.servedVaultId)
-        // The account's record and the server's may name the SAME vault: then there is no conflict to describe, only a
-        // device that has not been asked yet (A9 review LOW-4). "Personal, but the server sent Personal" read as a
-        // choice between two vaults of one name.
-        val same = change.currentVaultId == change.servedVaultId
-        val designated = change.currentVaultId.takeIf { it.isNotEmpty() && !same }?.let { details?.currentName ?: vm.vaultDisplayName(it) }
+        // The words, and whether there is another vault to keep, are core's (PersonalVaultCopy.proposedNotice): the
+        // account's record and the server's may name the SAME vault (a first sign-in once the account state has been read),
+        // and that is one vault to confirm, never a choice between two vaults of one name (A9 review LOW-4).
+        val notice = PersonalVaultCopy.proposedNotice(
+            change.currentVaultId,
+            change.servedVaultId,
+            currentName = change.currentVaultId.takeIf { it.isNotEmpty() }?.let { details?.currentName ?: vm.vaultDisplayName(it) },
+            servedName = newName,
+        )
+        val designated = notice.keepName
         Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Column(Modifier.padding(12.dp)) {
-                Text(
-                    when {
-                        same -> PersonalVaultCopy.sameVaultTitle(newName)
-                        designated == null -> "The server says your personal vault is $newName."
-                        else -> "Your account's personal vault is $designated, but the server sent $newName."
-                    },
-                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    when {
-                        same -> PersonalVaultCopy.sameVaultBody(change.servedVaultId) + " Until you confirm, new items need a vault picked by hand."
-                        designated == null -> "This device hasn't confirmed it yet, so it uses no personal vault until you decide: new items need a vault picked by hand."
-                        else -> "${PersonalVaultCopy.DIFFERENT_VAULTS} Another of your devices chose $designated, or the server sent an older record. This device uses no personal vault until you decide."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                Text(notice.title, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
+                Text(notice.body, style = MaterialTheme.typography.bodySmall)
                 if (designated != null) {
                     OutlinedButton(enabled = !busy, onClick = {
                         scope.launch {
