@@ -15,19 +15,25 @@ on:
         description: Branch, tag or commit to test
         required: false
         default: ""
+      only:
+        description: "Run only these tests, space separated, as Class or Class/test (for example: T5CardFillTests/test01_MerchantPagesRefuseWithCopyFromApp). Empty runs the whole suite."
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ios-uitest-${{ github.ref }}-${{ inputs.ref }}
+  group: ios-uitest-${{ github.ref }}-${{ inputs.ref }}-${{ inputs.only }}
   cancel-in-progress: true
 
 jobs:
   uitest:
     name: UI tests on the iOS simulator
     runs-on: macos-26
-    timeout-minutes: 120
+    # The whole suite takes about 90 minutes of test time on a hosted runner, after about 15 of setup and build. At
+    # 120 the job was cancelled while it collected logs, so a run's screenshots were never kept.
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -152,8 +158,22 @@ jobs:
           exit "$status"
 
       - name: Run the UI tests
+        env:
+          UITEST_ONLY: ${{ inputs.only }}
         run: |
           . app-ios/uitest/env.sh
+          # A manual run may name a few tests. The names reach the shell only through the environment, and only
+          # letters, digits, underscores and one slash each are accepted.
+          only=()
+          set -f
+          for t in $UITEST_ONLY; do
+            if ! printf '%s' "$t" | grep -Eq '^[A-Za-z0-9_]+(/[A-Za-z0-9_]+)?$'; then
+              echo "::error::not a test name: $t"; exit 2
+            fi
+            only+=("-only-testing:AndvariUITests/$t")
+          done
+          set +f
+          [ "${#only[@]}" -gt 0 ] && echo "Running only: ${only[*]}"
           set +e
           # TEST_RUNNER_X reaches the test runner as X. The runner is a simulator process and writes its
           # screenshots and summary straight into out/.
@@ -173,6 +193,7 @@ jobs:
             xcodebuild test-without-building -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
               -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
               -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult \
+              ${only[@]+"${only[@]}"} \
               > out/xcodebuild-test.log 2>&1
           status=$?
           grep -E "^Test Case .* (passed|failed|skipped)|error:" out/xcodebuild-test.log | head -200
@@ -194,11 +215,14 @@ jobs:
           if [ -d out/AndvariUITests.xcresult ] && [ ! -d out/screenshots ]; then
             xcrun xcresulttool export attachments --path out/AndvariUITests.xcresult --output-path out/attachments || true
           fi
-          # What the simulator's system said about the app and its extensions, for a failure nobody can watch.
+          # What the simulator's system said about the app and its extensions, for a failure nobody can watch. The
+          # last 30 minutes only, compressed, and given at most five minutes: a 45-minute log was 200 MB and its
+          # collection ran a job into its time limit before the results were kept.
           if [ -n "${UITEST_UDID:-}" ]; then
-            xcrun simctl spawn "$UITEST_UDID" log show --last 45m --style compact \
+            perl -e 'alarm 300; exec @ARGV' xcrun simctl spawn "$UITEST_UDID" log show --last 30m --style compact \
               --predicate 'process BEGINSWITH "Andvari" OR (process IN {"MobileSafari", "com.apple.WebKit.Networking", "trustd"} AND (eventMessage CONTAINS[c] "uitest.test" OR eventMessage CONTAINS ":8443" OR eventMessage CONTAINS[c] "andvari uitest CA")) OR (eventMessage CONTAINS[c] "andvari" AND NOT process IN {"installcoordinationd", "CoreSimulatorBridge", "runningboardd", "SpringBoard", "backboardd", "lsd", "installd"})' \
               > out/simulator.log 2>&1 || true
+            gzip -f out/simulator.log || true
           fi
           ls -la out out/screenshots 2>/dev/null | head -150
 
