@@ -23,7 +23,8 @@ import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
-import { isCardEntryDocument, isCardProviderOrigin } from "./cardproviders";
+import { isCardEntryDocument, isCardProviderOrigin, providerAccountOf } from "./cardproviders";
+import { frameCounts } from "./cardrelease";
 import { CARD_FILL } from "./cardfillflag";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
@@ -359,6 +360,20 @@ const cardBox = CARD_FILL && isCardEntryDocument(location.origin, location.pathn
 /** A provider's document that is not a card document (an address or a sign-in element): it reports no card form. */
 const providerNonCardDocument = !cardBox && isCardProviderOrigin(location.origin);
 
+/**
+ * A provider's hosted page (its card document as the top-level page, as Stripe's Checkout is): only fields the page
+ * marks with a card autocomplete hint are card fields there, one per kind, never one named by its label (round-13
+ * review: a field the page labels "Card number" may be anything).
+ */
+const hostedCardPage = cardBox && isTop;
+
+/**
+ * The merchant account this provider document works for, where its own URL names one (cardproviders.ts
+ * providerAccountOf), read once as the document loaded: two documents of one provider on two accounts are two payment
+ * forms (round-13 review). Null elsewhere.
+ */
+const providerAccount: string | null = cardBox ? providerAccountOf(location.href) : null;
+
 /** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
  *  (`location.ancestorOrigins`; the page around this frame cannot change the list). Null where the browser has no such
  *  list (Firefox). The choices of one fill share them (round-12 review). */
@@ -369,21 +384,48 @@ const ancestorChain: string[] | null = (() => {
 })();
 
 /**
- * A provider's card document only: whether this frame shows in the top-level viewport with a size, as an
- * IntersectionObserver from inside it sees its document (round-12 review: a collapsed frame, of zero size or nowhere in
- * the viewport, such as a second payment method or a stored card's code beside the new-card form, neither counts nor
- * can be chosen). Null until the browser first answers.
+ * Firefox, which has no `location.ancestorOrigins`: the frameId of this frame's parent, as the browser gives it to this
+ * script (`runtime.getFrameId(window.parent)`), so the worker tells two frames of one form from frames of two forms
+ * (round-13 review). Null where the browser lists ancestor origins, in the top frame, or where it cannot say: then the
+ * worker refuses a fill whose choices span frames.
+ */
+const parentFrameId: number | null = (() => {
+  if (ancestorChain !== null || isTop || !cardBox) return null;
+  try {
+    const rt = (globalThis as { browser?: { runtime?: { getFrameId?: (target: unknown) => unknown } } }).browser?.runtime;
+    const id = rt?.getFrameId?.(window.parent);
+    return typeof id === "number" && Number.isInteger(id) && id >= 0 ? id : null;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * A provider's card document only: whether this frame counts (cardrelease.ts frameCounts; round-12 and round-13 review).
+ * A frame that has never shown in the top-level viewport with a size (a second payment method, a stored card's code
+ * beside the new-card form, kept out of sight) neither counts nor can be chosen; once it has shown, it keeps counting
+ * wherever the page is scrolled, until it has no size (or is removed). Null until the browser first answers.
  */
 let frameShown: boolean | null = null;
+/** This frame has shown in the top-level viewport with a size, as an IntersectionObserver from inside it saw. */
+let everShown = false;
+
+function noteFrameShown(): void {
+  const shown = frameCounts(everShown, window.innerWidth, window.innerHeight);
+  if (shown === frameShown) return;
+  frameShown = shown;
+  reportCardForm();
+}
+
 if (cardBox && typeof IntersectionObserver === "function") {
   new IntersectionObserver((entries) => {
     const e = entries[entries.length - 1];
     if (e === undefined) return;
-    const shown = e.isIntersecting && e.intersectionRect.width > 0 && e.intersectionRect.height > 0;
-    if (shown === frameShown) return;
-    frameShown = shown;
-    reportCardForm();
+    if (e.isIntersecting && e.intersectionRect.width > 0 && e.intersectionRect.height > 0) everShown = true;
+    noteFrameShown();
   }).observe(document.documentElement);
+  // A frame the page shrinks to nothing reports at once; one it grows back counts again.
+  window.addEventListener("resize", noteFrameShown);
 }
 
 /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own word, so
@@ -434,6 +476,7 @@ function reportCardForm(): void {
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
   void safeSend({
     type: "cardFormInfo", forms, anchor, choseNow, ancestors: ancestorChain,
+    ...(parentFrameId !== null ? { parentFrameId } : {}), ...(providerAccount !== null ? { account: providerAccount } : {}),
     ...(isTop ? { providerOrigins } : {}), ...(cardBox && frameShown !== null ? { shown: frameShown } : {}),
   });
 }
@@ -634,7 +677,7 @@ function cardFormHolding(anchor: FillableControl): CardForm | null {
 
 /** Every card form of this frame, scanned now (no cache). */
 function freshCardForms(): CardForm[] {
-  return scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox }));
+  return scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox, hintsOnly: hostedCardPage }));
 }
 
 function cardSigOf(form: CardForm): string {
@@ -878,7 +921,7 @@ function consumeTrustedGesture(): boolean {
  *  redemption path, which deliberately forces a FRESH scan. */
 function allCardForms(): CardForm[] {
   if (!cardFormsCache) {
-    cardFormsCache = scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox }));
+    cardFormsCache = scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox, hintsOnly: hostedCardPage }));
     requestAnimationFrame(() => {
       cardFormsCache = null;
     });
@@ -1735,7 +1778,8 @@ function init(): void {
         return undefined;
       }
       if (msg.type === "dropCardChoice") {
-        // Round-11 review: a newer choice in another frame covers a kind of this frame's chosen form.
+        // Round-11 review: a newer choice in another frame of the same payment form covers a kind of this frame's chosen
+        // form. Round-13 review: or the person pressed Start over in the popup.
         setCardFocus(null);
         sendResponse({ ok: true });
         return undefined;

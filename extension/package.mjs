@@ -33,7 +33,9 @@ execFileSync(process.execPath, ["--test", "src/**/*.test.ts"], { stdio: "inherit
 // A8: content.js is injected into EVERY page — it must never carry the ~144 KB PSL blob
 // (pslData is imported ONLY by psl.ts, which only background.ts uses). Cap it well below
 // blob size so a future import-chain slip fails the package, not the users' page loads.
-const CONTENT_JS_CAP = 60 * 1024; // today ~50 KB / 83% used (card autofill + the in-page chip ride in content.js)
+// 96 KiB since the card-release rules (rounds 5 to 13: the choice, viewport and frame-count checks ride in content.js)
+// took it to ~72 KiB: still far below the blob, so a leak fails the package as it did.
+const CONTENT_JS_CAP = 96 * 1024; // today ~73 KiB (Chrome and Firefox release builds)
 
 // firefox first, chrome last: dist/ is left holding the CHROME build, which is what the
 // README's "Load + verify" (chrome://extensions → Load unpacked → extension/dist) assumes.

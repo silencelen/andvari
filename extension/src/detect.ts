@@ -1324,6 +1324,51 @@ export interface CardForm {
   fields: CardFormFieldRef[];
 }
 
+/**
+ * A hosted provider page's card kind for a field (round-13 review): only from its `autocomplete` hint (a cc-* token),
+ * never from its name, id or label. Null for any field without one.
+ */
+export function hostedCardKind(autocomplete: string | null): CardFieldKind | null {
+  for (const raw of (autocomplete ?? "").split(/\s+/)) {
+    const k = HOSTED_HINTS[raw.toLowerCase()];
+    if (k !== undefined) return k;
+  }
+  return null;
+}
+
+/** The cc-* autocomplete tokens (HTML's autofill field names) and the card kind each names. */
+const HOSTED_HINTS: Record<string, CardFieldKind> = {
+  "cc-number": "cardnumber",
+  "cc-exp": "cardexpiry",
+  "cc-exp-month": "cardexpmonth",
+  "cc-exp-year": "cardexpyear",
+  "cc-csc": "cardcvv",
+  "cc-name": "cardname",
+  "cc-type": "cardtype",
+};
+
+/**
+ * A hosted provider page's card form (round-13 review): the fields with a card autocomplete hint, exactly one per kind.
+ * Null when there is none, or when two fields claim one kind: nothing then tells which the page means.
+ */
+export function hostedCardKinds(autocompletes: readonly (string | null)[]): (CardFieldKind | null)[] | null {
+  const kinds = autocompletes.map(hostedCardKind);
+  const named = kinds.filter((k): k is CardFieldKind => k !== null);
+  if (named.length === 0 || new Set(named).size !== named.length) return null;
+  return kinds;
+}
+
+function buildHostedCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): CardForm | null {
+  const kinds = hostedCardKinds(fields.map((f) => f.input.getAttribute("autocomplete")));
+  if (kinds === null) return null;
+  const refs: CardFormFieldRef[] = [];
+  fields.forEach((f, i) => {
+    const kind = kinds[i];
+    if (kind !== null && kind !== undefined) refs.push({ kind, input: f.input });
+  });
+  return refs.length > 0 ? { form, container, fields: refs } : null;
+}
+
 function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[], numberless: boolean): CardForm | null {
   // A card form REQUIRES the PAN anchor, except in a payment provider's card document, where a security code alone
   // (saved-card re-authentication) or one field of a form split across frames is a card form of its own.
@@ -1371,10 +1416,11 @@ export function postalIsAmbiguous(kinds: readonly (CardFieldKind | null)[]): boo
 /** All same-page card forms under `root`, document order — same grouping as findLoginForms so the
  *  two views never disagree on which fields belong to which form. [numberless]: a payment provider's card document
  *  (content.ts cardBox), where a group of card fields with no card number is a card form too. */
-export function findCardForms(root: Document | ShadowRoot, opts: { numberless?: boolean } = {}): CardForm[] {
+export function findCardForms(root: Document | ShadowRoot, opts: { numberless?: boolean; hintsOnly?: boolean } = {}): CardForm[] {
   const out: CardForm[] = [];
   for (const g of groupFields(root)) {
-    const built = buildCardForm(g.form, g.container, g.fields, opts.numberless === true);
+    // [hintsOnly]: a provider's hosted page (content.ts hostedCardPage): card fields by their autocomplete hint only.
+    const built = opts.hintsOnly === true ? buildHostedCardForm(g.form, g.container, g.fields) : buildCardForm(g.form, g.container, g.fields, opts.numberless === true);
     if (built) out.push(built);
   }
   return out;

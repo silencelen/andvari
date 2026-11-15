@@ -32,12 +32,12 @@ A card is filled only into a payment provider's card form (owner decision 2026-1
 stand-in provider: `https://pay.andvari-uitest.test:8443` (`UITEST_PROVIDER_ORIGIN` in `env.sh`), the same server
 under its own name, which the certificate carries too. Only the Safari extension's UI-test build lists it as a
 provider (`UITEST=1` in `prepare.sh`, which this workflow sets; `extension/build.mjs`), and `ios-unsigned.yml` fails
-when a release bundle names the test domain. The App Store build has no in-page card fill at all (owner decision
+when a release bundle names the test domain or any payment provider's test host (`app-ios/scripts/check-no-test-hosts.sh`). The App Store build has no in-page card fill at all (owner decision
 2026-11-14), so this workflow also sets `CARDFILL=1`, the switch the card-preview build uses. `checkout.html` is a shop page that embeds the provider's card form:
 `pay/card.html` in one frame (`?layout=card`, the default), one `pay/field.html` frame per field (`?layout=split`), or
 a security code alone (`?layout=code`). The shop's own name-on-card field there is never filled. `?layout=lure` adds a
-rewards widget of another site with provider frames of its own (`rewards.html`), whose fields never join the code's
-fill; `?layout=clipped` clips the card frame to its postal code, so a fill from a tap there writes nothing else.
+rewards widget of another site with provider frames of its own (`rewards.html`): a field tapped there and the shop's
+code are two payment forms, in either order, so the popup fills neither and offers Start over; `?layout=clipped` clips the card frame to its postal code, so a fill from a tap there writes nothing else.
 
 ## Adding a test
 
