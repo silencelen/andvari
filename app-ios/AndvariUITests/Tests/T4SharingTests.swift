@@ -66,7 +66,7 @@ final class T4SharingTests: UITestCase {
     func test02_VaultHealthRecordsACheck() {
         launchApp()
         step("vault") {
-            reachVault()
+            reachVaultAnyWay()
         }
         step("health") {
             openSettings()
