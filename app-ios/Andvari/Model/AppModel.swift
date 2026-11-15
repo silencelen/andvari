@@ -666,6 +666,25 @@ final class AppModel: ObservableObject {
         controller.answerBadOffer(opening: opening)
     }
 
+    // MARK: - Importing a CSV export
+
+    /// The file's bytes, read whole (within core's limit): parsed and planned on this device, nothing sent yet.
+    func importCsv(_ data: Data) async -> Outcome {
+        await run { try await $0.importCsvData(data: data) }
+    }
+
+    func setImportVault(_ vaultId: String) async -> Outcome {
+        await run { try await $0.setImportVault(vaultId: vaultId) }
+    }
+
+    func confirmImport() async -> Outcome {
+        await run { try await $0.confirmImport() }
+    }
+
+    func closeImport() {
+        controller.closeImport()
+    }
+
     // MARK: - Shared vaults awaiting review
 
     /// Trust on first use: the vault's key as the server delivered it is vouched for, and the vault opens for saving.

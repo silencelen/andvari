@@ -2618,6 +2618,86 @@ open class SessionControllerTest {
         assertNull(controller.state.health)
     }
 
+    // ---- importing a CSV export ----
+
+    /**
+     * A CSV export is parsed and planned on this device against the items already in the vault (a login already there is
+     * skipped, a duplicate in the file merged, a row that can't be read named); nothing is sent until Import, and an
+     * interrupted import is finished by Retry with the same items under the same ids. The file's bytes are zeroed once read.
+     */
+    @Test
+    fun aCsvExportIsPlannedAgainstTheVaultThenImportedIntoItOnce() = test {
+        unlockedWithAPersonalVault()
+        // A server holding the personal vault's row, as a synced device sees it, and the items pushed to it.
+        val server = VaultServer(this)
+        val rows = mutableListOf<WireItem>()
+        val sent = mutableListOf<List<String>>()
+        val applying: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            sent += body.mutations.map { it.itemId }
+            val results = body.mutations.map { m ->
+                val rev = ++server.rev
+                rows.removeAll { it.itemId == m.itemId }
+                val up = m.item
+                rows += WireItem(m.itemId, m.vaultId, rev, 3_000, 3_000, deleted = up == null, conflict = false, formatVersion = up?.formatVersion ?: 1, attachmentIds = up?.attachmentIds.orEmpty(), blob = up?.blob)
+                io.silencelen.andvari.core.model.MutationResult(m.mutationId, "applied", newItemRev = rev)
+            }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(server.rev, results)), HttpStatusCode.OK, headers)
+        }
+        routes["/sync/push"] = applying
+        routes["/sync"] = { request ->
+            val since = request.url.parameters["since"]?.toLongOrNull() ?: 0L
+            val body = io.silencelen.andvari.core.model.SyncResponse(++server.rev, since == 0L, server.vaults.values.toList(), server.grants.values.toList(), rows.filter { it.rev > since }, emptyList())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+        }
+        assertEquals(ActionResult.Ok, controller.refresh())
+        val unrecognized = "hello,world\n1,2\n".encodeToByteArray()
+        assertEquals(ActionResult.Failed(ImportCopy.UNRECOGNIZED), controller.importCsv(unrecognized))
+        assertNull(controller.state.csvImport)
+
+        val file = (
+            "name,url,username,password,note\n" +
+                "Example,https://login.example.com/x,fam,hunter2,\n" +
+                "Bank,https://bank.example,me,Brisk-Otter-Lamp-41,\n" +
+                "Bank,https://bank.example,me,Brisk-Otter-Lamp-41,\n" +
+                "Mail,https://mail.example,me@mail,Quiet-Maple-Door-73,\n" +
+                ",,,,\n" +
+                "Broken,https://broken.example,me\n"
+            ).encodeToByteArray()
+        val pushes = calls.count { it.endsWith("/sync/push") }
+        assertEquals(ActionResult.Ok, controller.importCsv(file))
+        assertTrue(file.all { it == 0.toByte() }, "the file's bytes are zeroed once read")
+        val preview = assertNotNull(controller.state.csvImport)
+        assertEquals("Chrome or another Chromium browser", preview.source)
+        assertEquals(reg.personalVault.vaultId, preview.vaultId)
+        assertEquals(2, preview.toImport, "Bank once, and Mail")
+        assertEquals(listOf("Example"), preview.buckets.single { it.title == ImportCopy.ALREADY }.names)
+        assertTrue(ImportCopy.collapsed(1) in preview.counts)
+        assertTrue(preview.errors.single().endsWith(": the wrong number of fields"))
+        assertNull(preview.done)
+        assertEquals(pushes, calls.count { it.endsWith("/sync/push") }, "nothing is sent before Import")
+
+        // Interrupted: the items stay planned, and Retry sends the same ones again.
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Ok, controller.confirmImport())
+        val interrupted = assertNotNull(controller.state.csvImport)
+        assertEquals(ImportCopy.INTERRUPTED, interrupted.error)
+        assertTrue(interrupted.retryable)
+        assertNull(interrupted.done)
+        routes["/sync/push"] = applying
+        assertEquals(ActionResult.Ok, controller.confirmImport())
+        val done = assertNotNull(controller.state.csvImport)
+        assertNull(done.error)
+        assertTrue(assertNotNull(done.done).startsWith("Added 2 items to “"))
+        assertEquals(2, sent.flatten().toSet().size, "two items, each sent under its planned id")
+        assertEquals(1, controller.state.items.count { it.name == "Bank" })
+        assertEquals(1, controller.state.items.count { it.name == "Mail" })
+        assertEquals(ActionResult.NotDone(null), controller.confirmImport(), "imported once")
+
+        controller.closeImport()
+        assertNull(controller.state.csvImport)
+    }
+
     // ---- vaults: where a new item goes, moving and copying ----
 
     @Test

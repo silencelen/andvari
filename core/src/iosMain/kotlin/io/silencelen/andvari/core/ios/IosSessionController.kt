@@ -124,6 +124,10 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
 
     /** A scan's pages (each a JPEG, in order) as one PDF, made in memory ([ScanPdf]); null when a page is not a JPEG it can carry. */
     fun scannedPdf(pages: List<NSData>): NSData? = ScanPdf.build(pages.map { it.toByteArray() })?.toNSData()
+
+    /** A CSV export the person chose, read whole by the app ([importCsv]): parsed and planned here, nothing sent yet. */
+    @Throws(CancellationException::class)
+    suspend fun importCsvData(data: NSData): ActionResult = importCsv(data.toByteArray())
 }
 
 /** One file of an item as the app shows it or saves it to Files: its bytes in memory, or why there are none (neither: locked). */
