@@ -11,9 +11,7 @@ POST /control/vault-create|vault-delete|vault-restore?name=… let a test act as
 account (tools/uitest-seed `vault`), and POST /control/share-read-only?name=…&item=… as a second account that
 shares a vault read-only with it, accepted on another device (tools/uitest-seed `share`), to see what the app
 learns at its next sync; with &email=…&password=… the second account has that address and master password, for a
-test that signs in as it. POST /control/invite?email=… has the test account, an admin, invite that address
-(tools/uitest-seed `invite`); the answer's last line is "invite: <code>", for a test that enrolls in the app.
-POST /control/server-stall?seconds=… stops the vault server for that long (20 s at most)
+test that signs in as it. POST /control/server-stall?seconds=… stops the vault server for that long (20 s at most)
 and lets it go on: what a save that is still sending its files meets on a network that stalls. Both ports listen on
 loopback only and the accounts are throwaway ones.
 
@@ -131,8 +129,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             sharer = [(query.get(key) or [""])[0] for key in ("email", "password")]
             if all(sharer):
                 args += sharer
-        elif parsed.path == "/control/invite" and (query.get("email") or [""])[0]:
-            args = ["invite"] + account + [query["email"][0]]
         else:
             self.send_error(404)
             return

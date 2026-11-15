@@ -38,9 +38,6 @@ import kotlin.system.exitProcess
  *                                       a second account shares a vault holding one login READ-ONLY with the account,
  *                                       and another device of the account accepts it (see [share]); with the last two,
  *                                       that account has this address and password, so a test can sign in as it
- *   invite <origin> <email> <master password> <invitee email>
- *                                       the account, an admin, invites someone as the web app's Administration does;
- *                                       the invite's code is printed, for a test that enrolls with it in the app
  *
  * Nothing here is a backdoor: the server is unmodified and every call is one the apps make.
  */
@@ -58,7 +55,6 @@ fun main(args: Array<String>) {
             8 -> share(args[1], args[2], args[3], args[4], args[5], args[6] to args[7])
             else -> usage()
         }
-        "invite" -> if (args.size == 5) invite(args[1], args[2], args[3], args[4]) else usage()
         else -> usage()
     }
 }
@@ -67,8 +63,7 @@ private fun usage(): Nothing {
     System.err.println(
         "usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site> [<throwaway email> <throwaway password>] | " +
             "vault <create|delete|restore> <origin> <email> <password> <vault name> | " +
-            "share <origin> <email> <password> <vault name> <item name> [<sharer email> <sharer password>] | " +
-            "invite <origin> <email> <password> <invitee email>",
+            "share <origin> <email> <password> <vault name> <item name> [<sharer email> <sharer password>]",
     )
     exitProcess(2)
 }
@@ -182,15 +177,6 @@ private fun vault(action: String, origin: String, email: String, password: Strin
     }
     api.logout()
     println("$action: \"$name\" done")
-    exitProcess(0)
-}
-
-/** Another device of the account, an admin, invites [invitee]; the last line printed is "invite: <code>". */
-private fun invite(origin: String, email: String, password: String, invitee: String): Unit = runBlocking {
-    val (api, _) = signIn(origin, email, password, createCryptoProvider())
-    val code = api.adminInvite(InviteRequest(email = invitee, ttlMinutes = 120)).inviteToken
-    api.logout()
-    println("invite: $code")
     exitProcess(0)
 }
 

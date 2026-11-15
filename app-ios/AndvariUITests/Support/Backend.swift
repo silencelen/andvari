@@ -29,23 +29,7 @@ enum OtherDevice {
         control("server-stall", ["seconds": String(seconds)])
     }
 
-    /// The test account, an admin, invites [email], as the web app's Administration does: the invite's code, for a test
-    /// that enrolls with it in the app. Nil when it failed, with the reason in [problem].
-    static func invite(_ email: String) -> (code: String?, problem: String?) {
-        let answer = ask("invite", ["email": email])
-        guard answer.ok else { return (nil, answer.text) }
-        let line = answer.text.split(separator: "\n").last { $0.hasPrefix("invite: ") }
-        guard let line else { return (nil, "the answer names no invite: " + String(answer.text.suffix(200))) }
-        return (String(line.dropFirst("invite: ".count)).trimmingCharacters(in: .whitespacesAndNewlines), nil)
-    }
-
     private static func control(_ action: String, _ query: [String: String]) -> String? {
-        let answer = ask(action, query)
-        return answer.ok ? nil : answer.text
-    }
-
-    /// One control request: whether it worked, and what it answered (the error, when it did not).
-    private static func ask(_ action: String, _ query: [String: String]) -> (ok: Bool, text: String) {
         // Plain http to the loopback address first; the https name (trusted in the simulator) only when that one gave
         // no answer at all, so an action that answered with an error is never run twice.
         var last = "not tried"
@@ -68,11 +52,11 @@ enum OtherDevice {
                 last = "\(origin): no answer"
                 continue
             }
-            if status == 200 { return (true, text) }
+            if status == 200 { return nil }
             last = "\(origin): \(status) \(text.suffix(300))"
-            if status != 0 { return (false, last) }
+            if status != 0 { return last }
         }
-        return (false, last)
+        return last
     }
 }
 
