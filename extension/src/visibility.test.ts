@@ -223,10 +223,21 @@ test("only the person chooses the card field, only in a provider's card document
   assert.match(content, /const cardBox = CARD_FILL && isCardEntryDocument\(location\.origin, location\.pathname\);/);
   assert.match(content, /const providerNonCardDocument = !cardBox && isCardProviderOrigin\(location\.origin\);/);
   assert.match(content, /const all = providerNonCardDocument \? \[\] : allCardForms\(\);/);
-  // A collapsed card frame says so (an IntersectionObserver on its own document, implicit root).
-  assert.match(content, /const shown = e\.isIntersecting && e\.intersectionRect\.width > 0 && e\.intersectionRect\.height > 0;/);
-  assert.match(content, /\}\)\.observe\(document\.documentElement\);/);
+  // A collapsed card frame says so (an IntersectionObserver on its own document, implicit root). Round-13 review: once it
+  // has shown with a size it keeps counting wherever the page is scrolled, until it has no size (cardrelease.ts
+  // frameCounts); the latch is never set back.
+  assert.match(content, /if \(e\.isIntersecting && e\.intersectionRect\.width > 0 && e\.intersectionRect\.height > 0\) everShown = true;\s*noteFrameShown\(\);/);
+  assert.match(content, /const shown = frameCounts\(everShown, window\.innerWidth, window\.innerHeight\);/);
+  assert.match(content, /let everShown = false;/);
+  assert.equal(content.match(/\beverShown = false;/g)?.length, 1, "unset until it shows...");
+  assert.equal(content.match(/\beverShown = true;/g)?.length, 1, "...set once it shows, and never back");
+  assert.match(content, /\}\)\.observe\(document\.documentElement\);\s*\/\/[^\n]*\n\s*window\.addEventListener\("resize", noteFrameShown\);/);
   assert.match(content, /ancestors: ancestorChain,/);
+  // Round-13 review: which payment form the frame belongs to, as read inside the provider's own document: on Firefox its
+  // parent's frameId (where the browser lists no ancestors), and the merchant account its own URL names, read once.
+  assert.match(content, /if \(ancestorChain !== null \|\| isTop \|\| !cardBox\) return null;[\s\S]{0,250}?const id = rt\?\.getFrameId\?\.\(window\.parent\);/);
+  assert.match(content, /const providerAccount: string \| null = cardBox \? providerAccountOf\(location\.href\) : null;/);
+  assert.match(content, /\.\.\.\(parentFrameId !== null \? \{ parentFrameId \} : \{\}\), \.\.\.\(providerAccount !== null \? \{ account: providerAccount \} : \{\}\),/);
   const choose = content.slice(content.indexOf("function chooseIfPersonPut("), content.indexOf("/** The innermost element focus is on"));
   assert.match(choose, /if \(filling \|\| !cardBox\) return;/, "a press in any other document never chooses a card field");
   assert.match(choose, /const onField = press !== null && press\.target === t && now - press\.at < CHOOSE_PRESS_MS;/, "a press on that very field");
@@ -295,8 +306,14 @@ test("a card fill: only in a provider's card document, only where the person cho
   assert.match(content, /if \(!cardBox\) return;\s*if \(!\(target instanceof HTMLInputElement \|\| target instanceof HTMLSelectElement\)\) return;/);
   // A form without a card number is a card form only in a provider's card document (a security code alone, one field of
   // a split form); everywhere else detection is as it was.
-  assert.match(content, /findCardForms\(s, \{ numberless: cardBox \}\)/);
+  assert.equal(content.match(/findCardForms\(s, \{ numberless: cardBox, hintsOnly: hostedCardPage \}\)/g)?.length, 2);
+  assert.ok(!/findCardForms\(s, \{ numberless: cardBox \}\)/.test(content));
   assert.match(detect, /if \(!numberless && !fields\.some\(\(f\) => f\.cardKind === "cardnumber"\)\) return null;/);
+  // Round-13 review: a provider's hosted page (its card document as the top-level page) takes card fields by their
+  // autocomplete hint only, one per kind, never by name or label.
+  assert.match(content, /const hostedCardPage = cardBox && isTop;/);
+  assert.match(detect, /const built = opts\.hintsOnly === true \? buildHostedCardForm\(g\.form, g\.container, g\.fields\) : buildCardForm\(g\.form, g\.container, g\.fields, opts\.numberless === true\);/);
+  assert.match(detect, /const kinds = hostedCardKinds\(fields\.map\(\(f\) => f\.input\.getAttribute\("autocomplete"\)\)\);/);
   // The page-geometry rules the owner's decision replaced are gone, not left unused.
   for (const gone of ["framesAgainst", "cardFillAgainst", "framesUpChain", "frameChainSeen", "frameContentMapping", "providerCardFramesHere", "cardEntryHost", "styleDigest", "remeasureAfterBlur", "refusedChoice", "everyElement", "paymentProvider"]) {
     assert.ok(!content.includes(gone), `content.ts: ${gone}`);
@@ -312,12 +329,25 @@ test("the worker: a card only to a provider's card document, by the origin the b
   assert.match(info, /const index = typeof a === "number" && Number\.isInteger\(a\) && a >= 0 && a < msg\.forms\.length \? a : null;/, "an index out of range is no choice");
   // L7: every new choice is stamped; a later report keeps a choice the record holds and never brings one back.
   assert.match(info, /const anchorAt = index === null \? undefined : msg\.choseNow === true \? Date\.now\(\) : typeof was\?\.anchor === "number" \? was\.anchorAt : undefined;/);
-  // Round-11 review: a new choice of a kind lets go of that kind's choices in every other frame, which are told.
-  assert.match(info, /for \(const other of supersededChoices\(reg, frameId, msg\.forms\[anchor\]!, anchorAt\)\) \{[\s\S]*?reg\[other\] = \{ origin: r\.origin, forms: r\.forms, anchor: null,[\s\S]*?\{ type: "dropCardChoice" \}/);
+  // Round-11 review: a new choice of a kind lets go of that kind's choices in the other frames of its payment form (round
+  // 13: never another form's), which are told.
+  assert.match(info, /for \(const other of supersededChoices\(reg, frameId, msg\.forms\[anchor\]!, anchorAt\)\) letChoiceGo\(tabId, reg, other\);/);
+  const letGo = background.slice(background.indexOf("function letChoiceGo("), background.indexOf("async function clearCardChoices("));
+  assert.match(letGo, /const \{ anchorAt: _gone, \.\.\.kept \} = r;\s*reg\[frameId\] = \{ \.\.\.kept, anchor: null \};/);
+  assert.match(letGo, /const drop: TabMsg = \{ type: "dropCardChoice" \};\s*void chrome\.tabs\.sendMessage\(tabId, drop, \{ frameId \}\)/);
+  // Round-13 review: Start over, from the popup only, lets every choice in the active tab go.
+  const clear = background.slice(background.indexOf("async function clearCardChoices("), background.indexOf("/**", background.indexOf("async function clearCardChoices(")));
+  assert.match(clear, /if \(sender\.tab !== undefined\) return \{ ok: false \};/);
+  assert.match(clear, /for \(const frameId of framesWithChoices\(reg\)\) letChoiceGo\(tab\.id, reg, frameId\);/);
   // The top frame's word about the provider frames it shows is a hint for the popup's line, kept apart from the records
   // a fill reads; the frames' ancestor origins are each frame's own report of what the browser lists for it.
   assert.match(info, /if \(frameId === 0\) \{\s*heard\.top = true;[\s\S]*?heard\.hints = /);
-  assert.match(info, /reg\[frameId\] = \{\s*origin, forms: msg\.forms, anchor, \.\.\.\(anchorAt !== undefined \? \{ anchorAt \} : \{\}\),[\s\S]*?ancestors: ancestorsOf\(msg\.ancestors\), \.\.\.\(typeof msg\.shown === "boolean" \? \{ shown: msg\.shown \} : \{\}\),\s*\};/);
+  assert.match(info, /reg\[frameId\] = \{\s*origin, forms: msg\.forms, anchor, \.\.\.\(anchorAt !== undefined \? \{ anchorAt \} : \{\}\),[\s\S]*?ancestors: ancestorsOf\(msg\.ancestors\), parent: parentOf\(msg\.parentFrameId\), account: accountOf\(msg\.account\),\s*\.\.\.\(typeof msg\.shown === "boolean" \? \{ shown: msg\.shown \} : \{\}\),\s*\};/);
+  // Round-13 review, Safari: whether the browser set sender.origin for the last provider frame, for the popup's Details
+  // only. The frame's own URL is read for that line and nothing else.
+  assert.match(info, /const byUrl = webOriginOfUrl\(sender\.url\);\s*if \(byUrl !== null && isCardProviderOrigin\(byUrl\)\) providerFrameDiag = /);
+  assert.equal(background.match(/providerFrameDiag/g)?.length, 3, "declared, set there, and read by serverDiag only");
+  assert.match(background, /providerFrame: providerFrameDiag,/);
   for (const [name, from, to] of [
     ["fillCardFromPopup", "async function fillCardFromPopup(", "async function revealCardForFill("],
     ["revealCardForFill", "async function revealCardForFill(", "// ---- capture → pending save → resolve ----"],
@@ -334,6 +364,10 @@ test("the worker: a card only to a provider's card document, by the origin the b
   assert.match(fill, /let plan = cardFillPlan\(records\(\), Date\.now\(\), providerFrameNotAllowed\(tabId\)\);/);
   assert.match(fill, /if \(plan\.reason === "unreported"\) \{[\s\S]{0,250}?return \{ ok: false, code: "provider_not_allowed", allowOrigin: plan\.origin,/);
   assert.match(fill, /if \(plan\.reason === "duplicate_kind"\) return \{ ok: false, code: "duplicate_fields",/, "two provider frames offering one kind: no fill at all");
+  assert.match(fill, /if \(plan\.reason === "mixed_forms"\) return \{ ok: false, code: "mixed_forms",/, "choices in two payment forms: no fill at all (round-13 review)");
+  const offers = background.slice(background.indexOf("async function cardFillOffers("), background.indexOf("async function fillCardFromPopup("));
+  assert.match(offers, /if \(choicesSpanForms\(records, Date\.now\(\)\)\) return \{ \.\.\.none, mixed: true \};/);
+  assert.ok(offers.indexOf("choicesSpanForms(") < offers.indexOf("chosenCardFrames("), "the popup is told before any frame is offered");
   assert.match(fill, /if \(!sameFrames\(shown, plan\.targets\)\) return \{ ok: false, code: "changed",/, "exactly the frames the popup showed");
   assert.ok(fill.indexOf("if (!plan.ok)") < fill.indexOf("cardGrants.set(") && fill.indexOf("if (!sameFrames(") < fill.indexOf("cardGrants.set("), "refused before any grant is minted");
   assert.match(fill, /await pruneGoneCardFrames\(tabId\);/, "frames gone from the page are forgotten first");

@@ -51,12 +51,13 @@ test("every entry point of the card path is gated on the build's define itself",
     ["cardChipOffer", /case "cardChipOffer":[\s\S]{0,120}?return __ANDVARI_CARDFILL__ \? cardChipOffer\(sender\) : \(\{ fillable: false, locked: false \}/],
     ["openPopupForCards", /case "openPopupForCards":[\s\S]{0,120}?return __ANDVARI_CARDFILL__ \? openPopupForCards\(sender\) : \(\{ opened: false \}/],
     ["cardFillOffers", /case "cardFillOffers":\s*return __ANDVARI_CARDFILL__ \? cardFillOffers\(sender\) : \(\{ fillable: false, origin: null, frames: \[\], pageFormOnly: false, fillOff: true \}/],
+    ["clearCardChoices", /case "clearCardChoices":\s*return __ANDVARI_CARDFILL__ \? clearCardChoices\(sender\) : \(\{ ok: false \}/],
     ["fillCardFromPopup", /case "fillCardFromPopup":\s*return __ANDVARI_CARDFILL__ \? fillCardFromPopup\(msg\.itemId, msg\.frames, sender\) : \(\{ ok: false, code: "fill_off", error: CARD_FILL_OFF \}/],
     ["revealCardForFill", /case "revealCardForFill":\s*return __ANDVARI_CARDFILL__ \? revealCardForFill\(msg, sender\) : \(\{ ok: false, error: CARD_FILL_OFF \}/],
   ];
   for (const [name, re] of gated) assert.match(bg, re, `${name} is not gated on __ANDVARI_CARDFILL__`);
   // Each handler is called from its gated case only, so a build without card fill drops it.
-  for (const name of ["cardFormInfo(msg", "cardChipOffer(sender)", "openPopupForCards(sender)", "cardFillOffers(sender)", "fillCardFromPopup(msg", "revealCardForFill(msg"]) {
+  for (const name of ["cardFormInfo(msg", "cardChipOffer(sender)", "openPopupForCards(sender)", "cardFillOffers(sender)", "clearCardChoices(sender)", "fillCardFromPopup(msg", "revealCardForFill(msg"]) {
     assert.equal(bg.split(name).length - 1, 1, `${name} is called somewhere else too`);
   }
 });

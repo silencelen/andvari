@@ -19,9 +19,9 @@ iframe { display: block; width: 100%; border: 1px solid #888; margin-top: 16px; 
      ?layout=card (the default): one provider frame holding the number, the expiry and the security code.
      ?layout=split: one provider frame per field, siblings under this page.
      ?layout=code: a security code alone (a saved card's re-authentication).
-     ?layout=lure: the round-12 lure: the shop asks only for the security code, and a "rewards" widget of another site
-       shows provider frames of its own labelled "Rewards number" and "Valid thru". Typed into earlier, they never join
-       the code's fill.
+     ?layout=lure: the round-12 and round-13 lure: the shop asks only for the security code, and a "rewards" widget of
+       another site shows provider frames of its own labelled "Rewards number" and "Valid thru". Tapped before or after
+       the code, they are another payment form: the popup fills neither and offers Start over.
      ?layout=clipped: the one card frame clipped by the page so that only its postal code shows; a fill from a tap there
        writes no detail that does not show. -->
 <form method="post" action="submitted">
