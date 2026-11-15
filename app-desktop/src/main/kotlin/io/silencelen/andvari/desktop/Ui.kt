@@ -206,7 +206,8 @@ fun DesktopApp(state: DesktopState) {
         // decision here (Loading/Welcome/Unlock render nothing; lock() clears every source
         // anyway, so a lock-screen dead-action card is structurally impossible).
         when (state.screen) {
-            is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing -> AttentionArea(state)
+            is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing,
+            is DesktopScreen.DeleteAccount -> AttentionArea(state)
             // RecoverySetup is a mid-enroll gate (no account chrome yet), like Welcome/Unlock — no
             // attention area; RecoveryCapture (v2 #15) is the same gate reached from unlock/sign-in;
             // Recover is the pre-session forgot-password flow (no account chrome by definition).
@@ -233,6 +234,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.RecoverySetup -> AuthPane { RecoverySetupScreen(state) }
                 is DesktopScreen.RecoveryCapture -> AuthPane { RecoveryCaptureScreen(state) }
                 is DesktopScreen.Recover -> AuthPane { RecoverScreen(state) }
+                is DesktopScreen.DeleteAccount -> DeleteAccountScreen(state)
             }
         }
     }
@@ -549,6 +551,8 @@ private fun Welcome(state: DesktopState) {
         // Self-recovery lands here with "Master password reset — sign in with your new password."
         // — Welcome composed no notice surface before, so the line was silently lost.
         NoticeBar(state.notice, state::clearNotice)
+        // Spec 03 §13: the session ended while a deletion was on its way and its answer never came.
+        state.deletionForgetOffer?.let { DeletionForgetCard(state, it) }
         if (showEnroll) Enroll(state) else SignIn(state)
         Spacer(Modifier.height(20.dp))
         if (pending == null) {
@@ -3355,6 +3359,157 @@ private fun SettingsScreen(state: DesktopState) {
                         Button(onClick = { state.beginTotpSetup(totpPassword); totpPassword = "" }, enabled = totpPassword.isNotEmpty() && !state.busy) { Text("Enable") }
                     }
                 }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        DeleteAccountCard(state)
+    }
+}
+
+// ---- deleting the account (spec 03 §13; the state takes core's AccountDeletionFlow) ----
+
+/** Settings' entry: what deleting does, in one line, and the way in. */
+@Composable
+private fun DeleteAccountCard(state: DesktopState) {
+    val words = state.deletionCopy
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(words.TITLE, style = MaterialTheme.typography.titleLarge)
+            Text(words.ENTRY_ABOUT, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = state::openAccountDeletion, enabled = !state.busy, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(words.ENTRY) }
+        }
+    }
+}
+
+/**
+ * Settings › Delete account: what deleting would do now, as the server says (what goes for good, the shared vaults it
+ * leaves, what stands in the way), then the address typed to confirm, the master password (proved on this computer
+ * before anything is sent) and the two-step code when the account has one, behind a last confirmation.
+ */
+@Composable
+private fun DeleteAccountScreen(state: DesktopState) {
+    val words = state.deletionCopy
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    var confirming by remember { mutableStateOf(false) }
+    val deletion = state.accountDeletion
+    val preview = deletion?.preview
+    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+        TextButton(onClick = state::closeAccountDeletion, enabled = !state.busy) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
+        Text(words.TITLE, style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(16.dp))
+        if (deletion == null || preview == null) {
+            if (state.busy) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Checking with your server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                state.deletionMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = state::retryDeletionPreview) { Text("Try again") }
+            }
+            return@Column
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text(words.GOES_HEADING, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                preview.deleted.forEach { line -> Text("• $line", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp)) }
+                preview.left.forEach { line ->
+                    Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 2.dp))
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        if (preview.blockers.isNotEmpty()) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(words.BLOCKERS_HEADING, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    preview.blockers.forEach { line ->
+                        Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 2.dp))
+                    }
+                    Text(words.BLOCKERS_FOOTER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = state::openAccountDeletion, enabled = !state.busy) { Text(words.CHECK_AGAIN) }
+                }
+            }
+        } else {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(words.CONFIRM_HEADING, style = MaterialTheme.typography.titleMedium)
+                    Text(words.confirmFooter(deletion.email), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    Field(words.EMAIL_LABEL, email, { email = it })
+                    Secret(words.PASSWORD_LABEL, password) { password = it }
+                    if (preview.totpRequired) {
+                        Field(words.CODE_LABEL, code, { code = it.filter { c -> c.isDigit() || c == ' ' }.take(9) }, mono = true)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { confirming = true },
+                        enabled = !state.busy && email.isNotBlank() && password.isNotEmpty() && (!preview.totpRequired || code.isNotBlank()),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    ) { Text(words.DELETE_BUTTON) }
+                }
+            }
+        }
+        if (deletion.outcomeUnknown) {
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(onClick = state::checkAccountDeletion, enabled = !state.busy) { Text(words.CHECK_OUTCOME) }
+        }
+        if (state.busy) {
+            Spacer(Modifier.height(12.dp))
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        state.deletionMessage?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text(words.CONFIRM_TITLE) },
+            text = { Text(words.CONFIRM_BODY) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirming = false
+                        val typed = password
+                        password = "" // the master password is not kept on the screen once it is sent
+                        state.deleteAccount(email, typed, code)
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(words.CONFIRM_BUTTON) }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** On the Welcome screen: the session ended while a deletion was on its way and its answer never came (spec 03 §13). */
+@Composable
+private fun DeletionForgetCard(state: DesktopState, offer: DeletionForgetOffer) {
+    val words = state.deletionCopy
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text(offer.message, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+            Row {
+                OutlinedButton(
+                    onClick = state::forgetDeletedAccount, enabled = !state.busy,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(words.FORGET_BUTTON) }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = state::dismissDeletionForgetOffer) { Text(words.SIGN_IN_TO_CHECK) }
             }
         }
     }

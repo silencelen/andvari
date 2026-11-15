@@ -334,6 +334,7 @@ fun AndvariApp(vm: AndvariViewModel) {
                     is Screen.Trash -> TrashScreen(vm, ui)
                     is Screen.Health -> HealthScreen(vm, ui)
                     is Screen.AutofillStatus -> AutofillStatusScreen(vm, ui)
+                    is Screen.DeleteAccount -> DeleteAccountScreen(vm, ui)
                     is Screen.RecoverySetup -> RecoverySetupScreen(vm, ui)
                     is Screen.RecoveryCapture -> RecoveryCaptureScreen(vm, ui)
                     is Screen.Recover -> RecoverScreen(vm, ui, screen.email)
@@ -645,6 +646,8 @@ fun WelcomeScreen(vm: AndvariViewModel, ui: UiState) {
         // Success landings that end HERE need a voice too — chiefly the recover flow's
         // "Master password reset — sign in with your new password." (sessions were revoked).
         NoticeBar(ui.notice, vm::clearNotice)
+        // Spec 03 §13: the session ended while a deletion was on its way and its answer never came.
+        ui.deletionForgetOffer?.let { DeletionForgetCard(vm, it, busy = ui.busy) }
         // §4.3 B2-6 pending notice sits ABOVE the shared enroll form as a separate sibling — so it
         // can appear without disturbing the form's composition identity.
         if (pending != null) PendingSwitchNotice(vm, pending, busy = ui.busy)
@@ -2909,7 +2912,164 @@ fun SettingsScreen(vm: AndvariViewModel, ui: UiState) {
                 }
             }
             Spacer(Modifier.height(16.dp))
+            DeleteAccountCard(vm, ui)
+            Spacer(Modifier.height(16.dp))
             AboutCard()
+        }
+    }
+}
+
+// ---- deleting the account (spec 03 §13; the VM takes core's AccountDeletionFlow) ----
+
+/** The words of the Android app's deletion screens: core's, with this phone named as this phone. */
+private val DELETION = io.silencelen.andvari.core.app.DeletionCopy.PHONE
+
+/** Settings' entry: what deleting does, in one line, and the way in. */
+@Composable
+private fun DeleteAccountCard(vm: AndvariViewModel, ui: UiState) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(DELETION.TITLE, style = MaterialTheme.typography.titleLarge)
+            Text(DELETION.ENTRY_ABOUT, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = vm::openAccountDeletion, enabled = !ui.busy, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(DELETION.ENTRY) }
+        }
+    }
+}
+
+/**
+ * Settings › Delete account: what deleting would do now, as the server says (what goes for good, the shared vaults it
+ * leaves, what stands in the way), then the address typed to confirm, the master password (proved on this phone before
+ * anything is sent) and the two-step code when the account has one, behind a last confirmation.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun DeleteAccountScreen(vm: AndvariViewModel, ui: UiState) {
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    var confirming by remember { mutableStateOf(false) }
+    val deletion = ui.accountDeletion
+    val preview = deletion?.preview
+    BackHandler(onBack = vm::closeAccountDeletion)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(DELETION.TITLE, style = MaterialTheme.typography.titleLarge) },
+                navigationIcon = { IconButton(onClick = vm::closeAccountDeletion, enabled = !ui.busy) { Icon(Icons.Default.ArrowBack, "back") } },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+            if (deletion == null || preview == null) {
+                if (ui.busy) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text("Checking with your server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                } else {
+                    InlineError(ui.deletionMessage)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = vm::retryDeletionPreview, modifier = Modifier.fillMaxWidth()) { Text("Try again") }
+                }
+                return@Column
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(DELETION.GOES_HEADING, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    preview.deleted.forEach { line -> Text("• $line", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp)) }
+                    preview.left.forEach { line ->
+                        Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 2.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            if (preview.blockers.isNotEmpty()) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(DELETION.BLOCKERS_HEADING, style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(8.dp))
+                        preview.blockers.forEach { line ->
+                            Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                        Text(DELETION.BLOCKERS_FOOTER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = vm::openAccountDeletion, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) { Text(DELETION.CHECK_AGAIN) }
+                    }
+                }
+            } else {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(DELETION.CONFIRM_HEADING, style = MaterialTheme.typography.titleMedium)
+                        Text(DELETION.confirmFooter(deletion.email), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        Field(DELETION.EMAIL_LABEL, email, { email = it }, keyboard = KeyboardType.Email)
+                        SecretField(DELETION.PASSWORD_LABEL, password) { password = it }
+                        if (preview.totpRequired) {
+                            Field(DELETION.CODE_LABEL, code, { code = it.filter { c -> c.isDigit() || c == ' ' }.take(9) }, mono = true, keyboard = KeyboardType.Number)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { confirming = true },
+                            enabled = !ui.busy && email.isNotBlank() && password.isNotEmpty() && (!preview.totpRequired || code.isNotBlank()),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        ) { Text(DELETION.DELETE_BUTTON) }
+                    }
+                }
+            }
+            if (deletion.outcomeUnknown) {
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(onClick = vm::checkAccountDeletion, enabled = !ui.busy, modifier = Modifier.fillMaxWidth()) { Text(DELETION.CHECK_OUTCOME) }
+            }
+            if (ui.busy) {
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            ui.deletionMessage?.let {
+                Spacer(Modifier.height(12.dp))
+                InlineError(it)
+            }
+        }
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text(DELETION.CONFIRM_TITLE) },
+            text = { Text(DELETION.CONFIRM_BODY) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirming = false
+                        val typed = password
+                        password = "" // the master password is not kept on the screen once it is sent
+                        vm.deleteAccount(email, typed, code)
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(DELETION.CONFIRM_BUTTON) }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** On the sign-in screen: the session ended while a deletion was on its way and its answer never came (spec 03 §13). */
+@Composable
+private fun DeletionForgetCard(vm: AndvariViewModel, offer: DeletionForgetOffer, busy: Boolean) {
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text(offer.message, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = vm::forgetDeletedAccount, enabled = !busy, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(DELETION.FORGET_BUTTON) }
+            TextButton(onClick = vm::dismissDeletionForgetOffer, modifier = Modifier.fillMaxWidth()) { Text(DELETION.SIGN_IN_TO_CHECK) }
         }
     }
 }

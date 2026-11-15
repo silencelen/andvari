@@ -88,7 +88,7 @@ class SelfIdentityKeyValueStoreTest {
     @Test
     fun aChangedUserIdForTheSameEmailIsRefused() {
         val m = mutableMapOf<String, String>()
-        val s = SelfIdentityPin.KeyValueStore({ m[it] }, { k, v -> m[k] = v })
+        val s = SelfIdentityPin.KeyValueStore({ m[it] }, { k, v -> m[k] = v }, { m.remove(it) })
         val a = account()
         assertNull(s.pinFor("ann@example.com", a.userId))
         s.record(a.userId, "ann@example.com", a)
@@ -101,10 +101,28 @@ class SelfIdentityKeyValueStoreTest {
     fun aPreA11PinIsBoundToTheSessionEmailAndKeptAsIs() {
         val a = account()
         val m = mutableMapOf("selfIdentityPub.${a.userId}" to Bytes.toB64(a.identityPub)) // the pre-A11 prefs key
-        val s = SelfIdentityPin.KeyValueStore({ m[it] }, { k, v -> m[k] = v })
+        val s = SelfIdentityPin.KeyValueStore({ m[it] }, { k, v -> m[k] = v }, { m.remove(it) })
         s.bindLegacy(a.userId, "ann@example.com")
         assertFailsWith<CryptoException> { s.pinFor("ann@example.com", forged) }
         assertContentEquals(a.identityPub, s.pinFor("ann@example.com", a.userId))
         assertEquals(Bytes.toB64(a.identityPub), m["selfIdentityPub.${a.userId}"], "the legacy pin is not rewritten")
+    }
+
+    @Test
+    fun aDeletionThisDeviceRanForgetsItsRecordsButNeverAnotherAccountsBinding() {
+        val m = mutableMapOf<String, String>()
+        val s = SelfIdentityPin.KeyValueStore({ m[it] }, { k, v -> m[k] = v }, { m.remove(it) })
+        val a = account()
+        s.record(a.userId, "ann@example.com", a)
+        assertFailsWith<CryptoException> { s.pinFor("ann@example.com", forged) }
+        s.forget(a.userId, " ANN@example.com")
+        assertNull(s.pinFor("ann@example.com", forged), "the address registers again here as a new account")
+        assertTrue(m.isEmpty(), "the pin and the binding")
+        // A binding at the address for ANOTHER account is not this deletion's to remove (its pin is keyed apart too).
+        val b = account()
+        s.record(b.userId, "ann@example.com", b)
+        s.forget(a.userId, "ann@example.com")
+        assertFailsWith<CryptoException> { s.pinFor("ann@example.com", forged) }
+        assertContentEquals(b.identityPub, s.pinFor("ann@example.com", b.userId))
     }
 }

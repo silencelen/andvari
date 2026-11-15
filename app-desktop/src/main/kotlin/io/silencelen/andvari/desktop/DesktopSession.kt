@@ -360,6 +360,27 @@ class DesktopSessionStore(
     /** §4.2: per-origin — clearing keys for one origin never touches another's namespace. */
     fun clearAccountKeys(key: String, userId: String) { accountKeysFile(key, userId).delete() }
 
+    /**
+     * Account deletion (spec 03 §13; spec 01 §5 as amended 2026-11-10): this computer RAN a deletion the server confirmed,
+     * so it forgets its self-identity records for [userId] on origin [key]: the pin, and the email binding only where it
+     * names that userId (one at the same address for another account is not this deletion's to remove). The address can
+     * then register again here. Nothing else ever removes them (see [loadSelfIdentityPub]).
+     */
+    fun forgetSelfIdentity(key: String, userId: String, email: String) {
+        selfIdentityFile(key, userId).delete()
+        if (email.isBlank()) return
+        val f = bindingFile(key, email)
+        val binding = io.silencelen.andvari.core.client.SelfIdentityPin.decodeBinding(runCatching { f.readText() }.getOrNull())
+        if (binding?.userId == userId) f.delete()
+    }
+
+    /** Account deletion: everything kept in [userId]'s namespace on [key] (the vault cache, the cached keys, the device
+     *  state, the pin), best effort; [deleteCacheDb] first, for a file Windows holds open a moment longer. */
+    fun deleteNamespace(key: String, userId: String) {
+        deleteCacheDb(key, userId)
+        nsDir(key, userId).deleteRecursively()
+    }
+
     // A12 (row 81): the session held for THIS run when at-rest storage is declined. Never written
     // anywhere; dies with the process, so the next launch signs in again.
     @Volatile

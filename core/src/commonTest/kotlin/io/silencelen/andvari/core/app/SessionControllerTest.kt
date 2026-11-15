@@ -2457,40 +2457,45 @@ open class SessionControllerTest {
         assertEquals(EMAIL, open.email)
         val preview = assertNotNull(open.preview)
         assertTrue(preview.totpRequired)
-        assertEquals(listOf(DeletionCopy.blocker("shared_vault", null, 2), DeletionCopy.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
+        assertEquals(listOf(DeletionCopy.IPHONE.blocker("shared_vault", null, 2), DeletionCopy.IPHONE.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
         assertTrue(preview.deleted.any { it.startsWith("Your Personal vault") })
-        assertEquals(DeletionCopy.leaves(listOf(null)), preview.left)
+        assertEquals(DeletionCopy.IPHONE.leaves(listOf(null)), preview.left)
 
         // Checked here first, and nothing sent: the address, the code the account needs, the master password.
-        assertEquals(ActionResult.Failed(DeletionCopy.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
-        assertEquals(ActionResult.Failed(DeletionCopy.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
         assertEquals(ActionResult.Failed(HouseholdCopy.REAUTH_FAILED), controller.deleteAccount(EMAIL, "not it", "123456"))
         assertTrue(sent.isEmpty(), "a wrong password never leaves this device")
 
         // Refused for blockers: the server's show, and nothing was deleted.
-        assertEquals(ActionResult.Failed(DeletionCopy.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
         assertEquals(EMAIL, sent.single().confirmEmail)
         assertEquals("123456", sent.single().totp)
         assertEquals(AppScreen.VAULT, controller.state.screen)
 
         // No answer that says what happened: never "deleted" or "not deleted"; a check finds the account still here.
         fail502 = true
-        assertEquals(ActionResult.Failed(DeletionCopy.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertTrue(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
         assertEquals(ActionResult.Ok, controller.checkAccountDeletion())
         assertFalse(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
-        assertEquals(DeletionCopy.NOT_DELETED_AFTER_CHECK, controller.state.notice)
+        assertEquals(DeletionCopy.IPHONE.NOT_DELETED_AFTER_CHECK, controller.state.notice)
         fail502 = false
 
         // The blockers resolved: a wrong code is refused, the right one deletes the account.
         blockers = emptyList()
-        assertEquals(ActionResult.Failed(DeletionCopy.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
         val namespace = "$homeKey/${reg.userId}"
         assertTrue(namespaces.devices.containsKey(namespace))
         assertNotNull(queue.key, "the save key the extensions seal to")
+        // The self-identity records this unlock left: the address answered with another account is the spec 01 §5 fault.
+        val newAccountAtTheSameAddress = "00000000-0000-4000-8000-0000000000aa"
+        val pins = store.origin(homeKey).identityPins()
+        pins.record(reg.userId, EMAIL, enrolled.account)
+        assertTrue(runCatching { pins.pinFor(EMAIL, newAccountAtTheSameAddress) }.isFailure)
         assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
-        assertEquals(DeletionCopy.deleted(EMAIL), controller.state.notice)
+        assertEquals(DeletionCopy.IPHONE.deleted(EMAIL), controller.state.notice)
         assertNull(controller.state.accountDeletion)
         assertNull(store.load(), "no session and no tokens")
         assertTrue(namespace in namespaces.deleted, "the vault cache")
@@ -2498,6 +2503,8 @@ open class SessionControllerTest {
         assertTrue(quickKeys.wiped.isNotEmpty(), "quick unlock")
         assertNull(queue.key, "the save queue and its key")
         assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
+        // Spec 03 §13: and the self-identity records, so the address can register again here as a new account.
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, newAccountAtTheSameAddress))
     }
 
     // ---- vault health ----

@@ -94,4 +94,30 @@ class SelfIdentityEmailPinTest {
         assertNull(store.selfIdentityPubFor(key, "bob@example.com", forged))
         assertNull(store.selfIdentityPubFor(originKey("https://other.example.org"), "ann@example.com", forged))
     }
+
+    /**
+     * Account deletion (spec 03 §13; spec 01 §5 as amended): this computer ran a deletion the server confirmed, so it
+     * forgets its records of that account, and the address registers again here as a new account. A binding at the same
+     * address for another account is not this deletion's to remove; the whole namespace of the deleted userId goes.
+     */
+    @Test
+    fun aDeletionThisComputerRanForgetsItsRecordsOfThatAccountOnly() {
+        val store = DesktopSessionStore(root)
+        val a = account("ann@example.com")
+        store.recordSelfIdentityPub(key, a.userId, "ann@example.com", a)
+        store.personalDeviceState(key, a.userId).set("personal.last", "v1")
+        assertFailsWith<CryptoException> { store.selfIdentityPubFor(key, "ann@example.com", forged) }
+        store.forgetSelfIdentity(key, a.userId, " ANN@example.com")
+        store.deleteNamespace(key, a.userId)
+        assertNull(store.selfIdentityPubFor(key, "ann@example.com", forged), "the address registers again as a new account")
+        assertNull(store.loadSelfIdentityPub(key, a.userId))
+        kotlin.test.assertFalse(store.nsDir(key, a.userId).exists(), "the device state and everything else under the userId")
+
+        val b = account("ann@example.com")
+        store.recordSelfIdentityPub(key, b.userId, "ann@example.com", b)
+        store.forgetSelfIdentity(key, a.userId, "ann@example.com")
+        assertFailsWith<CryptoException> { store.selfIdentityPubFor(key, "ann@example.com", forged) }
+        assertContentEquals(b.identityPub, store.selfIdentityPubFor(key, "ann@example.com", b.userId), "another account's binding stays")
+    }
 }
+

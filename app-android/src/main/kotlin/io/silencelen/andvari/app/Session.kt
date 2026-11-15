@@ -458,7 +458,15 @@ class SessionStore(context: Context) : SessionPersistence {
     private fun selfIdentityStore(originKey: String) = io.silencelen.andvari.core.client.SelfIdentityPin.KeyValueStore(
         get = { prefs.getString(ns(originKey, it), null) },
         put = { k, v -> prefs.edit().putString(ns(originKey, k), v).commit() },
+        remove = { k -> prefs.edit().remove(ns(originKey, k)).commit() },
     )
+
+    /**
+     * Account deletion (spec 03 §13; spec 01 §5 as amended): this phone RAN a deletion the server confirmed, so it forgets
+     * its self-identity records for [userId] on [originKey] (the pin, and the email binding when it names that userId),
+     * and the address can register again here. Nothing else ever removes them.
+     */
+    fun forgetSelfIdentity(originKey: String, userId: String, email: String) = selfIdentityStore(originKey).forget(userId, email)
 
     /** Drop the CURRENT origin's cached accountKeys. */
     fun clearAccountKeys() = clearAccountKeys(currentOriginKey())

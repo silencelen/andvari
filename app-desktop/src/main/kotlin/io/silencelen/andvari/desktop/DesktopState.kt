@@ -10,6 +10,12 @@ import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CopyDeniedException
+import io.silencelen.andvari.core.app.AccountDeletionFlow
+import io.silencelen.andvari.core.app.AccountDeletionPreviewView
+import io.silencelen.andvari.core.app.AccountDeletionView
+import io.silencelen.andvari.core.app.DeletionCheck
+import io.silencelen.andvari.core.app.DeletionCopy
+import io.silencelen.andvari.core.app.DeletionOutcome
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.SaveOutcome
 import io.silencelen.andvari.core.client.ItemChangedException
@@ -58,6 +64,8 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.AccountDeleteBlocker
+import io.silencelen.andvari.core.model.AccountDeletePreview
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
 import io.silencelen.andvari.core.model.PendingTransfer
@@ -108,7 +116,13 @@ sealed interface DesktopScreen {
     // server-refused on the public break-glass origin. Confirm-binding §6 scope ruling: verify's
     // password-hash check already binds the caller to the CURRENT piece — no pieceId here.
     data object Recover : DesktopScreen
+    // Settings › Delete account (spec 03 §13): what deleting would do, then the typed address, the master password and
+    // the two-step code; core's AccountDeletionFlow takes the steps, as on iOS, Android and the web.
+    data object DeleteAccount : DesktopScreen
 }
+
+/** The account whose deletion's answer was lost while its session ended (spec 03 §13): what forgetting it here wipes. */
+data class DeletionForgetOffer(val originKey: String, val userId: String, val email: String, val message: String)
 
 /**
  * §F.1 enrollment posture — the desktop mirror of web `enrollposture.ts` (deliberately LOCAL, not
@@ -1012,7 +1026,8 @@ class DesktopState(
     val menuSignedIn: Boolean
         get() = screen.let {
             it is DesktopScreen.Vault || it is DesktopScreen.Sharing || it is DesktopScreen.Settings ||
-                it is DesktopScreen.Trash || it is DesktopScreen.RecoverySetup || it is DesktopScreen.RecoveryCapture
+                it is DesktopScreen.Trash || it is DesktopScreen.RecoverySetup || it is DesktopScreen.RecoveryCapture ||
+                it is DesktopScreen.DeleteAccount
         }
 
     /**
@@ -3051,6 +3066,219 @@ class DesktopState(
         screen = DesktopScreen.Vault
     }
 
+    // ---- deleting the account (spec 03 §13; core's AccountDeletionFlow, as on iOS, Android and the web) ----
+    //
+    // Settings › Delete account: what deleting would do (the server's preview: what goes, what stands in the way), then
+    // the typed address, the master password (proved on this computer first: a wrong one is never sent) and the two-step
+    // code when the account has one. Once the server says it is done, this computer forgets everything it kept for the
+    // account and lands signed out. An answer that says nothing is never taken for "deleted" or "not deleted".
+
+    private val deletion = AccountDeletionFlow(DeletionCopy.COMPUTER)
+
+    /** The deletion screens' words (core's, with this computer named as this computer). */
+    val deletionCopy: DeletionCopy get() = deletion.copy
+
+    /** The preview as last read: the vaults' names and whether a code is needed. */
+    private var deletionRead: AccountDeletePreview? = null
+
+    /** Settings › Delete account while its screen is open: the address to type and the server's preview (null until it
+     *  answered), and whether the last request's outcome is unknown. */
+    var accountDeletion by mutableStateOf<AccountDeletionView?>(null)
+        private set
+
+    /** Why the deletion screen's last step did nothing, or what a check found. */
+    var deletionMessage by mutableStateOf<String?>(null)
+        private set
+
+    /** On the Welcome screen: the session ended while a deletion was on its way and its answer never came. */
+    var deletionForgetOffer by mutableStateOf<DeletionForgetOffer?>(null)
+        private set
+
+    /** Open Settings › Delete account and ask the server what deleting would do now. */
+    fun openAccountDeletion() {
+        val a = api ?: return
+        if (busy) return
+        deletionRead = null
+        deletionMessage = null
+        accountDeletion = AccountDeletionView(email = store.load()?.email ?: "", preview = null)
+        screen = DesktopScreen.DeleteAccount
+        loadDeletionPreview(a)
+    }
+
+    /** The preview again, after it could not be read. */
+    fun retryDeletionPreview() {
+        val a = api ?: return
+        if (busy || accountDeletion == null) return
+        loadDeletionPreview(a)
+    }
+
+    private fun loadDeletionPreview(a: AndvariApi) {
+        busy = true
+        deletionMessage = null
+        scope.launch {
+            val read = try {
+                deletion.preview(a)
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                busy = false
+                if (api !== a || accountDeletion == null) return@launch
+                if (t is UpgradeRequiredException) {
+                    upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${baseUrl}/downloads."
+                } else {
+                    deletionMessage = deletion.copy.forPreview(t)
+                }
+                return@launch
+            }
+            busy = false
+            if (api !== a || accountDeletion == null) return@launch
+            deletionRead = read
+            accountDeletion = accountDeletion?.copy(preview = deletionPreviewView(read))
+        }
+    }
+
+    private fun deletionPreviewView(p: AccountDeletePreview, blockers: List<AccountDeleteBlocker> = p.blockers): AccountDeletionPreviewView {
+        val names = engine?.vaultInfos().orEmpty().associate { it.vaultId to it.name }
+        return deletion.previewView(p, account?.personalVaultId ?: "", names::get, blockers)
+    }
+
+    /** Back to Settings; not while a request is on its way. */
+    fun closeAccountDeletion() {
+        if (busy) return
+        deletionRead = null
+        accountDeletion = null
+        deletionMessage = null
+        screen = DesktopScreen.Settings
+    }
+
+    /**
+     * Delete this account: [email] as typed, the master [password] and the two-step [code] when the account has one.
+     * Nothing is sent when the address is not the account's. Once the server says it is done, this computer forgets the
+     * account ([forgetAccount]) and lands on the Welcome screen saying so.
+     */
+    fun deleteAccount(email: String, password: String, code: String) {
+        if (busy) return
+        val a = api ?: return
+        val acct = account ?: return
+        val stored = store.load() ?: return
+        val open = accountDeletion ?: return
+        val preview = deletionRead ?: return
+        deletion.refusal(email, stored.email, password, code, preview.totpRequired)?.let {
+            deletionMessage = it
+            return
+        }
+        val key = originKey(baseUrl)
+        busy = true
+        deletionMessage = null
+        scope.launch {
+            val outcome = deletion.delete(a, acct, email, password, code)
+            busy = false
+            // A refused refresh while the request was on its way clears the stored session: the session ended meanwhile.
+            val ended = api !== a || store.load()?.userId != stored.userId
+            when (outcome) {
+                DeletionOutcome.Deleted -> {
+                    forgetAccount(key, stored.userId, stored.email)
+                    notice = deletion.copy.deleted(stored.email)
+                }
+                DeletionOutcome.Unknown -> if (ended) {
+                    // Most likely the deletion's own end: offer to forget the account here, or to sign in and check.
+                    endSessionForDeletion()
+                    deletionForgetOffer = DeletionForgetOffer(key, stored.userId, stored.email, deletion.copy.MOST_LIKELY_DELETED)
+                } else {
+                    deletionMessage = deletion.copy.OUTCOME_UNKNOWN
+                    accountDeletion = accountDeletion?.copy(outcomeUnknown = true)
+                }
+                is DeletionOutcome.Blocked -> {
+                    // Refused: the account is still here, and the server's blockers now show in place of the preview's.
+                    deletionMessage = deletion.copy.BLOCKED
+                    accountDeletion = accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(preview, outcome.blockers))
+                }
+                is DeletionOutcome.Refused -> {
+                    val t = outcome.cause
+                    if (t is UpgradeRequiredException) {
+                        upgradeRequired = "This andvari server requires a newer desktop app. Download the latest from ${baseUrl}/downloads."
+                        return@launch
+                    }
+                    // The server had asked for no code, but the account has one now: the field shows, and the person types it.
+                    if (outcome.codeNowRequired) {
+                        deletionRead = preview.copy(totpRequired = true)
+                        accountDeletion = accountDeletion?.let { d -> d.copy(preview = d.preview?.copy(totpRequired = true)) }
+                    }
+                    deletionMessage = deletion.refusedMessage(t, open.outcomeUnknown)
+                }
+            }
+        }
+    }
+
+    /**
+     * After an answer that said nothing: ask the server for the preview again. An answer means the account is still here;
+     * a refused session says only that this session ended, which a revocation does too, so the account may still exist.
+     */
+    fun checkAccountDeletion() {
+        val a = api ?: return
+        if (busy || accountDeletion?.outcomeUnknown != true) return
+        busy = true
+        deletionMessage = null
+        scope.launch {
+            val check = deletion.check(a)
+            busy = false
+            if (api !== a) return@launch
+            if (check !is DeletionCheck.StillHere) {
+                deletionMessage = deletion.checkMessage(check)
+                return@launch
+            }
+            deletionRead = check.preview
+            deletionMessage = deletion.copy.NOT_DELETED_AFTER_CHECK
+            accountDeletion = accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(check.preview))
+        }
+    }
+
+    /** The Welcome screen's card after a lost answer: forget the account on this computer (the same wipe as a deletion). */
+    fun forgetDeletedAccount() {
+        val offer = deletionForgetOffer ?: return
+        forgetAccount(offer.originKey, offer.userId, offer.email)
+        deletionForgetOffer = null
+        notice = deletion.copy.FORGOTTEN
+    }
+
+    /** "Sign in to check" instead: the card goes, and this computer keeps its records of the account. */
+    fun dismissDeletionForgetOffer() {
+        deletionForgetOffer = null
+    }
+
+    /** The session this computer held, ended without a logout (the server ended it): the Welcome screen, nothing kept open. */
+    private fun endSessionForDeletion() {
+        clearUsage() // a deleted account's uses go nowhere
+        engine?.close(); api?.close(); api = null; account = null; engine = null
+        clearVaultClipboard()
+        pendingRecoverySecret?.fill(0); pendingRecoverySecret = null; recoveryPhrase = null // §F.7
+        pendingPieceId = null
+        pendingCaptureAuthKey = null
+        clearSecondary(); signInTotpRequired = false
+        importRequested = false
+        mustChangePassword = false
+        upgradeRequired = null
+        lockReason = null
+        if (policy != null) policyFetchFailed = false
+        deletionRead = null
+        accountDeletion = null
+        deletionMessage = null
+        screen = DesktopScreen.Welcome; items = emptyList(); needsUpdateCount = 0
+    }
+
+    /**
+     * Everything this computer kept for an account the server deleted (spec 03 §13): its session and tokens, the vault
+     * cache and the namespace it lives in (the cached keys and the device state with it), every secret held for a screen,
+     * and the spec 01 §5 self-identity records, so the address can register again here. Never another account's or another
+     * origin's.
+     */
+    private fun forgetAccount(key: String, userId: String, email: String) {
+        endSessionForDeletion()
+        store.clearAccountKeys(key, userId)
+        store.forgetSelfIdentity(key, userId, email)
+        store.deleteNamespace(key, userId)
+        if (store.load()?.userId == userId) store.clear()
+    }
+
     /** Item undelete (feature): open the Trash screen and load the deleted items. */
     fun openTrash() {
         deletedItems = null
@@ -3585,6 +3813,7 @@ class DesktopState(
         // guard under it.
         recoveryCaptureError = null; recoveryReplacedNotice = null; editorOpen = false; idleLockImminent = false; downloadingAttachmentId = null
         confirmSignOut = false // quality-deadcode--13: an un-answered menu confirm dies with the session it would have ended
+        accountDeletion = null; deletionMessage = null; deletionRead = null // the deletion screen goes with the session
         cacheConsentPrompt = false // §5.3: an unanswered prompt dies with the session; re-asks at the next landing
         clearRecoverState() // §F.7 belt: the self-recovery stash never outlives a session teardown
         notice = null; totpStatus = null; totpSetupInfo = null; totpError = null
