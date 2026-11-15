@@ -161,6 +161,19 @@ struct SettingsView: View {
                 }
                 .listRowBackground(Palette.raised)
 
+                Section {
+                    NavigationLink {
+                        DeleteAccountView()
+                    } label: {
+                        Text("Delete account…")
+                            .foregroundStyle(Palette.danger)
+                    }
+                    .accessibilityIdentifier("settings.delete-account")
+                } footer: {
+                    Text("Deletes your account and everything only you hold, on every device. It can't be undone.")
+                }
+                .listRowBackground(Palette.raised)
+
                 Section("Appearance") {
                     Picker("Appearance", selection: $appearance) {
                         ForEach(Appearance.allCases) { choice in

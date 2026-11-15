@@ -128,6 +128,10 @@ internal class FakeNamespaces : NamespaceStorage {
 
     override fun deviceState(originKey: String, userId: String): DeviceState = devices.getOrPut("$originKey/$userId") { MemoryDeviceState() }
 
+    override fun deleteDeviceState(originKey: String, userId: String) {
+        devices.remove("$originKey/$userId")
+    }
+
     /** Caches a test filled in advance, by "originKey/userId"; any other namespace opens empty. */
     val caches = mutableMapOf<String, VaultCache>()
     val deleted = mutableListOf<String>()

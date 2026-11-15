@@ -12,6 +12,7 @@ import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.InviteRequest
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.system.exitProcess
@@ -23,22 +24,28 @@ import kotlin.system.exitProcess
  *   env  <file>                         write the server's environment (random escrow key, enumeration secret and
  *                                       bootstrap token; the escrow private seed is discarded: nothing is recovered)
  *   seed <origin> <bootstrap token> <email> <master password> <https site origin> <http site origin>
+ *        [<throwaway email> <throwaway master password>]
  *                                       enroll the first account with the bootstrap invite, as any client would,
  *                                       confirm its recovery phrase so a sign-in lands in the vault, and save the
- *                                       logins the tests look for
+ *                                       logins the tests look for; with the last two, the first account (an admin)
+ *                                       also invites a second, empty account and enrolls it, for a test to delete
  *
  * Nothing here is a backdoor: the server is unmodified and every call is one the apps make.
  */
 fun main(args: Array<String>) {
     when (args.firstOrNull()) {
         "env" -> env(File(args.getOrNull(1) ?: usage()))
-        "seed" -> if (args.size == 7) seed(args[1], args[2], args[3], args[4], args[5], args[6]) else usage()
+        "seed" -> when (args.size) {
+            7 -> seed(args[1], args[2], args[3], args[4], args[5], args[6], null)
+            9 -> seed(args[1], args[2], args[3], args[4], args[5], args[6], args[7] to args[8])
+            else -> usage()
+        }
         else -> usage()
     }
 }
 
 private fun usage(): Nothing {
-    System.err.println("usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site>")
+    System.err.println("usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site> [<throwaway email> <throwaway password>]")
     exitProcess(2)
 }
 
@@ -58,7 +65,7 @@ private fun env(out: File) {
 /** RFC 6238's test secret, so anyone can check a code the tests show. */
 private const val TOTP = "otpauth://totp/andvari-uitest?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=SHA1&digits=6&period=30"
 
-private fun seed(origin: String, token: String, email: String, password: String, site: String, httpSite: String): Unit = runBlocking {
+private fun seed(origin: String, token: String, email: String, password: String, site: String, httpSite: String, throwaway: Pair<String, String>?): Unit = runBlocking {
     val crypto = createCryptoProvider()
     val api = AndvariApi(origin, HttpClient(Java), platform = "linux")
     val policy = api.clientPolicy()
@@ -92,6 +99,29 @@ private fun seed(origin: String, token: String, email: String, password: String,
     logins.forEach { engine.save(null, it) }
     engine.sync()
     check(engine.items().size == logins.size) { "the server holds ${engine.items().size} items, expected ${logins.size}" }
+    if (throwaway != null) {
+        // A second account for a test to delete (spec 03 §13): invited by the first, an admin, like any invite, and
+        // enrolled with its recovery phrase confirmed. It holds nothing; its own personal vault is its only vault.
+        val (throwawayEmail, throwawayPassword) = throwaway
+        val invite = api.adminInvite(InviteRequest(email = throwawayEmail, ttlMinutes = 120))
+        val other = AndvariApi(origin, HttpClient(Java), platform = "linux")
+        val (otherRequest, _) = Account.enroll(
+            inviteToken = invite.inviteToken,
+            email = throwawayEmail,
+            displayName = "UI test throwaway",
+            password = throwawayPassword,
+            params = policy.kdfParams,
+            recoveryPublicKey = Bytes.fromB64(other.recoveryPubkey()),
+            recoveryFingerprint = policy.recoveryFingerprint,
+            deviceName = "uitest-seed",
+            crypto = crypto,
+            platform = "linux",
+        )
+        val otherSession = other.register(otherRequest)
+        other.recoverySelfConfirm(otherSession.recoveryPieceId)
+        other.logout()
+        println("seeded a throwaway account $throwawayEmail at $origin")
+    }
     api.logout()
     println("seeded ${logins.size} items for $email at $origin")
     // The HTTP client's threads are not daemons.

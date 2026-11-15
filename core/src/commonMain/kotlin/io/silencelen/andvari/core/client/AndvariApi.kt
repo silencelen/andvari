@@ -94,7 +94,17 @@ open class ApiException(val status: Int, val code: String, message: String) : Ex
  */
 class UpgradeRequiredException(code: String, message: String) : ApiException(426, code, message)
 
+/**
+ * `409 account_delete_blocked` (spec 03 §13): the server refused to delete the account, for [blockers] (vaults the
+ * account owns that other people hold, or the instance's last admin). Nothing was deleted.
+ */
+class AccountDeleteBlockedException(val blockers: List<io.silencelen.andvari.core.model.AccountDeleteBlocker>) :
+    ApiException(409, "account_delete_blocked", "account deletion is blocked")
+
 private const val ATTACHMENT_SIZE_MISMATCH = "attachment does not match its declared size"
+
+/** At most this many blockers of one refused account deletion are kept (a hostile server's list is bounded). */
+private const val MAX_BLOCKERS = 64
 
 data class Tokens(val accessToken: String, val refreshToken: String)
 
@@ -618,6 +628,38 @@ class AndvariApi(
     }
     suspend fun totpConfirm(code: String): TotpStatus = call("POST", "/api/v1/account/totp/confirm", TotpCodeRequest(code))
     suspend fun totpDisable(code: String): TotpStatus = call("POST", "/api/v1/account/totp/disable", TotpCodeRequest(code))
+
+    /**
+     * An admin invites someone (`POST /admin/users`, spec 03 §7): the web app's Administration makes this call, and the
+     * iOS UI tests' seed tool does to make a throwaway account. The invite token is for the invitee's enrolment only.
+     */
+    suspend fun adminInvite(req: io.silencelen.andvari.core.model.InviteRequest): io.silencelen.andvari.core.model.InviteResponse =
+        call("POST", "/api/v1/admin/users", req)
+
+    // ---- account deletion (spec 03 §13) ----
+
+    /**
+     * What `POST /account/delete` would do now: what refuses it, the vaults deleted with the account, the memberships it
+     * drops, and whether it must carry a two-step code. A snapshot: the deletion checks everything again.
+     */
+    suspend fun accountDeletePreview(): io.silencelen.andvari.core.model.AccountDeletePreview = call("GET", "/api/v1/account/delete/preview")
+
+    /**
+     * Delete this account (spec 03 §13). Never sent twice: a 401 here is the server saying the credential or the session
+     * changed since the proof was made, not a token to refresh. A refusal for blockers throws
+     * [AccountDeleteBlockedException], with them.
+     */
+    suspend fun deleteAccount(req: io.silencelen.andvari.core.model.AccountDeleteRequest): io.silencelen.andvari.core.model.AccountDeleteResponse {
+        val resp = request("POST", "/api/v1/account/delete", req, retry = false)
+        if (resp.status.isSuccess()) return resp.body()
+        if (resp.status.value == 409) {
+            val blocked = runCatching {
+                json.decodeFromString(io.silencelen.andvari.core.model.AccountDeleteBlockedError.serializer(), resp.bodyAsText())
+            }.getOrNull()
+            if (blocked?.error == "account_delete_blocked") throw AccountDeleteBlockedException(blocked.blockers.take(MAX_BLOCKERS))
+        }
+        throw errorFrom(resp)
+    }
 
     suspend fun changePassword(req: PasswordChangeRequest) {
         val resp = request("PUT", "/api/v1/account/password", req)

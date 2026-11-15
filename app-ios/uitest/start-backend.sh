@@ -38,7 +38,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 curl -fsS "$UITEST_SERVER_ORIGIN/healthz" > /dev/null || { cat "$WORK/server.log"; echo "the server never answered"; exit 1; }
-java -jar "$SEED_JAR" seed "$UITEST_SERVER_ORIGIN" "$ANDVARI_BOOTSTRAP_TOKEN" "$UITEST_EMAIL" "$UITEST_PASSWORD" "$UITEST_SITE_ORIGIN" "$UITEST_HTTP_ORIGIN"
+java -jar "$SEED_JAR" seed "$UITEST_SERVER_ORIGIN" "$ANDVARI_BOOTSTRAP_TOKEN" "$UITEST_EMAIL" "$UITEST_PASSWORD" "$UITEST_SITE_ORIGIN" "$UITEST_HTTP_ORIGIN" "$UITEST_THROWAWAY_EMAIL" "$UITEST_THROWAWAY_PASSWORD"
 
 # The site's certificate: a CA and a leaf made here, never stored. The simulator is told to trust ca.pem.
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=andvari uitest CA" \

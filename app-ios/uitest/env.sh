@@ -32,3 +32,6 @@ export UITEST_HTTP_ORIGIN="http://${UITEST_HTTP_HOST}:${UITEST_HTTP_PORT}"
 # A throwaway account on a throwaway loopback server: these are test fixtures, not secrets.
 export UITEST_EMAIL="uitest@andvari-uitest.test"
 export UITEST_PASSWORD="correct horse battery staple uitest 1"
+# A second, empty account the seed tool enrolls for the account-deletion test to delete (T5AccountDeletionTests).
+export UITEST_THROWAWAY_EMAIL="throwaway@andvari-uitest.test"
+export UITEST_THROWAWAY_PASSWORD="correct horse battery staple throwaway 2"

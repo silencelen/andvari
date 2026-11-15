@@ -7,6 +7,7 @@ import io.silencelen.andvari.core.app.FillSnapshotStore
 import io.silencelen.andvari.core.app.SaveQueue
 import io.silencelen.andvari.core.app.SaveQueueStore
 import io.silencelen.andvari.core.client.DeviceState
+import io.silencelen.andvari.core.client.JsonDeviceState
 import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.VaultCache
 import io.silencelen.andvari.core.client.fileDeviceState
@@ -234,6 +235,10 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
     }
 
     override fun deviceState(originKey: String, userId: String): DeviceState = fileDeviceState(ensure(dir(originKey, userId)))
+
+    override fun deleteDeviceState(originKey: String, userId: String) {
+        runCatching { NSFileManager.defaultManager.removeItemAtPath("${dir(originKey, userId)}/${JsonDeviceState.FILE_NAME}", error = null) }
+    }
 
     override fun deleteVaultCache(originKey: String, userId: String) {
         val path = cachePath(originKey, userId)

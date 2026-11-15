@@ -12,6 +12,9 @@ enum Fixture {
     static let serverOrigin = value("UITEST_SERVER_ORIGIN", "http://127.0.0.1:8087")
     static let email = value("UITEST_EMAIL", "uitest@andvari-uitest.test")
     static let password = value("UITEST_PASSWORD", "correct horse battery staple uitest 1")
+    /// The second, empty account the seed tool made for the deletion test to delete.
+    static let throwawayEmail = value("UITEST_THROWAWAY_EMAIL", "throwaway@andvari-uitest.test")
+    static let throwawayPassword = value("UITEST_THROWAWAY_PASSWORD", "correct horse battery staple throwaway 2")
     static let siteOrigin = value("UITEST_SITE_ORIGIN", "https://site.andvari-uitest.test:8443")
     static let siteHost = value("UITEST_SITE_HOST", "site.andvari-uitest.test")
     static let httpOrigin = value("UITEST_HTTP_ORIGIN", "http://plainhttp-uitest.test:8081")
