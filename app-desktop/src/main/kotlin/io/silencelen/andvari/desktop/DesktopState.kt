@@ -3176,7 +3176,7 @@ class DesktopState(
             val ended = api !== a || store.load()?.userId != stored.userId
             when (outcome) {
                 DeletionOutcome.Deleted -> {
-                    forgetAccount(key, stored.userId, stored.email)
+                    forgetAccount(key)
                     notice = deletion.copy.deleted(stored.email)
                 }
                 DeletionOutcome.Unknown -> if (ended) {
@@ -3235,7 +3235,7 @@ class DesktopState(
     /** The Welcome screen's card after a lost answer: forget the account on this computer (the same wipe as a deletion). */
     fun forgetDeletedAccount() {
         val offer = deletionForgetOffer ?: return
-        forgetAccount(offer.originKey, offer.userId, offer.email)
+        forgetAccount(offer.originKey)
         deletionForgetOffer = null
         notice = deletion.copy.FORGOTTEN
     }
@@ -3266,17 +3266,24 @@ class DesktopState(
     }
 
     /**
-     * Everything this computer kept for an account the server deleted (spec 03 §13): its session and tokens, the vault
-     * cache and the namespace it lives in (the cached keys and the device state with it), every secret held for a screen,
-     * and the spec 01 §5 self-identity records, so the address can register again here. Never another account's or another
-     * origin's.
+     * The server deleted the account: this computer is left as a fresh install (spec 03 §13, owner decision 2026-11-15),
+     * with nothing of the account and nothing of its server. The session and every secret held for a screen go, and so
+     * does everything kept under that server's origin, whoever's it is ([DesktopSessionStore.forgetServer]): every vault
+     * cache, the cached keys, device states, the spec 01 §5 self-identity records (so the address can register again
+     * here), the policy mirrors and the cache consent. The server's address goes last: the computer dials the default
+     * server again, as a first launch does, and probes its policy for the Welcome screen. Another server's namespace is
+     * never touched (§4.2).
      */
-    private fun forgetAccount(key: String, userId: String, email: String) {
+    private fun forgetAccount(key: String) {
         endSessionForDeletion()
-        store.clearAccountKeys(key, userId)
-        store.forgetSelfIdentity(key, userId, email)
-        store.deleteNamespace(key, userId)
-        if (store.load()?.userId == userId) store.clear()
+        originChanged() // a policy probe still on its way writes nothing back
+        store.forgetServer(key)
+        pendingServer = null; pendingConnected = false; pendingReturnOrigin = null
+        baseUrl = store.baseUrl
+        lastExportAt = store.lastExportAt
+        policy = null
+        policyFetchFailed = false
+        probePolicy()
     }
 
     /** Item undelete (feature): open the Trash screen and load the deleted items. */

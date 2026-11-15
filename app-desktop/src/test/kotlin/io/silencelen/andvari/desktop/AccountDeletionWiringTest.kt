@@ -7,8 +7,9 @@ import kotlin.test.assertTrue
 /**
  * Delete account on the desktop (spec 03 §13): the steps are core's AccountDeletionFlow (tested in core, with the iOS
  * controller running them against a server stand-in); these pin the desktop's wiring around them. Settings offers it;
- * once the server deleted the account this computer forgets all it kept for it, the self-identity records included
- * (SelfIdentityEmailPinTest runs the store's half), and a lost answer with the session ended meanwhile offers to forget.
+ * once the server deleted the account this computer is left as a fresh install, with nothing of the account or its
+ * server (AccountDeletionStoreTest runs the store's half), and a lost answer with the session ended meanwhile offers to
+ * forget.
  */
 class AccountDeletionWiringTest {
     private fun source(name: String): String =
@@ -32,27 +33,36 @@ class AccountDeletionWiringTest {
     }
 
     @Test
-    fun aDeletedAccountLeavesNothingOnThisComputer() {
+    fun aDeletedAccountLeavesThisComputerAsAFreshInstall() {
         val delete = body("fun deleteAccount(email: String, password: String, code: String) {")
-        assertTrue(delete.contains("DeletionOutcome.Deleted -> {\n                    forgetAccount(key, stored.userId, stored.email)"))
+        assertTrue(delete.contains("DeletionOutcome.Deleted -> {\n                    forgetAccount(key)"))
         // A lost answer while the stored session was cleared (a refused refresh): most likely the deletion's own end.
         assertTrue(delete.contains("val ended = api !== a || store.load()?.userId != stored.userId"))
         assertTrue(delete.contains("deletionForgetOffer = DeletionForgetOffer(key, stored.userId, stored.email, deletion.copy.MOST_LIKELY_DELETED)"))
-        val forget = body("private fun forgetAccount(key: String, userId: String, email: String) {")
-        for (wipe in listOf(
+        // The account and its server go (AccountDeletionStoreTest runs the store's half against a directory); then the
+        // computer stands where a first launch does: the default server, its policy probed for the Welcome screen.
+        val forget = body("private fun forgetAccount(key: String) {")
+        val steps = listOf(
             "endSessionForDeletion()",
-            "store.clearAccountKeys(key, userId)",
-            "store.forgetSelfIdentity(key, userId, email)",
-            "store.deleteNamespace(key, userId)",
-            "if (store.load()?.userId == userId) store.clear()",
-        )) {
-            assertTrue(forget.contains(wipe), wipe)
+            "originChanged()",
+            "store.forgetServer(key)",
+            "baseUrl = store.baseUrl",
+            "lastExportAt = store.lastExportAt",
+            "policy = null",
+            "probePolicy()",
+        )
+        var at = -1
+        for (step in steps) {
+            val next = forget.indexOf(step, at + 1)
+            assertTrue(next > at, "$step, in this order")
+            at = next
         }
         val end = body("private fun endSessionForDeletion() {")
         // The usage buffer is dropped, not flushed: a deleted account's uses go nowhere.
         assertTrue(end.indexOf("clearUsage()") in 0 until end.indexOf("engine?.close()"))
         assertTrue(end.contains("pendingRecoverySecret?.fill(0)"))
         assertTrue(end.contains("screen = DesktopScreen.Welcome"))
-        assertTrue(body("fun forgetDeletedAccount() {").contains("forgetAccount(offer.originKey, offer.userId, offer.email)"))
+        // The forget card runs the same wipe.
+        assertTrue(body("fun forgetDeletedAccount() {").contains("forgetAccount(offer.originKey)"))
     }
 }

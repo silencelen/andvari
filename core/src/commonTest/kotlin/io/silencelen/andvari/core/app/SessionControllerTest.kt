@@ -23,6 +23,7 @@ import io.silencelen.andvari.core.client.session.FakeNamespaces
 import io.silencelen.andvari.core.client.session.FakeQuickKeys
 import io.silencelen.andvari.core.client.session.FakeSessionPersistence
 import io.silencelen.andvari.core.client.session.HttpClients
+import io.silencelen.andvari.core.client.session.QuickEnroll
 import io.silencelen.andvari.core.client.session.QuickGate
 import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.SessionPersistence
@@ -115,7 +116,7 @@ open class SessionControllerTest {
     private val headers = headersOf(HttpHeaders.ContentType, "application/json")
 
     /** Everything one test drives, built on the test's event loop. */
-    private inner class Rig(ui: CoroutineContext, origin: String?) {
+    private inner class Rig(private val ui: CoroutineContext, origin: String?) {
         val clocks = FakeClocks(wall = 100 * DAY, mono = 5 * DAY, boot = "7")
         val store = newStore(origin)
         val namespaces = FakeNamespaces()
@@ -158,6 +159,12 @@ open class SessionControllerTest {
         val pendingLog = InMemoryFillSnapshots()
         val pendingFiles = InMemoryBlobs()
         val controller = SessionController(
+            store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
+            pendingLog, pendingFiles,
+        )
+
+        /** A new process of the app over what this one left on the device: another controller on the same stores. */
+        fun newProcess() = SessionController(
             store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
             pendingLog, pendingFiles,
         )
@@ -2493,18 +2500,119 @@ open class SessionControllerTest {
         val pins = store.origin(homeKey).identityPins()
         pins.record(reg.userId, EMAIL, enrolled.account)
         assertTrue(runCatching { pins.pinFor(EMAIL, newAccountAtTheSameAddress) }.isFailure)
+        // What else this device keeps: of another account that signed in to the same server here and signed out since
+        // (its device state, a stamp, its self-identity pin), and of another server, left by an earlier switch.
+        val earlier = "00000000-0000-4000-8000-0000000000bb"
+        val otherKey = OriginCanon.originKey("https://other.example")
+        namespaces.deviceState(homeKey, earlier).set("personal.last", "v1")
+        namespaces.deviceState(otherKey, earlier).set("personal.last", "v1")
+        store.origin(homeKey).setPasswordStamp(earlier, io.silencelen.andvari.core.client.session.PasswordStamp(10, 5, 5, "7"))
+        store.origin(otherKey).policyFetchedAt = 5
+        store.lastSyncAt = 7
+        assertNotNull(snapshots.read(), "the snapshot the extensions read")
+        assertEquals(HOME, shared.last(), "the server's address, as the extensions are told it")
+
         assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
         assertEquals(DeletionCopy.IPHONE.deleted(EMAIL), controller.state.notice)
         assertNull(controller.state.accountDeletion)
+        assertNull(controller.state.server, "no server chosen")
+        assertNull(controller.state.policy)
+        assertNull(controller.state.accountEmail)
+
+        // Nothing of the account (owner decision 2026-11-15: the device is left as a fresh install)...
         assertNull(store.load(), "no session and no tokens")
-        assertTrue(namespace in namespaces.deleted, "the vault cache")
-        assertFalse(namespaces.devices.containsKey(namespace), "the device state")
-        assertTrue(quickKeys.wiped.isNotEmpty(), "quick unlock")
+        assertNull(snapshots.read(), "the snapshot the extensions read")
         assertNull(queue.key, "the save queue and its key")
+        assertTrue(queue.entries().isEmpty())
+        assertNull(appliedLog.read(), "the list of automatic saves")
+        assertNull(pendingLog.read(), "kept saves")
+        assertTrue(pendingFiles.ids().isEmpty(), "and their files")
         assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
-        // Spec 03 §13: and the self-identity records, so the address can register again here as a new account.
-        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, newAccountAtTheSameAddress))
+        // ...and nothing of its server: its address, and everything kept under its origin, whoever's.
+        assertNull(store.baseUrl, "the server's address")
+        assertNull(shared.last(), "nor the copy of it the extensions read")
+        assertEquals(listOf(homeKey), namespaces.deletedOrigins, "every namespace at that server")
+        assertFalse(namespaces.devices.keys.any { it.startsWith("$homeKey/") }, "every device state there")
+        assertTrue("$homeKey/${reg.userId}" in quickKeys.wiped && "$homeKey/$earlier" in quickKeys.wiped, "every quick-unlock key there: ${quickKeys.wiped}")
+        assertNull(store.origin(homeKey).passwordStamp(earlier), "the stamps")
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, newAccountAtTheSameAddress), "the self-identity records: the address can register again here")
+        assertEquals(0L, store.origin(homeKey).policyFetchedAt, "the policy mirrors")
+        assertEquals(0L, store.lastSyncAt)
+        // §4.2: another server's namespace is not this deletion's.
+        assertTrue(namespaces.devices.containsKey("$otherKey/$earlier"))
+        assertEquals(5L, store.origin(otherKey).policyFetchedAt)
+        assertFalse(quickKeys.wiped.any { it.startsWith("$otherKey/") })
+
+        // A new process starts where a first launch does: at the server choice, with nothing to probe.
+        calls.clear()
+        val next = newProcess()
+        try {
+            next.startAndLand()
+            assertEquals(AppScreen.CHOOSE_SERVER, next.state.screen)
+            assertNull(next.state.server)
+            assertNull(next.state.accountEmail)
+            assertTrue(calls.isEmpty(), "no server, no probe")
+        } finally {
+            next.close()
+        }
+    }
+
+    /**
+     * After a deletion the device is as a fresh install, and a vault made on it afterwards works like any other: the same
+     * address can enroll again as a new account (the self-identity records of the deleted one are gone), the app opens
+     * the new vault, the snapshot the extensions read is written again, and the AutoFill extension opens it with the new
+     * account's quick-unlock key. In the same process as the deletion, which holds whatever the deleted session left in
+     * memory.
+     */
+    @Test
+    fun aVaultMadeAfterADeletionOpensInTheAppAndInTheExtension() = test {
+        unlockedWithAPersonalVault()
+        twoStepServer()
+        store.origin(homeKey).identityPins().record(reg.userId, EMAIL, enrolled.account)
+        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
+        routes["/account/delete/preview"] = {
+            val p = io.silencelen.andvari.core.model.AccountDeletePreview(emptyList(), deletedVaults = listOf(reg.personalVault.vaultId), leftVaults = emptyList(), totpRequired = false)
+            respond(json.encodeToString(io.silencelen.andvari.core.model.AccountDeletePreview.serializer(), p), HttpStatusCode.OK, headers)
+        }
+        routes["/account/delete"] = { respond("""{"deletedAt":5000}""", HttpStatusCode.OK, headers) }
+        assertEquals(ActionResult.Ok, controller.openAccountDeletion())
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, ""))
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability(), "nobody is signed in: the extension says to open the app")
+        assertFalse(quickKeys.isEnrolled(homeKey, reg.userId), "the deleted account's quick-unlock key is gone")
+        routes["/account/keys"] = { throw IOException("unreachable") } // the deleted account's keys are served no more
+
+        // The same server again, through the Trust Gate as on a first launch, and a new account at the same address.
+        assertIs<ServerChoice.NeedsGate>(controller.chooseServer(HOME))
+        assertEquals(ActionResult.Ok, controller.confirmTrustGate())
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+        assertEquals(HOME, shared.last(), "the extensions are told the server again")
+        var newUserId = ""
+        routes["/auth/register"] = { request ->
+            val req = json.decodeFromString(RegisterRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            newUserId = req.userId
+            val keys = AccountKeys(req.kdfSalt, req.kdfParams, req.wrappedUvk, req.encryptedIdentitySeed, req.identityPub, "", personalWrap = req.personalWrap)
+            respond(json.encodeToString(SessionResponse.serializer(), SessionResponse(req.userId, DEVICE, "a2", "r2", keys, false, recoveryPieceId = "piece-2")), HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = { respond(EMPTY_SYNC, HttpStatusCode.OK, headers) }
+        assertEquals(ActionResult.Ok, controller.enroll(EnrollForm("tok", EMAIL, "", PASSWORD, false, "")))
+        assertEquals(ActionResult.Ok, controller.confirmRecoveryPhrase(assertNotNull(controller.recoveryPhrase())))
+        assertEquals(AppScreen.VAULT, controller.state.screen, "the new vault opens")
+        assertNotEquals(reg.userId, newUserId, "a new account, at the address of the deleted one")
+        assertEquals(newUserId, store.load()?.userId)
+        settle { queue.key != null } // the key the extensions seal saves to is published again
+
+        // The extension: nothing until Face ID is on for the new account (as after any sign-in), then the new vault.
+        val fill = autofill()
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NOT_ENROLLED), fill.availability())
+        var uvk: ByteArray? = null
+        quickKeys.enrollNext = { account -> uvk = account.uvkCopyForPlatformWrap(); QuickEnroll.Ok }
+        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
+        assertEquals(FillAvailability.Ready(EMAIL), fill.availability(), "the snapshot is the new account's")
+        quickKeys.next = { QuickRecover.Ok(assertNotNull(uvk).copyOf()) }
+        assertEquals(FillUnlock.Unlocked, fill.unlock(BiometricHost.None), "the extension opens the vault made after the deletion")
+        fill.close()
     }
 
     // ---- vault health ----

@@ -90,6 +90,10 @@ internal class UserDefaultsPrefs(suite: String?) : KeyValuePrefs {
     override fun putString(key: String, value: String?) {
         if (value == null) defaults.removeObjectForKey(key) else defaults.setObject(value, forKey = key)
     }
+
+    /** The keys of these defaults under [prefix] (the system's own keys, which the list also holds, start otherwise). */
+    override fun keysWithPrefix(prefix: String): List<String> =
+        defaults.dictionaryRepresentation().keys.mapNotNull { it as? String }.filter { it.startsWith(prefix) }
 }
 
 /**
@@ -247,6 +251,15 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
         for (suffix in listOf("", "-wal", "-shm", "-journal")) {
             runCatching { NSFileManager.defaultManager.removeItemAtPath(path + suffix, error = null) }
         }
+    }
+
+    /** The origin's whole directory: every user's vault cache and device state there. The users are its sub-directories. */
+    override fun deleteOrigin(originKey: String): List<String> {
+        val fm = NSFileManager.defaultManager
+        val origin = "$root/${OriginCanon.pathSafe(originKey)}"
+        val users = runCatching { fm.contentsOfDirectoryAtPath(origin, error = null)?.mapNotNull { it as? String } }.getOrNull().orEmpty()
+        runCatching { fm.removeItemAtPath(origin, error = null) }
+        return users
     }
 
     companion object {
