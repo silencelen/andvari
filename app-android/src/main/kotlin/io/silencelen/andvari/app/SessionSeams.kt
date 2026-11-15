@@ -60,4 +60,17 @@ class AndroidNamespaceStorage(private val noBackupDir: File) : NamespaceStorage 
     override fun deviceState(originKey: String, userId: String): DeviceState = PersonalDeviceState.open(noBackupDir, originKey, userId)
 
     override fun deleteVaultCache(originKey: String, userId: String) = OfflineData.deleteVaultCache(noBackupDir, originKey, userId)
+
+    /**
+     * Account deletion (spec 03 §13): everything under `<noBackup>/ns/<originKey>/`, every user's. A quick-unlock blob
+     * lives in its user's directory and names its Keystore key, so each user's key is destroyed first ([QuickUnlock.wipe]
+     * reads the blob), then the directory goes: vault caches, device states, blobs. Another origin is never touched.
+     */
+    override fun deleteOrigin(originKey: String): List<String> {
+        val origin = File(File(noBackupDir, "ns"), OriginNamespace.pathSafe(originKey))
+        val users = runCatching { origin.listFiles { f -> f.isDirectory }?.map { it.name } }.getOrNull().orEmpty()
+        users.forEach { user -> runCatching { QuickUnlock.wipe(noBackupDir, originKey, user) } }
+        runCatching { origin.deleteRecursively() }
+        return users
+    }
 }

@@ -620,7 +620,10 @@ and the transfer-cancel row and any row a racing request writes afterwards carry
 (c) **Other devices**: an offline device of the deleted account keeps its offline copy until it next reaches the server
 (T3: the server then answers 401 and the client wipes). Every device other than the deleting one keeps its spec 01 §5
 self-identity record and refuses a re-registered account at the same address on that origin until the record is removed
-by hand — the backstop cannot tell a new account from a swapped one, so this stays. Co-members keep whatever members list
+by hand — the backstop cannot tell a new account from a swapped one, so this stays. On the deleting device a native app
+forgets the account's whole origin (spec 03 §13, the fresh-install rule), so another account that had unlocked there on
+that device loses its record on it and is pinned afresh at its next unlock there: for that account, on that one device,
+the backstop restarts from trust-on-first-use, exactly as after the app is reinstalled. Co-members keep whatever members list
 their clients hold in memory, and their contact pins of the old identity key, sealed in their own account state where the
 server cannot edit them: inert — the old userId can never be granted again (404), nor name a new account (its SHA-256 and
 the pseudonym's are kept in `retired_ids`, and register refuses both as `user_id_taken`, so neither a pin of the old id nor

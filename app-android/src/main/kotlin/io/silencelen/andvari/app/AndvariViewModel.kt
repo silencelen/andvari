@@ -3446,7 +3446,7 @@ class AndvariViewModel(
             when (outcome) {
                 DeletionOutcome.Deleted -> {
                     // Whatever ended the session meanwhile (the deletion revokes every session of the account), it is gone.
-                    forgetAccount(originKey, stored.userId, stored.email)
+                    forgetAccount(originKey, stored.userId)
                     landSignedOut(deletion.copy.deleted(stored.email))
                 }
                 DeletionOutcome.Unknown -> if (ended) {
@@ -3530,9 +3530,8 @@ class AndvariViewModel(
     /** The sign-in screen's card after a lost answer: forget the account on this phone (the same wipe as a deletion). */
     fun forgetDeletedAccount() {
         val offer = _ui.value.deletionForgetOffer ?: return
-        forgetAccount(offer.originKey, offer.userId, offer.email)
-        _ui.value = _ui.value.copy(deletionForgetOffer = null, lockReason = null, notice = deletion.copy.FORGOTTEN)
-        refreshQuickUnlockState()
+        forgetAccount(offer.originKey, offer.userId)
+        landSignedOut(deletion.copy.FORGOTTEN)
     }
 
     /** "Sign in to check" instead: the card goes, and this phone keeps its records of the account. */
@@ -3541,12 +3540,16 @@ class AndvariViewModel(
     }
 
     /**
-     * Everything this phone kept for an account the server deleted (spec 03 §13): its session and tokens, the vault
-     * cache and the namespace it lives in (the device state with it), the cached keys, quick unlock and its stamp, the
-     * apps confirmed for its fills, uses not yet sent, unfinished moves and every secret held for a screen, and the spec
-     * 01 §5 self-identity records, so the address can register again here. Never another account's or another origin's.
+     * The server deleted the account: this phone is left as a fresh install (spec 03 §13, owner decision 2026-11-15),
+     * with nothing of the account and nothing of its server. What the account kept goes: its session and tokens, the
+     * apps confirmed for its fills, uses not yet sent, unfinished moves, every secret held for a screen, and what the
+     * autofill status screen recorded of its last fills. So does everything kept under that server's origin, whoever's
+     * it is: every vault cache, device state and quick-unlock key (its Keystore key with it), the policy mirrors, cached
+     * keys, stamps, and the spec 01 §5 self-identity records, so the address can register again here. The server's
+     * address goes last: the phone dials the default server again, as a first launch does. Another server's namespace is
+     * never touched (§4.2).
      */
-    private fun forgetAccount(originKey: String, userId: String, email: String) {
+    private fun forgetAccount(originKey: String, userId: String) {
         UsageRecorder.clear() // a deleted account's uses go nowhere: the lock's flush would only be refused
         VaultSession.lock() // the engine releases the cache database before it is deleted
         runCatching { io.silencelen.andvari.app.autofill.AppSignerBindings.clearAll(appContext) }
@@ -3559,17 +3562,16 @@ class AndvariViewModel(
         moves.drop()
         movePickerMode = null
         movePickerItemId = null
-        deleteCache(originKey, userId)
-        QuickUnlock.wipe(cacheDir, originKey, userId)
-        store.clearFullPasswordStamp(originKey, userId)
-        store.clearAccountKeys(originKey)
-        OriginNamespace.dir(cacheDir, originKey, userId).deleteRecursively() // the device state, and all else kept by the userId
-        store.forgetSelfIdentity(originKey, userId, email)
-        if (store.load()?.userId == userId) store.clear()
+        runCatching { io.silencelen.andvari.app.autofill.AutofillDebugLog.forget(appContext) }
+        // Every account's namespace at that server, each quick-unlock key first (its blob names the Keystore key).
+        runCatching { QuickUnlock.wipe(cacheDir, originKey, userId) }
+        AndroidNamespaceStorage(cacheDir).deleteOrigin(originKey)
+        store.forgetServer(originKey) // the session, everything under that origin, and the address itself
+        coordinator.originChanged() // a policy probe still on its way writes nothing back
         VaultSession.takeRejected() // the server ended the session: that is this deletion, not a second event
     }
 
-    /** The sign-in screen once the account is gone, with [notice]. */
+    /** The sign-in screen once the account is gone, with [notice]: the default server, as on a first launch. */
     private fun landSignedOut(notice: String) {
         deletionRead = null
         deletionUnknown = false
@@ -3577,9 +3579,20 @@ class AndvariViewModel(
             screen = Screen.Welcome, busy = false,
             quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
             mustChangePassword = false, upgradeRequired = null, deletionForgetOffer = null,
+            baseUrl = store.baseUrl, policy = null, policyFetchFailed = false, lastExportAt = store.lastExportAt,
+            trustGate = null, pendingSwitch = null, pendingReconcile = null,
             notice = notice,
         )
         refreshQuickUnlockState()
+        // The sign-in screen needs the policy of the server the phone dials now (the default one), as at a launch.
+        probeJob?.cancel()
+        probeJob = viewModelScope.launch {
+            when (val probed = serverSwitch.probePolicy()) {
+                is PolicyProbe.Applied -> showPolicy(probed.policy)
+                is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
+                PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
+            }
+        }
     }
 
     // ---- autofill status (diagnostic surface; reached from Settings) ----

@@ -164,6 +164,22 @@ object AutofillDebugLog {
         }
     }
 
+    /**
+     * Account deletion (spec 03 §13: the phone is left as a fresh install): the last fill's summary and the ring go, and
+     * the debug toggle is off. They hold no value, but they say which apps and sites the deleted account filled on.
+     */
+    fun forget(context: Context) {
+        runCatching {
+            val app = context.applicationContext
+            SessionStore(app).autofillDebugUntil = 0L
+            debugUntilCache = 0L
+            writer.execute {
+                runCatching { File(app.filesDir, LAST_FILE).delete() }
+                runCatching { File(app.filesDir, LOG_FILE).delete() }
+            }
+        }
+    }
+
     // ---- status-screen reads ----
 
     fun lastEvent(context: Context): FillEvent? = runCatching {

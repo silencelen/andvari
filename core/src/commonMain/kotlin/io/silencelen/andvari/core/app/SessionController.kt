@@ -3799,9 +3799,11 @@ open class SessionController(
             // gone, and this device forgets it.
             DeletionOutcome.Deleted -> {
                 wipeDeletedAccount(stored)
+                // As on a first launch: no server chosen, nobody signed in, no policy known.
                 update {
                     cleared(it, null).copy(
-                        screen = AppScreen.CHOOSE_SERVER, accountEmail = null, mustChangePassword = false, upgradeMessage = null,
+                        screen = landingScreen(), server = store.baseUrl, policy = null, serverUnreachable = false,
+                        accountEmail = null, mustChangePassword = false, upgradeMessage = null,
                         notice = deletion.copy.deleted(stored.email),
                     )
                 }
@@ -3852,23 +3854,34 @@ open class SessionController(
         ActionResult.Ok
     }
 
-    /** Everything this device kept for [stored]'s account, which the server no longer has. */
+    /**
+     * The server deleted [stored]'s account: this device is left as a fresh install (spec 03 §13, owner decision
+     * 2026-11-15), with nothing of the account and nothing of its server. What the account kept goes (the session and its
+     * tokens, the snapshot and save queue the extensions share, kept saves and their files, the saved list, unfinished
+     * moves, every screen's state), and so does everything kept under that server's origin, whoever's it is: every vault
+     * cache and device state, every quick-unlock key, the policy mirrors, cached account keys, full-password stamps and
+     * the spec 01 §5 self-identity records. The address itself goes last, so the app stands where a first launch does:
+     * at the server choice, in this process and the next. Another server's namespace is never touched (§4.2).
+     */
     private fun wipeDeletedAccount(stored: StoredSession) {
         session.lock() // the engine releases its cache before the cache is deleted
         forgetSessionViews() // kept saves and their files, unfinished moves, every screen's state
         zeroSecrets()
         dropFillSnapshot() // the snapshot, the save queue and its key, the saved list
-        (stored.baseUrl.takeIf { it.isNotEmpty() } ?: store.baseUrl)?.let(OriginCanon::originKey)?.let { originKey ->
-            namespaces.deleteVaultCache(originKey, stored.userId)
-            namespaces.deleteDeviceState(originKey, stored.userId)
-            quickKeys.wipe(originKey, stored.userId)
-            val origin = store.origin(originKey)
-            origin.clearPasswordStamp(stored.userId)
-            origin.clearAccountKeys(stored.userId)
-            // Spec 03 §13: and the spec 01 §5 self-identity records, so the address can register again on this device.
-            origin.identityPins().forget(stored.userId, stored.email)
+        val originKey = (stored.baseUrl.takeIf { it.isNotEmpty() } ?: store.baseUrl)?.let(OriginCanon::originKey)
+        if (originKey == null) {
+            store.clear()
+        } else {
+            // Every account's namespace at that server, and the quick-unlock key of each (a sign-out wipes its own, so
+            // none but this account's is expected; whatever is there goes).
+            val users = (runCatching { namespaces.deleteOrigin(originKey) }.getOrDefault(emptyList()) + OriginCanon.pathSafe(stored.userId)).distinct()
+            users.forEach { user -> runCatching { quickKeys.wipe(originKey, user) } }
+            store.forgetServer(originKey)
         }
-        store.clear()
+        // A policy probe still on its way writes nothing back, and the live policy was that server's.
+        coordinator.originChanged()
+        gateTarget = null
+        publishServer() // the extensions' copy of the address goes with it
         session.takeRejected() // the server ended the session: that is this deletion, not a second event
     }
 

@@ -458,15 +458,7 @@ class SessionStore(context: Context) : SessionPersistence {
     private fun selfIdentityStore(originKey: String) = io.silencelen.andvari.core.client.SelfIdentityPin.KeyValueStore(
         get = { prefs.getString(ns(originKey, it), null) },
         put = { k, v -> prefs.edit().putString(ns(originKey, k), v).commit() },
-        remove = { k -> prefs.edit().remove(ns(originKey, k)).commit() },
     )
-
-    /**
-     * Account deletion (spec 03 §13; spec 01 §5 as amended): this phone RAN a deletion the server confirmed, so it forgets
-     * its self-identity records for [userId] on [originKey] (the pin, and the email binding when it names that userId),
-     * and the address can register again here. Nothing else ever removes them.
-     */
-    fun forgetSelfIdentity(originKey: String, userId: String, email: String) = selfIdentityStore(originKey).forget(userId, email)
 
     /** Drop the CURRENT origin's cached accountKeys. */
     fun clearAccountKeys() = clearAccountKeys(currentOriginKey())
@@ -493,6 +485,32 @@ class SessionStore(context: Context) : SessionPersistence {
                 // A fresh account starts with a full offer budget — it never inherits the previous
                 // account's dismissals or its evidence count.
                 .remove(ns(ok, "quickUnlockPasswordUnlocks")).remove(ns(ok, "quickUnlockReoffers")).apply()
+        }
+    }
+
+    /**
+     * Account deletion (spec 03 §13: the phone is left as a fresh install): forget the server at [originKey]. Every
+     * `ns.<originKey>.` key goes, whoever's it is (the policy mirrors, cached account keys, the quick-unlock stamps and
+     * offer counters, the self-identity pins and bindings); so does the stored session when it is that origin's. A phone
+     * that dials that origin goes back to the default one, as a first launch has it, and the pending-switch marker and
+     * the last sync and last backup times, which were that account's, go with the address. What is the device's own stays: the clock ratchet,
+     * the one-shot migration flags, another origin's namespace (§4.2). One synchronous write, so nothing of it is left
+     * for a process started right after.
+     */
+    override fun forgetServer(originKey: String) {
+        synchronized(SESSION_LOCK) {
+            val edit = prefs.edit()
+            val sessionOrigin = prefs.getString(SESSION_ORIGIN, null)
+            if (sessionOrigin.isNullOrEmpty() || OriginNamespace.originKey(sessionOrigin) == originKey) {
+                runCatching { AppSignerBindings.clearAll(appContext) }
+                edit.remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN).remove("mustChangePassword")
+            }
+            val prefix = ns(originKey, "")
+            for (key in prefs.all.keys) if (key.startsWith(prefix)) edit.remove(key)
+            // The server the phone dials: its address, the switch that was pending on it, and its account's times.
+            if (currentOriginKey() == originKey) edit.remove("baseUrl").remove("pendingServer").remove("lastSyncAt").remove("lastExportAt")
+            edit.commit()
+            originKeyMemo = null
         }
     }
 

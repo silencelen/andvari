@@ -1092,7 +1092,14 @@ table, `retired_ids` (below; spec 02 §5).
   after the preview was fetched): the client then asks for the code rather than leaving no way to send one. On `200`:
   wipe this device's state for the account — session and tokens, the offline cache, every device-local record keyed by
   the userId — **including the spec 01 §5 self-identity records** (the userId-keyed pin, and the email binding when it
-  names that userId), then land signed out. A transport failure, no answer within the client's deadline (the web client
+  names that userId), then land signed out. The native apps (iOS, Android, desktop), which keep a server address of
+  their own, leave the device as a **fresh install** (owner decision 2026-11-15): nothing of the account's server stays
+  either. Everything kept under that server's origin goes, whoever's it is — every vault cache and device state, every
+  quick-unlock key, the cached account keys, the policy mirrors and consents, and every self-identity record at that
+  origin (another account's that unlocked there on this device too; it is pinned afresh at its next unlock there) —
+  with what the app shares with its own extensions and the server's address itself, so the next start is a first
+  launch (the server choice on iOS, the default server on Android and desktop). Another origin's namespace is never
+  touched. A transport failure, no answer within the client's deadline (the web client
   gives the request 60 s), any `5xx`, or a reply that is not the server's JSON (a proxy's error page; a `200` without
   `deletedAt`) leaves the outcome unknown — the transaction may have committed — and MUST NOT be reported as either
   success or failure; the client offers to check (the preview answers `200` while the account exists). A session end
