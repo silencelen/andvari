@@ -617,6 +617,8 @@ class ApiReview2Test {
         val offerId = "11111111-1111-4111-8111-111111111111"
         val lifecycle = owner.account.lifecycleKeyFor(vaultId)
         val proof = LifecycleProof.acceptFromHash(crypto, lifecycle, vaultId, offerId, member.userId, 1, wrapHash)
+        // Sharing review 2026-11 (finding 1): a handover away is this account's own only for an offer on its record.
+        engine.accountState.update { AccountState.withOwnOffers(it, listOf(OwnOffer(vaultId, offerId, member.userId, 1))) }
         val rev = server.feed.rev + 1
         server.feed = server.feed.copy(
             rev = rev, full = true,

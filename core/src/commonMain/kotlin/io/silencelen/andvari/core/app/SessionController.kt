@@ -24,6 +24,7 @@ import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.DeletedVaultInfo
+import io.silencelen.andvari.core.client.HeldVaultCopy
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
@@ -1557,14 +1558,9 @@ open class SessionController(
     private fun removedVaults(live: VaultSession.Unlocked): List<RemovedVaultView> =
         // A vault this account can still restore is listed once, under Recently deleted, not again here.
         runCatching { live.engine.heldVaultInfos() }.getOrDefault(emptyList()).filter { it.vaultId !in deletedVaults }.map { h ->
-            val day = LifecycleNoticeCopy::englishDay
-            val line = when {
-                h.reason == "deleted" && h.verified -> "Deleted by its owner. Kept sealed until ${day(h.purgeAt ?: h.expungeAt)}."
-                h.reason == "left" -> "You left. Kept until ${day(h.expungeAt)}."
-                h.verified -> "Your access was removed. Kept until ${day(h.expungeAt)}."
-                else -> "The server says your access was removed, but this couldn't be verified. Kept until ${day(h.expungeAt)}."
-            }
-            RemovedVaultView(h.vaultId, h.name, line, warning = !h.verified && h.reason != "left")
+            // Sharing review 2026-11 (item 6): by how the removal's proof checked here, the same words on every client.
+            val (line, warning) = HeldVaultCopy.sentence(h)
+            RemovedVaultView(h.vaultId, h.name, line, warning)
         }
 
     private fun sharingView(live: VaultSession.Unlocked, copied: String? = state.sharing?.copied): SharingView = SharingView(
@@ -1732,7 +1728,10 @@ open class SessionController(
         val vault = runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList()).firstOrNull { it.vaultId == vaultId }
             ?: return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
         if (vault.type != "shared") return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
-        if (vault.role == "owner") return@action ActionResult.Failed(SharingCopy.OWNER_CANNOT_LEAVE)
+        // Sharing review 2026-11 (item 8): the server's owner label never keeps this account in a vault awaiting review, one
+        // whose key nothing verified; leaving it is the safe way out. The server refuses an owner that really is one.
+        val awaitingReview = runCatching { live.engine.legacyReviewVaults() }.getOrDefault(emptyList()).any { it.vaultId == vaultId }
+        if (vault.role == "owner" && !awaitingReview) return@action ActionResult.Failed(SharingCopy.OWNER_CANNOT_LEAVE)
         busy()
         runBounded(BoundedOps.FLAT_MS) { live.engine.leaveSharedVault(vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
@@ -1783,9 +1782,10 @@ open class SessionController(
         val owner = vault.role == "owner"
         val rows = membersRead?.map { m ->
             val you = m.userId == live.account.userId
+            val check = if (you) null else memberCheck(live, m.userId, m.identityPub)
             MemberView(
                 userId = m.userId, name = m.displayName, email = m.email, role = m.role, disabled = (m.status ?: "active") != "active", you = you,
-                check = if (you) null else memberCheck(live, m.userId, m.identityPub),
+                check = check, verifiedName = if (check == MemberCheck.VERIFIED) verifiedNameOf(live, m.userId) else null,
             )
         }
         val pending = if (owner) runCatching { live.engine.pendingTransferFor(vaultId) }.getOrNull() else null
@@ -1794,7 +1794,12 @@ open class SessionController(
             canAdd = owner && runCatching { live.engine.ownsVault(vaultId) }.getOrDefault(false),
             members = rows, adding = newMember?.takeIf { it.vaultId == vaultId }?.let { newMemberView(live, it) },
             offer = pending?.takeIf { it.toUserId != live.account.userId && it.expiresAt > clocks.wallMs() }?.let { p ->
-                OwnerOfferView(p.toUserId, membersRead?.firstOrNull { it.userId == p.toUserId }?.displayName ?: MembersCopy.A_MEMBER, p.expiresAt)
+                // Sharing review 2026-11 (item 5): "You asked" only for this account's own offer, whose proof checks.
+                val target = rows?.firstOrNull { it.userId == p.toUserId }
+                OwnerOfferView(
+                    p.toUserId, target?.verifiedName ?: target?.name ?: MembersCopy.A_MEMBER, p.expiresAt,
+                    mine = runCatching { live.engine.pendingTransferIsOwn(vaultId) }.getOrDefault(false),
+                )
             },
             legacy = if (owner) legacyGrantViews(live, vaultId) else emptyList(),
         )
@@ -1838,6 +1843,10 @@ open class SessionController(
             SyncEngine.MemberPinState.KEY_CHANGED -> MemberCheck.KEY_CHANGED
             SyncEngine.MemberPinState.NEEDS_VERIFICATION -> MemberCheck.NOT_VERIFIED
         }
+
+    /** What this device recorded when it verified [userId]: the address typed then, else the name shown then. */
+    private fun verifiedNameOf(live: VaultSession.Unlocked, userId: String): String? =
+        live.engine.accountState.currentPin(userId)?.let { it.email ?: it.label }
 
     /**
      * Where adding [n] stands, by this account's pins (A11): the server's name for them is shown as its word, and a
@@ -2043,8 +2052,10 @@ open class SessionController(
 
     /**
      * Offer to make a member the owner (owner). Nothing changes until they accept in their app, within 14 days; until
-     * then the owner can cancel. The offer is signed under the vault's key ([SyncEngine.offerTransfer]), so their devices
-     * can tell it from one the server made up. Afterwards they manage the vault and this account stays in it as a writer.
+     * then the owner can cancel. Only to someone verified on this device (sharing review 2026-11, item 4), named as they
+     * were recorded then. The offer's proof is made with the vault's key, which every member holds, so it tells their
+     * devices only that some member made it; this account's devices know it as their own by their record of the offers
+     * it made ([SyncEngine.offerTransfer]). Afterwards they manage the vault and this account stays in it as a writer.
      */
     @Throws(CancellationException::class)
     suspend fun offerOwnership(userId: String): ActionResult = action {
@@ -2056,12 +2067,19 @@ open class SessionController(
         val member = membersRead?.firstOrNull { it.userId == userId } ?: return@action ActionResult.Failed(MembersCopy.MEMBER_GONE)
         if (member.role == "owner" || member.userId == live.account.userId) return@action ActionResult.Failed(MembersCopy.OWNER_ALREADY)
         if ((member.status ?: "active") != "active") return@action ActionResult.Failed(MembersCopy.DISABLED_CANNOT_OWN)
+        if (memberCheck(live, member.userId, member.identityPub) != MemberCheck.VERIFIED) return@action ActionResult.Failed(MembersCopy.VERIFY_BEFORE_HANDOVER)
+        val name = verifiedNameOf(live, member.userId) ?: member.displayName
         val token = membersScreen.now()
         busy()
-        runBounded(BoundedOps.FLAT_MS) { live.engine.offerTransfer(open.vaultId, userId) }
+        try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.offerTransfer(open.vaultId, userId) }
+        } catch (e: MemberNotVerifiedException) {
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action idleFailed(MembersCopy.VERIFY_BEFORE_HANDOVER)
+        }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         rereadMembers(live, open.vaultId, token) { it }
-        update { it.copy(busy = false, members = if (membersScreen.still(token)) membersView(live, open.vaultId) else it.members, notice = MembersCopy.offered(member.displayName, open.vaultName)) }
+        update { it.copy(busy = false, members = if (membersScreen.still(token)) membersView(live, open.vaultId) else it.members, notice = MembersCopy.offered(name, open.vaultName)) }
         ActionResult.Ok
     }
 
@@ -2089,7 +2107,8 @@ open class SessionController(
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         val offer = state.ownershipOffers.firstOrNull { it.vaultId == vaultId } ?: return@action ActionResult.Failed(MembersCopy.OFFER_GONE)
         busy()
-        runBounded(BoundedOps.FLAT_MS) { live.engine.acceptTransfer(vaultId) }
+        // Sharing review 2026-11 (item 2): the offer shown, and no other.
+        runBounded(BoundedOps.FLAT_MS) { live.engine.acceptTransfer(vaultId, offer.offerId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         publishSharing(live, MembersCopy.ownershipAccepted(offer.vaultName))
         ActionResult.Ok
@@ -2112,7 +2131,7 @@ open class SessionController(
         val now = clocks.wallMs()
         val offers = runCatching { live.engine.incomingTransfers() }.getOrDefault(emptyList()).filter { it.expiresAt > now }
         for (o in offers) if (o.vaultId !in offerOwners && offerOwnerAsks.add(o.vaultId)) askOfferOwner(live, o.vaultId)
-        return offers.sortedBy { it.vaultName }.map { OwnershipOfferView(it.vaultId, it.vaultName, offerOwners[it.vaultId], it.expiresAt) }
+        return offers.sortedBy { it.vaultName }.map { OwnershipOfferView(it.vaultId, it.vaultName, it.offerId, offerOwners[it.vaultId], it.expiresAt) }
     }
 
     private fun askOfferOwner(live: VaultSession.Unlocked, vaultId: String) {
@@ -3931,7 +3950,10 @@ internal object MembersCopy {
     const val OWNER_ALREADY = "They already own this vault."
     const val DISABLED_CANNOT_OWN = "Their account is disabled, so they can't take the vault over."
     const val OFFER_PENDING = "An offer to hand this vault over is already waiting. Cancel it first."
-    const val OFFER_CANCELLED = "Offer cancelled. You still own the vault."
+    const val OFFER_CANCELLED =
+        "Offer cancelled. Should the server complete it anyway, your devices warn you and keep their record that you own the vault."
+    const val VERIFY_BEFORE_HANDOVER =
+        "Verify them on this device first, by comparing codes with them in person or on a call you trust: only someone you verified can be made the owner."
     const val OFFER_GONE = "That offer is no longer waiting."
     const val CONTACT_GONE = "They're no longer on your list."
     const val RECORD_ROLLED_BACK = "The server sent an older copy of the people you verified. Your newer copy was kept. If this keeps happening, tell your admin."

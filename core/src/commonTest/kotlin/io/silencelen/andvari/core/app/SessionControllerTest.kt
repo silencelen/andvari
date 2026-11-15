@@ -1196,7 +1196,15 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Failed(MembersCopy.OWNER_ALREADY), controller.offerOwnership(reg.userId))
         assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.offerOwnership("00000000-0000-4000-8000-0000000000ff"))
         assertEquals(ActionResult.Failed(MembersCopy.DISABLED_CANNOT_OWN), controller.offerOwnership(cy.userId))
+        // Sharing review 2026-11 (item 4): only someone verified on this device can be made the owner.
+        assertEquals(MemberCheck.NOT_VERIFIED, controller.state.members?.members?.single { it.userId == bea.userId }?.check)
+        assertEquals(ActionResult.Failed(MembersCopy.VERIFY_BEFORE_HANDOVER), controller.offerOwnership(bea.userId))
         assertTrue(server.offers.isEmpty())
+        assertEquals(ActionResult.Ok, controller.verifyListedMember(bea.userId))
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(bea.code))
+        val verifiedBea = controller.state.members?.members?.single { it.userId == bea.userId }
+        assertEquals(MemberCheck.VERIFIED, verifiedBea?.check)
+        assertEquals("Bea", verifiedBea?.verifiedName, "named as recorded when verified")
 
         assertEquals(ActionResult.Ok, controller.offerOwnership(bea.userId))
         val (vaultId, offer) = server.offers.single()
@@ -1207,7 +1215,7 @@ open class SessionControllerTest {
         val left = offer.expiresAt - kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
         assertTrue(left in 13 * DAY..14 * DAY, "$left")
         val shown = assertNotNull(controller.state.members?.offer)
-        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt), shown)
+        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt, mine = true), shown, "this account's own offer")
         assertTrue(assertNotNull(controller.state.notice).startsWith("Asked Bea to take over “Family”."))
         assertEquals(ActionResult.Failed(MembersCopy.OFFER_PENDING), controller.offerOwnership(bea.userId), "one offer at a time")
 
@@ -1216,6 +1224,15 @@ open class SessionControllerTest {
         assertNull(controller.state.members?.offer)
         assertEquals(MembersCopy.OFFER_CANCELLED, controller.state.notice)
         assertEquals("owner", controller.state.members?.members?.single { it.you }?.role, "nothing changed")
+
+        // Item 5: an offer the server lists after it was cancelled is only the server's word, never "You asked".
+        server.vaults[family] = server.vaults.getValue(family).copy(
+            rev = ++server.rev, pendingTransfer = io.silencelen.andvari.core.model.PendingTransfer(bea.userId, offer.offerId, offer.proof, offer.expiresAt, 1),
+        )
+        assertEquals(ActionResult.Ok, controller.refresh())
+        controller.closeMembers()
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt, mine = false), controller.state.members?.offer)
     }
 
     /**
@@ -1409,8 +1426,17 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.leaveSharedVault(boat))
         assertTrue(controller.state.legacyReviews.isEmpty())
         assertTrue(assertNotNull(controller.state.sharing).vaults.none { it.vaultId == boat })
+
+        // Sharing review 2026-11 (item 8): the server's owner label never keeps this account in a vault awaiting review.
+        val raft = shareTheOlderWay(owner("ray@example.com", "Ray"), "Raft")
+        server.grants[raft] = server.grants.getValue(raft).copy(role = "owner")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(listOf(raft), controller.state.legacyReviews.map { it.vaultId })
+        assertEquals(ActionResult.Ok, controller.leaveSharedVault(raft))
+        assertNull(server.vaults[raft], "the leave was sent")
+        assertTrue(controller.state.legacyReviews.isEmpty(), "and it is no longer awaiting review here")
         controller.lock()
-        assertTrue(controller.state.legacyReviews.isEmpty())
+        assertTrue(controller.state.legacyReviews.isEmpty(), "after the lock")
     }
 
     /**

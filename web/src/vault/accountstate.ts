@@ -58,6 +58,21 @@ export interface PersonalDesignation {
   at: number;
 }
 
+/**
+ * An offer this account made to hand one of its vaults over (sharing review 2026-11, finding 1; core `OwnOffer` twin):
+ * which offer, to whom, when it was made and when this account cancelled it. Recorded before the offer is sent, and a
+ * cancel before the cancel is sent, so every device of the account can tell a completed transfer of an offer it made
+ * from one it never made or had cancelled. The offer proof is a MAC under the vault's key, which every member holds.
+ */
+export interface OwnOffer {
+  vaultId: string;
+  offerId: string;
+  toUserId: string;
+  createdAt: number;
+  /** When this account asked for it to be cancelled (or the server refused it); absent while it stands. */
+  cancelledAt?: number;
+}
+
 export interface AccountStateDoc {
   v: 1;
   userId: string;
@@ -80,6 +95,8 @@ export interface AccountStateDoc {
   memberReceived: Record<string, number>;
   /** A9 (M-2): the account's own personal-vault designation, or null. */
   personal: PersonalDesignation | null;
+  /** Sharing review 2026-11 (finding 1): the offers this account made to hand a vault over; omitted while empty. */
+  ownOffers: OwnOffer[];
 }
 
 export class AccountStateError extends Error {}
@@ -87,16 +104,60 @@ export class AccountStateError extends Error {}
 export const ACCOUNT_STATE_VERSION = 1;
 export const NONCE_CAP = 256;
 export const ACCOUNT_STATE_SEALED_MAX = 65536;
+/** Newest own offers kept (finding 1; core `AccountState.OFFER_CAP`). */
+export const OFFER_CAP = 64;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HEX64_RE = /^[0-9a-f]{64}$/;
-const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones", "memberReceived", "personal"];
+const DOC_KEYS = ["v", "userId", "seq", "contacts", "contactTombstones", "orgRecoveryFp", "consumedNonces", "issuedGrants", "issuedTombstones", "ownedVaults", "ownedTombstones", "memberReceived", "personal", "ownOffers"];
 const PERSONAL_KEYS = ["vaultId", "at"];
+const OWN_OFFER_KEYS = ["vaultId", "offerId", "toUserId", "createdAt", "cancelledAt"];
 const CONTACT_KEYS = ["userId", "identityPub", "label", "verifiedAt", "method", "email"];
 const ISSUED_KEYS = ["vaultId", "userId", "keyHash", "at"];
 
 export function emptyAccountState(userId: string): AccountStateDoc {
-  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {}, memberReceived: {}, personal: null };
+  return { v: 1, userId, seq: 0, contacts: [], contactTombstones: {}, orgRecoveryFp: null, consumedNonces: {}, issuedGrants: [], issuedTombstones: {}, ownedVaults: {}, ownedTombstones: {}, memberReceived: {}, personal: null, ownOffers: [] };
+}
+
+/** True when `o` is a well-formed own offer (the decode rule): a record that is not is never written. */
+export function isOwnOffer(o: OwnOffer): boolean {
+  return UUID_RE.test(o.vaultId) && UUID_RE.test(o.offerId) && UUID_RE.test(o.toUserId) && isInt(o.createdAt) && o.createdAt >= 0 &&
+    (o.cancelledAt === undefined || (isInt(o.cancelledAt) && o.cancelledAt >= 0));
+}
+
+/**
+ * Own offers merged by offerId (finding 1; core `AccountState.mergeOffers` twin): a cancel recorded anywhere wins (the
+ * latest `cancelledAt`), the earliest `createdAt` is kept, and the newest {@link OFFER_CAP} stay, ordered by vault, time
+ * and offerId. Order-independent.
+ */
+export function mergeOwnOffers(offers: readonly OwnOffer[]): OwnOffer[] {
+  const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  const byId = new Map<string, OwnOffer>();
+  for (const o of offers) {
+    const cur = byId.get(o.offerId);
+    if (!cur) {
+      byId.set(o.offerId, o);
+      continue;
+    }
+    const base = o.createdAt !== cur.createdAt ? (o.createdAt < cur.createdAt ? o : cur) : (`${o.vaultId}|${o.toUserId}` < `${cur.vaultId}|${cur.toUserId}` ? o : cur);
+    const cancels = [o.cancelledAt, cur.cancelledAt].filter((t): t is number => t !== undefined);
+    const merged: OwnOffer = { vaultId: base.vaultId, offerId: base.offerId, toUserId: base.toUserId, createdAt: base.createdAt };
+    if (cancels.length > 0) merged.cancelledAt = Math.max(...cancels);
+    byId.set(o.offerId, merged);
+  }
+  return [...byId.values()]
+    .sort((a, b) => (b.createdAt !== a.createdAt ? b.createdAt - a.createdAt : cmp(a.offerId, b.offerId)))
+    .slice(0, OFFER_CAP)
+    .sort((a, b) => cmp(a.vaultId, b.vaultId) || a.createdAt - b.createdAt || cmp(a.offerId, b.offerId));
+}
+
+/**
+ * Put `offers` on record (finding 1; core `AccountState.withOwnOffers` twin): an offer about to be sent, or one this
+ * account cancelled (`cancelledAt` set), merged by offerId (a cancel wins). A malformed one is not recorded.
+ */
+export function withOwnOffers(doc: AccountStateDoc, offers: readonly OwnOffer[]): AccountStateDoc {
+  const valid = offers.filter(isOwnOffer);
+  return valid.length === 0 ? doc : { ...doc, ownOffers: mergeOwnOffers([...(doc.ownOffers ?? []), ...valid]) };
 }
 
 /** The tombstone key for an issued grant. */
@@ -122,7 +183,7 @@ export function isBlankAccountState(doc: AccountStateDoc): boolean {
   return doc.contacts.length === 0 && Object.keys(doc.consumedNonces).length === 0 && doc.orgRecoveryFp === null &&
     doc.issuedGrants.length === 0 && Object.keys(doc.issuedTombstones).length === 0 &&
     Object.keys(doc.ownedVaults).length === 0 && Object.keys(doc.ownedTombstones).length === 0 &&
-    Object.keys(doc.memberReceived).length === 0 && doc.personal === null;
+    Object.keys(doc.memberReceived).length === 0 && doc.personal === null && (doc.ownOffers ?? []).length === 0;
 }
 
 /** Deterministic encoding: fixed key order, contacts by userId, sorted maps. */
@@ -146,6 +207,14 @@ export function encodeAccountState(doc: AccountStateDoc): string {
     memberReceived: sortedRecord(doc.memberReceived),
     // A9: omitted while absent, so a document that never designated stays readable by older clients.
     ...(doc.personal ? { personal: { vaultId: doc.personal.vaultId, at: doc.personal.at } } : {}),
+    // Finding 1: omitted while empty, likewise.
+    ...((doc.ownOffers ?? []).length > 0
+      ? {
+          ownOffers: mergeOwnOffers(doc.ownOffers).map((o) => ({
+            vaultId: o.vaultId, offerId: o.offerId, toUserId: o.toUserId, createdAt: o.createdAt, ...(o.cancelledAt !== undefined ? { cancelledAt: o.cancelledAt } : {}),
+          })),
+        }
+      : {}),
   });
 }
 
@@ -259,9 +328,27 @@ export function decodeAccountState(userId: string, plaintext: string): AccountSt
     if (!isInt(p.at) || p.at < 0) throw new AccountStateError("personal designation at is invalid");
     personal = { vaultId: p.vaultId, at: p.at };
   }
+  // Finding 1: this account's own transfer offers (absent in older documents: none).
+  const ownOffers: OwnOffer[] = [];
+  const rawO = o.ownOffers ?? [];
+  if (!Array.isArray(rawO)) throw new AccountStateError("own offers are not an array");
+  for (const e of rawO as unknown[]) {
+    if (!e || typeof e !== "object" || Array.isArray(e)) throw new AccountStateError("own offer is not an object");
+    const r = e as Record<string, unknown>;
+    for (const k of Object.keys(r)) if (!OWN_OFFER_KEYS.includes(k)) throw new AccountStateError(`unknown own offer key ${k}`);
+    if (typeof r.vaultId !== "string" || !UUID_RE.test(r.vaultId) || typeof r.offerId !== "string" || !UUID_RE.test(r.offerId) ||
+      typeof r.toUserId !== "string" || !UUID_RE.test(r.toUserId)) {
+      throw new AccountStateError("own offer id is not a uuid");
+    }
+    if (!isInt(r.createdAt) || r.createdAt < 0 || (r.cancelledAt !== undefined && (!isInt(r.cancelledAt) || r.cancelledAt < 0))) {
+      throw new AccountStateError("own offer time is invalid");
+    }
+    ownOffers.push({ vaultId: r.vaultId, offerId: r.offerId, toUserId: r.toUserId, createdAt: r.createdAt, ...(r.cancelledAt !== undefined ? { cancelledAt: r.cancelledAt as number } : {}) });
+  }
+  if (new Set(ownOffers.map((x) => x.offerId)).size !== ownOffers.length) throw new AccountStateError("duplicate own offer");
   return {
     v: 1, userId, seq: o.seq, contacts, contactTombstones: tombstones, orgRecoveryFp: fp as string | null, consumedNonces: nonces,
-    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived, personal,
+    issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived, personal, ownOffers,
   };
 }
 
@@ -345,10 +432,12 @@ export function mergeAccountState(
   // withheld blob is simply the older copy, and loses.
   const personal = docs.map((d) => d.personal).filter((p): p is PersonalDesignation => p !== null && p !== undefined)
     .sort((a, b) => (b.at !== a.at ? b.at - a.at : a.vaultId < b.vaultId ? -1 : a.vaultId > b.vaultId ? 1 : 0))[0] ?? null;
+  // Finding 1: own offers union by offerId, a cancel recorded anywhere wins; a rollback cannot drop one the local copy holds.
+  const ownOffers = mergeOwnOffers(docs.flatMap((d) => d.ownOffers ?? []));
   return {
     doc: {
       v: 1, userId, seq: Math.max(localSeq, servedSeq, highWater, 0), contacts, contactTombstones: sortedTomb, orgRecoveryFp: fp, consumedNonces,
-      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived, personal,
+      issuedGrants, issuedTombstones, ownedVaults, ownedTombstones, memberReceived, personal, ownOffers,
     },
     rollback,
   };
@@ -445,10 +534,13 @@ function samePin(a: Contact, b: Contact): boolean {
   return a.userId === b.userId && a.identityPub === b.identityPub && a.label === b.label && a.method === b.method && (a.email ?? null) === (b.email ?? null);
 }
 
-export function withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
+export function withContact(doc: AccountStateDoc, pin: Contact): AccountStateDoc {
+  const prev = doc.contacts.find((x) => x.userId === pin.userId);
+  // Sharing review 2026-11 (item 7; core twin): verifying the same person's same key again without typing their address
+  // keeps the address recorded when they were verified with one.
+  const c: Contact = pin.email === undefined && prev && prev.identityPub === pin.identityPub && prev.email !== undefined ? { ...pin, email: prev.email } : pin;
   // A13 (q23; core AccountState.withContact twin): the newest HUMAN act wins the merge whatever this device's clock
   // says. A pin replacing a different pin, or a tombstone, is pushed past it; the same pin re-saved keeps its time.
-  const prev = doc.contacts.find((x) => x.userId === c.userId);
   let at = c.verifiedAt;
   const t = doc.contactTombstones[c.userId];
   if (t !== undefined) at = Math.max(at, t + 1);

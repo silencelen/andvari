@@ -21,6 +21,7 @@ import {
   type PendingUpload,
   REMOVAL_REPLAY,
   REMOVED_LEGACY,
+  TRANSFER_NOT_OFFERED,
   type VaultInfo,
   type VaultItem,
   type VaultStore,
@@ -1034,6 +1035,16 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
     case "transfer-complete":
       return { warn: false, body: n.becameMine ? `You are now the owner of “${name}”.` : `“${name}” now has a new owner.` };
     case "transfer-anomaly":
+      // Sharing review 2026-11 (finding 1): a proof that checks, for an offer this account did not make or had cancelled.
+      // TWIN of core HouseholdCopy.transferNotOfferedNotice, byte-equal.
+      if (n.reason === TRANSFER_NOT_OFFERED) {
+        return {
+          warn: true,
+          body:
+            `The server says “${name}” has a new owner, from an offer you didn't make or had cancelled. Your devices keep their record that you own it. ` +
+            `If you didn't hand it over, tell your admin — the server, or a member of the vault, may be misbehaving.`,
+        };
+      }
       return {
         warn: true,
         body:

@@ -276,7 +276,7 @@ data class RemovedVaultView(
     val name: String,
     /** Why access went and until when the sealed copy is kept, in words. */
     val line: String,
-    /** The removal could not be verified as a real owner action. */
+    /** The line is a warning: what the server said could not be verified on this device (sharing review 2026-11, item 6). */
     val warning: Boolean,
 )
 
@@ -399,16 +399,32 @@ data class ContactView(
     val confirmedHere: Boolean,
 )
 
-/** An offer this account made to hand a vault over: to whom (the server's name for them), and until when. */
-data class OwnerOfferView(val toUserId: String, val toName: String, val expiresAtMs: Long)
+/**
+ * An offer to hand the open vault over, as the server lists it: to whom, until when, and whether it is this account's own
+ * (sharing review 2026-11, item 5).
+ */
+data class OwnerOfferView(
+    val toUserId: String,
+    /** The name recorded when this device verified them, else what the server calls them. */
+    val toName: String,
+    val expiresAtMs: Long,
+    /**
+     * Its proof checks under the vault's key and it is an offer this account made and did not cancel. False: only what the
+     * server reports (the screen says so, never "You asked").
+     */
+    val mine: Boolean,
+)
 
 /**
- * An offer to make this account the owner of a shared vault. It is listed only once it verified under the vault's own
- * key, so the server cannot make one up; who sent it is the server's word ([from]), to confirm with them in person.
+ * An offer to make this account the owner of a shared vault. It is listed only once its proof checks under the vault's
+ * key, which every member holds: the server alone cannot make one up, but a member could, with the server. Who sent it
+ * is the server's word ([from]), to confirm with them in person.
  */
 data class OwnershipOfferView(
     val vaultId: String,
     val vaultName: String,
+    /** The offer shown: accepting accepts this one, and no other (sharing review 2026-11, item 2). */
+    val offerId: String,
     /** What the server calls the vault's owner, once it said; null before (or when it could not say). */
     val from: String?,
     val expiresAtMs: Long,
@@ -428,6 +444,8 @@ data class MemberView(
     val you: Boolean,
     /** Whether this device verified them; null for this account. */
     val check: MemberCheck?,
+    /** The address, else the name, recorded when this device verified them; null unless [check] is VERIFIED. */
+    val verifiedName: String? = null,
 )
 
 /** What this device knows of someone's identity key. */

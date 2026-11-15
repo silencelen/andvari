@@ -12,7 +12,7 @@ import { memoryClientState } from "./accountstatesync";
 import type { Contact } from "./accountstate";
 import { OwnershipNotConfirmedError, OwnershipTransferAckRequiredError, ReauthFailedError, VaultStore } from "./store";
 import { VaultKeyNotVerifiedError } from "./account";
-import { issuedFor, ownsVault } from "./accountstate";
+import { issuedFor, ownsVault, withOwnOffers } from "./accountstate";
 import { adIdkey, adUvk, adVk } from "../crypto/ad";
 import { fromB64, toB64, toHexLower, utf8 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
@@ -71,7 +71,7 @@ class FakeServer {
   feed: SyncResponse;
   adds: { vaultId: string; body: VaultMemberAdd }[] = [];
   reissues: { vaultId: string; userId: string; signedGrant: string }[] = [];
-  offers: { vaultId: string; toUserId: string }[] = [];
+  offers: { vaultId: string; toUserId: string; offerId?: string }[] = [];
   removals: { vaultId: string; userId: string }[] = [];
   created: string[] = [];
   members: Record<string, VaultMemberSummary[]> = {};
@@ -129,9 +129,14 @@ class FakeServer {
     this.reissues.push({ vaultId, userId, signedGrant: body.signedGrant });
     return { rev: this.feed.rev + 1 };
   }
-  async offerTransfer(vaultId: string, body: { toUserId: string }) {
-    this.offers.push({ vaultId, toUserId: body.toUserId });
+  async offerTransfer(vaultId: string, body: { toUserId: string; offerId?: string }) {
+    this.offers.push({ vaultId, toUserId: body.toUserId, offerId: body.offerId });
     return { rev: this.feed.rev + 1, expiresAt: 0 };
+  }
+  cancels: string[] = [];
+  async cancelTransfer(vaultId: string) {
+    this.cancels.push(vaultId);
+    return { rev: this.feed.rev + 1 };
   }
   async putGrantSelfWrap() {
     return { rev: this.feed.rev + 1 };
@@ -382,12 +387,46 @@ describe("A6b — re-issue authority (VaultStore)", () => {
     expect(ownsVault((await unlock(w.owner)).openAccountState(server.accountStateBlob!), w.vaultId), "sealed in account state for every device").toBe(true);
   });
 
-  it("a verified transfer away ends the ownership record", async () => {
+  it("a verified transfer away ends the ownership record, for an offer this account made and did not cancel", async () => {
     const owner = await enroll("a6b-owner");
     const member = await enroll("a6b-member");
     const { store, server, vaultId } = await ownerWithCreatedVault(owner);
     const wrapHash = toHexLower(sha256Sync(utf8("member-wrap")));
     const offerId = "11111111-1111-4111-8111-111111111111";
+    const key = await (store as unknown as { account: Account }).account.lifecycleKeyFor(vaultId);
+    const proof = await acceptProofFromHash(key, vaultId, offerId, member.userId, 1, wrapHash);
+    const handOver = async (rev: number) => {
+      server.feed = {
+        ...server.feed, rev, full: true,
+        vaults: server.feed.vaults.map((v) => (v.vaultId === vaultId ? { ...v, rev, lastTransfer: { offerId, newOwnerUserId: member.userId, acceptProof: proof, seq: 1, wrapHash } } : v)),
+      };
+      await store.sync();
+    };
+    // Sharing review 2026-11 (finding 1): the proof is a MAC under the vault's key, which every member holds. A handover
+    // of an offer this account never made (or cancelled) is warned of, and the ownership record is kept.
+    await handOver(server.feed.rev + 1);
+    expect(store.ownsVault(vaultId), "not this account's offer: the record stays").toBe(true);
+    expect(store.notices().find((n) => n.vaultId === vaultId)?.reason).toBe("not-offered");
+    // On this account's record (another of its devices made it): the same handover ends the ownership evidence.
+    await store.accountState.update((d) => withOwnOffers(d, [{ vaultId, offerId, toUserId: member.userId, createdAt: 1 }]));
+    await handOver(server.feed.rev + 1);
+    expect(store.ownsVault(vaultId), "a verified transfer to someone else ends this account's ownership evidence").toBe(false);
+    await expect(store.offerTransfer(vaultId, member.userId)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+  });
+
+  it("an offer is on this account's record before it is sent, a cancel marks it, and a handover of a cancelled one is warned of", async () => {
+    // Sharing review 2026-11 (finding 1, core twin): the owner cancels; the server keeps serving the offer and completes it.
+    const owner = await enroll("a6b-owner");
+    const member = await enroll("a6b-member");
+    const { store, server, vaultId } = await ownerWithCreatedVault(owner);
+    server.members[vaultId] = [summary(member, "Member", "writer")];
+    await store.offerTransfer(vaultId, member.userId);
+    const offerId = server.offers.at(-1)!.offerId!;
+    expect(store.isOwnLiveOffer(vaultId, offerId, member.userId), "on record before it was sent").toBe(true);
+    await store.cancelTransfer(vaultId);
+    expect(server.cancels).toEqual([vaultId]);
+    expect(store.isOwnLiveOffer(vaultId, offerId, member.userId), "on record as cancelled").toBe(false);
+    const wrapHash = toHexLower(sha256Sync(utf8("member-wrap")));
     const key = await (store as unknown as { account: Account }).account.lifecycleKeyFor(vaultId);
     const proof = await acceptProofFromHash(key, vaultId, offerId, member.userId, 1, wrapHash);
     const rev = server.feed.rev + 1;
@@ -396,8 +435,10 @@ describe("A6b — re-issue authority (VaultStore)", () => {
       vaults: server.feed.vaults.map((v) => (v.vaultId === vaultId ? { ...v, rev, lastTransfer: { offerId, newOwnerUserId: member.userId, acceptProof: proof, seq: 1, wrapHash } } : v)),
     };
     await store.sync();
-    expect(store.ownsVault(vaultId), "a verified transfer to someone else ends this account's ownership evidence").toBe(false);
-    await expect(store.offerTransfer(vaultId, member.userId)).rejects.toBeInstanceOf(OwnershipNotConfirmedError);
+    expect(store.ownsVault(vaultId)).toBe(true);
+    const n = store.notices().find((x) => x.vaultId === vaultId);
+    expect(n?.kind).toBe("transfer-anomaly");
+    expect(n?.reason).toBe("not-offered");
   });
 
   // ---- A6b review MEDIUM-1 / LOW-3 ----
