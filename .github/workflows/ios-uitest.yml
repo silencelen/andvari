@@ -175,6 +175,9 @@ jobs:
           set +f
           [ "${#only[@]}" -gt 0 ] && echo "Running only: ${only[*]}"
           set +e
+          # A failed test is run again, up to three times in all: on a hosted runner the simulator sometimes
+          # fails to launch Safari or to show the keyboard's bar in time (two full runs failed on three different
+          # tests that each pass alone). A test that fails three times is a real failure.
           # TEST_RUNNER_X reaches the test runner as X. The runner is a simulator process and writes its
           # screenshots and summary straight into out/.
           env TEST_RUNNER_UITEST_OUT_DIR="$PWD/out" \
@@ -193,6 +196,7 @@ jobs:
             xcodebuild test-without-building -project app-ios/Andvari.xcodeproj -scheme AndvariUITests \
               -destination "id=$UITEST_UDID" -derivedDataPath "$RUNNER_TEMP/dd" \
               -parallel-testing-enabled NO -resultBundlePath out/AndvariUITests.xcresult \
+              -retry-tests-on-failure -test-iterations 3 \
               ${only[@]+"${only[@]}"} \
               > out/xcodebuild-test.log 2>&1
           status=$?
