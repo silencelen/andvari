@@ -60,6 +60,10 @@ targets:
         # Shared with both extensions: the non-secret session state, the quick-unlock key, the AutoFill snapshot
         # and the save queue (IosStorageConfig). The session's tokens are never there.
         com.apple.security.application-groups: [group.com.silencelen.andvari]
+        # Every file the app creates is readable only while the device is unlocked (owner decision 2026-11-14), except
+        # those it must read or write while the device may be locked, which set their own class: core's iosMain
+        # IosStorage.kt, DeviceState.ios.kt and SqlBox.ios.kt.
+        com.apple.developer.default-data-protection: NSFileProtectionComplete
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari
@@ -96,6 +100,8 @@ targets:
       properties:
         # The handler reads the app's server origin from here and answers the extension's native message.
         com.apple.security.application-groups: [group.com.silencelen.andvari]
+        # The handler's one file, a captured login for the save queue, sets its own class (SafariWebExtensionHandler.swift).
+        com.apple.developer.default-data-protection: NSFileProtectionComplete
     postBuildScripts:
       # The extension's UI-test build (extension/build.mjs, UITEST=1) lists the test site's stand-in payment provider.
       # A Release build, which is what an archive is, must never carry it: this fails one whose bundled files name the
@@ -145,6 +151,8 @@ targets:
       properties:
         com.apple.developer.authentication-services.autofill-credential-provider: true
         com.apple.security.application-groups: [group.com.silencelen.andvari]
+        # The extension's files (a save for the queue) set their own class (core's iosMain IosStorage.kt).
+        com.apple.developer.default-data-protection: NSFileProtectionComplete
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.silencelen.andvari.autofill

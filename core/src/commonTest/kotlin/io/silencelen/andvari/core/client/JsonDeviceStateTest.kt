@@ -2,6 +2,7 @@ package io.silencelen.andvari.core.client
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 
 class JsonDeviceStateTest {
@@ -36,5 +37,19 @@ class JsonDeviceStateTest {
 
     @Test fun aCorruptFileReadsAsEmpty() {
         assertNull(JsonDeviceState(MemoryFile("{not json")).get("a"))
+    }
+
+    /** A file that is there and cannot be read now (iOS, the device locked) is never taken for an empty one: a write after
+     *  it would replace every record. */
+    @Test fun anUnreadableFileIsNeverWrittenOver() {
+        val file = object : DeviceStateFile {
+            var writes = 0
+            override fun read(): String? = error("protected")
+            override fun replace(text: String) { writes++ }
+        }
+        val state = JsonDeviceState(file)
+        assertFailsWith<IllegalStateException> { state.get("a") }
+        assertFailsWith<IllegalStateException> { state.set("a", "1") }
+        assertEquals(0, file.writes)
     }
 }

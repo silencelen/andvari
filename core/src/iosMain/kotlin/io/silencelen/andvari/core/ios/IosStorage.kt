@@ -40,6 +40,7 @@ import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSFileProtectionCompleteUnlessOpen
+import platform.Foundation.NSFileProtectionCompleteUntilFirstUserAuthentication
 import platform.Foundation.NSDate
 import platform.Foundation.NSFileModificationDate
 import platform.Foundation.NSFileProtectionKey
@@ -185,9 +186,34 @@ internal class CfOwned {
 }
 
 /**
+ * How each file of the app's own is protected (owner decision 2026-11-14: the app and its extensions default to
+ * `NSFileProtectionComplete`, readable only while the device is unlocked). A file that must be read or written while
+ * the device may be locked says so here, and why: the person can lock the phone during the upload grace (a save with
+ * new files gets 30 seconds to finish after the app leaves the screen), and a save, a sync or a list update then still
+ * writes. Every one of these files is ciphertext, sealed to the account or under a key of its own.
+ */
+internal object FileClasses {
+    /**
+     * Opened while the device is unlocked and kept open, or written whole into a new file: both keep working while it
+     * is locked. For the vault cache (its database stays open from the unlock; SQLite creates its journals while it
+     * writes) and the App Group's AutoFill snapshot and save queue (written whole; read only while someone uses them).
+     */
+    val OPEN_OR_NEW: Any? = NSFileProtectionCompleteUnlessOpen
+
+    /**
+     * Read again while the device may be locked, after the first unlock since it started. For the files set aside for an
+     * upload (read during the upload grace) and the lists read whole and rewritten after a save (kept saves, the saved
+     * list, unfinished moves) and the device state: under the other classes a closed file cannot be read while locked,
+     * would read as empty, and the write after it would replace every record it held.
+     */
+    val AFTER_FIRST_UNLOCK: Any? = NSFileProtectionCompleteUntilFirstUserAuthentication
+}
+
+/**
  * The namespace directories (design 2026-07-15 §4.2) under Application Support/andvari: one per (origin, user),
  * excluded from backup and created with file protection that keeps an open database writable while the device
- * locks (`NSFileProtectionCompleteUnlessOpen`). The files are ciphertext either way.
+ * locks ([FileClasses.OPEN_OR_NEW]; SqlBox.ios.kt opens it with the same class). The files are ciphertext either way;
+ * the device state in it sets its own class (DeviceState.ios.kt).
  */
 internal class IosNamespaceStorage(private val root: String = defaultRoot()) : NamespaceStorage {
     private fun dir(originKey: String, userId: String) = "$root/${OriginCanon.pathSafe(originKey)}/${OriginCanon.pathSafe(userId)}"
@@ -196,7 +222,7 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
 
     private fun ensure(path: String): String {
         val fm = NSFileManager.defaultManager
-        fm.createDirectoryAtPath(path, withIntermediateDirectories = true, attributes = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen), error = null)
+        fm.createDirectoryAtPath(path, withIntermediateDirectories = true, attributes = mapOf<Any?, Any?>(NSFileProtectionKey to FileClasses.OPEN_OR_NEW), error = null)
         // Excluding the root excludes everything under it; set once more here in case the root was made elsewhere.
         NSURL.fileURLWithPath(root).setResourceValue(true, forKey = NSURLIsExcludedFromBackupKey, error = null)
         return path
@@ -239,15 +265,16 @@ internal fun NSData.toByteArray(): ByteArray {
 }
 
 /**
- * The AutoFill snapshot: one file, replaced by a rename so a reader sees the old one or the new one, never a torn
- * one. Ciphertext, excluded from backup, with the protection class of the vault cache.
+ * One sealed record in a file (the AutoFill snapshot, the saved list, unfinished moves, kept saves), replaced by a
+ * rename so a reader sees the old one or the new one, never a torn one. Ciphertext, excluded from backup, with the
+ * protection class [protection] ([FileClasses]).
  */
-internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
+internal class FileFillSnapshots(private val path: String, private val protection: Any?) : FillSnapshotStore {
     override fun write(bytes: ByteArray): Boolean = runCatching {
         val fm = NSFileManager.defaultManager
         fm.createDirectoryAtPath(path.substringBeforeLast('/'), withIntermediateDirectories = true, attributes = null, error = null)
         val tmp = "$path.tmp"
-        val attributes = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
+        val attributes = mapOf<Any?, Any?>(NSFileProtectionKey to protection)
         if (!fm.createFileAtPath(tmp, contents = bytes.toNSData(), attributes = attributes)) return@runCatching false
         if (rename(tmp, path) != 0) {
             fm.removeItemAtPath(tmp, error = null)
@@ -268,11 +295,12 @@ internal class FileFillSnapshots(private val path: String) : FillSnapshotStore {
 /**
  * The files set aside for a save with new files (owner decision 2026-11-12): one file per attachment id in [dir] of the
  * app's own container, never the App Group. Each is the attachment encrypted under its own key, as it goes up; written
- * whole through a rename, excluded from backup, with the protection class of the vault cache.
+ * whole through a rename, excluded from backup, readable after the first unlock ([FileClasses.AFTER_FIRST_UNLOCK]): the
+ * upload grace reads them while the person may have locked the phone.
  */
 internal class FileBlobStore(private val dir: String) : BlobStore {
     private val fm get() = NSFileManager.defaultManager
-    private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
+    private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to FileClasses.AFTER_FIRST_UNLOCK)
 
     /** Only an id this app mints names a file here (a UUID), so no name reaches outside [dir]. */
     private fun pathOf(id: String): String? = if (ID.matches(id)) "$dir/$id" else null
@@ -316,7 +344,7 @@ internal class FileBlobStore(private val dir: String) : BlobStore {
  */
 internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
     private val fm get() = NSFileManager.defaultManager
-    private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUnlessOpen)
+    private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to FileClasses.OPEN_OR_NEW)
 
     /** [bytes] to [path] whole, through a temporary file of its own; [exclusive]: never over an existing [path]. */
     private fun writeWhole(path: String, bytes: ByteArray, exclusive: Boolean = false): Boolean = runCatching {

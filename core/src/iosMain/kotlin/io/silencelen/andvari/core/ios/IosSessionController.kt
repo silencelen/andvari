@@ -183,17 +183,17 @@ internal class IosSeams(
     val http: HttpClients = IosHttpClients
     val quickKeys: QuickUnlockKeys = quickUnlockKeys(config)
     val serverShare: ServerShare = config.sharedSuite?.let(::AppGroupServerShare) ?: ServerShare {}
-    val snapshots: FillSnapshotStore = snapshotPath?.let(::FileFillSnapshots) ?: FillSnapshotStore.None
+    val snapshots: FillSnapshotStore = snapshotPath?.let { FileFillSnapshots(it, FileClasses.OPEN_OR_NEW) } ?: FillSnapshotStore.None
     val saveQueue: SaveQueueStore = savesDir?.let(::FileSaveQueue) ?: SaveQueueStore.None
 
     /** The list of automatic saves, sealed to the account: in the app's own container, never the App Group. */
-    val appliedSaves: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/applied-saves.json")
+    val appliedSaves: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/applied-saves.json", FileClasses.AFTER_FIRST_UNLOCK)
 
     /** Moves and copies that did not finish, sealed to the account: in the app's own container, never the App Group. */
-    val moveMemos: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/move-memos.json")
+    val moveMemos: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/move-memos.json", FileClasses.AFTER_FIRST_UNLOCK)
 
     /** Saves with new files kept until done, sealed to the account, and their files, each encrypted: in the app's own container. */
-    val pendingSaveLog: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/pending-saves.json")
+    val pendingSaveLog: FillSnapshotStore = FileFillSnapshots("${IosNamespaceStorage.defaultRoot()}/pending-saves.json", FileClasses.AFTER_FIRST_UNLOCK)
     val pendingFiles: BlobStore = FileBlobStore("${IosNamespaceStorage.defaultRoot()}/pending-files")
 
     private companion object {
@@ -245,7 +245,7 @@ class IosAutofill internal constructor(config: IosStorageConfig, snapshotPath: S
     private val vault = AutofillVault(
         // The copy of the app's state the app publishes to the group (the extensions have nothing else to read).
         PrefsSessionPersistence(UserDefaultsPrefs(config.sharedSuite ?: config.defaultsSuite), NoSecrets),
-        snapshotPath?.let(::FileFillSnapshots) ?: FillSnapshotStore.None,
+        snapshotPath?.let { FileFillSnapshots(it, FileClasses.OPEN_OR_NEW) } ?: FillSnapshotStore.None,
         quickUnlockKeys(config),
         IosClocks,
         IosHttpClients,

@@ -8,7 +8,8 @@ import kotlinx.serialization.json.Json
 
 /** The platform half of a file-backed [DeviceState]: one small file, read whole and replaced whole. */
 interface DeviceStateFile {
-    /** The current contents, or null when there is no readable file. */
+    /** The current contents, or null when there is no file. A file that is there and cannot be read may throw instead
+     *  (iOS, while the device keeps it protected), and nothing is then written over it. */
     fun read(): String?
 
     /** Replaces the contents so that a crash leaves the old copy or the new one, never part of one. */
@@ -33,8 +34,12 @@ class JsonDeviceState(private val file: DeviceStateFile) : DeviceState {
 
     private val lock = SynchronizedObject()
 
-    private fun readAll(): Map<String, String> =
-        runCatching { file.read()?.let { json.decodeFromString(codec, it) } }.getOrNull() ?: emptyMap()
+    private fun readAll(): Map<String, String> {
+        // A file that cannot be read is never taken for an empty one: [set] writes the whole map back, so that would
+        // replace every record. Only a file that does not parse reads as empty.
+        val text = file.read() ?: return emptyMap()
+        return runCatching { json.decodeFromString(codec, text) }.getOrNull() ?: emptyMap()
+    }
 
     override fun get(key: String): String? = synchronized(lock) { readAll()[key] }
 
