@@ -99,11 +99,11 @@ final class T4VaultFeatureTests: UITestCase {
         }
         step("copied") {
             moveOrCopy(copied, to: vault, move: false)
-            XCTAssertTrue(waitUntil(15) { self.app.descendants(matching: .any).matching(identifier: "vault.item." + copied).count == 2 }, "the copy did not appear beside the original")
+            XCTAssertTrue(waitUntil(30) { self.app.descendants(matching: .any).matching(identifier: "vault.item." + copied).count == 2 }, "the copy did not appear beside the original")
         }
         step("moved") {
             moveOrCopy(moved, to: vault, move: true)
-            XCTAssertTrue(waitUntil(15) { self.app.descendants(matching: .any).matching(identifier: "vault.item." + moved).count == 1 }, "the moved login is not there once")
+            XCTAssertTrue(waitUntil(30) { self.app.descendants(matching: .any).matching(identifier: "vault.item." + moved).count == 1 }, "the moved login is not there once")
             // Moved out of the personal vault: from where it is now, the personal vault is a place to go.
             openItem(moved)
             let button = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Move or copy' OR label BEGINSWITH 'Copy to another vault'")).firstMatch
@@ -392,7 +392,17 @@ final class T4VaultFeatureTests: UITestCase {
             enter(password, into: app.secureTextFields["Password"], what: "the Password field")
         }
         app.buttons["Save"].tap()
-        if !waitUntil(15, { self.vaultRow(name).exists }) {
+        // The editor closes once the login is saved. By this test the simulator can be slow to answer for the app's
+        // screen (a look at a long list behind a sheet took half a minute in run 43699794293, and the row was there
+        // when it came), so the waits are long; and the list builds only the rows near what it shows, so a row not
+        // built yet is scrolled to.
+        if !waitUntil(60, { !self.app.navigationBars["New login"].exists }) {
+            dumpTree(app, as: "editor-stayed")
+            XCTFail("the editor did not close after Save of \(name)")
+            return
+        }
+        let row = vaultRow(name)
+        if !waitUntil(30, { row.exists }) && !scrollToComfort(row) {
             dumpTree(app, as: "login-not-added")
             XCTFail("\(name) was not added")
         }

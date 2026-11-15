@@ -108,8 +108,7 @@ extension UITestCase {
                 typeUnlock()
             }
             expectScreen(.vault, timeout: 60)
-            require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
-            confirmPersonalVaultIfAsked()
+            settleOnVaultList()
         default:
             reachVault()
         }
