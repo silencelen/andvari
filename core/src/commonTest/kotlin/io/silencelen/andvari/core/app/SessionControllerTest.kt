@@ -2698,6 +2698,113 @@ open class SessionControllerTest {
         assertNull(controller.state.csvImport)
     }
 
+    // ---- export and backup (spec 07) ----
+
+    /** A server holding the personal vault's row and every item pushed to it, as a synced device sees them. */
+    private fun Rig.syncedVaultServer(): VaultServer {
+        val server = VaultServer(this)
+        val rows = mutableListOf<WireItem>()
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            val results = body.mutations.map { m ->
+                val rev = ++server.rev
+                rows.removeAll { it.itemId == m.itemId }
+                val up = m.item
+                rows += WireItem(m.itemId, m.vaultId, rev, 3_000, 3_000, deleted = up == null, conflict = false, formatVersion = up?.formatVersion ?: 1, attachmentIds = up?.attachmentIds.orEmpty(), blob = up?.blob)
+                io.silencelen.andvari.core.model.MutationResult(m.mutationId, "applied", newItemRev = rev)
+            }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(server.rev, results)), HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = { request ->
+            val since = request.url.parameters["since"]?.toLongOrNull() ?: 0L
+            val body = io.silencelen.andvari.core.model.SyncResponse(++server.rev, since == 0L, server.vaults.values.toList(), server.grants.values.toList(), rows.filter { it.rev > since }, emptyList())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+        }
+        return server
+    }
+
+    /**
+     * Export for another password manager: a sync first, then what the CSV would hold, with what it leaves out named; a
+     * cell a spreadsheet would run as a formula holds the file back until it is acknowledged, and the file is made only
+     * for the folder chosen, as exactly the logins the screen counted.
+     */
+    @Test
+    fun aCsvExportNamesWhatItLeavesOutAndIsMadeOnlyOnceTheFormulaCellsAreAcknowledged() = test {
+        unlockedWithAPersonalVault()
+        syncedVaultServer()
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Sheet", "me", "=HYPERLINK(1)", listOf("https://sheet.example"), "", "", false)))
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Shopping", "milk", false)))
+        assertEquals(ActionResult.Ok, controller.openExport(ExportKind.CSV))
+        val screen = assertNotNull(controller.state.export)
+        assertEquals(ExportKind.CSV, screen.kind)
+        assertNull(screen.offlineNote, "the sync reached the server")
+        assertTrue(screen.vaults.single().personal && screen.vaults.single().included)
+        assertEquals(2, screen.count, "Example and Sheet")
+        assertEquals(listOf("Shopping"), screen.warnings.single { it.title == ExportCopy.NOTES_LEFT_OUT }.names)
+        assertEquals(listOf("Password of \u201CSheet\u201D"), screen.formulaCells)
+
+        assertNull(controller.csvFile(acknowledged = false), "not without the tick")
+        assertEquals(ExportCopy.FORMULA_ACK_NEEDED, controller.state.export?.error)
+        val file = assertNotNull(controller.csvFile(acknowledged = true))
+        assertTrue(Regex("andvari-export-\\d{4}-\\d{2}-\\d{2}\\.csv").matches(file.fileName), file.fileName)
+        val text = file.bytes.decodeToString()
+        assertTrue(text.startsWith(io.silencelen.andvari.core.client.ExportCsv.HEADER + "\r\n"))
+        assertTrue(text.contains("Sheet,https://sheet.example,me,=HYPERLINK(1),"), "written as is, never mangled")
+        assertFalse(text.contains("Shopping"))
+        controller.exportSaved(file.fileName, "On My iPhone")
+        assertEquals(ExportCopy.csvSaved(file.fileName, "On My iPhone", 2), controller.state.export?.done)
+
+        // A vault that changed after the tick: nothing is made, and the screen lists the cells again.
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Sum", "+SUM(A1)", "pw", emptyList(), "", "", false)))
+        assertNull(controller.csvFile(acknowledged = true))
+        val again = assertNotNull(controller.state.export)
+        assertEquals(ExportCopy.VAULT_CHANGED, again.error)
+        assertEquals(2, again.formulaCells.size)
+        assertNotNull(controller.csvFile(acknowledged = true), "acknowledged again, for the cells now listed")
+        controller.exportNotSaved(written = true)
+        assertEquals(ExportCopy.READ_BACK_FAILED, controller.state.export?.error)
+
+        controller.lock()
+        assertNull(controller.state.export, "a lock closes the export screen")
+    }
+
+    /**
+     * A backup is made in memory under a passphrase typed twice and at least "good", opened again before it is handed
+     * over, and holds the vault's items; offline, the screen says it holds the vault as of the last sync.
+     */
+    @Test
+    fun aBackupIsMadeUnderAGoodPassphraseAndOpensAgain() = test {
+        unlockedWithAPersonalVault()
+        syncedVaultServer()
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Shopping", "milk", false)))
+        routes["/sync"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Ok, controller.openExport(ExportKind.BACKUP))
+        val screen = assertNotNull(controller.state.export)
+        assertNotNull(screen.offlineNote, "offline: the vault as of the last sync")
+        assertEquals(2, screen.count, "Example and Shopping")
+
+        val good = "Brisk-Otter-Lamp-41-Quiet-Maple"
+        assertNull(controller.backupFile("", ""))
+        assertEquals(ExportCopy.PASSPHRASE_REQUIRED, controller.state.export?.error)
+        assertNull(controller.backupFile(good, good + "x"))
+        assertEquals(ExportCopy.PASSPHRASES_DIFFER, controller.state.export?.error)
+        assertNull(controller.backupFile("password", "password"))
+        assertEquals(ExportCopy.PASSPHRASE_WEAK, controller.state.export?.error)
+
+        val file = assertNotNull(controller.backupFile(good, good))
+        assertTrue(file.fileName.startsWith("andvari-backup-") && file.fileName.endsWith(".andvari"))
+        val opened = io.silencelen.andvari.core.client.Backup.open(crypto, good, file.bytes)
+        assertEquals(setOf("Example", "Shopping"), opened.payload.items.map { it.doc.name }.toSet())
+        assertEquals(reg.userId, opened.payload.userId)
+        assertTrue(runCatching { io.silencelen.andvari.core.client.Backup.open(crypto, "Another-Passphrase-99-Long", file.bytes) }.isFailure, "only under its passphrase")
+        controller.exportSaved(file.fileName, "iCloud Drive")
+        assertEquals(ExportCopy.backupSaved(file.fileName, "iCloud Drive", 2, 1, 0), controller.state.export?.done)
+        controller.closeExport()
+        assertNull(controller.state.export)
+    }
+
     // ---- vaults: where a new item goes, moving and copying ----
 
     @Test

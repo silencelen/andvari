@@ -685,6 +685,47 @@ final class AppModel: ObservableObject {
         controller.closeImport()
     }
 
+    // MARK: - Export and backup
+
+    /// A sync, then what the export would hold, by vault (spec 07). Nothing is made until a folder is chosen.
+    func openExport(_ kind: ExportKind) async -> Outcome {
+        await run { try await $0.openExport(kind: kind) }
+    }
+
+    func setExportVault(_ vaultId: String, included: Bool) {
+        controller.setExportVault(vaultId: vaultId, included: included)
+    }
+
+    func setExportAttachments(_ include: Bool) {
+        controller.setExportAttachments(include: include)
+    }
+
+    func closeExport() {
+        controller.closeExport()
+    }
+
+    /// The CSV for the folder chosen, or nil (the export screen says why). Plaintext: written once there, then wiped.
+    func exportCsv(acknowledged: Bool) -> ExportData? {
+        controller.exportCsvData(acknowledged: acknowledged)
+    }
+
+    /// The backup for the folder chosen, made, opened again and checked by core; nil when nothing is to be written.
+    func exportBackup(passphrase: String, confirm: String) async -> ExportData? {
+        do {
+            return try await controller.exportBackupData(passphrase: passphrase, confirm: confirm)
+        } catch {
+            return nil
+        }
+    }
+
+    func exportSaved(fileName: String, folder: String) {
+        controller.exportSaved(fileName: fileName, folder: folder)
+    }
+
+    func exportNotSaved(written: Bool) {
+        controller.exportNotSaved(written: written)
+    }
+
     // MARK: - Shared vaults awaiting review
 
     /// Trust on first use: the vault's key as the server delivered it is vouched for, and the vault opens for saving.

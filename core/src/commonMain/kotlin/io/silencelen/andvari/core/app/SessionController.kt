@@ -30,6 +30,8 @@ import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.DeletedVaultInfo
 import io.silencelen.andvari.core.client.HeldVaultCopy
+import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
@@ -120,6 +122,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.datetime.toLocalDateTime
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -3355,6 +3358,279 @@ open class SessionController(
         update { it.copy(csvImport = null) }
     }
 
+    // ---- export and backup (spec 07; the Android and desktop apps' flows on core's Export and ExportPlanner) ----
+    //
+    // The file is made in memory when the person has chosen a folder, handed to the platform to write there once, read
+    // back and compared; it is never written anywhere else, so no copy of a plaintext CSV outlives the export.
+
+    private var exporting: ExportSession? = null
+
+    /**
+     * Open the export screen for [kind]: a sync first (spec 07: an export holds what the server has; offline, the vault as
+     * of the last sync, which the screen says), then what the export would hold, by vault. Nothing is made until the
+     * person has chosen a folder ([csvFile], [backupFile]).
+     */
+    @Throws(CancellationException::class)
+    suspend fun openExport(kind: ExportKind): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val offline = try {
+            runBounded(BoundedOps.FLAT_MS) { syncNow(live.engine) }
+            false
+        } catch (e: kotlinx.io.IOException) {
+            true
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action failure(t, HouseholdCopy::forError) // a refused sync is said, never exported over
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        val s = ExportSession(kind, ExportPlanner.vaultLines(live.engine, live.account), live.account.personalVaultId)
+        if (offline) s.offlineNote = ExportCopy.offline(store.lastSyncAt.takeIf { it > 0 }?.let(LifecycleNoticeCopy::englishDay))
+        exporting = s
+        publishExport(live)
+        idle()
+        ActionResult.Ok
+    }
+
+    /** Put a shared vault in the export or leave it out; the personal vault is always in. */
+    fun setExportVault(vaultId: String, included: Boolean) {
+        val live = session.get() ?: return
+        val s = exporting ?: return
+        if (s.busy || vaultId == s.personalId || s.lines.none { it.vaultId == vaultId }) return
+        s.included = if (included) s.included + vaultId else s.included - vaultId
+        s.error = null
+        s.done = null
+        publishExport(live)
+    }
+
+    /** Backup: whether the files attached to its items go in (up to the 64 MiB cap; the rest are named). */
+    fun setExportAttachments(include: Boolean) {
+        val live = session.get() ?: return
+        val s = exporting?.takeIf { it.kind == ExportKind.BACKUP && !it.busy } ?: return
+        s.includeAttachments = include
+        s.done = null
+        publishExport(live)
+    }
+
+    fun closeExport() {
+        exporting = null
+        update { it.copy(export = null) }
+    }
+
+    /**
+     * The CSV for the folder the person chose: exactly the logins the screen counted, once the tick ([acknowledged])
+     * covers the formula cells it listed. The cells are worked out again from what is written: a vault that changed
+     * meanwhile writes nothing, and the screen comes back with the new list. Null when nothing is to be written (the
+     * screen says why). The bytes are plaintext: the caller writes them once, to that folder, and zeroes them.
+     */
+    fun csvFile(acknowledged: Boolean): ExportFile? {
+        val live = session.get() ?: return null
+        val s = exporting?.takeIf { it.kind == ExportKind.CSV && !it.busy } ?: return null
+        s.done = null
+        val docs = ExportPlanner.orderedItems(live.engine, s.order()).map { it.doc }
+        val refusal = when {
+            docs.none { it.type == "login" } -> ExportCopy.NOTHING_TO_EXPORT
+            s.shownCells.isNotEmpty() && !acknowledged -> ExportCopy.FORMULA_ACK_NEEDED
+            else -> null
+        }
+        if (refusal != null) {
+            s.error = refusal
+            publishExport(live)
+            return null
+        }
+        return when (val gated = ExportCsv.gatedWrite(docs, if (acknowledged) s.shownCells else null)) {
+            is ExportCsv.GatedWrite.NeedsAcknowledgement -> {
+                s.error = ExportCopy.VAULT_CHANGED
+                publishExport(live)
+                null
+            }
+            is ExportCsv.GatedWrite.Ready -> {
+                s.error = null
+                s.made = ExportMade(gated.loginCount, 0, 0, 0, emptyList())
+                ExportFile("andvari-export-${exportDate()}.csv", gated.csv.encodeToByteArray())
+            }
+        }
+    }
+
+    /**
+     * The backup for the folder the person chose (spec 07 §2): made in memory under [passphrase], which must be typed
+     * twice the same and be at least "good", then opened again under it, every file in it read back, before it is handed
+     * over: what is written is a backup that opens. Files go in when chosen, up to the 64 MiB cap; one that does not
+     * download twice is left out, by name. Null when nothing is to be written (the screen says why).
+     */
+    @Throws(CancellationException::class)
+    suspend fun backupFile(passphrase: String, confirm: String): ExportFile? {
+        val live = session.get() ?: return null
+        val s = exporting?.takeIf { it.kind == ExportKind.BACKUP && !it.busy } ?: return null
+        s.done = null
+        val refusal = when {
+            passphrase.isEmpty() -> ExportCopy.PASSPHRASE_REQUIRED
+            passphrase != confirm -> ExportCopy.PASSPHRASES_DIFFER
+            Strength.estimateStrength(passphrase) < Strength.BACKUP_FLOOR -> ExportCopy.PASSPHRASE_WEAK
+            s.order().isEmpty() -> ExportCopy.NOTHING_TO_EXPORT
+            else -> null
+        }
+        if (refusal != null) {
+            s.error = refusal
+            publishExport(live)
+            return null
+        }
+        s.busy = true
+        s.error = null
+        publishExport(live)
+        try {
+            val made = withContext(Dispatchers.Default) { makeBackup(live, s, passphrase) }
+            if (session.get() !== live || exporting !== s) {
+                made.second.fill(0)
+                return null
+            }
+            s.made = made.first
+            return ExportFile("andvari-backup-${exportDate()}.andvari", made.second)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (exporting === s) s.error = if (t is BackupVerifyException) ExportCopy.VERIFY_FAILED else HouseholdCopy.forError(t)
+            return null
+        } finally {
+            s.busy = false
+            if (session.get() === live && exporting === s) publishExport(live)
+        }
+    }
+
+    /** The file was written to [folder] as [fileName] and read back the same: the screen says what it holds. */
+    fun exportSaved(fileName: String, folder: String) {
+        val live = session.get() ?: return
+        val s = exporting ?: return
+        val made = s.made ?: return
+        s.made = null
+        s.error = null
+        s.done = when (s.kind) {
+            ExportKind.CSV -> ExportCopy.csvSaved(fileName, folder, made.logins)
+            ExportKind.BACKUP -> ExportCopy.backupSaved(fileName, folder, made.items, made.vaults, made.files) +
+                (if (made.skipped.isEmpty()) "" else " " + ExportCopy.filesSkipped(made.skipped))
+        }
+        session.touch() // an export counts as use, for the idle lock
+        publishExport(live)
+    }
+
+    /** Nothing was saved: the folder could not be written to, or ([written]) the file did not read back the same and the
+     *  caller removed it. */
+    fun exportNotSaved(written: Boolean) {
+        val live = session.get() ?: return
+        val s = exporting ?: return
+        s.made = null
+        s.error = if (written) ExportCopy.READ_BACK_FAILED else ExportCopy.WRITE_FAILED
+        publishExport(live)
+    }
+
+    private fun publishExport(live: VaultSession.Unlocked) {
+        val s = exporting ?: return
+        val items = ExportPlanner.orderedItems(live.engine, s.order())
+        val view = if (s.kind == ExportKind.CSV) {
+            val docs = items.map { it.doc }
+            val warnings = ExportCsv.warnings(docs)
+            // What a tick acknowledges: the cells shown now (re-checked against what is written, [csvFile]).
+            s.shownCells = warnings.formulaCells
+            exportView(s, warnings, docs.count { it.type == "login" }, items.size, null)
+        } else {
+            exportView(s, null, 0, items.size, ExportPlanner.planAttachments(items))
+        }
+        update { it.copy(export = view) }
+    }
+
+    /** spec 07 §2: build in memory, then open again and read every file back; the made file and what it holds. */
+    private suspend fun makeBackup(live: VaultSession.Unlocked, s: ExportSession, passphrase: String): Pair<ExportMade, ByteArray> {
+        val account = live.account
+        val engine = live.engine
+        val crypto = account.cryptoProvider()
+        val order = s.order()
+        val lines = s.lines.filter { it.vaultId in order }
+        val items = ExportPlanner.orderedItems(engine, order)
+        val undecryptable = ExportPlanner.undecryptable(engine).filter { it.vaultId in order }
+        val formatVersions = engine.envelopes().associate { it.itemId to it.formatVersion }
+        val plan = if (s.includeAttachments) ExportPlanner.planAttachments(items) else io.silencelen.andvari.core.client.AttachmentPlan(emptyList(), 0L, emptyList())
+        val fetched = ArrayList<Pair<io.silencelen.andvari.core.client.PlannedAttachment, ByteArray>>()
+        val fetchFailed = ArrayList<String>()
+        try {
+            for (p in plan.included) {
+                var bytes: ByteArray? = null
+                for (attempt in 0 until 2) {
+                    bytes = runCatching { runBounded(BoundedOps.attachmentMs(p.ref.size)) { engine.downloadAttachment(p.ref) } }.getOrNull()
+                    if (bytes != null) break
+                }
+                if (bytes == null) fetchFailed.add(AttachmentRules.safeFileName(p.ref.name)) else fetched.add(p to bytes)
+            }
+            // Each file goes in under a fresh key of its own (spec 07 §2.4); the items keep theirs.
+            val freshKeys = fetched.map { account.newFileKey() }
+            val manifest = fetched.mapIndexed { i, (p, bytes) ->
+                io.silencelen.andvari.core.client.BackupAttachmentEntry(
+                    section = i + 1, attachmentId = p.ref.id, itemId = p.item.itemId,
+                    name = p.ref.name, size = bytes.size.toLong(), fileKey = Bytes.toB64(freshKeys[i]),
+                )
+            }
+            val payload = io.silencelen.andvari.core.client.BackupPayload(
+                exportedAt = clocks.wallMs(),
+                origin = store.baseUrl ?: "",
+                userId = account.userId,
+                identityFingerprint = account.identityFingerprintShort(),
+                vaults = lines.map { io.silencelen.andvari.core.client.BackupVault(it.vaultId, it.type, it.name, it.role) },
+                items = items.map { io.silencelen.andvari.core.client.BackupItem(it.itemId, it.vaultId, formatVersions[it.itemId] ?: 1, it.updatedAt, it.doc) },
+                attachments = manifest,
+                skipped = io.silencelen.andvari.core.client.BackupSkipped(undecryptable, plan.overCap, fetchFailed),
+            )
+            // The policy's KDF cost, within what a backup may ask of the device that opens it (spec 07 §2.2).
+            val policyParams = coordinator.livePolicy?.kdfParams ?: io.silencelen.andvari.core.crypto.KdfParams.DEFAULT
+            val kdfParams = if (policyParams.ops <= io.silencelen.andvari.core.client.Backup.MAX_KDF_OPS && policyParams.memBytes <= io.silencelen.andvari.core.client.Backup.MAX_KDF_MEM_BYTES) {
+                policyParams
+            } else {
+                io.silencelen.andvari.core.crypto.KdfParams.DEFAULT
+            }
+            val chunks = ArrayList<ByteArray>()
+            val sections = fetched.mapIndexed { i, (_, bytes) -> io.silencelen.andvari.core.client.Backup.AttachmentSection(freshKeys[i]) { bytes } }
+            io.silencelen.andvari.core.client.Backup.build(
+                crypto = crypto, passphrase = passphrase,
+                fileId = account.newItemId(), kdfSalt = crypto.randomBytes(io.silencelen.andvari.core.crypto.KdfParams.SALT_BYTES),
+                kdfParams = kdfParams, payload = payload, attachments = sections,
+            ) { chunks.add(it.copyOf()) }
+            val file = ByteArray(chunks.sumOf { it.size })
+            var at = 0
+            for (c in chunks) {
+                c.copyInto(file, at)
+                at += c.size
+            }
+            // Opened again under the same passphrase, every file read back (spec 07 §2.6): only a backup that opens leaves.
+            val opened = try {
+                io.silencelen.andvari.core.client.Backup.open(crypto, passphrase, file)
+            } catch (e: Exception) {
+                file.fill(0)
+                throw BackupVerifyException()
+            }
+            if (opened.payload != payload) {
+                file.fill(0)
+                throw BackupVerifyException()
+            }
+            for (entry in opened.payload.attachments) {
+                val plain = opened.readAttachment(entry)
+                val ok = plain.size.toLong() == entry.size
+                plain.fill(0)
+                if (!ok) {
+                    file.fill(0)
+                    throw BackupVerifyException()
+                }
+            }
+            return ExportMade(0, items.size, lines.size, manifest.size, plan.overCap + fetchFailed) to file
+        } finally {
+            fetched.forEach { it.second.fill(0) } // Backup.build zeroes what it consumed; a throw before it leaves stragglers
+        }
+    }
+
+    /** Today's date for the file's name, as the other apps name it (yyyy-MM-dd, this device's time zone). */
+    private fun exportDate(): String =
+        kotlinx.datetime.Instant.fromEpochMilliseconds(clocks.wallMs()).toLocalDateTime(kotlinx.datetime.TimeZone.currentSystemDefault()).date.toString()
+
+    /** A made backup did not open again as made (spec 07 §2.6): nothing is handed over. */
+    private class BackupVerifyException : Exception("the backup did not open again as made")
+
     private fun publishImport(live: VaultSession.Unlocked) {
         val s = csv ?: return
         val names = vaultList(live).associate { it.vaultId to it.name }
@@ -4155,6 +4431,7 @@ open class SessionController(
         health = null
         breaches = null
         csv = null
+        exporting = null
     }
 
     private fun lock(reason: String?) {
@@ -4244,7 +4521,7 @@ open class SessionController(
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
         attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
-        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null, csvImport = null,
+        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null, csvImport = null, export = null,
     )
 
     private companion object {

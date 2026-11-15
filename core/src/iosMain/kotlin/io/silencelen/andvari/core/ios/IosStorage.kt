@@ -47,6 +47,8 @@ import platform.Foundation.NSFileModificationDate
 import platform.Foundation.NSFileProtectionKey
 import platform.Foundation.timeIntervalSinceDate
 import platform.Foundation.NSFileSize
+import platform.Foundation.NSMutableData
+import platform.Foundation.appendBytes
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSString
 import platform.Foundation.NSURL
@@ -259,6 +261,13 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
 /** Bytes for the Security framework. */
 internal fun ByteArray.toNSData(): NSData =
     if (isEmpty()) NSData() else usePinned { NSData.create(bytes = it.addressOf(0), length = size.convert()) }
+
+/** Bytes the app zeroes once it has used them (a plaintext export): a copy it can write over. */
+internal fun ByteArray.toNSMutableData(): NSMutableData {
+    val data = NSMutableData()
+    if (isNotEmpty()) usePinned { data.appendBytes(it.addressOf(0), size.convert()) }
+    return data
+}
 
 /** Bytes out of the Security framework. */
 internal fun NSData.toByteArray(): ByteArray {

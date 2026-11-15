@@ -137,6 +137,11 @@ struct SettingsView: View {
                     } label: {
                         Label("Import passwords", systemImage: "square.and.arrow.down")
                     }
+                    NavigationLink {
+                        ExportOptionsView()
+                    } label: {
+                        Label("Back up and export", systemImage: "square.and.arrow.up")
+                    }
                 } header: {
                     Text("Vault")
                 } footer: {
