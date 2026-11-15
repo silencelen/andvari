@@ -124,8 +124,24 @@ extension UITestCase {
             break
         }
         expectScreen(.vault, timeout: 60)
-        require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
+        settleOnVaultList()
+    }
+
+    /// The vault list just opened, with the personal-vault question answered when this device is asked it, and the
+    /// seeded login in the list. The question is asked first: after a sign-in on a device that has not confirmed its
+    /// personal vault (the first one, or again after an account deletion left the app as a fresh install), it heads
+    /// the list, and with the account's other vaults offered beside it, it fills the first screen. The rows are then
+    /// below it and not yet built, so the seeded login is looked for once the question has gone.
+    func settleOnVaultList(file: StaticString = #filePath, line: UInt = #line) {
+        let row = vaultRow(Fixture.siteItem)
+        _ = waitUntil(30) { row.exists || self.personalVaultNotice.exists }
         confirmPersonalVaultIfAsked()
+        if !waitUntil(15, { row.exists }) {
+            // A list that is not at its top (an earlier screen scrolled it) has the login above: back to the top.
+            app.swipeDown()
+            app.swipeDown()
+        }
+        require(row, "the seeded login in the list", timeout: 20, file: file, line: line)
     }
 
     /// Open an item's detail from the vault list, scrolling the list to its row.

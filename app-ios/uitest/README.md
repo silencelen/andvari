@@ -99,6 +99,13 @@ seconds, "certificate unknown" alerts in the site's log) and then passes again, 
 minutes. Each helper retries a bounded number of times and then fails with a tree dump; none of them loosens an
 assertion.
 
+A test class does not rely on what the class before it left. Since ios-ui 93101b2c, deleting an account (`T5`)
+leaves the app as a fresh install for that server: the next sign-in passes the Trust Gate again, is asked once
+more to confirm the personal vault, and has Face ID off. So a class that needs the extensions signs in, confirms,
+turns Face ID on and unlocks once for itself (`requireAutoFillProvider`), and every way to the vault answers the
+personal-vault question before it looks for a row: with the account's other vaults offered beside it, the question
+fills the first screen, and the rows under it are not built until it goes.
+
 ### Findings the tests show
 
 - **Saves made before the app is next opened overwrote each other** (found 2026-11-12, fixed on ios-ui by
