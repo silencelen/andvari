@@ -123,7 +123,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         command = ["java", "-jar", os.environ["UITEST_SEED_JAR"]] + args
         try:
-            done = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            # Each sign-in or enrollment is a key derivation, slow on a runner busy with the simulator: the share makes three.
+            done = subprocess.run(command, capture_output=True, text=True, timeout=300)
             ok, out = done.returncode == 0, (done.stdout + done.stderr)[-2000:]
         except subprocess.TimeoutExpired:
             ok, out = False, "timed out"
