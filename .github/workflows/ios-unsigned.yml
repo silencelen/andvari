@@ -127,11 +127,16 @@ jobs:
           app-ios/scripts/check-no-test-hosts.sh "$APP/PlugIns/AndvariSafari.appex"
           # In-page card fill (extension/src/cardfillflag.ts): the release artifact's Safari extension fills no card into a
           # page, and its worker does not even carry the card path; the card-preview artifact's does.
+          # Nor does its content script carry the chip, the choice, the report or the fill (build.mjs checks the same).
           BG="$APP/PlugIns/AndvariSafari.appex/background.js"
+          CT="$APP/PlugIns/AndvariSafari.appex/content.js"
           if [ "$CARDFILL" = "1" ]; then
             grep -q 'no card grant' "$BG" || { echo "the card-preview build's Safari extension has no card fill"; exit 1; }
+            grep -q 'cardFormInfo' "$CT" || { echo "the card-preview build's Safari content script has no card fill"; exit 1; }
           elif grep -q -e 'no card grant' -e 'card fill wrote nothing' "$BG"; then
             echo "the release build's Safari extension has card fill on"; exit 1
+          elif grep -q -e 'cardFormInfo' -e 'cardChipOffer' -e 'revealCardForFill' "$CT"; then
+            echo "the release build's Safari content script carries in-page card fill"; exit 1
           fi
           test -d "$APP/PlugIns/AndvariAutoFill.appex" || { echo "AutoFill extension missing"; exit 1; }
           for b in "$APP" "$APP/PlugIns/AndvariSafari.appex" "$APP/PlugIns/AndvariAutoFill.appex"; do

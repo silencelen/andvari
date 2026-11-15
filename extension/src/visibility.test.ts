@@ -220,8 +220,8 @@ test("only the person chooses the card field, only in a provider's card document
   // Round-12 review: a provider's card document by its origin and, where the provider serves several kinds of element,
   // its own path; a provider's other documents (an address element) report no card form at all.
   // A build without in-page card fill (cardfillflag.ts) has no card document at all.
-  assert.match(content, /const cardBox = CARD_FILL && isCardEntryDocument\(location\.origin, location\.pathname\);/);
-  assert.match(content, /const providerNonCardDocument = !cardBox && isCardProviderOrigin\(location\.origin\);/);
+  assert.match(content, /const cardBox = __ANDVARI_CARDFILL__ && isCardEntryDocument\(location\.origin, location\.pathname\);/);
+  assert.match(content, /const providerNonCardDocument = __ANDVARI_CARDFILL__ && !cardBox && isCardProviderOrigin\(location\.origin\);/);
   assert.match(content, /const all = providerNonCardDocument \? \[\] : allCardForms\(\);/);
   // A collapsed card frame says so (an IntersectionObserver on its own document, implicit root). Round-13 review: once it
   // has shown with a size it keeps counting wherever the page is scrolled, until it has no size (cardrelease.ts
@@ -236,7 +236,7 @@ test("only the person chooses the card field, only in a provider's card document
   // Round-13 review: which payment form the frame belongs to, as read inside the provider's own document: on Firefox its
   // parent's frameId (where the browser lists no ancestors), and the merchant account its own URL names, read once.
   assert.match(content, /if \(ancestorChain !== null \|\| isTop \|\| !cardBox\) return null;[\s\S]{0,250}?const id = rt\?\.getFrameId\?\.\(window\.parent\);/);
-  assert.match(content, /const providerAccount: string \| null = cardBox \? providerAccountOf\(location\.href\) : null;/);
+  assert.match(content, /const providerAccount: string \| null = __ANDVARI_CARDFILL__ && cardBox \? providerAccountOf\(location\.href\) : null;/);
   assert.match(content, /\.\.\.\(parentFrameId !== null \? \{ parentFrameId \} : \{\}\), \.\.\.\(providerAccount !== null \? \{ account: providerAccount \} : \{\}\),/);
   const choose = content.slice(content.indexOf("function chooseIfPersonPut("), content.indexOf("/** The innermost element focus is on"));
   assert.match(choose, /if \(filling \|\| !cardBox\) return;/, "a press in any other document never chooses a card field");

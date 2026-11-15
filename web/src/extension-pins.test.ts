@@ -1257,7 +1257,7 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     // real user click, but it lands in the popup's document, so a site that submits itself the
     // moment its fields change (fill → the page's change handler → requestSubmit()) found no
     // gesture in THIS document, captured nothing, and the Save banner simply never appeared.
-    const branch = spanOf(ct, 'if (msg.type === "fillItem") {', 'if (msg.type === "fillCard")');
+    const branch = spanOf(ct, 'if (msg.type === "fillItem") {', 'if (__ANDVARI_CARDFILL__ && msg.type === "fillCard")');
     expect(branch).toContain("recordLoginGesture();");
     // Armed BEFORE the fill: fillForm's input/change events can drive the page's requestSubmit()
     // synchronously, so an arm placed after the round-trip is an arm after the submit it exists for.
