@@ -80,7 +80,7 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | A login in a vault the account only reads: no Edit, "Copy to another vault…" and no Move; the copy in Personal can be edited | Works. A second account shares the vault read-only and another device of this account accepts it; the app takes it at a sync, through the account's own wrap of the vault key, with no invitation screen of its own | `T4…test05` |
 | The third-party keyboard switch | Present and off by default. Whether such a keyboard is kept out is skipped: the simulator has none, and the suite would need an app of its own to add one | `T4…test06` |
 | Two-step setup survives a trip to the Settings app (the same key at the confirm step after the unlock); the authenticator's code turns it on, a later one off | Works | `T4…test07` |
-| A password typed into the login editor a key at a time keeps the keyboard and is saved as typed | Skipped: app defect (below) | `T4…test08` |
+| A password typed into the login editor a key at a time keeps the keyboard and is saved as typed | Works since the fix of 2026-11-14 (below) | `T4…test08` |
 | Every card test page (extension/test-pages/card-*.html: the review rounds' attacks and first-party card forms): no Fill, and the popup's line says to copy from the app; the skimmer's hidden form receives nothing | Works | `T5…test01` |
 | checkout.html with the provider's frame Safari keeps the extension out of (Other Websites: Ask): no Fill, and the popup names the provider's site to allow; with every website allowed in Safari's settings, a Fill into the provider's origin | Works | `T5…test02` |
 | `?layout=card`: a tap on the number in the provider's frame, then Fill: number, expiry and code in the provider's form, the shop's own name-on-card field empty | Works | `T5…test03` |
@@ -88,7 +88,7 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | `?layout=code`: a security code alone in the provider's frame | Works | `T5…test05` |
 | The choice survives the keyboard's Done | Works | `T5…test06` |
 | `?layout=twice`: a second card-number frame beside the first: no Fill, the popup says the page shows more than one payment form asking for the same card detail and to copy from the app; nothing is filled | Works | `T5…test07` |
-| `?layout=lure` (round 12): the shop asks for the security code alone beside another site's rewards widget with provider frames of its own; after typing into the widget, a tap on the code and Fill: the Fill names the security code alone, the code is filled, the widget's fields keep what was typed | Works | `T5…test08` |
+| `?layout=lure` (rounds 12 and 13): the shop asks for the security code alone beside another site's rewards widget with provider frames of its own; after typing into the widget, a tap on the code: two payment forms, no Fill, the popup says so and offers Start over; after Start over, a tap on the code and Fill: the Fill names the security code alone, the code is filled, the widget's fields keep what was typed | Works | `T5…test08` |
 | `?layout=clipped` (round 12): the card frame clipped to its postal-code row; a fill from a tap there writes none of the number, expiry or security code | Works | `T5…test09` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
@@ -109,12 +109,13 @@ assertion.
   The same id also makes a later save replace an earlier save's record in the "Saved … from AutoFill" list
   even when the app was unlocked in between, so the earlier save can no longer be undone from the list.
 
-- **The login editor's password field lets go of the keyboard while it is typed into** (found 2026-11-14).
-  Typed a key at a time, 0.4 s apart, it keeps the keyboard for a key or two; typed fast, the rest of the keys
-  are lost (a password saved as "Fi" for "First-Passw0rd"). `LoginEditorView` and `CardEditorView` make their
-  `SecretTextField` without `focused`, which defaults to false, and every update of the field (each key changes
-  the draft) runs `updateUIView`, which resigns the first responder of a field that is not `focused`
-  (`Support/SecretFields.swift`, since bfd0b412). `InputField` passes its focus and is not affected.
+- **The login editor's password field let go of the keyboard while it was typed into** (found 2026-11-14,
+  fixed the same day). Typed a key at a time, 0.4 s apart, it kept the keyboard for a key or two; typed fast, the
+  rest of the keys were lost (a password saved as "Fi" for "First-Passw0rd"). `LoginEditorView` and
+  `CardEditorView` make their `SecretTextField` without `focused`, which defaults to false, and every update of the
+  field (each key changes the draft) ran `updateUIView`, which resigned the first responder of a field that was not
+  `focused` (`Support/SecretFields.swift`, since bfd0b412). The field now follows a change of its focus request
+  only, and `T4…test08` fails if it lets go again.
 
 - **Card fill into merchant pages, before 2026-11-14** (overtaken by the owner's redesign: a card goes only into a
   payment provider's card form). Under the earlier design the tests found that closing the keyboard with its Done

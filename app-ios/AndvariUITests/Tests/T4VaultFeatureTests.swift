@@ -319,9 +319,13 @@ final class T4VaultFeatureTests: UITestCase {
                 Thread.sleep(forTimeInterval: 0.4)
             }
         }
-        if kept < typed.count {
+        // Fixed (2026-11-14): SecretTextField applied its focus request on every update, and the editors, which pass none,
+        // had the field resign the keyboard after every key (app-ios/Andvari/Support/SecretFields.swift). It follows a
+        // change of the request only now, so the field keeps the keyboard for the whole password.
+        guard kept == typed.count else {
             app.buttons["Cancel"].firstMatch.tap()
-            try skip("App defect (found 2026-11-14): the login editor's password field lets go of the keyboard while it is typed into. It held the keyboard for \(kept) of \(typed.count) characters typed a key at a time 0.4 s apart, so a person has to tap the field again after every key or two; a fast typist's keys are lost (a password saved as \"Fi\" for \"First-Passw0rd\" in an earlier run). LoginEditorView and CardEditorView make their SecretTextField without `focused`, which defaults to false, and every update of the field (each key changes the draft) runs updateUIView, which resigns the first responder of a field that is not `focused` (app-ios/Andvari/Support/SecretFields.swift, since bfd0b412). InputField passes its focus and is not affected.")
+            XCTFail("the login editor's password field let go of the keyboard: it held it for \(kept) of \(typed.count) characters typed a key at a time 0.4 s apart")
+            return
         }
         step("saved-as-typed") {
             app.buttons["Save"].tap()
