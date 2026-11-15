@@ -1,5 +1,6 @@
 import { ApiClient, LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
 import { idbSupported, openVaultCache, vaultDbName } from "../vault/idbcache";
+import { forgetSelfIdentity } from "../vault/selfidentity";
 
 /**
  * The session: non-secret metadata persisted across reloads, plus the token pair. The vault KEY is
@@ -274,6 +275,44 @@ function rehomeSessionTokens(before: Session | null, userId: string | null): voi
 export async function wipeVaultCache(userId: string): Promise<void> {
   const cache = await openVaultCache(userId);
   await cache.wipe();
+}
+
+/**
+ * True for a localStorage key that belongs to [userId]: every per-account key this client writes is `andvari.<what>.<userId>`
+ * or `andvari.<what>.<userId>.<sub>` (`andvari.cs.<userId>.*` client state — the account-state copy and high-water seq, the
+ * personal-wrap cache, the trust records —, the cache opt-in and consent markers, the auto-lock and last-export stamps, the
+ * self-identity pin). A userId is a UUID, which carries no dot, so a segment match is exact.
+ */
+export function isAccountScopedKey(key: string, userId: string): boolean {
+  return key.startsWith("andvari.") && (key.endsWith(`.${userId}`) || key.includes(`.${userId}.`));
+}
+
+/**
+ * Account deletion (spec 03 §13, client duty) — after the server CONFIRMED the deletion, remove everything this browser holds
+ * for the account: the session record and this tab's token slot ({@link clearSession}), every localStorage key scoped to the
+ * userId ({@link isAccountScopedKey}), the spec 01 §5 self-identity records ({@link forgetSelfIdentity}: the pin, and the email
+ * binding where it names this account), and the offline copy (the account's IndexedDB). Device-wide settings — theme, install
+ * id, server address, this device's offline-copy opt-out and the org's cache pin — are not account data and stay.
+ *
+ * The synchronous part runs before the first await, so the caller can drop its token pair right after the call and no
+ * rotation hook writes the session back; the returned promise settles when the IndexedDB wipe has (idbcache's wipe never
+ * rejects, and neither does this). Not for sign-out: a sign-out keeps the self-identity records on purpose (an admin
+ * recovery revokes every session first, spec 01 §5).
+ */
+export async function wipeLocalAccountState(userId: string, email?: string): Promise<void> {
+  clearSession();
+  const doomed: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k !== null && isAccountScopedKey(k, userId)) doomed.push(k);
+    }
+  } catch {
+    /* storage unreachable: nothing persisted to remove */
+  }
+  for (const k of doomed) lsRemove(k);
+  forgetSelfIdentity(userId, email);
+  await wipeVaultCache(userId);
 }
 
 /**

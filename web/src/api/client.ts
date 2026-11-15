@@ -1,4 +1,8 @@
 import type {
+  AccountDeleteBlocker,
+  AccountDeletePreview,
+  AccountDeleteRequest,
+  AccountDeleteResponse,
   AdminDeviceSummary,
   AdminStatus,
   AdminUserSummary,
@@ -47,7 +51,7 @@ import type {
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
 import { SAFE_ID } from "../vault/itemdoc-shape";
-import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
+import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeleteBlockers, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeDeletePreview, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
 
 export const CLIENT_VERSION = "0.29.1";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
@@ -78,6 +82,42 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Account deletion (spec 03 §13): the `409 account_delete_blocked` refusal, carrying WHAT blocks it — the vaults the
+ * account owns that other accounts still use, or the last-admin role. An ApiError, so a caller that only knows the code
+ * still reads it. `blockers` may be empty when the server sent none it could decode: still a refusal.
+ */
+export class AccountDeleteBlockedError extends ApiError {
+  constructor(public blockers: AccountDeleteBlocker[]) {
+    super(409, "account_delete_blocked", "account deletion is blocked");
+    this.name = "AccountDeleteBlockedError";
+  }
+}
+
+/**
+ * Account deletion (spec 03 §13): a reply to `POST /account/delete` that says nothing reliable about whether the server
+ * committed — any 5xx (a proxy's 502/504/524, or the server failing AFTER its commit) and any reply that is not the
+ * server's JSON. The outcome is UNKNOWN: never reported as a failure ("not deleted" would be a guess, and a wrong one
+ * sends the member back into a retry against an account that is gone), never as a success.
+ */
+export class AccountDeleteUnknownError extends Error {
+  constructor(public status: number) {
+    super(`the deletion's outcome is unknown (HTTP ${status})`);
+    this.name = "AccountDeleteUnknownError";
+  }
+}
+
+/** A served blocker row in the minimal shape (a kind and a count); anything else becomes a blocker of unknown kind, so a
+ *  malformed row can never shrink a refusal into "nothing stands in the way". */
+function blockerOf(raw: unknown): AccountDeleteBlocker {
+  const r = (raw && typeof raw === "object" ? raw : {}) as { kind?: unknown; vaultId?: unknown; others?: unknown };
+  return {
+    kind: typeof r.kind === "string" ? r.kind : "unknown",
+    vaultId: typeof r.vaultId === "string" ? r.vaultId : null,
+    others: typeof r.others === "number" && Number.isFinite(r.others) ? r.others : 0,
+  };
+}
+
 export interface Tokens {
   accessToken: string;
   refreshToken: string;
@@ -97,6 +137,10 @@ const REFRESH_LOCK_WAIT_MS = 20_000;
  *  race does NOT cancel a fetch, and an uncancelled revocation outlives the sign-out (see
  *  logout()). One constant, one clock. */
 export const LOGOUT_TIMEOUT_MS = 5_000;
+/** Account deletion (spec 03 §13): how long `POST /account/delete` may take before its outcome is reported unknown —
+ *  ample for the server's memory-hard verify and a wait on its writer lock. It also bounds App's hold on a session end
+ *  that lands while the request is in flight (account-delete.ts stepDeletionWatch, DELETION_HOLD_LIMIT_MS). */
+export const ACCOUNT_DELETE_TIMEOUT_MS = 60_000;
 
 /**
  * Why the session ended (events() → onRevoked): an explicit server `revoked` frame is
@@ -113,6 +157,22 @@ function timeoutSignal(ms: number): AbortSignal | undefined {
   return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
     ? AbortSignal.timeout(ms)
     : undefined;
+}
+
+/** timeoutSignal, with an AbortController + timer where AbortSignal.timeout is missing: a deadline that must hold
+ *  (account deletion — App holds a session end until the request ends) cannot degrade to an unbounded wait. */
+function deadlineSignal(ms: number): AbortSignal | undefined {
+  const native = timeoutSignal(ms);
+  if (native || typeof AbortController === "undefined") return native;
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
+/** A fetch rejected by its signal: the timeout's TimeoutError, or a plain abort. */
+function isAbort(e: unknown): boolean {
+  const name = typeof e === "object" && e !== null ? (e as { name?: unknown }).name : undefined;
+  return name === "TimeoutError" || name === "AbortError";
 }
 
 /**
@@ -227,7 +287,7 @@ export class ApiClient {
     return accountKeys === s.accountKeys ? s : { ...s, accountKeys };
   }
 
-  private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0): Promise<Response> {
+  private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const used = auth && this.tokens ? this.tokens.accessToken : null;
@@ -238,13 +298,15 @@ export class ApiClient {
       // A PreSerializedJson body goes on the wire byte-for-byte (adminRecovery); everything
       // else is serialized here, as before.
       body: body === undefined ? undefined : body instanceof PreSerializedJson ? body.text : JSON.stringify(body),
+      // Optional deadline (account deletion): one signal for the request and its re-send, so the whole call is bounded.
+      ...(signal ? { signal } : {}),
     });
     if (resp.status === 401 && auth && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
       // A refresh that completed while this request was in flight (another caller's
       // single-flight refresh, or a pair adopted from another tab) already replaced
       // the tokens — retry with the fresh access token instead of rotating again.
-      if (this.tokens.accessToken !== used) return this.raw(method, path, body, auth, attempt + 1);
-      if (await this.tryRefresh()) return this.raw(method, path, body, auth, attempt + 1);
+      if (this.tokens.accessToken !== used) return this.raw(method, path, body, auth, attempt + 1, signal);
+      if (await this.tryRefresh()) return this.raw(method, path, body, auth, attempt + 1, signal);
     }
     return resp;
   }
@@ -738,6 +800,64 @@ export class ApiClient {
 
   changePassword(req: PasswordChangeRequest) {
     return this.text("PUT", "/api/v1/account/password", req);
+  }
+
+  // ---- account deletion (spec 03 §13) — refused on the public break-glass origin ----
+
+  /** What a deletion would do now: its blockers, the vaults deleted with the account and those it leaves, and whether
+   *  the request needs the TOTP code. Served vault ids pass the id grammar (A10) like every other. */
+  async accountDeletePreview(): Promise<AccountDeletePreview> {
+    return this.reported("accountDeletePreview", sanitizeDeletePreview(await this.json<AccountDeletePreview>("GET", "/api/v1/account/delete/preview")));
+  }
+
+  /** {@link ACCOUNT_DELETE_TIMEOUT_MS}; a field so a test can shorten it. */
+  deleteTimeoutMs = ACCOUNT_DELETE_TIMEOUT_MS;
+
+  /**
+   * Delete this account. NOT idempotent and never retried here. What the reply proves decides how it surfaces:
+   *  - the server's JSON `200 {deletedAt}` — deleted;
+   *  - its JSON `409 account_delete_blocked` — {@link AccountDeleteBlockedError} with the blockers;
+   *  - its JSON 4xx refusal — the usual ApiError (`reauth_failed`, `totp_code_required`, `bad_totp_code`,
+   *    `confirm_email_mismatch`, `credential_changed`, `invalid_credentials`, …): refused before its transaction wrote
+   *    anything;
+   *  - any 5xx, and any reply that is not the server's JSON (a proxy's error page, a truncated body, a refusal without
+   *    the server's `error` code) —
+   *    {@link AccountDeleteUnknownError}: the server may have committed (spec 03 §13: unknown, never "not deleted").
+   * A transport failure rejects with the fetch's TypeError, which the caller also treats as unknown. No answer within
+   * {@link deleteTimeoutMs} aborts the request — {@link AccountDeleteUnknownError} with status 0: it may have reached the
+   * server and committed. A 401 rides raw()'s one refresh-and-resend: a 401 means the request was not processed, so the
+   * resend is a fresh attempt (under the same deadline).
+   */
+  async deleteAccount(req: AccountDeleteRequest): Promise<AccountDeleteResponse> {
+    let resp: Response;
+    try {
+      resp = await this.raw("POST", "/api/v1/account/delete", req, true, 0, deadlineSignal(this.deleteTimeoutMs));
+    } catch (e) {
+      if (isAbort(e)) throw new AccountDeleteUnknownError(0);
+      throw e;
+    }
+    if (resp.status >= 500) throw new AccountDeleteUnknownError(resp.status);
+    type Reply = { error?: unknown; message?: unknown; blockers?: unknown; deletedAt?: unknown };
+    let body: Reply | null = null;
+    try {
+      const parsed: unknown = JSON.parse(await resp.text());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Reply;
+    } catch {
+      /* not JSON — handled below */
+    }
+    if (body === null) throw new AccountDeleteUnknownError(resp.status);
+    if (resp.ok) {
+      if (typeof body.deletedAt === "number") return { deletedAt: body.deletedAt };
+      throw new AccountDeleteUnknownError(resp.status); // a 2xx that is not the server's answer proves nothing
+    }
+    // The server's refusals always carry their code (§8); a JSON reply without one is some other hop's.
+    if (typeof body.error !== "string") throw new AccountDeleteUnknownError(resp.status);
+    if (resp.status === 409 && body.error === "account_delete_blocked") {
+      const rows = Array.isArray(body.blockers) ? body.blockers.map(blockerOf) : [];
+      throw new AccountDeleteBlockedError(this.reported("deleteAccount", sanitizeDeleteBlockers(rows)));
+    }
+    if (body.error === "upgrade_required") this.onUpgradeRequired?.();
+    throw new ApiError(resp.status, body.error, typeof body.message === "string" ? body.message : resp.statusText);
   }
 
   // ---- admin ----
