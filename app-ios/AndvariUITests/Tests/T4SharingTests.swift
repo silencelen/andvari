@@ -9,7 +9,8 @@ final class T4SharingTests: UITestCase {
     func test01_SharedVaultMembersAndVerifiedPeople() {
         launchApp()
         step("vault") {
-            reachVault()
+            // The tests before this one turn Face ID on: the unlock screen then asks for a face before the password.
+            reachVaultAnyWay()
         }
         step("shared-vaults") {
             openSettings()
