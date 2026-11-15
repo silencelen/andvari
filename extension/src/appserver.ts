@@ -124,3 +124,15 @@ export function appServerToAdopt(answer: AppServerAnswer, current: string | null
   if (target !== "safari" || answer.kind !== "set") return null;
   return answer.url === current ? null : answer.url;
 }
+
+/**
+ * Whether the extension forgets the server it uses: only in the Safari build, only when the app itself answered that it
+ * has none, and only while a server is in effect here ([chosen]). The app has no server before its first choice, and
+ * again once an account was deleted in it, which leaves the device as a fresh install (spec 03 §13: nothing of the
+ * account's server stays): the extension then keeps nothing of that server either, and stands where it does on a first
+ * install, until the app names one. No answer, or one that is not the app's own "none" (no handler, a timeout, a
+ * malformed reply), forgets nothing.
+ */
+export function appServerToForget(answer: AppServerAnswer, chosen: boolean, target: BuildTarget): boolean {
+  return target === "safari" && answer.kind === "none" && chosen;
+}
