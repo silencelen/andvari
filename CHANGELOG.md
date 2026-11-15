@@ -4,6 +4,80 @@
 Those were never in this repository — they are the reference instance's private, out-of-tree
 operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
+## 0.30.0 (2026-11-14) — account deletion, and a card goes only where the card belongs · fleet 0.30.0, extension 0.30.0
+
+*This release adds account deletion on the web, changes where the browser extension fills a payment card, and moves
+the Android app's sign-in, unlock and session handling onto shared code that the coming iPhone app also uses. Nothing in
+it lets the server read your passwords. The changes you will see are listed first.*
+
+**What you will notice**
+- **Browser extension (Chrome, Firefox): a card is filled only into a payment provider's own card form, and only after
+  you tap the card field.** The providers are Stripe, Braintree, Adyen, Checkout.com, Square, Worldpay, Cybersource,
+  Authorize.net and Recurly. A shop page that takes the card number in its own form is no longer filled: the popup says
+  so, and the copy buttons still work there. When a provider splits the number, expiry and code into separate boxes, tap
+  each box once. Firefox fills a card into a provider's frame from version 126 on; older Firefox versions say so and
+  offer the copy buttons. Saving a card you type into any page works as before.
+- **Browser extension: fields a page hides are no longer treated as sign-in fields.** A field that is invisible,
+  transparent, a few pixels wide or placed off the page is not offered for fill or save. If a sign-in page you use stops
+  offering your login, please report it.
+- **Web app: you can delete your account** (Settings → Delete account). It first shows what will go: the vaults only you
+  hold are deleted, and you leave the shared vaults you are a member of. It refuses while you own a vault other people
+  still use, or while you are the only admin of an instance that has other accounts; it says which, with a link to fix
+  it. To delete, type your email address, your master password and, if you use two-step sign-in, a code. Back up your
+  vault first: deletion cannot be undone. Afterwards the browser forgets the account and you are signed out.
+- **Android and desktop have no delete button yet.** When an account is deleted on the web, the Android app signs out at
+  its next contact with the server ("Your session ended — sign in again."), and the desktop app at its next unlock.
+- **Android: when the server ends your session, the app signs out at once.** If the server refuses to renew the
+  session (the device was signed out from another device, or the account was deleted), the app now locks, removes this
+  device's copy of the vault and returns to the sign-in screen straight away instead of at the next unlock. Changes
+  made on that device while offline and not yet synced are lost in that case.
+- **Android: moving and copying items between vaults.** An item in a vault you can only read now offers "Copy to
+  vault…". A vault whose key this device has not verified is no longer offered as a destination. A move cut short by a
+  lock or a lost connection is finished later, and only once a sync shows the copy is in the destination vault; the
+  messages now say when an item ended up in both vaults.
+- **Android: actions that wait for the server give up after about a minute** instead of waiting indefinitely. A first
+  sync that times out shows "Offline — showing cached data".
+- **Android and desktop: attachment names are cleaned before they are shown or offered as a file name to save.** Folder
+  parts, control characters and the invisible characters that can reverse how a name reads are removed, `:` becomes
+  `-`, and a name is cut to 120 characters, keeping its extension. The stored file and your backups keep the original
+  name.
+- **Known issue — Android and desktop, a device's first sign-in only:** the personal-vault notice can read "Your
+  account's personal vault is Personal, but the server sent Personal." when both name the same vault. Choosing either
+  button keeps that same vault. Devices that already confirmed their personal vault see nothing new.
+
+**Security fixes**
+- **Card fill:** a saved card could be filled into a shop page's own form, where every script on that page, including a
+  compromised third-party script, could read it, and into card fields the person could not see. Cards now go only into
+  a payment provider's own frame, only into fields you can see, and only after you choose the field.
+- **Attachment names:** a name could use invisible direction characters to make a file look like a different type (a
+  program shown as a document). Those characters are no longer shown, and are not used in the suggested save name.
+- **Android:** the account's keys are wiped from memory when the vault locks or the account is replaced, and a sign-in
+  that the app never stores is ended at the server instead of being left open until it expires.
+
+**For self-hosters**
+- **Schema v16 and v17, applied automatically at the first start, forward only.** v16 adds `retired_ids` (a deleted
+  account's id and audit pseudonym can never be registered again); v17 adds `mutations.userId` with an index and fills
+  it from the journal once. Back up `./data` before upgrading: going back to 0.29.1 means restoring that backup.
+- **New endpoints:** `GET /api/v1/account/delete/preview` and `POST /api/v1/account/delete` (spec 03 §13). Deletion is
+  rate-limited to 5 per hour per account and refused on the emergency (break-glass) origin.
+- **What deletion keeps:** the account's data is removed in one transaction. Security audit rows about it are kept under
+  a random pseudonym, with its devices under fresh random ids, and the janitor deletes them 90 days later.
+- **An instance whose last account is deleted opens for bootstrap again.** Every invite is cleared, and a start with no
+  account re-creates the bootstrap invite from `ANDVARI_BOOTSTRAP_TOKEN` (72 hours). Without that variable no invite
+  exists. An instance that has accounts is not affected.
+- No new settings, and the minimum client version is not raised: 0.29.1 apps and extensions keep working against this
+  server. Update the server first; the web app's delete page needs it.
+
+**Under the hood, for readers**
+- The session layer (sign-in, unlock, quick unlock, token refresh, the purge on a definitive refusal, the server switch)
+  is now one implementation in the shared core (`core/client/session`), which Android uses and the iPhone app will.
+  Vault move and copy rules (`VaultMoves`) and attachment-name cleaning are shared the same way.
+- Card fill's rule is written down as a threat model (`docs/design/2026-11-09-ios-app.md`), and a build flag
+  (`CARDFILL`) decides per target whether the card path is bundled at all; the Chrome and Firefox builds keep it.
+- The iPhone app (`app-ios/`) and its Safari extension build are in testing and are not part of this release's
+  downloads.
+- Built with Kotlin 2.4.21 (from 2.1.0).
+
 ## 0.29.1 (2026-10-26) — the server keeps its own bounds · fleet 0.29.1, extension 0.29.1
 
 *Security review 2026-10 continued with a scan of the server alone, at 0.28.1, and an adversarial

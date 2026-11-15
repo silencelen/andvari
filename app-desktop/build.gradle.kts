@@ -28,7 +28,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb)
             packageName = "andvari"
-            packageVersion = "0.29.1"
+            packageVersion = "0.30.0"
             description = "andvari password manager"
             vendor = "silencelen"
             // H130 — real package metadata. jpackage does NOT leave an unset field blank: it
