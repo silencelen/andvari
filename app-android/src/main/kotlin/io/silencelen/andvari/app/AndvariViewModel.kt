@@ -1993,6 +1993,20 @@ class AndvariViewModel(
     /** The pending offer on a vault (owner's "Ownership offer to …" chip), or null. */
     fun pendingTransferFor(vaultId: String): PendingTransfer? = engine?.pendingTransferFor(vaultId)
 
+    /** Whether that offer is this account's own: its proof checks and it is on record (sharing review 2026-11, item 5). */
+    fun pendingTransferIsOwn(vaultId: String): Boolean = runCatching { engine?.pendingTransferIsOwn(vaultId) }.getOrNull() == true
+
+    /**
+     * The address, else the name, recorded when this device verified [userId], when it did and the server still serves
+     * that key ([identityPub]); null otherwise. Only such a member can be made a vault's owner (sharing review 2026-11,
+     * item 4; the engine checks again).
+     */
+    fun verifiedNameFor(userId: String, identityPub: String): String? {
+        val e = engine ?: return null
+        if (runCatching { e.memberPinState(userId, identityPub) }.getOrNull() != SyncEngine.MemberPinState.PINNED) return null
+        return e.accountState.currentPin(userId)?.let { it.email ?: it.label }
+    }
+
     fun dismissNotice(id: String) {
         engine?.dismissNotice(id)
         refreshLifecycle()
@@ -2176,9 +2190,10 @@ class AndvariViewModel(
         refreshItems(); reloadSharing()
     }
 
-    /** Accept an ownership offer — the engine re-verifies the proof before acting. */
-    fun acceptTransfer(vaultId: String) = op {
-        engine!!.acceptTransfer(vaultId)
+    /** Accept the ownership offer [offerId] shown — the engine re-verifies the proof, and that it is that offer, before
+     *  acting (sharing review 2026-11, item 2). */
+    fun acceptTransfer(vaultId: String, offerId: String) = op {
+        engine!!.acceptTransfer(vaultId, offerId)
         refreshItems(); reloadSharing()
     }
 

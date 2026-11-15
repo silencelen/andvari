@@ -32,6 +32,8 @@ import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -215,6 +217,47 @@ class AccountStateTest {
         assertEquals(newKey.identityPub, merged.contact(u)?.identityPub, "the newer human act wins, not the faster clock")
         // The same pin re-saved does not churn its time.
         assertEquals(5_000, AccountState.withContact(oldPin, contact(u, 1_000)).contact(u)?.verifiedAt)
+    }
+
+    @Test
+    fun verifyingAgainWithoutAnAddressKeepsTheAddressRecordedForTheSameKey() {
+        // Sharing review 2026-11 (item 7): a re-check from a members list (no address typed) must not drop the address
+        // recorded when they were verified by it; a re-verification of another key, or with an address, says its own.
+        val typed = Contact(u, Bytes.toB64(ByteArray(32) { 3 }), "Bea", 1_000, Contact.METHOD_TYPED, "bea@example.com")
+        val doc = AccountState.withContact(AccountState.empty(me).copy(seq = 1), typed)
+        val again = AccountState.withContact(doc, Contact(u, typed.identityPub, "Bea B", 2_000, Contact.METHOD_QR))
+        assertEquals("bea@example.com", again.contact(u)?.email)
+        assertEquals(Contact.METHOD_QR, again.contact(u)?.method, "the rest of the pin is the new verification's")
+        val otherKey = AccountState.withContact(doc, Contact(u, Bytes.toB64(ByteArray(32) { 9 }), "Bea", 2_000, Contact.METHOD_QR))
+        assertNull(otherKey.contact(u)?.email, "another key: nothing carried over")
+        val newAddress = AccountState.withContact(doc, typed.copy(email = "b@example.com", verifiedAt = 2_000))
+        assertEquals("b@example.com", newAddress.contact(u)?.email)
+    }
+
+    @Test
+    fun ownOffersMergeByOfferIdAndACancelAnywhereWins() {
+        // Sharing review 2026-11 (finding 1).
+        val v = "66666666-6666-4666-8666-666666666666"
+        val o1 = OwnOffer(v, "11111111-1111-4111-8111-111111111111", u, 100)
+        val o2 = OwnOffer(v, "22222222-2222-4222-8222-222222222222", u, 200)
+        val a = AccountState.withOwnOffers(AccountState.empty(me).copy(seq = 1), listOf(o1, o2))
+        val b = AccountState.withOwnOffers(AccountState.empty(me).copy(seq = 2), listOf(o1.copy(cancelledAt = 150)))
+        val merged = AccountState.merge(me, a, b, 0).doc
+        assertEquals(listOf(o1.copy(cancelledAt = 150), o2), merged.ownOffers)
+        assertEquals(merged, AccountState.merge(me, b, a, 0).doc.copy(seq = merged.seq), "order-independent")
+        assertEquals(listOf(o1.copy(cancelledAt = 150), o2), AccountState.merge(me, a, b, 5).doc.ownOffers, "a rollback cannot drop one")
+        // Malformed offers are never recorded; the newest OFFER_CAP stay.
+        assertTrue(AccountState.withOwnOffers(AccountState.empty(me), listOf(OwnOffer(v, "not-a-uuid", u, 1))).ownOffers.isEmpty())
+        val many = (0 until AccountState.OFFER_CAP + 5).map { i -> OwnOffer(v, "00000000-0000-4000-8000-${i.toString().padStart(12, '0')}", u, i.toLong()) }
+        val capped = AccountState.withOwnOffers(AccountState.empty(me), many).ownOffers
+        assertEquals(AccountState.OFFER_CAP, capped.size)
+        assertEquals(5L, capped.minOf { it.createdAt }, "the oldest go first")
+        // A document with offers round-trips; one without them encodes as before (older clients read it).
+        val doc = AccountState.withOwnOffers(AccountState.empty(me).copy(seq = 3), listOf(o1))
+        assertEquals(doc, AccountState.decode(me, AccountState.encode(doc)))
+        assertFalse(AccountState.encode(AccountState.empty(me)).contains("ownOffers"))
+        assertFalse(AccountState.encode(doc).contains("cancelledAt"), "omitted while the offer stands")
+        assertFailsWith<AccountStateException> { AccountState.decode(me, AccountState.encode(doc).replace(o1.toUserId, "x")) }
     }
 
     // ---- A13 review RF3: a consumed nonce keeps the EARLIEST time any device recorded for it ----

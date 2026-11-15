@@ -80,8 +80,8 @@ struct VaultMembersView: View {
         } message: { _ in
             Text("They lose access to this vault on all their devices. What they already saw they may have kept: the vault's key is not changed, so change any password that matters at its website too.")
         }
-        .confirmationDialog("Make \(handingOver?.name ?? "") the owner?", isPresented: handOverAsked, titleVisibility: .visible, presenting: handingOver) { member in
-            Button("Ask \(member.name) to take over") {
+        .confirmationDialog("Make \(handingOver.map(Self.verifiedName) ?? "") the owner?", isPresented: handOverAsked, titleVisibility: .visible, presenting: handingOver) { member in
+            Button("Ask \(Self.verifiedName(member)) to take over") {
                 act { await model.offerOwnership(member.userId) }
             }
         } message: { _ in
@@ -125,6 +125,11 @@ struct VaultMembersView: View {
         row.verifiedLabel ?? row.name
     }
 
+    /// Who a handover goes to, as this device recorded them when it verified them (only someone verified is offered it).
+    private static func verifiedName(_ member: MemberView) -> String {
+        member.verifiedName ?? member.name
+    }
+
     // MARK: - The list
 
     private func listSection(_ members: MembersView) -> some View {
@@ -134,7 +139,8 @@ struct VaultMembersView: View {
                     memberRow(
                         member,
                         managed: members.owner && member.role != "owner" && !member.you,
-                        canHandOver: members.canAdd && members.offer == nil && !member.disabled
+                        // Only someone verified on this device can be made the owner (the review's rule; core checks too).
+                        canHandOver: members.canAdd && members.offer == nil && !member.disabled && member.check == MemberCheck.verified
                     )
                 }
             } else {
@@ -251,8 +257,14 @@ struct VaultMembersView: View {
 
     private func offerSection(_ offer: OwnerOfferView, vaultName: String) -> some View {
         Section {
-            Text("You asked \(offer.toName) to take over “\(vaultName)”. It's theirs once they accept, which they can do until \(day(offer.expiresAtMs)).")
+            // "You asked" only for this account's own offer, whose proof checks; otherwise it is the server's word.
+            Text(
+                offer.mine
+                    ? "You asked \(offer.toName) to take over “\(vaultName)”. It's theirs once they accept, which they can do until \(day(offer.expiresAtMs))."
+                    : "The server reports an offer to hand “\(vaultName)” over to \(offer.toName), until \(day(offer.expiresAtMs)). This device has no record that you made it. If you didn't, cancel it and tell your admin."
+            )
                 .font(.footnote)
+                .foregroundStyle(offer.mine ? Palette.ink : Palette.danger)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Cancel the offer") {
                 act { await model.cancelOwnershipOffer() }
@@ -1064,8 +1076,9 @@ struct OwnershipConfirmRows: View {
 
 // MARK: - Offers to take a vault over
 
-/// An offer to make this account the owner of a shared vault (spec 03 §11). It is shown only once it verified under the
-/// vault's own key, so the server cannot make one up; who sent it is the server's word, to confirm with them.
+/// An offer to make this account the owner of a shared vault (spec 03 §11). It is shown only once its proof checks under
+/// the vault's key, which every member holds: the server alone cannot make one up, but a member could, with the server.
+/// Who sent it is the server's word, to confirm with them.
 struct OwnershipOfferRow: View {
     let offer: OwnershipOfferView
 
@@ -1079,7 +1092,7 @@ struct OwnershipOfferRow: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Palette.ink)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("The offer was signed with the vault's own key. To be sure it came from them, and not from a server that was broken into, ask them in person or on a call you trust. As its owner you would manage its members, and only you could rename, hand over or delete it.")
+            Text("The offer was made with the vault's key, which every member holds, so it can't tell you who made it. To be sure it came from them, and not from another member or a server that was broken into, ask them in person or on a call you trust. As its owner you would manage its members, and only you could rename, hand over or delete it.")
                 .font(.footnote)
                 .foregroundStyle(Palette.inkDim)
                 .fixedSize(horizontal: false, vertical: true)

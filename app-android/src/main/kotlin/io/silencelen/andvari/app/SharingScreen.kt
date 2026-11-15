@@ -49,6 +49,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.silencelen.andvari.core.client.HeldVaultCopy
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.SyncEngine
@@ -91,11 +92,16 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
             if (n.becameMine) "You are now the owner of “$name”." else "“$name” now has a new owner.",
             false,
         )
-        "transfer-anomaly" -> Pair(
-            "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
-                "If nobody in your household did this, tell your admin — the server may be misbehaving.",
-            true,
-        )
+        // Sharing review 2026-11 (finding 1): a proof that checks, for an offer this account did not make or had cancelled.
+        "transfer-anomaly" -> if (n.reason == SyncEngine.TRANSFER_NOT_OFFERED) {
+            Pair(HouseholdCopy.transferNotOfferedNotice(name), true)
+        } else {
+            Pair(
+                "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
+                    "If nobody in your household did this, tell your admin — the server may be misbehaving.",
+                true,
+            )
+        }
         // TWIN → core [HouseholdCopy.replayDeniedNotice] (ux-copy--3): the one §11 sentence that
         // interpolates, and the one every surface hand-wrote — it had drifted three ways from web.
         // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
@@ -163,14 +169,17 @@ internal fun IncomingTransferCards(vm: AndvariViewModel, ui: UiState) {
                 Text("$owner wants to make you the owner of “${t.vaultName}”.", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "✓ This offer was verified with the vault's own key. To be sure it really came from $owner — " +
-                        "and not a compromised server — confirm with them in person or by phone. As owner you'd manage " +
-                        "members and be the only one who can rename, transfer, or delete it.",
+                    // Sharing review 2026-11: the proof is made with the vault's key, which every member holds.
+                    "This offer checks with the vault's key, which every member holds, so it can't tell you who made it. " +
+                        "To be sure it really came from $owner — and not from another member or a compromised server — " +
+                        "confirm with them in person or by phone. As owner you'd manage members and be the only one who can " +
+                        "rename, transfer, or delete it.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    androidx.compose.material3.Button(onClick = { vm.acceptTransfer(t.vaultId) }, enabled = !ui.busy, modifier = Modifier.weight(1f)) {
+                    // Item 2: accepting accepts the offer shown, and no other.
+                    androidx.compose.material3.Button(onClick = { vm.acceptTransfer(t.vaultId, t.offerId) }, enabled = !ui.busy, modifier = Modifier.weight(1f)) {
                         Text("Become the owner")
                     }
                     OutlinedButton(onClick = { vm.cancelTransfer(t.vaultId) }, enabled = !ui.busy) { Text("Decline") }
@@ -464,12 +473,18 @@ private fun TransferControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
     val pending = vm.pendingTransferFor(v.vaultId)
     val members = ui.sharingMembers[v.vaultId]
     if (pending != null) {
-        val pendingName = members?.find { it.userId == pending.toUserId }?.displayName ?: "a member"
+        val target = members?.find { it.userId == pending.toUserId }
+        val pendingName = target?.let { vm.verifiedNameFor(it.userId, it.identityPub) ?: it.displayName } ?: "a member"
+        // Sharing review 2026-11 (item 5): this account's own offer only when its proof checks and it is on record.
+        val mine = remember(v.vaultId, pending.offerId, ui.busy) { vm.pendingTransferIsOwn(v.vaultId) }
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}",
+                    if (mine) "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}"
+                    else "The server reports an ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}. " +
+                        "This device has no record that you made it; if you didn't, cancel it and tell your admin.",
                     Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                    color = if (mine) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                 )
                 TextButton(
                     onClick = { vm.cancelTransfer(v.vaultId) }, enabled = !ui.busy,
@@ -480,24 +495,34 @@ private fun TransferControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
         }
         return
     }
-    // Transfer targets: active members who are not the owner and not disabled (F22 badge).
-    val targets = (members ?: emptyList()).filter { it.role != "owner" && (it.status ?: "active") == "active" }
-    if (targets.isEmpty()) return
+    // Transfer targets: active members who are not the owner and not disabled (F22 badge), and (sharing review 2026-11,
+    // item 4) verified on this device with the key the server serves now, named as they were recorded then.
+    val active = (members ?: emptyList()).filter { it.role != "owner" && (it.status ?: "active") == "active" }
+    if (active.isEmpty()) return
+    val names = remember(v.vaultId, members, ui.busy) { active.associate { it.userId to vm.verifiedNameFor(it.userId, it.identityPub) } }
+    val targets = active.filter { names[it.userId] != null }
     var confirming by remember(v.vaultId) { mutableStateOf<String?>(null) } // userId pending confirm
     Column {
         Text("Make someone else the owner", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         targets.forEach { m ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("${m.displayName} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
+                Text("${names[m.userId]} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
                 TextButton(onClick = { confirming = m.userId }, enabled = !ui.busy) { Text("Transfer ownership…") }
             }
+        }
+        if (targets.size < active.size) {
+            Text(
+                "Only someone you verified on this device can be made the owner: compare codes with them first.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
     confirming?.let { userId ->
         val m = targets.find { it.userId == userId } ?: return
+        val name = names[m.userId] ?: m.displayName
         AlertDialog(
             onDismissRequest = { confirming = null },
-            title = { Text("Make ${m.displayName} the owner of “${v.name}”?") },
+            title = { Text("Make $name the owner of “${v.name}”?") },
             text = {
                 Text(
                     "Nothing changes until they accept in their app (they have 14 days; you can cancel anytime). " +
@@ -507,7 +532,7 @@ private fun TransferControl(vm: AndvariViewModel, ui: UiState, v: VaultInfo) {
             },
             confirmButton = {
                 TextButton(onClick = { confirming = null; vm.offerTransfer(v.vaultId, m.userId) }, enabled = !ui.busy) {
-                    Text("Ask ${m.displayName} to take over")
+                    Text("Ask $name to take over")
                 }
             },
             dismissButton = { TextButton(onClick = { confirming = null }) { Text("Cancel") } },
@@ -660,15 +685,11 @@ private fun RecentlyRemovedSection(held: List<HeldVaultInfo>) {
             held.forEach { h ->
                 Column(Modifier.padding(vertical = 4.dp)) {
                     Text("“${h.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis) // a11yand-12
-                    val line = when {
-                        h.reason == "deleted" && h.verified -> "deleted by its owner · kept sealed until ${fmtDay(h.purgeAt ?: h.expungeAt)}"
-                        h.reason == "left" -> "you left · kept until ${fmtDay(h.expungeAt)}"
-                        h.verified -> "access removed · kept until ${fmtDay(h.expungeAt)}"
-                        else -> "unverified removal · kept until ${fmtDay(h.expungeAt)}"
-                    }
+                    // Sharing review 2026-11 (item 6): by how the removal's proof checked here (core [HeldVaultCopy]).
+                    val (line, warning) = HeldVaultCopy.fragment(h, ::fmtDay)
                     Text(
                         line, style = MaterialTheme.typography.bodySmall,
-                        color = if (h.verified || h.reason == "left") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                        color = if (warning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

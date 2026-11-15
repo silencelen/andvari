@@ -54,6 +54,12 @@ data class HeldVaultRecord(
     val deleteId: String?,
     val parked: List<Mutation>,
     val expungeAt: Long,
+    /**
+     * Sharing review 2026-11 (item 6): how the removal's proof checked on this device, so "Recently removed" can say it:
+     * a [io.silencelen.andvari.core.crypto.RemovalProof.Verdict] name for a removal or a leave, `VALID` or `ANOMALY` for
+     * a delete. Null on an entry kept before this was recorded.
+     */
+    val proof: String? = null,
 )
 
 /**

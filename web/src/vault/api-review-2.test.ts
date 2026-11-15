@@ -16,7 +16,7 @@ import { sealSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
 import { Account, ReauthFailedError, VaultKeyNotVerifiedError } from "./account";
 import { AccountStateSync, memoryClientState } from "./accountstatesync";
-import { decodeAccountState, emptyAccountState, isBlankAccountState, ownsVault, withPersonal } from "./accountstate";
+import { decodeAccountState, emptyAccountState, isBlankAccountState, ownsVault, withOwnOffers, withPersonal } from "./accountstate";
 import type { Contact } from "./accountstate";
 import { NoPersonalVaultError, ReauthStaleSessionError, VaultStore } from "./store";
 
@@ -593,6 +593,8 @@ describe("A9 — second API-review round (VaultStore / Account)", () => {
     const wrapHash = toHexLower(sha256Sync(utf8("member-wrap")));
     const offerId = "11111111-1111-4111-8111-111111111111";
     const proof = await acceptProofFromHash(await owner.account.lifecycleKeyFor(vaultId), vaultId, offerId, member.userId, 1, wrapHash);
+    // Sharing review 2026-11 (finding 1): a handover away is this account's own only for an offer on its record.
+    await s.accountState.update((d) => withOwnOffers(d, [{ vaultId, offerId, toUserId: member.userId, createdAt: 1 }]));
     const rev = server.feed.rev + 1;
     server.feed = {
       ...server.feed, rev, full: true,
