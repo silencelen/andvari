@@ -129,6 +129,7 @@ export type CardFillFailCode =
   | "provider_not_allowed" // a payment provider's box is there, but andvari may not run in it (Safari asks per site)
   | "duplicate_fields" // two provider card frames in the tab ask for the same card detail: nothing is filled (round-11 review)
   | "changed" //       the frames to fill are not the ones the popup showed: the page changed since
+  | "fill_off" //      this build has no in-page card fill (cardfillflag.ts; owner decision 2026-11-14)
   | "no_frame_origin"; // this browser does not say which site a frame comes from (Firefox before 126): no card in a frame
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
@@ -687,6 +688,9 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[];
                                               /** This browser does not say which site a frame comes from: no card in a frame. */
                                               noFrameOrigin?: boolean;
+                                              /** This build has no in-page card fill (cardfillflag.ts): the popup says to fill
+                                               *  cards from the andvari app. */
+                                              fillOff?: boolean;
                                               /** Two provider card frames ask for the same card detail: no Fill, and the popup
                                                *  says why. */
                                               doubled?: boolean;

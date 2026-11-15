@@ -219,7 +219,8 @@ test("the hit test looks at nine points: the field itself at the centre; elsewhe
 test("only the person chooses the card field, only in a provider's card document, held to the fill rules (round-7 H1, M2-tab, regression 6)", () => {
   // Round-12 review: a provider's card document by its origin and, where the provider serves several kinds of element,
   // its own path; a provider's other documents (an address element) report no card form at all.
-  assert.match(content, /const cardBox = isCardEntryDocument\(location\.origin, location\.pathname\);/);
+  // A build without in-page card fill (cardfillflag.ts) has no card document at all.
+  assert.match(content, /const cardBox = CARD_FILL && isCardEntryDocument\(location\.origin, location\.pathname\);/);
   assert.match(content, /const providerNonCardDocument = !cardBox && isCardProviderOrigin\(location\.origin\);/);
   assert.match(content, /const all = providerNonCardDocument \? \[\] : allCardForms\(\);/);
   // A collapsed card frame says so (an IntersectionObserver on its own document, implicit root).

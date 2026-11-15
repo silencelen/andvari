@@ -60,7 +60,7 @@ jobs:
             app-ios/AndvariSafari/web
             server/build/libs/andvari-server.jar
             tools/uitest-seed/build/libs/andvari-uitest-seed.jar
-          key: uitest-built-uitestprovider-${{ runner.os }}-${{ hashFiles('core/**', 'server/**', 'tools/uitest-seed/**', 'extension/**', 'spec/**', 'gradle/**', '*.gradle.kts', 'gradle.properties', 'docs/self-hosting.md', 'deploy/**', 'scripts/ci/build-libsodium-ios.sh', 'app-ios/scripts/prepare.sh') }}
+          key: uitest-built-cardfill-uitestprovider-${{ runner.os }}-${{ hashFiles('core/**', 'server/**', 'tools/uitest-seed/**', 'extension/**', 'spec/**', 'gradle/**', '*.gradle.kts', 'gradle.properties', 'docs/self-hosting.md', 'deploy/**', 'scripts/ci/build-libsodium-ios.sh', 'app-ios/scripts/prepare.sh') }}
 
       - name: Restore libsodium
         if: steps.built.outputs.cache-hit != 'true'
@@ -78,9 +78,11 @@ jobs:
 
       # UITEST=1: the Safari extension's UI-test build, which adds the test site's stand-in payment provider to the
       # card-entry origins (extension/build.mjs); ios-unsigned.yml checks that the release bundle names no test domain.
+      # CARDFILL=1: in-page card fill on, which the App Store build ships without (owner decision 2026-11-14), so the
+      # card tests keep running.
       - name: Kotlin framework and Safari files
         if: steps.built.outputs.cache-hit != 'true'
-        run: UITEST=1 app-ios/scripts/prepare.sh iosSimulatorArm64
+        run: UITEST=1 CARDFILL=1 app-ios/scripts/prepare.sh iosSimulatorArm64
 
       - name: Server and seeding tool
         if: steps.built.outputs.cache-hit != 'true'
@@ -111,6 +113,8 @@ jobs:
           for f in background.js content.js; do
             grep -q 'pay.andvari-uitest.test' "app-ios/AndvariSafari/web/$f" || { echo "$f does not list the stand-in provider"; exit 1; }
           done
+          # …and in-page card fill is on (CARDFILL=1): the worker carries the card path.
+          grep -q 'no card grant' app-ios/AndvariSafari/web/background.js || { echo "the UI-test build has no card fill"; exit 1; }
 
       - name: Names for the test site
         run: echo "127.0.0.1 site.andvari-uitest.test other-uitest.test plainhttp-uitest.test pay.andvari-uitest.test" | sudo tee -a /etc/hosts

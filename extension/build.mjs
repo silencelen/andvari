@@ -41,6 +41,15 @@ const UITEST_PROVIDER = "https://pay.andvari-uitest.test:8443";
 const uitest = process.env.UITEST === "1";
 if (uitest && target !== "safari") throw new Error("UITEST=1 is for the Safari build only");
 
+// CARDFILL (owner decision 2026-11-14): in-page card fill, per target. The Safari build ships without it (the first App
+// Store version fills no card into a page) unless built with CARDFILL=1, as the UI tests and the card-preview build
+// are; the Chrome and Firefox builds keep it unless built with CARDFILL=0. Without it, background.ts does not bundle the
+// card path's handlers (cardfillflag.ts), which the check at the end proves of dist/background.js.
+const cardFill = target === "safari" ? process.env.CARDFILL === "1" : process.env.CARDFILL !== "0";
+/** Strings only the card path's handlers hold (background.ts fillCardFromPopup and revealCardForFill): a build without
+ *  card fill must not contain them, a build with it must. */
+const CARD_PATH_MARKERS = ["card fill wrote nothing", "no card grant"];
+
 // The pages the Safari build does not ship: the server is chosen in the andvari app (no Options page), quick unlock is
 // the app's Face ID (no WebAuthn connector window), and Chrome's offscreen clipboard document has no use there. The
 // worker refuses their messages in that build too; the check at the end fails the build if any is left in dist/.
@@ -76,6 +85,7 @@ await esbuild.build({
     // Round-12 review: the payment providers' sandbox and test hosts are card-entry origins in the debug and UI-test
     // builds only (cardproviders.ts CARD_PROVIDER_TEST_ORIGINS); a release build fails if one is left in it (below).
     __ANDVARI_PROVIDER_TEST_HOSTS__: JSON.stringify(!release || uitest),
+    __ANDVARI_CARDFILL__: JSON.stringify(cardFill),
   },
   plugins: target === "safari" ? [noDefaultServer] : [],
 });
@@ -133,4 +143,11 @@ if (release && !uitest) {
   const leaked = walkAll("dist").filter((f) => !f.endsWith(".png") && hosts.some((h) => readFileSync(f, "utf8").includes(h)));
   if (leaked.length > 0) throw new Error(`a release build must not list a payment provider's test host, but one is in: ${leaked.join(", ")}`);
 }
-console.log(`built → dist/ (${target}${release ? ", release" : ""}${uitest ? ", UI-test provider" : ""}; Load unpacked: extension/dist)`);
+{
+  // The card path is in the worker exactly when the build has card fill (cardfillflag.ts).
+  const worker = readFileSync("dist/background.js", "utf8");
+  const held = CARD_PATH_MARKERS.filter((m) => worker.includes(m));
+  if (!cardFill && held.length > 0) throw new Error(`a build without card fill must not bundle the card path, but dist/background.js holds: ${held.join(", ")}`);
+  if (cardFill && held.length !== CARD_PATH_MARKERS.length) throw new Error("a build with card fill lost its card path markers: build.mjs and background.ts disagree");
+}
+console.log(`built → dist/ (${target}${release ? ", release" : ""}${uitest ? ", UI-test provider" : ""}${cardFill ? "" : ", no card fill"}; Load unpacked: extension/dist)`);

@@ -33,6 +33,11 @@ import { gateServedEnvelope } from "./servedblob";
 import { DEFAULT_GENERATOR, generatePassword } from "./generator";
 import type { CardFieldKind } from "./detect";
 import { isCardProviderOrigin } from "./cardproviders";
+import { CARD_FILL_OFF } from "./cardfillflag";
+
+/** In-page card fill in this build (build.mjs defines it for every target; cardfillflag.ts). Read here as the define
+ *  itself, never through a constant, so that esbuild drops the card path's handlers from a build without it. */
+declare const __ANDVARI_CARDFILL__: boolean;
 import { cardFillPlan, chosenCardFrames, frameOriginOf, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease";
 import type {
   CardFillFields,
@@ -2647,20 +2652,25 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     }
     case "updateStatus":
       return updateStatus();
+    // In-page card fill, per build (cardfillflag.ts; owner decision 2026-11-14). Each entry point of the card path is
+    // gated on the build's define itself, so a build without card fill answers the fixed refusal and does not even
+    // bundle the handler: nothing records a card choice, offers a chip, mints a card grant or releases a card's fields.
     case "cardFormInfo":
-      return cardFormInfo(msg, sender);
+      return __ANDVARI_CARDFILL__ ? cardFormInfo(msg, sender) : ({ ok: false } satisfies Res<"cardFormInfo">);
     case "cardChipOffer":
-      return cardChipOffer(sender); // C1 §C2 — page-triggered, so it is in PASSIVE_MSGS ([K13])
+      // C1 §C2 — page-triggered, so it is in PASSIVE_MSGS ([K13])
+      return __ANDVARI_CARDFILL__ ? cardChipOffer(sender) : ({ fillable: false, locked: false } satisfies Res<"cardChipOffer">);
     case "openPopupForCards":
-      return openPopupForCards(sender); // C1 §C4 — a real isTrusted click, deliberately NOT passive
+      // C1 §C4 — a real isTrusted click, deliberately NOT passive
+      return __ANDVARI_CARDFILL__ ? openPopupForCards(sender) : ({ opened: false } satisfies Res<"openPopupForCards">);
     case "openPopupForSearch":
       return openPopupForSearch(sender); // root cause B hand-off — a real, visibility-guarded click; NOT passive
     case "cardFillOffers":
-      return cardFillOffers(sender);
+      return __ANDVARI_CARDFILL__ ? cardFillOffers(sender) : ({ fillable: false, origin: null, frames: [], pageFormOnly: false, fillOff: true } satisfies Res<"cardFillOffers">);
     case "fillCardFromPopup":
-      return fillCardFromPopup(msg.itemId, msg.frames, sender);
+      return __ANDVARI_CARDFILL__ ? fillCardFromPopup(msg.itemId, msg.frames, sender) : ({ ok: false, code: "fill_off", error: CARD_FILL_OFF } satisfies Res<"fillCardFromPopup">);
     case "revealCardForFill":
-      return revealCardForFill(msg, sender);
+      return __ANDVARI_CARDFILL__ ? revealCardForFill(msg, sender) : ({ ok: false, error: CARD_FILL_OFF } satisfies Res<"revealCardForFill">);
   }
 }
 
