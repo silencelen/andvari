@@ -2500,6 +2500,124 @@ open class SessionControllerTest {
         assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
     }
 
+    // ---- vault health ----
+
+    /**
+     * Vault health (the Android app's screen, core's rules): weak and reused passwords; a breach check that sends only
+     * 5-character hash prefixes, one request per range, and keeps no verdict for a range that failed or a login changed
+     * since; copies merged, or one kept with the other's password in its history; and a check run that writes only the
+     * verdict a person gives, offering the trash for a login that is gone. A lock forgets it all.
+     */
+    @Test
+    fun vaultHealthChecksBreachesByPrefixCleansUpCopiesAndRecordsOnlyWhatThePersonSays() = test {
+        unlockedWithAPersonalVault()
+        onlineServer()
+        for (input in listOf(
+            LoginInput("Bank", "me", "Brisk-Otter-Lamp-41", listOf("https://bank.example"), "", "", false),
+            LoginInput("Bank again", "me", "Brisk-Otter-Lamp-41", listOf("https://bank.example/login"), "", "", false),
+            LoginInput("Shop", "sam", "Quiet-Maple-Door-73", listOf("https://shop.example"), "", "", false),
+            LoginInput("Shop old", "sam", "Older-Pine-Gate-19", listOf("https://shop.example"), "", "", false),
+            LoginInput("Forum", "fam", "hunter2", listOf("https://forum.example"), "", "", false),
+        )) assertEquals(ActionResult.Ok, controller.saveLogin(null, input))
+        val hibp = io.silencelen.andvari.core.crypto.Hibp
+        val breached = hibp.sha1UpperHex(crypto, "hunter2")
+        val unreachable = hibp.prefix(hibp.sha1UpperHex(crypto, "Quiet-Maple-Door-73"))
+        val asked = mutableListOf<String>()
+        prefixRoutes["/api/v1/hibp/range/"] = { request ->
+            val prefix = request.url.encodedPath.substringAfterLast('/')
+            asked += prefix
+            if (prefix == unreachable) throw IOException("unreachable")
+            val body = if (prefix == hibp.prefix(breached)) "${hibp.suffix(breached)}:4200\r\n00000000000000000000000000000000000:3" else "00000000000000000000000000000000000:1"
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
+        }
+
+        controller.openHealth()
+        val opened = assertNotNull(controller.state.health)
+        assertEquals(6, opened.tiles.logins, "the five saved here and the one the cache held")
+        assertNull(opened.tiles.breached, "never checked is not none")
+        assertEquals(HealthCopy.RUN_A_SCAN, opened.tiles.breachedHint)
+        val forum = opened.passwords.single { it.name == "Forum" }
+        assertTrue(forum.weak)
+        assertEquals(1, forum.reused, "the cached login has the same password")
+        assertNull(forum.breaches)
+        val exact = opened.duplicates.single { it.exact }
+        val differs = opened.duplicates.single { !it.exact }
+        assertEquals(setOf("Bank", "Bank again"), exact.members.map { it.name }.toSet())
+        assertNotNull(exact.mergeConfirm)
+        assertNull(exact.mergeRefusal)
+        assertEquals(setOf("Shop", "Shop old"), differs.members.map { it.name }.toSet())
+        assertEquals(6, opened.tiles.unchecked)
+        assertTrue(opened.staleness.all { it.neverChecked })
+
+        assertEquals(ActionResult.Ok, controller.checkBreaches())
+        val checked = assertNotNull(controller.state.health)
+        assertNull(checked.scan)
+        assertTrue(checked.scanned)
+        assertEquals(HealthCopy.SCAN_INCOMPLETE, checked.message)
+        assertTrue(asked.isNotEmpty() && asked.all { it.length == 5 }, "only 5 hex characters of a hash leave the device")
+        assertEquals(asked.size, asked.toSet().size, "each range is asked for once")
+        assertTrue(asked.size <= 4, "one request per range, for 4 distinct passwords")
+        assertEquals(4200L, checked.passwords.single { it.name == "Forum" }.breaches)
+        assertEquals(4200L, checked.passwords.single { it.name == "Example" }.breaches)
+        assertEquals(0L, checked.passwords.single { it.name == "Bank" }.breaches)
+        assertNull(checked.passwords.single { it.name == "Shop" }.breaches, "its range failed: no verdict, never none")
+        assertEquals(2, checked.tiles.breached)
+        assertEquals(HealthCopy.INCOMPLETE, checked.tiles.breachedHint)
+
+        // Copies with the same password merge into one; the survivor changed, so its verdict is retired.
+        assertEquals(ActionResult.Ok, controller.mergeDuplicates(exact.signature))
+        val merged = assertNotNull(controller.state.health)
+        assertEquals(HealthCopy.merged(1), merged.message)
+        assertTrue(merged.duplicates.none { it.exact })
+        val survivor = controller.state.items.single { it.name.startsWith("Bank") }
+        assertNull(merged.passwords.single { it.itemId == survivor.itemId }.breaches, "changed since the check")
+        assertEquals(ActionResult.Failed(HealthCopy.GROUP_CHANGED), controller.mergeDuplicates(exact.signature), "the group is gone")
+
+        // Copies with different passwords: one is kept, and the other's password goes into its history first.
+        val shop = differs.members.single { it.name == "Shop" }
+        assertNull(shop.keepRefusal)
+        assertNotNull(shop.keepConfirm)
+        assertEquals(ActionResult.Ok, controller.keepDuplicate(differs.signature, shop.itemId))
+        assertEquals(HealthCopy.kept(1), controller.state.health?.message)
+        assertTrue(controller.state.items.none { it.name == "Shop old" })
+        assertEquals(1, assertNotNull(controller.itemDetail(shop.itemId)).previousPasswords)
+
+        // The check run: a person signs in themselves and says what happened; only that verdict is written.
+        controller.startCheckRun(neverCheckedOnly = true)
+        val first = assertNotNull(controller.state.health?.run)
+        assertEquals(1, first.position)
+        assertEquals(4, first.total, "the never-checked logins left")
+        assertEquals(ActionResult.Failed(HealthCopy.CHOOSE_RESULT), controller.recordCheck(first.itemId, "maybe"))
+        assertEquals(first.itemId, controller.state.health?.run?.itemId, "a refusal keeps the run where it is")
+        assertEquals(ActionResult.Ok, controller.recordCheck(first.itemId, "ok"))
+        assertNull(controller.state.health?.message)
+        assertEquals(2, controller.state.health?.run?.position)
+        controller.skipCheck()
+        val third = assertNotNull(controller.state.health?.run)
+        assertEquals(3, third.position)
+        assertEquals(ActionResult.Ok, controller.recordCheck(third.itemId, "gone"))
+        assertEquals(third.itemId, controller.state.health?.offerDelete?.itemId, "gone offers the trash")
+        assertEquals(ActionResult.Ok, controller.trashGoneLogin())
+        assertEquals(HealthCopy.TRASHED, controller.state.health?.message)
+        assertNull(controller.state.health?.offerDelete)
+        assertTrue(controller.state.items.none { it.itemId == third.itemId })
+        val fourth = assertNotNull(controller.state.health?.run)
+        assertEquals(ActionResult.Ok, controller.recordCheck(fourth.itemId, "blocked"))
+        assertNull(controller.state.health?.run)
+        assertEquals(HealthCopy.RUN_FINISHED, controller.state.health?.message)
+        val after = assertNotNull(controller.state.health)
+        assertTrue(after.staleness.none { it.itemId == fourth.itemId }, "couldn't finish: snoozed, off the list")
+        assertEquals("Checked recently: it worked", after.staleness.single { it.itemId == first.itemId }.state)
+        controller.setHealthShowSnoozed(true)
+        assertTrue(assertNotNull(controller.state.health).staleness.single { it.itemId == fourth.itemId }.snoozed)
+        assertEquals(ActionResult.Ok, controller.unsnoozeLogin(fourth.itemId))
+        assertEquals(HealthCopy.BACK_ON_THE_LIST, controller.state.health?.message)
+        assertFalse(assertNotNull(controller.state.health).staleness.single { it.itemId == fourth.itemId }.snoozed)
+
+        controller.lock()
+        assertNull(controller.state.health)
+    }
+
     // ---- vaults: where a new item goes, moving and copying ----
 
     @Test

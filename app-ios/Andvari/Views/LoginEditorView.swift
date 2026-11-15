@@ -55,6 +55,9 @@ struct GeneratorConfig: Equatable {
 /// form forgets them when it closes.
 struct LoginEditorView: View {
     let itemId: String?
+    /// Vault health's "give it a new password": the editor opens with a fresh password generated and shown, unsaved
+    /// until its own Save. Nothing is changed at the site.
+    let generateOnOpen: Bool
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -73,8 +76,9 @@ struct LoginEditorView: View {
     @State private var vaultId: String?
     @StateObject private var files = FileAdding()
 
-    init(itemId: String?) {
+    init(itemId: String?, generateOnOpen: Bool = false) {
         self.itemId = itemId
+        self.generateOnOpen = generateOnOpen
     }
 
     var body: some View {
@@ -293,6 +297,7 @@ struct LoginEditorView: View {
         }
         draft = next
         model.openAttachmentDraft(itemId)
+        if generateOnOpen { generate() }
     }
 
     private func generate() {

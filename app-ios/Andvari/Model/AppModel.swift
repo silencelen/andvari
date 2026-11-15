@@ -586,6 +586,86 @@ final class AppModel: ObservableObject {
         await run { try await $0.checkAccountDeletion() }
     }
 
+    // MARK: - Vault health
+
+    func openHealth() {
+        controller.openHealth()
+    }
+
+    func closeHealth() {
+        controller.closeHealth()
+    }
+
+    func refreshHealth() {
+        controller.refreshHealth()
+    }
+
+    func setHealthShowSnoozed(_ show: Bool) {
+        controller.setHealthShowSnoozed(show: show)
+    }
+
+    func dismissHealthMessage() {
+        controller.dismissHealthMessage()
+    }
+
+    /// Only the first 5 characters of each password's SHA-1 hash go to the server; the match is made here.
+    func checkBreaches() async -> Outcome {
+        await run { try await $0.checkBreaches() }
+    }
+
+    func mergeDuplicates(_ signature: String) async -> Outcome {
+        await run { try await $0.mergeDuplicates(signature: signature) }
+    }
+
+    func keepDuplicate(_ signature: String, keep itemId: String) async -> Outcome {
+        await run { try await $0.keepDuplicate(signature: signature, keepId: itemId) }
+    }
+
+    func markNotDuplicates(_ signature: String) async -> Outcome {
+        await run { try await $0.markNotDuplicates(signature: signature) }
+    }
+
+    func restoreDuplicates(_ signature: String) async -> Outcome {
+        await run { try await $0.restoreDuplicates(signature: signature) }
+    }
+
+    func startCheckRun(neverCheckedOnly: Bool) {
+        controller.startCheckRun(neverCheckedOnly: neverCheckedOnly)
+    }
+
+    func checkLogin(_ itemId: String) {
+        controller.checkLogin(itemId: itemId)
+    }
+
+    func skipCheck() {
+        controller.skipCheck()
+    }
+
+    func stopCheckRun() {
+        controller.stopCheckRun()
+    }
+
+    /// "ok", "bad", "gone" or "blocked": what the person found when they signed in themselves.
+    func recordCheck(_ itemId: String, result: String) async -> Outcome {
+        await run { try await $0.recordCheck(itemId: itemId, result: result) }
+    }
+
+    func unsnoozeLogin(_ itemId: String) async -> Outcome {
+        await run { try await $0.unsnoozeLogin(itemId: itemId) }
+    }
+
+    func trashGoneLogin() async -> Outcome {
+        await run { try await $0.trashGoneLogin() }
+    }
+
+    func keepGoneLogin() {
+        controller.keepGoneLogin()
+    }
+
+    func answerBadOffer(opening: Bool) {
+        controller.answerBadOffer(opening: opening)
+    }
+
     // MARK: - Shared vaults awaiting review
 
     /// Trust on first use: the vault's key as the server delivered it is vouched for, and the vault opens for saving.
