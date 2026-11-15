@@ -13,12 +13,11 @@ final class T6SecretFieldTests: UITestCase {
 
     /// A login: the password and the one-time code's key, each hidden while typed and read back with its Show; the
     /// notes; then saved, and read again from the item (the code is the one an authenticator gives for the key).
-    func test01_LoginEditorSecretsTypedAKeyAtATime() throws {
+    func test01_LoginEditorSecretsTypedAKeyAtATime() {
         let name = "Typed Login \(stamp)"
         let password = "Typ3d--pass'w0rd\"1"
         let key = "JBSWY3DPEHPK3PXP"
         let notes = "teh notes -- it's \"q\"\nline two"
-        var lost: String?
         step("new-login-editor") {
             freshVault()
             openNewItemEditor("New login")
@@ -27,24 +26,16 @@ final class T6SecretFieldTests: UITestCase {
         }
         step("password-typed") {
             let kept = typeKeyByKey(password, into: app.secureTextFields["Password"], what: "the editor's Password field")
-            guard kept == password.count else {
-                lost = keyboardLost("login editor's Password", kept, of: password.count)
-                return
-            }
+            XCTAssertEqual(kept, password.count, "the Password field let go of the keyboard after \(kept) of \(password.count) characters")
             XCTAssertEqual(shownEntry("Password"), password, "the Password field does not hold what was typed")
         }
-        if let lost { try endForLostKeyboard(lost) }
         step("code-key-typed") {
             let field = app.secureTextFields["Secret or otpauth:// link"]
             scrollFormTo(field)
             let kept = typeKeyByKey(key, into: field, what: "the one-time code's key field")
-            guard kept == key.count else {
-                lost = keyboardLost("login editor's one-time code key", kept, of: key.count)
-                return
-            }
+            XCTAssertEqual(kept, key.count, "the one-time code's key field let go of the keyboard after \(kept) of \(key.count) characters")
             XCTAssertEqual(shownEntry("Secret or otpauth:// link"), key, "the one-time code's key field does not hold what was typed")
         }
-        if let lost { try endForLostKeyboard(lost) }
         step("notes-typed") {
             let field = app.textViews["Notes"]
             scrollFormTo(field)
@@ -72,13 +63,12 @@ final class T6SecretFieldTests: UITestCase {
 
     /// A card: the number and the security code on the number pad, each read back with its Show; the notes; then saved,
     /// and read again from the item.
-    func test02_CardEditorSecretsTypedAKeyAtATime() throws {
+    func test02_CardEditorSecretsTypedAKeyAtATime() {
         let name = "Typed Card \(stamp)"
         // A card network's test number: it passes the check digit and belongs to no one.
         let number = "5555555555554444"
         let code = "737"
         let notes = "teh pin -- 12"
-        var lost: String?
         step("new-card-editor") {
             freshVault()
             openNewItemEditor("New card")
@@ -86,13 +76,9 @@ final class T6SecretFieldTests: UITestCase {
         }
         step("number-typed") {
             let kept = typeKeyByKey(number, into: app.secureTextFields["Card number"], what: "the Card number field")
-            guard kept == number.count else {
-                lost = keyboardLost("card editor's Card number", kept, of: number.count)
-                return
-            }
+            XCTAssertEqual(kept, number.count, "the Card number field let go of the keyboard after \(kept) of \(number.count) digits")
             XCTAssertEqual(shownEntry("Card number").filter(\.isNumber), number, "the Card number field does not hold what was typed")
         }
-        if let lost { try endForLostKeyboard(lost) }
         step("expiry-typed") {
             enter("11", into: app.textFields["Month (MM)"], what: "the Month field")
             enter("2032", into: app.textFields["Year (YYYY)"], what: "the Year field")
@@ -101,13 +87,9 @@ final class T6SecretFieldTests: UITestCase {
             let field = app.secureTextFields["Security code"]
             scrollFormTo(field)
             let kept = typeKeyByKey(code, into: field, what: "the Security code field")
-            guard kept == code.count else {
-                lost = keyboardLost("card editor's Security code", kept, of: code.count)
-                return
-            }
+            XCTAssertEqual(kept, code.count, "the Security code field let go of the keyboard after \(kept) of \(code.count) digits")
             XCTAssertEqual(shownEntry("Security code"), code, "the Security code field does not hold what was typed")
         }
-        if let lost { try endForLostKeyboard(lost) }
         step("notes-typed") {
             let field = app.textViews["Notes"]
             scrollFormTo(field)
@@ -200,18 +182,5 @@ final class T6SecretFieldTests: UITestCase {
             field.typeText("\n")
             expectScreen(.vault, timeout: 60)
         }
-    }
-
-    // MARK: - Helpers
-
-    /// The app defect that ends an editor's test early while it stands (found 2026-11-14; T4 test08 is its own test).
-    private func keyboardLost(_ field: String, _ kept: Int, of count: Int) -> String {
-        "App defect (found 2026-11-14): the \(field) field lets go of the keyboard while it is typed into. It held the keyboard for \(kept) of \(count) characters typed a key at a time 0.3 s apart. LoginEditorView and CardEditorView make their SecretTextField without `focused`, which defaults to false, and every update of the field (each key changes the draft) runs updateUIView, which resigns the first responder of a field that is not `focused` (app-ios/Andvari/Support/SecretFields.swift). The fields after this one are typed once the editor keeps the keyboard."
-    }
-
-    private func endForLostKeyboard(_ reason: String) throws -> Never {
-        let cancel = app.buttons["Cancel"].firstMatch
-        if cancel.exists { cancel.tap() }
-        try skip(reason)
     }
 }
