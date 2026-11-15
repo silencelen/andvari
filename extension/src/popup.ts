@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_FILL_FROM_APP, CARD_MIXED_FORMS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, cardFillOffLine, CARD_MIXED_FORMS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -1053,7 +1053,7 @@ function cardCopyRemedy(): string {
 
 /** The one line that says why the rows copy instead of filling; null while they fill. */
 function cardCopyReason(safari: boolean): string | null {
-  if (cardFill.fillOff === true) return CARD_FILL_FROM_APP;
+  if (cardFill.fillOff === true) return cardFillOffLine(safari);
   if (cardFill.mixed === true) return CARD_MIXED_FORMS;
   if (cardFill.fillable) return null;
   if (cardFill.doubled === true) return CARD_DUPLICATE_FIELDS;

@@ -540,7 +540,7 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(pp).toContain('dest.textContent = cardFill.frames.length > 0 ? `Fill → ${fillDestination(cardFill.frames)}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;');
     expect(pp).not.toMatch(/fields\)`/);
     const reason = spanOf(pp, "function cardCopyReason(", "function renderCards(");
-    expect(reason).toMatch(/if \(cardFill\.fillOff === true\) return CARD_FILL_FROM_APP;\s*if \(cardFill\.mixed === true\) return CARD_MIXED_FORMS;\s*if \(cardFill\.fillable\) return null;/);
+    expect(reason).toMatch(/if \(cardFill\.fillOff === true\) return cardFillOffLine\(safari\);\s*if \(cardFill\.mixed === true\) return CARD_MIXED_FORMS;\s*if \(cardFill\.fillable\) return null;/);
     // Start over lets every choice in the tab go (the worker, popup-only), then asks again what a Fill would reach; it
     // shows only with the two-forms line, whose remedy it is.
     expect(pp).toMatch(/cardsStartOver\.addEventListener\("click", \(\) => \{[\s\S]{0,120}?await ask\(\{ type: "clearCardChoices" \}\);\s*cardFill = cardFillOf\(await ask\(\{ type: "cardFillOffers" \}\)\);/);
