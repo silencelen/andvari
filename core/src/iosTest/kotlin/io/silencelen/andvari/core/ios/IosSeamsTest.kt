@@ -186,7 +186,7 @@ class IosSeamsTest {
         try {
             NSFileManager.defaultManager.createDirectoryAtPath(dir, withIntermediateDirectories = true, attributes = null, error = null)
             val path = "$dir/autofill-snapshot.json"
-            val files = FileFillSnapshots(path)
+            val files = FileFillSnapshots(path, FileClasses.OPEN_OR_NEW)
             assertNull(files.read())
             assertTrue(files.write("one".encodeToByteArray()))
             assertTrue(files.write("two-longer".encodeToByteArray()))
