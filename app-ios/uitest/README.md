@@ -8,12 +8,18 @@ Read a run without a Mac:
 
 ```sh
 app-ios/scripts/uitest-report.sh <run id> [directory]
+app-ios/scripts/uitest-report.sh --text <run id> [directory]
 ```
 
-That downloads the run's artifact and prints one line per test. The directory then holds
-`uitest-summary.json` (test, status, failure or skip message, screenshot names),
+That downloads the run's artifact and prints one line per test, with what the test noted on the way (`note:`
+lines: something a reader should know whether it passed or not, such as a prompt iOS put over the app). The
+directory then holds `uitest-summary.json` (test, status, failure or skip message, notes, screenshot names),
 `screenshots/<Class>.<test>__NN_<step>.png` (one per step, plus the screen at the end of each test),
-`server.log`, the `xcodebuild` logs and the `.xcresult` bundle.
+`trees/<Class>.<test>__<name>.txt` (the UI tree where a test dumped it, at a failure mostly), `server.log`, the
+`xcodebuild` logs and the `.xcresult` bundle. The whole artifact is hundreds of megabytes; `--text` fetches the
+run's second, small artifact: the summary, the logs and the trees. The job's own log prints the summary too.
+
+A branch other than `ios-ui` is run by hand: `gh workflow run ios-uitest.yml --ref <branch>`.
 
 ## What runs where
 
@@ -25,7 +31,8 @@ That downloads the run's artifact and prints one line per test. The directory th
 | Test site, another site | `https://other-uitest.test:8443` | The same pages under another registrable domain and the same certificate, for a fill that crosses sites. |
 | Test site, plain http | `http://plainhttp-uitest.test:8081` | The same pages under another registrable domain, for the rule that an http page is only offered a login saved as http. |
 | Simulator | newest installed iOS, a new device per run | `boot-simulator.sh` |
-| Another device, a second account | `POST /control/…` on the test site | `vault-create`, `vault-delete` and `vault-restore` (`?name=`) sign in as another device of the account and change one of its shared vaults (`tools/uitest-seed vault`). `share-read-only` (`?name=&item=`) has a second account, enrolled with an invite the test account mints as the server's admin, share a vault holding one login read-only with the account, and another device of the account accept it by typing the sharer's identity code (`tools/uitest-seed share`). The app learns of either at its next sync. |
+| Another device, a second account | `POST /control/…` on the test site | `vault-create`, `vault-delete` and `vault-restore` (`?name=`) sign in as another device of the account and change one of its shared vaults (`tools/uitest-seed vault`). `share-read-only` (`?name=&item=`) has a second account, enrolled with an invite the test account mints as the server's admin, share a vault holding one login read-only with the account, and another device of the account accept it by typing the sharer's identity code (`tools/uitest-seed share`); with `&email=&password=` that second account has that address and master password, so a test can sign in as the owner of a vault someone else uses. The app learns of either at its next sync. `invite` (`?email=`) has the test account invite an address and answers with the invite's code, for a test that enrolls in the app. `server-stall` (`?seconds=`, 20 at most) stops the vault server for that long and lets it go on: a network that stalls. |
+| Files and Photos | the simulator's own | The runner is a simulator process and the simulator's containers are folders on its disk: a test writes its files into the Files app's On My iPhone (`FilesApp` in `Support/Backend.swift`), where the system's file picker offers them, and reads back what the app saved or exported there. `boot-simulator.sh` puts one picture into Photos (`simctl addmedia`) for the photo picker. The same way a test reads what andvari keeps on disk: its files, its preferences and the rows of its access groups in the simulator's Keychain (`LocalState`, `SimulatorKeychain`). |
 | Page event log | `<page>.html?uitest-events` | The test site adds a passive log after the page's content: presses, focus moves with the page's user activation and focus, and window focus. The card tests read it to say what the page saw. |
 
 The account's email and master password are in `env.sh`. They are fixtures for a server that lives for one job.
@@ -46,7 +53,15 @@ code are two payment forms, in either order, so the popup fills neither and offe
 Subclass `UITestCase`, write the test as `step("name") { … }` blocks (each ends with a screenshot), find
 elements by accessibility identifier (`AccessID` in `Andvari/Support/Theme.swift` and the literal identifiers
 in the views). A test that cannot run in the simulator stays in the suite and calls `try skip("why")`, so the
-summary carries the reason.
+summary carries the reason. `note("…")` records something the test saw for the summary without failing it.
+
+A class makes the state it needs and relies on nothing the class before left: the account deletion tests end with
+no account in the app, so a test starts with `freshVault()` (the app started again, the seeded account signed in
+and unlocked) and one that needs the extensions with `requireAutoFillProvider()`, which also turns Face ID on.
+
+The vault list builds only the rows near what it shows. A new item's row is where its name sorts, which in a long
+list is below the fold and not in the tree at all: find it with `requireInVault` or open it with `openItem` /
+`openAnyItem`, which scroll to it, never by waiting for the row to exist.
 
 ## What the simulator can and cannot show
 
@@ -90,6 +105,24 @@ the summary; a red test is a regression or a new finding, never a known gap.
 | `?layout=twice`: a second card-number frame beside the first: no Fill, the popup says the page shows more than one payment form asking for the same card detail and to copy from the app; nothing is filled | Works | `T5…test07` |
 | `?layout=lure` (rounds 12 and 13): the shop asks for the security code alone beside another site's rewards widget with provider frames of its own; after typing into the widget, a tap on the code: two payment forms, no Fill, the popup says so and offers Start over; after Start over, a tap on the code and Fill: the Fill names the security code alone, the code is filled, the widget's fields keep what was typed | Works | `T5…test08` |
 | `?layout=clipped` (round 12): the card frame clipped to its postal-code row; a fill from a tap there writes none of the number, expiry or security code | Works | `T5…test09` |
+| A shared vault made here: Members offers adding someone and this account is its owner; an address the server does not know is said so and nothing is recorded under People you verified | Works | `T4Sharing…test01` |
+| Vault health counts the logins and records a check ("It worked") against the login checked | Works | `T4Sharing…test02` |
+| Delete an empty account from Settings: the preview, the address and the master password, the confirmation, then the server screen | Works | `T5AccountDeletion…test01` |
+| The login editor's password and one-time code key, hidden while typed a key at a time and read back with Show; its notes; saved, and read again from the item (the code is the authenticator's for the key typed) | Works | `T6…test01` |
+| The card editor's number and security code on the number pad, read back with Show; its notes; saved, and read again from the item | Works | `T6…test02` |
+| A note's text, two lines of it, read back from the field and from the saved note | Works | `T6…test03` |
+| The recovery phrase field of "Forgot your master password?": hidden while typed, the same characters once shown | Works | `T6…test04` |
+| The unlock screen's master password typed a key at a time: one dot a character, and it opens the vault | Works | `T6…test05` |
+| A new account enrolled in the app with an invite and then recovered: the enrolment's master password and its confirmation, the recovery phrase typed back, the phrase typed to recover, the new master password and its confirmation, each a key at a time; the new password signs in | Works | `T6…test06` |
+| A note with a text file, a PDF and an image chosen in Files: each listed in the item, opened as what it is, and saved back to Files byte for byte | Works | `T7…test01` |
+| A note with a picture chosen in the photo picker: listed under the name Photos gives it, opened as an image | Works | `T7…test02` |
+| The document scanner | Skipped: the simulator has no camera, so the Add a file menu offers no Scan a document (checked) and no scan can be made | `T7…test03` |
+| A note saved with three 20 MB files while the server stalls and the app leaves the screen: the note is in the vault once with its three files, nothing is left set aside on the device, and one saved back to Files is the file added | Works | `T7…test04` |
+| A Chrome CSV export chosen in Files: the screen says where it is from and what it would add, the import adds its three logins (one with a comma and quotes in its password reads as in the file), and the same file again adds nothing | Works | `T8…test01` |
+| Vault health counts two more logins, two more weak and two more reused after two imported logins that share a weak password, and says of each that it is reused in one other login | Works | `T8…test02` |
+| The vault exported as a CSV into On My iPhone: the screen names the file, the file has the header and as many logins as the screen counted, and an imported login is in it as it went in | Works | `T8…test03` |
+| A backup under a passphrase typed a key at a time, twice: the file saved is an andvari backup (`ANDVBK01`) and holds no seeded password, name or card number in plain text | Works | `T8…test04` |
+| An account that owns a vault someone else reads: the deletion preview names the vault and takes no confirmation; with the vault deleted in Shared vaults the account is deleted, and the app is as a fresh install is, in a new process too: the server screen, and no file, preference or Keychain row of the account or its server on the simulator's disk | Works since the deletion forgets the server too (below) | `T9…test01` |
 
 The Safari tests have helpers for what Safari does on a cold start: it can come up on its start page and drop
 the address it was opened with, show first-run tips over what the tests tap, and offer a fill before the system's
@@ -116,6 +149,22 @@ assertion.
   field (each key changes the draft) ran `updateUIView`, which resigned the first responder of a field that was not
   `focused` (`Support/SecretFields.swift`, since bfd0b412). The field now follows a change of its focus request
   only, and `T4…test08` fails if it lets go again.
+
+- **iOS offers to save a password typed in andvari's own fields** (seen 2026-11-15). After a login whose password
+  was typed into the editor's hidden field is saved, iOS puts its own "Save Password? Securely store your password
+  so it's filled automatically the next time you need it." (Not Now, Save) over the vault; it does the same for the
+  master password after a sign-in or an unlock by typing. A person sees it too, on an iPhone where AutoFill
+  Passwords is on with Apple's Passwords as a provider: the simulator shows it until the AutoFill tests have made
+  andvari the provider, and a run of the whole suite, where they have, showed none after the editor. A password
+  shown with the editor's eye before Save is not offered. The tests answer Not Now and note each time in the
+  summary. Whether andvari should keep iOS from offering to store its master password and its items' passwords
+  elsewhere is a product question, not the tests'.
+
+- **Deleting the account left the server on the device** (found 2026-11-15). After Delete account the app stood
+  on the server screen, but the server's address was still stored: a new process started on the sign-in screen of
+  that server, and what the device kept for other accounts of that server stayed. The owner's rule since: a
+  deletion leaves the app as a fresh install is. `T9…test01` starts the app again after the deletion and lists
+  what is left on the simulator's disk.
 
 - **Card fill into merchant pages, before 2026-11-14** (overtaken by the owner's redesign: a card goes only into a
   payment provider's card form). Under the earlier design the tests found that closing the keyboard with its Done
@@ -153,4 +202,6 @@ enrolled faces.
 - The signed build: entitlements, provisioning profiles, the App Group and Keychain group as TestFlight
   ships them. The tests run an ad hoc signed Debug build.
 - Hardware and OS behaviours the simulator lacks or fakes: a device passcode, lock and unlock of the phone,
-  the clipboard's Universal Clipboard exclusion, timing on a real CPU.
+  the clipboard's Universal Clipboard exclusion, timing on a real CPU, a camera (the document scanner).
+- What a Keychain item holds. The simulator's Keychain is a database on its disk, and a test counts the rows of
+  andvari's access groups there; the items' secrets, and their names, are sealed.

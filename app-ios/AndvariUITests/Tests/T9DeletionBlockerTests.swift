@@ -36,7 +36,7 @@ final class T9DeletionBlockerTests: UITestCase {
             masterPasswordField.typeText("\n")
             expectScreen(.vault, timeout: 90)
             confirmPersonalVaultIfAsked()
-            require(vaultRow(item), "the owner's login in the vault it shares", timeout: 30)
+            requireInVault(item)
         }
         // Whether the simulator's Keychain can be read for andvari's items at all: it holds the session's tokens now.
         var keychainRead = false

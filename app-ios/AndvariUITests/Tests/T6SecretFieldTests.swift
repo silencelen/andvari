@@ -44,8 +44,7 @@ final class T6SecretFieldTests: UITestCase {
             XCTAssertEqual(field.value as? String, notes, "the Notes field does not hold what was typed")
         }
         step("saved-and-read-back") {
-            app.buttons["Save"].tap()
-            require(vaultRow(name), "\(name) in the vault", timeout: 20)
+            saveEditor("New login")
             XCTAssertEqual(revealedPassword(of: name), password, "the password was not saved as typed")
             let code = element("detail.one-time-code")
             require(code, "the one-time code row")
@@ -98,8 +97,7 @@ final class T6SecretFieldTests: UITestCase {
             XCTAssertEqual(field.value as? String, notes, "the Notes field does not hold what was typed")
         }
         step("saved-and-read-back") {
-            app.buttons["Save"].tap()
-            require(vaultRow(name), "\(name) in the vault", timeout: 20)
+            saveEditor("New card")
             openAnyItem(name)
             XCTAssertEqual(revealedDetail("detail.card number", show: "Show card number").filter(\.isNumber), number, "the card number was not saved as typed")
             XCTAssertEqual(revealedDetail("detail.security code", show: "Show security code"), code, "the security code was not saved as typed")
@@ -124,8 +122,7 @@ final class T6SecretFieldTests: UITestCase {
             XCTAssertEqual(field.value as? String, text, "the Note field does not hold what was typed")
         }
         step("saved-and-read-back") {
-            app.buttons["Save"].tap()
-            require(vaultRow(name), "\(name) in the vault", timeout: 20)
+            saveEditor("New note")
             openAnyItem(name)
             XCTAssertTrue(detailNotesRead(text), "the note was not saved as typed")
             app.navigationBars.buttons.firstMatch.tap()

@@ -1,8 +1,8 @@
 # While this file exists the workflow runs only the tests it names (a class, or Class/test), one a line.
 # It is for working on a few tests; it is removed before a branch is handed over.
-T4VaultFeatureTests/test07_TwoStepSetupSurvivesATripAway
 T4VaultFeatureTests/test08_PasswordTypedInTheEditorKeepsTheKeyboard
-T6SecretFieldTests
+T6SecretFieldTests/test01_LoginEditorSecretsTypedAKeyAtATime
+T6SecretFieldTests/test06_EnrolmentAndRecoveryFieldsTypedAKeyAtATime
 T7AttachmentTests
 T8TransferTests
 T9DeletionBlockerTests

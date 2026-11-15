@@ -27,6 +27,38 @@ extension UITestCase {
         entry.tap()
     }
 
+    /// The open editor's Save, and its sheet gone: the item is saved once the editor closes. [title] is the editor's
+    /// own ("New login", "Edit card").
+    func saveEditor(_ title: String, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line) {
+        let bar = app.navigationBars[title]
+        bar.buttons["Save"].tap()
+        if !waitUntil(timeout, { !bar.exists }) {
+            dumpTree(app, as: "editor-not-saved")
+            XCTFail("the \(title) editor did not close within \(Int(timeout)) s of Save. It says: \(screenWords(containing: ["could not", "couldn't", "can't", "too large", "Adding", "Sending", "no longer"]))", file: file, line: line)
+        }
+    }
+
+    /// Whether the vault lists [name], looked for the way a person looks: the list builds only the rows near what it
+    /// shows, so a row that is not there is looked for further down, and from the top again while it has not come (a
+    /// save still on its way). A new item's row is where its name sorts, not where the list happens to stand.
+    func findInVault(_ name: String, timeout: TimeInterval = 30) -> Bool {
+        let row = vaultRow(name)
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if waitUntil(3, { row.exists }) { return true }
+            if scrollToComfort(row, tries: 10) || row.exists { return true }
+            if Date() >= deadline { return false }
+            for _ in 0..<3 { app.swipeDown() }
+        }
+    }
+
+    func requireInVault(_ name: String, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line) {
+        if !findInVault(name, timeout: timeout) {
+            dumpTree(app, as: "not-in-the-vault")
+            XCTFail("\(name) is not in the vault list, looked for from its top to its foot", file: file, line: line)
+        }
+    }
+
     /// Scroll an editor's form up until [element] can be tapped: above the keyboard when one is up, clear of the bars
     /// otherwise. The drag is made in the upper part of the screen, which a keyboard never covers: one that starts on
     /// the keyboard types, or moves the cursor.

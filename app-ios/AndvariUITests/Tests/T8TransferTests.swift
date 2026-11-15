@@ -42,7 +42,7 @@ final class T8TransferTests: UITestCase {
         }
         step("logins-in-the-vault-as-in-the-file") {
             for login in logins {
-                require(vaultRow(login.name), "\(login.name) in the vault", timeout: 20)
+                requireInVault(login.name)
             }
             let tricky = logins[2]
             XCTAssertEqual(revealedPassword(of: tricky.name), tricky.password, "the imported password is not the file's")

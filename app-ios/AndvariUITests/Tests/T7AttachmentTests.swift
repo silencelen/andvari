@@ -137,7 +137,7 @@ final class T7AttachmentTests: UITestCase {
         step("saved-and-left-while-sending") {
             // The server stops for a few seconds, as a network stalls: the files cannot all be up when the app leaves.
             XCTAssertNil(OtherDevice.stallServer(seconds: 6), "the server could not be stalled")
-            app.buttons["Save"].tap()
+            app.navigationBars["New note"].buttons["Save"].tap()
             XCUIDevice.shared.press(.home)
             setAside = LocalState.filesSetAside().count
             XCTAssertGreaterThan(setAside, 0, "no file of the save was still set aside on the device when the app left: the save had already finished")
@@ -161,7 +161,7 @@ final class T7AttachmentTests: UITestCase {
         }
         step("note-saved-once-with-its-files") {
             let rows = app.descendants(matching: .any).matching(identifier: "vault.item." + note)
-            if !waitUntil(150, { rows.count >= 1 }) {
+            if !findInVault(note, timeout: 150) {
                 dumpTree(app, as: "note-not-saved")
                 XCTFail("\(note) is not in the vault after the app came back. The vault says: \(vaultWords())")
             }
@@ -249,12 +249,10 @@ final class T7AttachmentTests: UITestCase {
         _ = waitUntil(5) { !self.app.keyboards.firstMatch.exists }
     }
 
+    /// Save the note with its files (they go up with it) and find it in the vault.
     private func saveNote(_ name: String) {
-        app.buttons["Save"].tap()
-        if !waitUntil(60, { self.vaultRow(name).exists }) {
-            dumpTree(app, as: "item-not-saved")
-            XCTFail("\(name) is not in the vault after Save. The editor says: \(editorWords())")
-        }
+        saveEditor("New note", timeout: 90)
+        requireInVault(name)
     }
 
     /// What the editor says about its files: a refusal, or that it is still adding or sending.
