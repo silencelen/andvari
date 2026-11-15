@@ -261,8 +261,10 @@ newest release. (`bringup.sh --build` users: `git pull` and re-run with `--build
 
 **Schema migrations run themselves, forward only.** The server stamps a
 `meta.schemaVersion` in its SQLite DB and applies any missing steps at boot — you never
-run a migration tool. As of 0.25.0 the current version is **9** (the usage ledger, spec 02
-§8.2). There are no down-migrations: an older image pointed at a newer DB is not a
+run a migration tool. As of 0.30.0 the current version is **17** (v16 keeps the ids of
+deleted accounts so they are never registered again, v17 indexes the change journal by
+account; both for account deletion, spec 03 §13). There are no down-migrations, and the
+server does not refuse a database newer than itself: an older image pointed at a newer DB is not a
 supported state, so **take the backup below before you pull**, and roll back by restoring
 `./data`, not by downgrading in place. Migrations only ever touch the server's own tables
 and metadata — vault contents are ciphertext the server cannot read, so no upgrade can
