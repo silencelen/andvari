@@ -34,12 +34,17 @@ export interface LoginForm {
   password: HTMLInputElement | null;
   /** Generator fill targets: every new-password field (primary + confirm). Empty when !isSignup. */
   newPasswords: HTMLInputElement[];
+  /** Every password field of the form, in document order: the fields the capture engine may read (content.ts captureField,
+   *  [chooseEnteredCapture]). Each passed the detection visibility rules ([isVisible]) when the form was scanned, as every
+   *  collected field does. Empty on a username-step form. */
+  passwords: HTMLInputElement[];
   /** H04 (2026-09-13 audit): the field whose value the CAPTURE engine records as "the password"
    *  — distinct from `password`, which is the FILL target. On a change-password form the fill
    *  target is the current-password field (that is what a login fill must write), but the value
    *  worth saving is the NEW one; reading `password` for capture saved the OLD password (or, with
    *  the generator, nothing the vault ever learned — the generated value went only into
-   *  newPasswords). Chosen by chooseCapturePassword; null only on a username-step form. */
+   *  newPasswords). Chosen by chooseCapturePassword; null only on a username-step form. The capture engine reads it only
+   *  while the person has entered nothing into the form's passwords: what they entered comes first ([chooseEnteredCapture]). */
   capturePassword: HTMLInputElement | null;
   isSignup: boolean;
   /** CVV-negative rule (cards design 2026-07-09): true when the form's LONE password-typed
@@ -1189,6 +1194,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       username: users[0]!.input,
       password: null,
       newPasswords: [],
+      passwords: [],
       capturePassword: null,
       isSignup: false,
       suppressSave: isCardForm,
@@ -1239,7 +1245,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       primary.input.type === "password" &&
       (isCvvNameOrId(primary.input.name) || isCvvNameOrId(primary.input.id)));
 
-  return { kind: "login", form, container, username, password: primary.input, newPasswords, capturePassword, isSignup, suppressSave };
+  return { kind: "login", form, container, username, password: primary.input, newPasswords, passwords: passwords.map((p) => p.input), capturePassword, isSignup, suppressSave };
 }
 
 /**
@@ -1264,6 +1270,28 @@ export function chooseCapturePassword<T>(passwords: readonly T[], newPasswords: 
   if (newPasswords.length > 0) return newPasswords[0]!;
   if (passwords.length >= 3) return passwords[1]!;
   return fillTarget;
+}
+
+/**
+ * The field the capture engine reads, preferring what the person ENTERED (0.30.0 release check): a field that received
+ * trusted input (typed, pasted, the browser's own autofill), or one andvari filled or generated a password into at their
+ * request ([entered]; content.ts records both). Pure, like [chooseCapturePassword], over the form's password fields in
+ * document order, every one of which passed the detection visibility rules.
+ *
+ * A honeypot trap is a password field the page keeps from people, so nobody enters anything into it. Most traps fail the
+ * visibility rules and are never fields at all; one drawn under another field passes them (the hit test is a fill-time
+ * rule), and two such traps beside the real password read as the three-field change-password shape, whose capture is the
+ * SECOND field: a trap, empty, so the person's password was never offered for saving (or a trap a script filled was).
+ * So: [chooseCapturePassword]'s pick when the person entered it, or entered nothing at all; otherwise the same rule over
+ * the fields they did enter. A change of password the person typed out keeps its pick (they typed every field), and a
+ * field they typed into is never passed over for one they did not.
+ */
+export function chooseEnteredCapture<T>(passwords: readonly T[], newPasswords: readonly T[], fillTarget: T, entered: (field: T) => boolean): T {
+  const chosen = chooseCapturePassword(passwords, newPasswords, fillTarget);
+  if (entered(chosen)) return chosen;
+  const typed = passwords.filter(entered);
+  if (typed.length === 0) return chosen;
+  return chooseCapturePassword(typed, newPasswords.filter(entered), entered(fillTarget) ? fillTarget : typed[0]!);
 }
 
 interface FieldGroup {

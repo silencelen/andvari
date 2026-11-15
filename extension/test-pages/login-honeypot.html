@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>andvari test: honeypot traps beside a real login</title>
+<style>
+  /* The filltest site's rules that decide where each field lands (assets/ft.css), so the page lays out as the site does. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 16px; max-width: 52rem; }
+  .demo { border: 1px solid #d8d8d2; border-radius: 8px; padding: 1rem; margin: 1rem 0; max-width: 30rem; background: #fff; }
+  .row { margin: 0 0 0.85rem; }
+  .row label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+  input[type=text], input[type=password] { font: inherit; width: 100%; max-width: 28rem; padding: 0.55rem 0.65rem; border: 1px solid #d8d8d2; border-radius: 6px; }
+  /* The traps, each hidden a different way. The page's input rule above is more specific than .trap-tiny and .trap-clip,
+     so those two are drawn full width and about 20 px high, one under the next, where only a hit test sees they are covered. */
+  .trap-wrap { position: relative; }
+  .trap-display-none { display: none; }
+  .trap-visibility { visibility: hidden; height: 0; margin: 0; overflow: hidden; }
+  .trap-offscreen { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+  .trap-opacity-wrap { position: relative; height: 2.4rem; max-width: 28rem; margin-bottom: 0.85rem; }
+  .trap-opacity { position: absolute; inset: 0; opacity: 0; }
+  .trap-tiny { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; top: 0; left: 0; }
+  .trap-clip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .trap-covered { position: relative; height: 2.6rem; max-width: 28rem; margin-bottom: 0.85rem; }
+  .trap-covered input { position: absolute; inset: 0; }
+  .trap-covered .cover { position: absolute; inset: -2px; background: #fff; z-index: 2; display: flex; align-items: center; color: #5d5d58; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<h1>Honeypot traps beside a real login</h1>
+<p>The filltest site's honeypot page (login/honeypot.html), its form as the site serves it: seven username and password
+traps around the real fields, each hidden a different way. capture.honeypot.test.ts reads this markup.</p>
+<ul>
+  <li>Only the two real fields fill: the seven traps stay empty.</li>
+  <li>Type a username and a password into the real fields, then Sign in: the save offer holds the password you typed.
+  Until the 0.30.0 release check the capture read the "1 by 1 px" trap instead (empty, so nothing was offered): the
+  page's own input rule draws that trap and the clipped one full width under the next trap, where the detection rules
+  count them as password fields, and three password fields read as a change of password, whose capture is the second.</li>
+</ul>
+<form class="demo" method="post" action="#" onsubmit="return false" data-ft-form="login-honeypot">
+<div class="trap-display-none" aria-hidden="true"><label for="hp1">Username</label><input type="text" id="hp1" name="username_confirm" tabindex="-1" autocomplete="off" data-ft="Trap: username, display:none" data-expect="empty" data-trap="1"></div>
+<div class="trap-wrap" aria-hidden="true"><input type="text" id="hp2" class="trap-offscreen" name="login" tabindex="-1" autocomplete="off" aria-label="Login" data-ft="Trap: username, moved off screen" data-expect="empty" data-trap="1"></div>
+<div class="row"><label for="real-user">Username</label><input type="text" id="real-user" name="username" autocomplete="username" data-ft="Username (real)" data-expect="username"></div>
+<div class="trap-opacity-wrap" aria-hidden="true"><input type="text" class="trap-opacity" id="hp3" name="email" tabindex="-1" autocomplete="off" aria-label="Email" data-ft="Trap: username, opacity 0" data-expect="empty" data-trap="1"></div>
+<div class="row"><label for="real-pass">Password</label><input type="password" id="real-pass" name="password" autocomplete="current-password" data-ft="Password (real)" data-expect="password"></div>
+<div class="trap-visibility" aria-hidden="true"><input type="password" id="hp4" name="password_confirm" tabindex="-1" autocomplete="off" aria-label="Password" data-ft="Trap: password, visibility hidden" data-expect="empty" data-trap="1"></div>
+<div class="trap-wrap" aria-hidden="true"><input type="password" class="trap-tiny" id="hp5" name="pass2" tabindex="-1" autocomplete="off" aria-label="Password" data-ft="Trap: password, 1 by 1 px" data-expect="empty" data-trap="1"></div>
+<div class="trap-wrap" aria-hidden="true"><input type="password" class="trap-clip" id="hp6" name="pw" tabindex="-1" autocomplete="off" aria-label="Password" data-ft="Trap: password, clipped away" data-expect="empty" data-trap="1"></div>
+<div class="trap-covered" aria-hidden="true"><input type="text" id="hp7" name="user" tabindex="-1" autocomplete="off" aria-label="Username" data-ft="Trap: username, covered by another element" data-expect="empty" data-trap="1"><div class="cover">(a field is hidden under this box)</div></div>
+<div class="actions"><button type="submit">Sign in</button></div>
+</form>
+</body>
+</html>

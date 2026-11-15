@@ -7,7 +7,7 @@
 // existed only in the page) was silently lost.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { chooseCapturePassword } from "./detect.ts";
+import { chooseCapturePassword, chooseEnteredCapture } from "./detect.ts";
 
 // Fields are stand-ins: only identity matters, and document order is the array order.
 const current = { name: "current" };
@@ -48,3 +48,66 @@ test("the capture choice never returns a field outside the form's own passwords"
     assert.ok(pw.includes(chooseCapturePassword(pw, nw, fill)));
   }
 });
+
+// ---- what the person entered comes first (0.30.0 release check) ----
+//
+// chooseEnteredCapture: a field that received trusted input, or that andvari filled or generated into at the person's
+// request, is read before one that did not. A honeypot trap is never entered; one drawn under another field passes the
+// detection rules, and two of them beside the real password read as the three-field change-password shape.
+const trap = { name: "trap" };
+const trap2 = { name: "trap2" };
+const real = { name: "real" };
+const only = (...fields: object[]) => (f: object): boolean => fields.includes(f);
+const nobody = (): boolean => false;
+
+test("entered: nothing entered leaves every shape's pick as it was", () => {
+  for (const [pw, nw, fill] of [
+    [[current], [], current],
+    [[current, fresh, confirm], [fresh, confirm], current],
+    [[current, fresh, confirm], [], current],
+    [[fresh, confirm], [fresh, confirm], fresh],
+    [[real, trap, trap2], [], real],
+  ] as const) {
+    assert.equal(chooseEnteredCapture(pw, nw, fill, nobody), chooseCapturePassword(pw, nw, fill));
+  }
+});
+
+test("entered: two traps beside the real password no longer make the capture read a trap", () => {
+  // The filltest honeypot page as a browser's detection sees it: the real password, then two covered traps.
+  assert.equal(chooseCapturePassword([real, trap, trap2], [], real), trap, "the pick without what was entered");
+  assert.equal(chooseEnteredCapture([real, trap, trap2], [], real, only(real)), real);
+  // A trap before the real password (two unflagged passwords read as the signup pair; the fill target is the trap).
+  assert.equal(chooseEnteredCapture([trap, real], [trap, real], trap, only(real)), real);
+  // And a trap inside a change of password the person typed out.
+  assert.equal(chooseEnteredCapture([current, trap, fresh, confirm], [], current, only(current, fresh, confirm)), fresh);
+});
+
+test("entered: a change of password keeps its pick once the new password is typed", () => {
+  // Hintless: while only the current password is typed the capture holds it; the new one replaces it as it is typed.
+  assert.equal(chooseEnteredCapture([current, fresh, confirm], [], current, only(current)), current);
+  assert.equal(chooseEnteredCapture([current, fresh, confirm], [], current, only(current, fresh)), fresh);
+  assert.equal(chooseEnteredCapture([current, fresh, confirm], [], current, only(current, fresh, confirm)), fresh);
+  // Hinted: the new-password field, as before.
+  assert.equal(chooseEnteredCapture([current, fresh, confirm], [fresh, confirm], current, only(current, fresh, confirm)), fresh);
+  // A generated password lands in both new fields, which andvari records as entered.
+  assert.equal(chooseEnteredCapture([current, fresh, confirm], [fresh, confirm], current, only(fresh, confirm)), fresh);
+});
+
+test("entered: a field the person entered is never passed over for one they did not", () => {
+  const shapes = [
+    [[current], [], current],
+    [[current, fresh, confirm], [fresh, confirm], current],
+    [[current, fresh, confirm], [], current],
+    [[fresh, confirm], [fresh, confirm], fresh],
+    [[real, trap, trap2], [], real],
+    [[trap, real], [trap, real], trap],
+  ] as const;
+  for (const [pw, nw, fill] of shapes) {
+    for (let mask = 1; mask < 1 << pw.length; mask++) {
+      const typed = pw.filter((_, i) => mask & (1 << i));
+      const got = chooseEnteredCapture(pw, nw, fill, only(...typed));
+      assert.ok(typed.includes(got), `${pw.map((f) => f.name).join(",")} typed ${typed.map((f) => f.name).join(",")}: ${got.name}`);
+    }
+  }
+});
+
