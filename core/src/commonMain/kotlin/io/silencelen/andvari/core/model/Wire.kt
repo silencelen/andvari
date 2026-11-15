@@ -614,6 +614,49 @@ data class TotpSetupRequest(val code: String? = null, val currentAuthKey: String
 @Serializable
 data class TotpStatus(val enrolled: Boolean, val pendingSetup: Boolean)
 
+// ---- account deletion (spec 03 §13; design docs/design/2026-11-10-account-deletion.md) ----
+
+/**
+ * One reason the server refuses to delete the caller's account (spec 03 §13). [kind]:
+ *  - `shared_vault`: the caller owns [vaultId] and [others] other accounts still hold an active grant to it.
+ *    Delete the vault or transfer its ownership (spec 03 §11), then retry.
+ *  - `last_admin`: the caller is the instance's only active admin and [others] other accounts exist on it.
+ * A client MUST treat a kind it does not know as a blocker it cannot explain: it shows it generically and never
+ * offers to proceed past it.
+ */
+@Serializable
+data class AccountDeleteBlocker(val kind: String, val vaultId: String? = null, val others: Int = 0)
+
+/**
+ * `GET /account/delete/preview`: what `POST /account/delete` would do right now. [deletedVaults] are deleted with the
+ * account (its personal vault and every vault only it holds, a soft-deleted one included); [leftVaults] are other
+ * people's vaults whose membership is dropped, as a leave would. [totpRequired]: the account has server TOTP enrolled,
+ * so the deletion must carry the current code. A snapshot: the deletion re-checks everything inside its own tx.
+ */
+@Serializable
+data class AccountDeletePreview(
+    val blockers: List<AccountDeleteBlocker> = emptyList(),
+    val deletedVaults: List<String> = emptyList(),
+    val leftVaults: List<String> = emptyList(),
+    val totpRequired: Boolean = false,
+)
+
+/**
+ * `POST /account/delete`. [confirmEmail] is the address the human typed to confirm (compared trimmed and lowercased
+ * with the account's), [currentAuthKey] the fresh master-password proof (verified like a password change), [totp] the
+ * current code when the account has server TOTP enrolled.
+ */
+@Serializable
+data class AccountDeleteRequest(val confirmEmail: String, val currentAuthKey: String, val totp: String? = null)
+
+@Serializable
+data class AccountDeleteResponse(val deletedAt: Long)
+
+/** The `409 account_delete_blocked` body: the house [ApiError] fields plus the blockers (additive, so a client that
+ *  decodes only [ApiError] still reads the code). */
+@Serializable
+data class AccountDeleteBlockedError(val error: String, val message: String, val blockers: List<AccountDeleteBlocker>)
+
 // ---- admin ----
 
 @Serializable

@@ -348,28 +348,39 @@ internal fun purgeRetiredEscrowLegacy(repo: Repo, config: Config) {
     if (purged) repo.db.checkpointTruncate()
 }
 
-private fun seedBootstrap(repo: Repo, config: Config) {
+internal fun seedBootstrap(repo: Repo, config: Config) {
     val userCount = repo.db.read { it.queryOne("SELECT COUNT(*) FROM users") { rs -> rs.getInt(1) } ?: 0 }
     if (userCount > 0) return
+    // With ZERO accounts, no invite row has any business left: an expired one is debris (#22: it
+    // used to count as "existing" and block the re-mint until the janitor's 30-day prune, bricking
+    // a first-run admin whose 72 h fuse lapsed); a USED one was redeemed by an account that has
+    // since deleted itself (account deletion, spec 03 §13 — a used `*` row blocked the re-mint the
+    // same way, with no log line, for ~33 days); and a live one is authority left over from a
+    // household that no longer exists. Only the operator's bootstrap token may enrol the next first
+    // admin, so every row goes BEFORE minting, in the minting tx — which also frees the tokenHash PK
+    // for the same token. A live bootstrap invite from an earlier start is simply minted again (same
+    // token, a fresh 72 h). Account deletion clears the table itself when it removes the last
+    // account; this is the belt for a database emptied any other way (or by an older build).
     val token = config.bootstrapToken?.takeIf { it.length >= INVITE_TOKEN_MIN_CHARS }
+    val tokenHash = token?.let { ServerCrypto.hashToken(it) }
+    val stale = repo.db.tx { c ->
+        // Said in the log only for rows other than this token's own unredeemed invite, which an unenrolled instance
+        // re-mints at every start and is not news.
+        val n = c.queryOne("SELECT COUNT(*) FROM invites WHERE NOT (tokenHash IS ? AND usedAt IS NULL)", tokenHash) { it.getInt(1) } ?: 0
+        c.exec("DELETE FROM invites")
+        if (tokenHash != null) {
+            c.exec(
+                "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,1,?,?)",
+                tokenHash, BOOTSTRAP_ANY_EMAIL, now(), now() + 72L * 3600 * 1000,
+            )
+        }
+        n
+    }
+    if (stale > 0) System.err.println("[andvari] no accounts: cleared $stale invite row(s) an earlier household left (used, expired, or minted by an account that no longer exists)")
     if (token == null) {
         val why = if (config.bootstrapToken.isNullOrBlank()) "is unset or blank" else "is shorter than $INVITE_TOKEN_MIN_CHARS characters"
         System.err.println("[andvari] WARNING: no users yet and ANDVARI_BOOTSTRAP_TOKEN $why — no admin invite minted; set a random token (deploy/bringup.sh mints one) to enroll the first admin")
         return
-    }
-    // #22 self-heal: with ZERO users no invite was ever redeemed (redeem creates the user in the
-    // same tx), so an EXPIRED leftover row here is pure debris — yet it used to count as "existing"
-    // and block re-minting until the janitor's 30-day prune, bricking a first-run admin whose 72 h
-    // fuse lapsed before enrollment. Clear it (which also frees the tokenHash PK for the same
-    // ANDVARI_BOOTSTRAP_TOKEN), then only a LIVE invite blocks the re-mint.
-    repo.db.tx { c -> c.exec("DELETE FROM invites WHERE usedAt IS NULL AND expiresAt < ?", now()) }
-    val existing = repo.db.read { it.queryOne("SELECT COUNT(*) FROM invites") { rs -> rs.getInt(1) } ?: 0 }
-    if (existing > 0) return
-    repo.db.tx { c ->
-        c.exec(
-            "INSERT INTO invites(tokenHash,email,isAdmin,createdAt,expiresAt) VALUES(?,?,1,?,?)",
-            ServerCrypto.hashToken(token), BOOTSTRAP_ANY_EMAIL, now(), now() + 72L * 3600 * 1000,
-        )
     }
     System.err.println("[andvari] bootstrap admin invite created (redeem with ANDVARI_BOOTSTRAP_TOKEN and any email)")
 }
@@ -403,6 +414,11 @@ fun Application.andvariModule(services: Services) {
                 is BadRequest -> call.respond(HttpStatusCode.BadRequest, ApiError(cause.reason, "bad request"))
                 is NotFound -> call.respond(HttpStatusCode.NotFound, ApiError(cause.reason, "not found"))
                 is Conflict -> call.respond(HttpStatusCode.Conflict, ApiError(cause.reason, "conflict"))
+                // spec 03 §13: the house error shape plus WHAT blocks the deletion (additive field).
+                is AccountDeleteBlocked -> call.respond(
+                    HttpStatusCode.Conflict,
+                    io.silencelen.andvari.core.model.AccountDeleteBlockedError("account_delete_blocked", "account deletion is blocked", cause.blockers),
+                )
                 is Gone -> call.respond(HttpStatusCode.Gone, ApiError(cause.reason, "gone"))
                 is ResyncRequired -> call.respond(HttpStatusCode.Gone, ApiError("resync_required", "cursor predates retained history"))
                 is RateLimited -> call.respond(HttpStatusCode.TooManyRequests, ApiError("rate_limited", "slow down"))
@@ -745,6 +761,35 @@ fun Application.andvariModule(services: Services) {
             if (!limiter.allow("totp_verify:${p.userId}", 5, 60_000)) throw RateLimited()
             service.totpDisable(p.userId, call.receive<TotpCodeRequest>().code, call.clientIp(config))
             call.respond(service.totpStatus(p.userId))
+        }
+
+        // ---- account deletion (spec 03 §13; design docs/design/2026-11-10-account-deletion.md) ----
+        // Both routes: authenticated (a §2.6 TOTP-restricted session is refused like every other route — enroll, then
+        // delete), version-pinned like the §11 lifecycle routes, and REFUSED on the break-glass twin origin: deleting an
+        // account is the most destructive sit-at-home operation there is, and the emergency origin exists to READ a vault
+        // from somewhere hostile, never to administer one (spec 03 §8 and §10–§12 refuse register, sharing, lifecycle and
+        // recovery there for the same reason).
+        get("/api/v1/account/delete/preview") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("account_delete_public_disabled")
+            call.respond(service.accountDeletePreview(p))
+        }
+        post("/api/v1/account/delete") {
+            val p = requirePrincipal(call, service)
+            enforceVersion(call, service)
+            if (call.isPublicOrigin(config)) throw Forbidden("account_delete_public_disabled")
+            // A memory-hard verify per attempt, and every reauth route a session holder can reach is one more password
+            // guess per window — so this one is per HOUR, not the password-change route's per minute: a member deletes an
+            // account once, and five typos in an hour is already a bad day.
+            if (!limiter.allow("account_delete:${p.userId}", 5, 3_600_000)) throw RateLimited()
+            val req = call.receive<io.silencelen.andvari.core.model.AccountDeleteRequest>()
+            // A code checked against the LIVE factor draws on that factor's shared budget (see the TOTP routes above).
+            if (req.totp != null && service.totpStatus(p.userId).enrolled && !limiter.allow("totp_verify:${p.userId}", 5, 60_000)) throw RateLimited()
+            val resp = service.deleteAccount(p, req, call.clientIp(config))
+            // M8: every session of the account is gone — lock and close each of its sockets (this tab's included).
+            services.notifier.notifyRevokedUser(p.userId)
+            call.respond(resp)
         }
 
         // ---- attachments (spec 02 §6: blob first, then the item update referencing it) ----
@@ -1216,8 +1261,17 @@ fun Application.andvariModule(services: Services) {
             // members' blobs were pulled. Written BEFORE the lookup so a miss (a waived member,
             // an unknown id) is recorded too — the attempt is the interesting event. Meta = the
             // target userId, the same shape user_disable / recovery_apply use; the row's own
-            // userId is the ACTING admin. Own tx (repo.audit): the route holds no tx here.
-            services.repo.audit("escrow_admin_read", p.userId, null, call.clientIp(config), targetId)
+            // userId is the ACTING admin.
+            // Account deletion (spec 03 §13): meta names the target only while that account exists. An id asked for after
+            // its account was deleted (an old admin screen) must not come back into the trail the deletion scrubbed, so a
+            // miss on the account is recorded as `no_such_user`. The check and the write share one tx: a deletion either
+            // committed first (the row says no_such_user) or commits after (its audit pass swaps the id in this row's meta
+            // for the pseudonym, as in every other row).
+            val ip = call.clientIp(config)
+            services.repo.db.tx { c ->
+                val exists = c.queryOne("SELECT 1 FROM users WHERE userId=?", targetId) { 1 } != null
+                services.repo.auditOn(c, "escrow_admin_read", p.userId, null, ip, if (exists) targetId else "no_such_user")
+            }
             // 404, not 400: the id was well-formed, the row simply isn't there — the same stance
             // every other state-of-the-world miss takes (no_such_user, not_a_member). A 400 told
             // the Admin UI "you sent a bad id" for a member who is merely waived (bug-server--9).

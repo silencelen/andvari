@@ -635,5 +635,47 @@ class Db(path: String) : AutoCloseable {
                 }
             }
         }
+        if (version < 16) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Account deletion (spec 03 §13, design 2026-11-10): the ids a deleted account leaves behind that must
+                    // never name a NEW account — its userId (re-registering it would revive every lookup of the old one)
+                    // and the pseudonym its retained audit rows carry (an account registered under it would have its own
+                    // security rows erased by the 90-day purge). The CLIENT chooses its userId at register (the AEAD ADs
+                    // bind it), so register checks this table beside `users`. Stored as lowercase-hex SHA-256 of the id,
+                    // never the id: the deletion's promise is that no column names the deleted userId, and a digest of a
+                    // random 122-bit id answers only "was this id retired?" for someone who already holds it. No
+                    // timestamp, deliberately: it would keep the deletion's date beside that digest forever.
+                    // Idempotent: a restore drill that rewinds the marker re-runs this.
+                    st.executeUpdate("CREATE TABLE IF NOT EXISTS retired_ids(idHash TEXT PRIMARY KEY)")
+                    st.executeUpdate("UPDATE meta SET value='16' WHERE key='schemaVersion'")
+                }
+            }
+        }
+        if (version < 17) {
+            tx { c ->
+                c.createStatement().use { st ->
+                    // Account deletion (spec 03 §13): the idempotency journal named only a deviceId, and the janitor prunes a
+                    // session-less device row after 90 days while the journal keeps its rows 180 — so a deletion that found
+                    // the account's journal through `devices` missed every pruned device's rows (and their device ids). The
+                    // pushing account now rides on each new row. Existing rows take it from their device row where that still
+                    // exists; a row whose device is already pruned stays NULL, and the deletion still finds it through the
+                    // device ids on the account's own audit rows, or it ages out within the 180 days. Idempotent: a restore
+                    // drill that rewinds the marker re-runs this.
+                    val cols = st.executeQuery("PRAGMA table_info(mutations)").use { rs ->
+                        val names = HashSet<String>()
+                        while (rs.next()) names.add(rs.getString("name"))
+                        names
+                    }
+                    if ("userId" !in cols) st.executeUpdate("ALTER TABLE mutations ADD COLUMN userId TEXT")
+                    st.executeUpdate(
+                        "UPDATE mutations SET userId=(SELECT d.userId FROM devices d WHERE d.deviceId=mutations.deviceId) WHERE userId IS NULL",
+                    )
+                    // The deletion reads and deletes by it; without the index each is a scan of 180 days of pushes.
+                    st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_mutations_user ON mutations(userId)")
+                    st.executeUpdate("UPDATE meta SET value='17' WHERE key='schemaVersion'")
+                }
+            }
+        }
     }
 }
