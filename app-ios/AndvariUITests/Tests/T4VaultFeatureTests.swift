@@ -329,7 +329,10 @@ final class T4VaultFeatureTests: UITestCase {
         }
         step("saved-as-typed") {
             app.buttons["Save"].tap()
-            require(vaultRow(name), "\(name) in the vault", timeout: 15)
+            // The editor closes once the login is saved. The list builds only the rows near what it shows, and by now it
+            // is longer than the screen: the new row, late in the alphabet, is found by scrolling to it, not by waiting
+            // for it where the list stands.
+            XCTAssertTrue(waitUntil(20) { !self.app.navigationBars["New login"].exists }, "the editor did not close after Save")
             XCTAssertEqual(revealedPassword(of: name), typed, "the password was not saved as typed")
             app.navigationBars.buttons.firstMatch.tap()
         }
