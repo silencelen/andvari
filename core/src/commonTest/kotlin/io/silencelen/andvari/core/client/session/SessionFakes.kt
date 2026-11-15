@@ -46,7 +46,7 @@ internal class FakeOriginStore : OriginStore {
         stamps.remove(userId)
     }
 
-    override fun identityPins() = SelfIdentityPin.KeyValueStore({ pinMap[it] }, { k, v -> pinMap[k] = v })
+    override fun identityPins() = SelfIdentityPin.KeyValueStore({ pinMap[it] }, { k, v -> pinMap[k] = v }, { pinMap.remove(it) })
 }
 
 internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPersistence {

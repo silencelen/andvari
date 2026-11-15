@@ -72,9 +72,14 @@ object SelfIdentityPin {
     /**
      * The pin logic over ONE origin's string key-value namespace (Android prefs; the desktop keeps files with the
      * same semantics). Keys: `selfIdentityPub.<userId>` (the pre-A11 pin, unchanged) and
-     * `selfIdentityByEmail.<normalised email>` (the [Binding]). Both are written once and never overwritten.
+     * `selfIdentityByEmail.<normalised email>` (the [Binding]). Both are written once and never overwritten, and removed
+     * only by [forget], after a deletion of the account that this device ran.
      */
-    class KeyValueStore(private val get: (String) -> String?, private val put: (String, String) -> Unit) {
+    class KeyValueStore(
+        private val get: (String) -> String?,
+        private val put: (String, String) -> Unit,
+        private val remove: (String) -> Unit,
+    ) {
         private fun legacyKey(userId: String) = "selfIdentityPub.$userId"
         private fun bindingKey(email: String) = "selfIdentityByEmail.${normalizeEmail(email)}"
 
@@ -88,6 +93,19 @@ object SelfIdentityPin {
         fun record(userId: String, email: String, account: Account) {
             if (get(legacyKey(userId)) == null) put(legacyKey(userId), encode(account))
             if (email.isNotBlank() && get(bindingKey(email)) == null) put(bindingKey(email), encodeBinding(userId, account))
+        }
+
+        /**
+         * Account deletion (spec 03 §13 client duties; spec 01 §5 as amended 2026-11-10): the device that RAN a deletion the
+         * server confirmed forgets its records for that account, so the address can register again here as a new account
+         * instead of meeting the security fault at its first unlock. The userId-keyed pin goes; the email binding goes only
+         * when it names [userId] (one at the same address for another account is not this deletion's to remove). Every
+         * other device keeps its records (spec 05 R19(c)). The web client's forgetSelfIdentity.
+         */
+        fun forget(userId: String, email: String) {
+            remove(legacyKey(userId))
+            if (email.isBlank()) return
+            if (decodeBinding(get(bindingKey(email)))?.userId == userId) remove(bindingKey(email))
         }
 
         /** Migration: bind a pre-A11 pin of the saved session ([userId], [email]) to that email, once. */

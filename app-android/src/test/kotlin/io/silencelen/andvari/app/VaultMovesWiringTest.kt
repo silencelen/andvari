@@ -68,7 +68,7 @@ class VaultMovesWiringTest {
         assertTrue(vm.contains("""private val moves = VaultMoves(VaultMoves.Store.Sealed(AppPrivateFile(File(cacheDir, "move-memos.bin"))) { account })"""))
         assertTrue(span(vm, "fun closeMovePicker() {", "\n    }\n").contains("movePickerItemId?.let(moves::cancelled)"), "Cancel/dismiss drops it")
         assertTrue(vm.contains("moves.forget() // L5"), "a lock keeps it, sealed, out of memory")
-        assertEquals(2, Regex("""moves\.drop\(\)""").findAll(vm).count(), "a sign-out and an ended session drop it")
+        assertEquals(3, Regex("""moves\.drop\(\)""").findAll(vm).count(), "a sign-out, an ended session and a deleted account drop it")
     }
 
     @Test

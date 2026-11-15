@@ -250,7 +250,11 @@ class PrefsSessionPersistence(
         override fun clearPasswordStamp(userId: String) = prefs.putString(k("stamp.${user(userId)}"), null)
 
         override fun identityPins(): SelfIdentityPin.KeyValueStore =
-            SelfIdentityPin.KeyValueStore(get = { prefs.getString(k(it)) }, put = { name, value -> prefs.putString(k(name), value) })
+            SelfIdentityPin.KeyValueStore(
+                get = { prefs.getString(k(it)) },
+                put = { name, value -> prefs.putString(k(name), value) },
+                remove = { prefs.putString(k(it), null) },
+            )
     }
 
     private companion object {
