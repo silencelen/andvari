@@ -51,6 +51,9 @@ const cardFill = target === "safari" ? process.env.CARDFILL === "1" : process.en
 /** Strings only the card path's handlers hold (background.ts fillCardFromPopup and revealCardForFill): a build without
  *  card fill must not contain them, a build with it must. */
 const CARD_PATH_MARKERS = ["card fill wrote nothing", "no card grant"];
+// And the content script's in-page card fill: the report of a frame's card forms and choice, the chip, and the fill's
+// redemption (content.ts gates each on the define, so a build without card fill bundles none of them).
+const CONTENT_CARD_MARKERS = ["cardFormInfo", "cardChipOffer", "Fill card with andvari", "revealCardForFill"];
 
 // The pages the Safari build does not ship: the server is chosen in the andvari app (no Options page), quick unlock is
 // the app's Face ID (no WebAuthn connector window), and Chrome's offscreen clipboard document has no use there. The
@@ -151,5 +154,9 @@ if (!debug && !uitest) {
   const held = CARD_PATH_MARKERS.filter((m) => worker.includes(m));
   if (!cardFill && held.length > 0) throw new Error(`a build without card fill must not bundle the card path, but dist/background.js holds: ${held.join(", ")}`);
   if (cardFill && held.length !== CARD_PATH_MARKERS.length) throw new Error("a build with card fill lost its card path markers: build.mjs and background.ts disagree");
+  const content = readFileSync("dist/content.js", "utf8");
+  const inPage = CONTENT_CARD_MARKERS.filter((m) => content.includes(m));
+  if (!cardFill && inPage.length > 0) throw new Error(`a build without card fill must not bundle the content script's card fill, but dist/content.js holds: ${inPage.join(", ")}`);
+  if (cardFill && inPage.length !== CONTENT_CARD_MARKERS.length) throw new Error("a build with card fill lost its content-side card markers: build.mjs and content.ts disagree");
 }
 console.log(`built → dist/ (${target}${release ? ", release" : ""}${uitest ? ", UI-test provider" : ""}${cardFill ? "" : ", no card fill"}; Load unpacked: extension/dist)`);
