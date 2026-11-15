@@ -14,7 +14,10 @@ Capitalized="$(printf '%s' "${TARGET:0:1}" | tr '[:lower:]' '[:upper:]')${TARGET
 # UITEST=1 (the UI-test workflow only): the Safari files are the UI-test build, which adds the test site's stand-in
 # payment provider to the card-entry origins (extension/build.mjs). Every other caller gets the release files, which
 # ios-unsigned.yml checks name no test domain.
-( cd extension && npm ci --no-audit --no-fund && RELEASE=1 TARGET=safari UITEST="${UITEST:-0}" node build.mjs )
+# CARDFILL=1 (the UI tests and the card-preview build): the Safari extension fills cards into pages. Without it, as for
+# the App Store build (owner decision 2026-11-14), it fills none, and its worker does not even carry the card path
+# (extension/src/cardfillflag.ts; build.mjs and ios-unsigned.yml check).
+( cd extension && npm ci --no-audit --no-fund && RELEASE=1 TARGET=safari UITEST="${UITEST:-0}" CARDFILL="${CARDFILL:-0}" node build.mjs )
 WEB="$REPO/app-ios/AndvariSafari/web"
 rm -rf "$WEB"
 mkdir -p "$WEB"

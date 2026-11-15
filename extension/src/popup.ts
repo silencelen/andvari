@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_FILL_FROM_APP, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -15,6 +15,7 @@ import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./
 import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { BUILD_TARGET } from "./buildtarget";
+import { CARD_FILL } from "./cardfillflag";
 import { askAppServerDetailed, nativeSender } from "./appserver";
 import { displaySite, safeSiteUrl } from "./siteurl";
 import { reuseWarning } from "./reusealert";
@@ -54,6 +55,8 @@ let cardFill: {
   allowEverywhere?: boolean;
   doubled?: boolean;
   noFrameOrigin?: boolean;
+  /** This build has no in-page card fill (cardfillflag.ts). */
+  fillOff?: boolean;
 } = { fillable: false, origin: null, frames: [], pageFormOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
@@ -411,6 +414,15 @@ async function loadUnlocked(): Promise<void> {
   // origin). The SW answers off its registry IMMEDIATELY and fires a rescan broadcast; the one
   // delayed re-query below is what picks up a form the rescan just surfaced (CSS-revealed step,
   // bfcache return) — freshness without an inline wait on the popup's critical path.
+  // A build without in-page card fill (cardfillflag.ts) asks nothing: its rows copy, and one line says where cards are
+  // filled from.
+  if (!CARD_FILL) {
+    cardFill = { fillable: false, origin: null, frames: [], pageFormOnly: false, fillOff: true };
+    renderCards(cards.items);
+    startTotp();
+    if (BUILD_TARGET !== "safari") el<HTMLInputElement>("search").focus();
+    return;
+  }
   const offer = await ask({ type: "cardFillOffers" });
   cardFill = cardFillOf(offer);
   renderCards(cards.items);
@@ -448,6 +460,7 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
     ...(offer.allowEverywhere === true ? { allowEverywhere: true } : {}),
     ...(offer.doubled === true ? { doubled: true } : {}),
     ...(offer.noFrameOrigin === true ? { noFrameOrigin: true } : {}),
+    ...(offer.fillOff === true ? { fillOff: true } : {}),
   };
 }
 
@@ -1016,6 +1029,7 @@ function cardCopyRemedy(): string {
 
 /** The one line that says why the rows copy instead of filling; null while they fill. */
 function cardCopyReason(safari: boolean): string | null {
+  if (cardFill.fillOff === true) return CARD_FILL_FROM_APP;
   if (cardFill.fillable) return null;
   if (cardFill.doubled === true) return CARD_DUPLICATE_FIELDS;
   if (cardFill.noFrameOrigin === true) return CARD_NO_FRAME_ORIGIN;
@@ -1032,7 +1046,8 @@ function renderCards(items: CardItem[]): void {
   // The line needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
   const why = cardCopyReason(BUILD_TARGET === "safari");
   cardsPspNote.hidden = items.length === 0 || why === null;
-  if (why !== null) cardsPspNote.textContent = `${why} ${cardCopyRemedy()}`;
+  // Without card fill in the build, the line is the remedy itself.
+  if (why !== null) cardsPspNote.textContent = cardFill.fillOff === true ? why : `${why} ${cardCopyRemedy()}`;
   cardsList.replaceChildren();
   for (const it of items) cardsList.append(cardRow(it));
 }

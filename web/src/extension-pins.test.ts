@@ -380,7 +380,9 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(fill).toContain("let plan = cardFillPlan(records(), Date.now(), providerFrameNotAllowed(tabId));");
     expect(fill).toMatch(/if \(!sameFrames\(shown, plan\.targets\)\) return \{ ok: false, code: "changed",[^\n]*\n\s*const targets = plan\.targets;\n\s*const expiresMs = Date\.now\(\) \+ GRANT_TTL_MS;\n\s*cardGrants\.set\(/);
     expect(bg).toContain('{ itemId, frameId: t.frameId, origin: t.origin, kinds: t.kinds, sig: t.kinds.join(","), expiresMs }');
-    expect(bg).toContain("return fillCardFromPopup(msg.itemId, msg.frames, sender);");
+    // Gated on the build's in-page card fill (cardfillflag.ts, owner decision 2026-11-14): without it the handler is not
+    // even bundled.
+    expect(bg).toContain("return __ANDVARI_CARDFILL__ ? fillCardFromPopup(msg.itemId, msg.frames, sender) :");
   });
 
   it("[U12] grant-sig targeting fails CLOSED — sig-match only, never an index fallback", () => {

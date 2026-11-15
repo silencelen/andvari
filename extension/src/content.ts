@@ -24,6 +24,7 @@ import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLande
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { isCardEntryDocument, isCardProviderOrigin } from "./cardproviders";
+import { CARD_FILL } from "./cardfillflag";
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
@@ -353,7 +354,7 @@ async function scheduleClipboardClear(): Promise<void> {
  *  kinds of element from it, its own path (round-12 review: Stripe's Address Element is no card frame): where a field
  *  can be chosen, the chip can show, and a form holding only some of a card's fields (a security code alone, one field
  *  of a split form) is a card form. The worker checks the origin the browser reports before anything is filled. */
-const cardBox = isCardEntryDocument(location.origin, location.pathname);
+const cardBox = CARD_FILL && isCardEntryDocument(location.origin, location.pathname);
 
 /** A provider's document that is not a card document (an address or a sign-in element): it reports no card form. */
 const providerNonCardDocument = !cardBox && isCardProviderOrigin(location.origin);
@@ -414,6 +415,8 @@ let lastCardSig: string | null = null;
  *  across [document, …shadowRoots] — §2 [U13]). Empty ⇒ every form went away and the SW clears
  *  our record. Idempotent: a stable structure never re-sends. */
 function reportCardForm(): void {
+  // A build without in-page card fill (cardfillflag.ts) reports no card form: the worker records no card choice.
+  if (!CARD_FILL) return;
   const all = providerNonCardDocument ? [] : allCardForms();
   const forms: CardFieldKind[][] = all.map((f) => f.fields.map((x) => x.kind));
   // Round-6 review M2: which of them holds the field the person chose, so the worker builds a fill's grant from that

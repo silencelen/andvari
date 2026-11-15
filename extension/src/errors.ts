@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields" | "changed" | "no_frame_origin";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields" | "changed" | "fill_off" | "no_frame_origin";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -282,6 +282,9 @@ export const CARD_DUPLICATE_FIELDS = "This page shows more than one payment form
  *  filled into a payment form inside a frame. */
 export const CARD_NO_FRAME_ORIGIN = "This browser doesn't tell andvari which site a payment form's frame comes from, so andvari fills no card into one. Update the browser to fill cards here.";
 
+/** The popup's line over the cards in a build without in-page card fill (cardfillflag.ts; owner decision 2026-11-14). */
+export const CARD_FILL_FROM_APP = "andvari fills no cards here: copy a card's number and code in the andvari app.";
+
 /** A card fill that wrote nothing: the refusals in words, the rest as for a login fill. */
 export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigin?: string, safari = false): string {
   switch (code) {
@@ -293,6 +296,8 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigi
       return CARD_DUPLICATE_FIELDS;
     case "changed":
       return "The payment form changed after andvari opened. Open andvari again and fill.";
+    case "fill_off":
+      return CARD_FILL_FROM_APP;
     case "no_frame_origin":
       return CARD_NO_FRAME_ORIGIN;
     case "no_focus":
