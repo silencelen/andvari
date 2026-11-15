@@ -1,7 +1,11 @@
 package io.silencelen.andvari.app
 
+import io.silencelen.andvari.core.client.PersonalVaultCopy
 import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -16,13 +20,29 @@ class PersonalVaultNoticeCopyTest {
     private fun branch(status: String): String = source.substringAfter("status == Account.PersonalStatus.$status) {").substringBefore("return\n    }")
 
     @Test
-    fun theSameVaultIsOneVaultToConfirmNotAChoiceBetweenTwo() {
+    fun theSameVaultIsOneVaultToConfirmAndTwoVaultsAreSaidToBeTwo() {
+        val id = "00000000-0000-4000-8000-00000000abcdef"
+        val other = "00000000-0000-4000-8000-000000123456"
+        // The same id twice (a first sign-in once the account state has been read): one vault to confirm, nothing to keep.
+        val same = PersonalVaultCopy.proposedNotice(id, id, currentName = "Personal", servedName = "Personal")
+        assertEquals("Confirm your personal vault on this device: Personal.", same.title)
+        assertNull(same.keepName)
+        assertFalse((same.title + same.body).contains("but the server sent"))
+        // Two ids of one name: said to be two vaults, and the account's is the one "Keep" keeps.
+        val two = PersonalVaultCopy.proposedNotice(other, id, currentName = "Personal", servedName = "Personal")
+        assertEquals("Your account's personal vault is Personal, but the server sent Personal.", two.title)
+        assertTrue(two.body.startsWith(PersonalVaultCopy.DIFFERENT_VAULTS))
+        assertEquals("Personal", two.keepName)
+    }
+
+    @Test
+    fun theBannerSaysWhatCoreSaysAndKeepsOnlyAnotherVault() {
         val proposed = branch("PROPOSED")
-        assertTrue(proposed.contains("val same = change.currentVaultId == change.servedVaultId"))
-        assertTrue(proposed.contains("change.currentVaultId.takeIf { it.isNotEmpty() && !same }"), "no \"Keep\" of the very vault the server sent")
-        assertTrue(proposed.contains("same -> PersonalVaultCopy.sameVaultTitle(newName)"))
-        assertTrue(proposed.contains("same -> PersonalVaultCopy.sameVaultBody(change.servedVaultId)"))
-        assertTrue(proposed.contains("\${PersonalVaultCopy.DIFFERENT_VAULTS} Another of your devices chose"), "two vaults are said to be two")
+        assertTrue(proposed.contains("val notice = PersonalVaultCopy.proposedNotice(\n            change.currentVaultId,\n            change.servedVaultId,"))
+        assertTrue(proposed.contains("Text(notice.title, "))
+        assertTrue(proposed.contains("Text(notice.body, "))
+        assertTrue(proposed.contains("val designated = notice.keepName"), "\"Keep\" only for another vault than the one the server sent")
+        assertFalse(proposed.contains("but the server sent"), "no words of its own for the two records")
         assertTrue(branch("CHANGED").contains("\${PersonalVaultCopy.DIFFERENT_VAULTS} Another of your devices changed it"))
     }
 
