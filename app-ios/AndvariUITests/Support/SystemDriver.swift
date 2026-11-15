@@ -82,7 +82,9 @@ extension UITestCase {
             // moment to show which it is.
             Thread.sleep(forTimeInterval: 1)
             let faceButton = element("unlock.biometric")
-            if faceButton.exists {
+            if signOutAnotherAccountAtUnlock() {
+                typeSignIn()
+            } else if faceButton.exists {
                 // While a prompt is up the screen is busy and the button is disabled. A button that stays enabled
                 // means the screen's own offer was used up (an earlier test, an app already open): ask again.
                 var enabledSince: Date?

@@ -244,6 +244,38 @@ class UITestCase: XCTestCase {
         field.typeText(text)
     }
 
+    /// Type [text] into [field] a key at a time, [gap] apart, as a person types. A field that lets go of the keyboard on
+    /// the way ends the typing: the count returned is how many characters went in while it held it, [text]'s length
+    /// when the field kept the keyboard to the end.
+    @discardableResult
+    func typeKeyByKey(_ text: String, into field: XCUIElement, what: String, gap: TimeInterval = 0.3, file: StaticString = #filePath, line: UInt = #line) -> Int {
+        require(field, what, file: file, line: line)
+        _ = waitUntil(15) { self.safelyHittable(field) }
+        for _ in 0..<3 where !hasKeyboardFocus(field) {
+            field.tap()
+            _ = waitUntil(5) { self.hasKeyboardFocus(field) }
+        }
+        if !hasKeyboardFocus(field) {
+            dumpTree(app, as: "no-keyboard-focus")
+            XCTFail("\(what) never took the keyboard", file: file, line: line)
+            return 0
+        }
+        var typed = 0
+        for character in text {
+            guard hasKeyboardFocus(field) else { break }
+            field.typeText(String(character))
+            typed += 1
+            Thread.sleep(forTimeInterval: gap)
+        }
+        return typed
+    }
+
+    /// How many characters a hidden field holds, from the dots it shows; nil when it shows something else.
+    func hiddenLength(of field: XCUIElement) -> Int? {
+        guard field.exists, let value = field.value as? String, value != field.placeholderValue else { return nil }
+        return value.allSatisfy({ $0 == "•" }) ? value.count : nil
+    }
+
     /// Scroll [application]'s list until [element] sits in the middle part of the screen, clear of the bars above and
     /// the floating search bar below: a row partly behind one of them is "hittable" and still takes no tap. A row the
     /// list has not built yet is taken to be further down.

@@ -119,13 +119,51 @@ extension UITestCase {
         case .welcome:
             typeSignIn()
         case .unlock:
-            typeUnlock()
+            if signOutAnotherAccountAtUnlock() {
+                typeSignIn()
+            } else {
+                typeUnlock()
+            }
         case .vault:
             break
         }
         expectScreen(.vault, timeout: 60)
         require(vaultRow(Fixture.siteItem), "the seeded login in the list", timeout: 30)
         confirmPersonalVaultIfAsked()
+    }
+
+    /// The unlock screen, ready to be typed into. With Face ID on, the screen raises its prompt by itself as it opens,
+    /// over the password field: it is given up on first, with a face that does not match and then Cancel, as someone
+    /// who means to type the password does.
+    func settleUnlockScreenForTyping() {
+        expectScreen(.unlock)
+        Thread.sleep(forTimeInterval: 1)
+        guard element("unlock.biometric").exists else { return }
+        Thread.sleep(forTimeInterval: 2)
+        Biometrics.noMatch()
+        Thread.sleep(forTimeInterval: 3)
+        dismissBiometricPrompt()
+    }
+
+    /// An unlock screen that names another account (a test that signed in as one and stopped halfway): sign it out
+    /// there, which leaves the sign-in screen of the same server. True when it did.
+    @discardableResult
+    func signOutAnotherAccountAtUnlock() -> Bool {
+        let account = element("unlock.account")
+        guard account.exists, account.label != Fixture.email else { return false }
+        // Its Face ID prompt, if it has one, is in the way of the buttons.
+        if element("unlock.biometric").exists {
+            Thread.sleep(forTimeInterval: 2)
+            Biometrics.noMatch()
+            Thread.sleep(forTimeInterval: 3)
+            dismissBiometricPrompt()
+        }
+        let signOut = app.buttons.matching(NSPredicate(format: "label == 'Sign out'")).firstMatch
+        guard signOut.exists else { return false }
+        scrollToComfort(signOut)
+        signOut.tap()
+        confirmSignOut()
+        return true
     }
 
     /// Open an item's detail from the vault list, scrolling the list to its row.

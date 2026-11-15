@@ -11,7 +11,9 @@ POST /control/vault-create|vault-delete|vault-restore?name=… let a test act as
 account (tools/uitest-seed `vault`), and POST /control/share-read-only?name=…&item=… as a second account that
 shares a vault read-only with it, accepted on another device (tools/uitest-seed `share`), to see what the app
 learns at its next sync; with &email=…&password=… the second account has that address and master password, for a
-test that signs in as it. Both ports listen on loopback only and the accounts are throwaway ones.
+test that signs in as it. POST /control/server-stall?seconds=… stops the vault server for that long (20 s at most)
+and lets it go on: what a save that is still sending its files meets on a network that stalls. Both ports listen on
+loopback only and the accounts are throwaway ones.
 
 GET <page>.html?uitest-events serves the page with a passive event log at the end of its body (presses, focus
 moves with the page's user activation and focus, window focus), so a test can read what the page saw.
@@ -20,6 +22,7 @@ import functools
 import hashlib
 import http.server
 import os
+import signal
 import subprocess
 import ssl
 import sys
@@ -115,6 +118,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         item = (query.get("item") or [""])[0]
         account = [os.environ["UITEST_SERVER_ORIGIN"], os.environ["UITEST_EMAIL"], os.environ["UITEST_PASSWORD"]]
         vault_action = {"/control/vault-create": "create", "/control/vault-delete": "delete", "/control/vault-restore": "restore"}.get(parsed.path)
+        if parsed.path == "/control/server-stall":
+            self.stall(query)
+            return
         if vault_action and name:
             args = ["vault", vault_action] + account + [name]
         elif parsed.path == "/control/share-read-only" and name and item:
@@ -134,6 +140,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             ok, out = False, "timed out"
         sys.stderr.write("control %s %r: %s\n" % (parsed.path, name, "ok" if ok else out))
+        body = out.encode()
+        self.send_response(200 if ok else 500)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def stall(self, query):
+        """Stop the vault server (start-backend.sh left its pid beside the site's directory) and let it go on after
+        the seconds asked for. The answer is sent at once; the time is bounded, so a test that dies cannot leave the
+        server stopped."""
+        try:
+            seconds = min(max(float((query.get("seconds") or ["5"])[0]), 0.5), 20.0)
+            with open(os.path.join(os.path.dirname(os.path.abspath(self.directory)), "server.pid")) as pid_file:
+                pid = int(pid_file.read().strip())
+            os.kill(pid, signal.SIGSTOP)
+            threading.Timer(seconds, os.kill, args=(pid, signal.SIGCONT)).start()
+            ok, out = True, "server %d stopped for %.1f s" % (pid, seconds)
+        except (OSError, ValueError) as error:
+            ok, out = False, "%s: %s" % (type(error).__name__, error)
+        sys.stderr.write("control /control/server-stall: %s\n" % out)
         body = out.encode()
         self.send_response(200 if ok else 500)
         self.send_header("Content-Type", "text/plain; charset=utf-8")

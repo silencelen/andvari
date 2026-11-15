@@ -22,6 +22,12 @@ enum OtherDevice {
         control("share-read-only", ["name": vault, "item": item, "email": email, "password": password])
     }
 
+    /// Stop the vault server for [seconds] (20 at most), after which it goes on by itself: a network that stalls. The
+    /// answer comes at once. The error text when it failed, nil when it worked.
+    static func stallServer(seconds: Int) -> String? {
+        control("server-stall", ["seconds": String(seconds)])
+    }
+
     private static func control(_ action: String, _ query: [String: String]) -> String? {
         // Plain http to the loopback address first; the https name (trusted in the simulator) only when that one gave
         // no answer at all, so an action that answered with an error is never run twice.
@@ -53,26 +59,70 @@ enum OtherDevice {
     }
 }
 
-/// The simulator's Files app, "On My iPhone". Its storage is a plain folder on the simulator's disk, and the runner is a
-/// simulator process: a test puts a file there for the system's file picker to offer, and reads back a file the app
-/// saved or exported there.
-enum FilesApp {
-    /// The folder behind "On My iPhone": the File Provider Storage of the group com.apple.FileProvider.LocalStorage.
-    /// Nil until the simulator has made it (opening the Files app once does).
-    static func localStorage() -> URL? {
-        let fm = FileManager.default
-        // The runner's home is <device>/data/Containers/Data/Application/<id>; the groups are in …/Containers/Shared/AppGroup.
-        let containers = URL(fileURLWithPath: NSHomeDirectory()).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let groups = containers.appendingPathComponent("Shared/AppGroup", isDirectory: true)
-        guard let dirs = try? fm.contentsOfDirectory(at: groups, includingPropertiesForKeys: nil) else { return nil }
+/// The simulator's disk, as the runner sees it. The runner is a simulator process and every app's containers are plain
+/// folders there, so a test can put a file where an app will find it and read what an app left, without the app's help.
+enum SimulatorDisk {
+    /// <device>/data/Containers: the runner's own home is …/Containers/Data/Application/<id>.
+    private static var containers: URL {
+        URL(fileURLWithPath: NSHomeDirectory()).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    private static func container(in folder: String, identifier: String) -> URL? {
+        let root = containers.appendingPathComponent(folder, isDirectory: true)
+        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return nil }
         for dir in dirs {
             let meta = NSDictionary(contentsOf: dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist"))
-            guard (meta?["MCMMetadataIdentifier"] as? String) == "group.com.apple.FileProvider.LocalStorage" else { continue }
-            let storage = dir.appendingPathComponent("File Provider Storage", isDirectory: true)
-            try? fm.createDirectory(at: storage, withIntermediateDirectories: true)
-            return storage
+            if (meta?["MCMMetadataIdentifier"] as? String) == identifier { return dir }
         }
         return nil
+    }
+
+    /// The container of an App Group, nil while the simulator has made none for it.
+    static func group(_ identifier: String) -> URL? {
+        container(in: "Shared/AppGroup", identifier: identifier)
+    }
+
+    /// The App Groups the simulator has a container for, for a failure that has to say what it found.
+    static func groups() -> [String] {
+        let root = containers.appendingPathComponent("Shared/AppGroup", isDirectory: true)
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        return dirs.compactMap { dir in
+            NSDictionary(contentsOf: dir.appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist"))?["MCMMetadataIdentifier"] as? String
+        }.sorted()
+    }
+
+    /// An app's own data container.
+    static func data(of bundleID: String) -> URL? {
+        container(in: "Data/Application", identifier: bundleID)
+    }
+
+    /// Every regular file under [root], as paths from it ("folder/name.csv"), without hidden ones.
+    static func files(under root: URL) -> [String] {
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
+        // The enumerator's paths may spell the root another way (/private/var for /var): compare resolved paths.
+        let base = root.resolvingSymlinksInPath().path + "/"
+        var out: [String] = []
+        for case let url as URL in walker {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            let full = url.resolvingSymlinksInPath().path
+            guard full.hasPrefix(base) else { continue }
+            let path = String(full.dropFirst(base.count))
+            if !path.hasPrefix(".") && !path.contains("/.") { out.append(path) }
+        }
+        return out.sorted()
+    }
+}
+
+/// The simulator's Files app, "On My iPhone": a test puts a file there for the system's file picker to offer, and reads
+/// back a file the app saved or exported there.
+enum FilesApp {
+    /// The folder behind "On My iPhone": the File Provider Storage of the group com.apple.FileProvider.LocalStorage.
+    /// Nil until the simulator has made that group's container (opening the Files app once does).
+    static func localStorage() -> URL? {
+        guard let group = SimulatorDisk.group("group.com.apple.FileProvider.LocalStorage") else { return nil }
+        let storage = group.appendingPathComponent("File Provider Storage", isDirectory: true)
+        try? FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        return storage
     }
 
     /// Write [data] as [name] at the top of "On My iPhone". False when the folder is not there or the write failed.
@@ -84,14 +134,7 @@ enum FilesApp {
 
     /// Every file under "On My iPhone", as paths from its top ("folder/name.csv").
     static func files() -> [String] {
-        guard let storage = localStorage(), let walker = FileManager.default.enumerator(at: storage, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
-        var out: [String] = []
-        for case let url as URL in walker {
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
-            let path = url.path.replacingOccurrences(of: storage.path + "/", with: "")
-            if !path.hasPrefix(".") && !path.contains("/.") { out.append(path) }
-        }
-        return out.sorted()
+        localStorage().map(SimulatorDisk.files(under:)) ?? []
     }
 
     static func read(_ path: String) -> Data? {
@@ -101,6 +144,44 @@ enum FilesApp {
     static func remove(_ path: String) {
         guard let storage = localStorage() else { return }
         try? FileManager.default.removeItem(at: storage.appendingPathComponent(path))
+    }
+}
+
+/// What andvari keeps on the simulator's disk for the account signed in, read from outside the app. The Keychain is
+/// not a folder and cannot be read this way.
+enum LocalState {
+    static let appGroup = "group.com.silencelen.andvari"
+
+    /// The address of the account the app is signed in to, from the snapshot it shares with its extensions (rows sealed
+    /// under their vault keys, in plain JSON that names the account). Nil when the app is signed out, or has not
+    /// unlocked since it signed in.
+    static func signedInEmail() -> String? {
+        guard let group = SimulatorDisk.group(appGroup),
+              let data = try? Data(contentsOf: group.appendingPathComponent("autofill-snapshot.json")),
+              let snapshot = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return snapshot["email"] as? String
+    }
+
+    /// Every file the app keeps for accounts: what is under Application Support/andvari in its own container (vault
+    /// caches, device state, kept saves and their files, unfinished moves, the list of automatic saves), and the snapshot
+    /// and the save queue in its App Group. Paths start "app/" or "group/".
+    static func accountFiles() -> [String] {
+        var out: [String] = []
+        if let data = SimulatorDisk.data(of: "com.silencelen.andvari") {
+            let support = data.appendingPathComponent("Library/Application Support/andvari", isDirectory: true)
+            out += SimulatorDisk.files(under: support).map { "app/" + $0 }
+        }
+        if let group = SimulatorDisk.group(appGroup) {
+            out += SimulatorDisk.files(under: group)
+                .filter { $0 == "autofill-snapshot.json" || $0.hasPrefix("saves/") }
+                .map { "group/" + $0 }
+        }
+        return out.sorted()
+    }
+
+    /// The sealed files of saves that are kept until their upload is done (Application Support/andvari/pending-files).
+    static func filesSetAside() -> [String] {
+        accountFiles().filter { $0.hasPrefix("app/pending-files/") }
     }
 }
 

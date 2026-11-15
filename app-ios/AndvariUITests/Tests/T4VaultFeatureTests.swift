@@ -243,8 +243,10 @@ final class T4VaultFeatureTests: UITestCase {
             scrollToComfort(link)
             require(link, "Two-step sign-in in Settings")
             link.tap()
+            // Typed a key at a time, as a person types it: the setup key comes only for the password as it is.
             let password = app.secureTextFields["Master password"]
-            enter(Fixture.password, into: password, what: "the master password for two-step setup")
+            let typed = typeKeyByKey(Fixture.password, into: password, what: "the master password for two-step setup")
+            XCTAssertEqual(typed, Fixture.password.count, "the two-step master password field let go of the keyboard after \(typed) of \(Fixture.password.count) characters")
             app.buttons["Turn on"].tap()
             require(keyText, "the setup key", timeout: 20)
             key = keyText.label.replacingOccurrences(of: " ", with: "")
@@ -301,7 +303,7 @@ final class T4VaultFeatureTests: UITestCase {
         let password = app.secureTextFields["Password"]
         step("new-login-editor") {
             freshVault()
-            openNewLoginEditor()
+            openNewItemEditor("New login")
             enter(name, into: app.textFields["Name"], what: "the Name field")
             enter("tess", into: app.textFields["Username"], what: "the Username field")
         }
@@ -340,20 +342,6 @@ final class T4VaultFeatureTests: UITestCase {
 
     // MARK: - Helpers
 
-    /// The add menu's New login. iOS's own "Save Password?" for the master password just typed at the unlock can come
-    /// up over the vault a moment later and take the tap meant for the add menu: it is answered, and the menu opened
-    /// again.
-    private func openNewLoginEditor() {
-        let newLogin = app.buttons["New login"]
-        for _ in 0..<3 where !newLogin.exists {
-            answerSystemAlerts()
-            app.buttons["vault.new-item"].tap()
-            _ = waitUntil(4, { newLogin.exists })
-        }
-        require(newLogin, "New login in the add menu", timeout: 5)
-        newLogin.tap()
-    }
-
     /// Edit the login [name] (its detail open), have the editor generate a password, save, and read it back from a
     /// fresh detail.
     private func generatePassword(for name: String) -> String {
@@ -370,22 +358,8 @@ final class T4VaultFeatureTests: UITestCase {
         return revealedPassword(of: name)
     }
 
-    /// The password of the login [name], read from its detail opened afresh and revealed; the detail stays open.
-    private func revealedPassword(of name: String) -> String {
-        openItem(name)
-        let reveal = element("detail.reveal-password")
-        require(reveal, "the password of \(name)", timeout: 15)
-        reveal.tap()
-        var value = ""
-        _ = waitUntil(10) {
-            value = (self.element("detail.password").value as? String) ?? ""
-            return !value.isEmpty && !value.contains("•")
-        }
-        return value
-    }
-
     private func addLogin(_ name: String, user: String, password: String? = nil) {
-        openNewLoginEditor()
+        openNewItemEditor("New login")
         enter(name, into: app.textFields["Name"], what: "the Name field")
         enter(user, into: app.textFields["Username"], what: "the Username field")
         if let password {
@@ -418,36 +392,6 @@ final class T4VaultFeatureTests: UITestCase {
         }
     }
 
-    /// The app started again: it comes up locked, with nothing an earlier test left open over the vault.
-    private func freshVault() {
-        app.terminate()
-        launchApp()
-        reachVaultAnyWay()
-    }
-
-    /// Tap the button [label] of the dialog titled [title]. The rows behind a dialog can carry the same word (each trash
-    /// row has its own Delete forever), so it is the one that can be tapped while the dialog is up, nearest below its
-    /// title.
-    private func confirm(_ label: String, inDialog title: String) {
-        let heading = app.staticTexts[title]
-        require(heading, "the dialog “\(title)”", timeout: 5)
-        let buttons = app.buttons.matching(NSPredicate(format: "label == %@", label))
-        var target: XCUIElement?
-        _ = waitUntil(5) {
-            let top = heading.frame.minY
-            target = buttons.allElementsBoundByIndex
-                .filter { self.safelyHittable($0) && $0.frame.minY > top }
-                .min { $0.frame.minY < $1.frame.minY }
-            return target != nil
-        }
-        guard let target else {
-            dumpTree(app, as: "no-confirm-\(label)")
-            XCTFail("the dialog “\(title)” has no \(label) to tap")
-            return
-        }
-        target.tap()
-    }
-
     /// The trash's row for [name]: a row with the name and a Restore button (the vault list behind has no Restore).
     private func trashRow(_ name: String) -> XCUIElement {
         app.cells.containing(NSPredicate(format: "label CONTAINS %@", name)).containing(.button, identifier: "Restore").firstMatch
@@ -462,21 +406,6 @@ final class T4VaultFeatureTests: UITestCase {
     }
 
     private func closeTrash() {
-        app.navigationBars.buttons.firstMatch.tap()
-        let done = element("settings.done")
-        require(done, "Settings' Done")
-        done.tap()
-    }
-
-    private func openSharedVaults() {
-        openSettings()
-        let link = app.buttons["Shared vaults"]
-        scrollToComfort(link)
-        link.tap()
-        require(app.navigationBars["Shared vaults"], "the shared vaults")
-    }
-
-    private func closeSharedVaults() {
         app.navigationBars.buttons.firstMatch.tap()
         let done = element("settings.done")
         require(done, "Settings' Done")
@@ -500,16 +429,6 @@ final class T4VaultFeatureTests: UITestCase {
             app.navigationBars.buttons.firstMatch.tap()
         }
         _ = waitUntil(10) { self.settingsButton.exists }
-    }
-
-    /// Pull the vault list down from its top: a sync.
-    private func refreshVault() {
-        for _ in 0..<2 where !(self.safelyHittable(settingsButton)) { app.navigationBars.buttons.firstMatch.tap() }
-        for _ in 0..<2 {
-            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-            start.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)), withVelocity: .slow, thenHoldForDuration: 0.5)
-            Thread.sleep(forTimeInterval: 2)
-        }
     }
 
     private func dismissNotice(_ notice: XCUIElement) {
