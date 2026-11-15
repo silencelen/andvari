@@ -1,5 +1,6 @@
 package io.silencelen.andvari.core.app
 
+import io.silencelen.andvari.core.client.AccountDeleteBlockedException
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.Account
@@ -70,6 +71,7 @@ import io.silencelen.andvari.core.client.session.SessionBinder
 import io.silencelen.andvari.core.client.session.SessionClients
 import io.silencelen.andvari.core.client.session.SessionEntry
 import io.silencelen.andvari.core.client.session.SessionPersistence
+import io.silencelen.andvari.core.client.session.StoredSession
 import io.silencelen.andvari.core.client.session.SignInResult
 import io.silencelen.andvari.core.client.session.SwitchResult
 import io.silencelen.andvari.core.client.session.UnlockLadder
@@ -84,6 +86,9 @@ import io.silencelen.andvari.core.client.session.signInOriginMoved
 import io.silencelen.andvari.core.crypto.Attachments
 import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Fingerprint
+import io.silencelen.andvari.core.model.AccountDeleteBlocker
+import io.silencelen.andvari.core.model.AccountDeletePreview
+import io.silencelen.andvari.core.model.AccountDeleteRequest
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.MemberRecovery
@@ -2909,6 +2914,163 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- deleting the account (spec 03 §13; the web client's Settings › Delete account) ----
+    //
+    // The server deletes the account in one transaction, after the typed address, a fresh master-password proof and the
+    // two-step code when the account has one. What it would do is shown first (its preview): what goes, and what stands
+    // in the way. Once it is done, everything this device kept for the account goes too. A request whose answer says
+    // nothing (no answer, a server error) may have deleted the account: that is said, never "deleted" or "not deleted".
+
+    private val deletionScreen = ScreenToken()
+
+    /** The preview as last read, for the blockers' and vaults' names. */
+    private var deletionRead: AccountDeletePreview? = null
+
+    /** Open Settings › Delete account ([AppState.accountDeletion]): what deleting would do now, as the server says. */
+    @Throws(CancellationException::class)
+    suspend fun openAccountDeletion(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val token = deletionScreen.open()
+        deletionRead = null
+        update { it.copy(accountDeletion = AccountDeletionView(email = store.load()?.email ?: "", preview = null)) }
+        busy()
+        val preview = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.accountDeletePreview() }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            if (!deletionScreen.still(token)) return@action screenGone()
+            return@action failure(t, DeletionCopy::forPreview)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (!deletionScreen.still(token)) return@action screenGone()
+        deletionRead = preview
+        update { it.copy(busy = false, accountDeletion = it.accountDeletion?.copy(preview = deletionPreviewView(live, preview))) }
+        ActionResult.Ok
+    }
+
+    fun closeAccountDeletion() {
+        deletionScreen.close()
+        deletionRead = null
+        update { it.copy(accountDeletion = null) }
+    }
+
+    private fun deletionPreviewView(live: VaultSession.Unlocked, p: AccountDeletePreview, blockers: List<AccountDeleteBlocker> = p.blockers): AccountDeletionPreviewView {
+        val names = vaultList(live).associate { it.vaultId to it.name }
+        val name = { id: String? -> id?.let(names::get) }
+        val personal = live.account.personalVaultId
+        return AccountDeletionPreviewView(
+            deleted = DeletionCopy.deletes(p.deletedVaults.contains(personal), p.deletedVaults.filter { it != personal }.take(DELETION_LISTED).map(name)),
+            left = DeletionCopy.leaves(p.leftVaults.take(DELETION_LISTED).map(name)),
+            blockers = blockers.take(DELETION_LISTED).map { DeletionCopy.blocker(it.kind, name(it.vaultId), it.others) },
+            totpRequired = p.totpRequired,
+        )
+    }
+
+    /**
+     * Delete this account: [email] typed as on the screen, the master [password] (proved on this device against the key
+     * this session holds, then sent as the fresh proof the server checks) and the two-step [code] when the account has
+     * one. Nothing is sent when the address does not match. Once the server says it is done, this device keeps nothing
+     * of the account: the session, its tokens and keys, quick unlock, the vault cache and its device state, the snapshot
+     * and save queue the extensions share, kept saves and their files, the saved list and unfinished moves. The app then
+     * stands on the server screen.
+     */
+    @Throws(CancellationException::class)
+    suspend fun deleteAccount(email: String, password: String, code: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val stored = store.load() ?: return@action ActionResult.NotDone(null)
+        val open = state.accountDeletion ?: return@action ActionResult.NotDone(null)
+        val preview = deletionRead ?: return@action ActionResult.NotDone(null)
+        if (email.trim().lowercase() != stored.email.trim().lowercase()) return@action ActionResult.Failed(DeletionCopy.EMAIL_MISMATCH)
+        if (password.isEmpty()) return@action ActionResult.Failed(DeletionCopy.PASSWORD_REQUIRED)
+        val digits = code.filter { it.isDigit() }
+        if (preview.totpRequired && digits.isEmpty()) return@action ActionResult.Failed(DeletionCopy.CODE_REQUIRED)
+        busy()
+        // The proof first, on this device: a wrong password is caught here and never sent.
+        val proof = try {
+            val keys = runBounded(BoundedOps.FLAT_MS) { live.api.accountKeys() }
+            withContext(Dispatchers.Default) { live.account.reauthAuthKey(password, keys) }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action failure(t, DeletionCopy::forError)
+        }
+        try {
+            runBounded(BoundedOps.FLAT_MS) {
+                live.api.deleteAccount(AccountDeleteRequest(confirmEmail = email.trim(), currentAuthKey = proof, totp = digits.ifEmpty { null }))
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            if (t is AccountDeleteBlockedException) {
+                // The server's blockers now, in place of the preview's.
+                update { s -> s.copy(busy = false, accountDeletion = s.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, preview, t.blockers))) }
+                return@action ActionResult.Failed(DeletionCopy.BLOCKED)
+            }
+            if (DeletionCopy.outcomeUnknown(t)) {
+                update { s -> s.copy(busy = false, accountDeletion = s.accountDeletion?.copy(outcomeUnknown = true)) }
+                return@action ActionResult.Failed(DeletionCopy.OUTCOME_UNKNOWN)
+            }
+            // The server had asked for no code, but the account has one now: the field shows, and the person types it.
+            if (t is ApiException && t.code == "totp_code_required") {
+                deletionRead = preview.copy(totpRequired = true)
+                update { s -> s.copy(accountDeletion = s.accountDeletion?.let { d -> d.copy(preview = d.preview?.copy(totpRequired = true)) }) }
+            }
+            return@action failure(t, if (open.outcomeUnknown) DeletionCopy::forErrorAfterUnknown else DeletionCopy::forError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        wipeDeletedAccount(stored)
+        update {
+            cleared(it, null).copy(
+                screen = AppScreen.CHOOSE_SERVER, accountEmail = null, mustChangePassword = false, upgradeMessage = null,
+                notice = DeletionCopy.deleted(stored.email),
+            )
+        }
+        refreshQuick()
+        ActionResult.Ok
+    }
+
+    /**
+     * After an answer that said nothing ([AccountDeletionView.outcomeUnknown]): ask the server for the preview again. An
+     * answer means the account is still here; a refused session says only that this session ended, which a revocation
+     * does too, so the account may still exist.
+     */
+    @Throws(CancellationException::class)
+    suspend fun checkAccountDeletion(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        if (state.accountDeletion?.outcomeUnknown != true) return@action ActionResult.NotDone(null)
+        busy()
+        val preview = try {
+            runBounded(BoundedOps.FLAT_MS) { live.api.accountDeletePreview() }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            idle()
+            return@action ActionResult.Failed(if (t is ApiException && t.status == 401) DeletionCopy.SESSION_ENDED_OUTCOME_UNKNOWN else DeletionCopy.OUTCOME_UNKNOWN)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        deletionRead = preview
+        update { it.copy(busy = false, notice = DeletionCopy.NOT_DELETED_AFTER_CHECK, accountDeletion = it.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, preview))) }
+        ActionResult.Ok
+    }
+
+    /** Everything this device kept for [stored]'s account, which the server no longer has. */
+    private fun wipeDeletedAccount(stored: StoredSession) {
+        session.lock() // the engine releases its cache before the cache is deleted
+        forgetSessionViews() // kept saves and their files, unfinished moves, every screen's state
+        zeroSecrets()
+        dropFillSnapshot() // the snapshot, the save queue and its key, the saved list
+        store.baseUrl?.let(OriginCanon::originKey)?.let { originKey ->
+            namespaces.deleteVaultCache(originKey, stored.userId)
+            namespaces.deleteDeviceState(originKey, stored.userId)
+            quickKeys.wipe(originKey, stored.userId)
+            store.origin(originKey).clearPasswordStamp(stored.userId)
+            store.origin(originKey).clearAccountKeys(stored.userId)
+        }
+        store.clear()
+        session.takeRejected() // the server ended the session: that is this deletion, not a second event
+    }
+
     /** The error has been shown. */
     fun dismissError() = update { it.copy(error = null) }
 
@@ -3440,6 +3602,7 @@ open class SessionController(
         membersRead = null
         newMember = null
         verifyTarget = null
+        deletionRead = null
         invitationSenders.clear()
         invitationAsks.clear()
         offerOwners.clear()
@@ -3536,7 +3699,7 @@ open class SessionController(
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
         attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
-        legacyReviews = emptyList(), ownershipClaim = null,
+        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null,
     )
 
     private companion object {
@@ -3548,6 +3711,9 @@ open class SessionController(
 
         /** The roles an owner gives a member. */
         val MEMBER_ROLES = setOf("writer", "reader")
+
+        /** At most this many of a deletion preview's vaults and blockers are listed. */
+        const val DELETION_LISTED = 50
 
         /** What a typed identity code is counted in ([Fingerprint.matchesShort] drops everything else). */
         const val HEX_DIGITS = "0123456789abcdef"
@@ -3637,6 +3803,118 @@ internal object SharingCopy {
     const val TYPE_THE_NAME = "Type the vault's name exactly to delete it."
     const val COPY_RUNNING = "Wait for the copy into your personal vault to finish first."
     const val OWNER_CANNOT_LEAVE = "You own this vault, so you can't leave it: make someone else the owner, or delete it."
+}
+
+/** What deleting the account says (the web app's sentences, spec 03 §13), in this app's words. */
+internal object DeletionCopy {
+    const val UNNAMED_VAULT = "a vault this iPhone can't name"
+    const val EMAIL_MISMATCH = "That isn't this account's email address."
+    const val PASSWORD_REQUIRED = "Type your master password."
+    const val CODE_REQUIRED = "Type the code from your authenticator app."
+    const val BAD_CODE = "That code is wrong or was already used. Wait for the next one and try again."
+    const val BLOCKED = "The server didn't delete your account: something below stands in the way. Nothing was deleted."
+    const val PUBLIC_ORIGIN = "Deleting an account isn't available from this emergency address. Use your household's usual andvari address."
+    const val TOTP_ENROLL_FIRST = "This server requires two-step sign-in: turn it on first, then delete the account."
+    const val CREDENTIAL_CHANGED =
+        "Your password was changed, or this iPhone was signed out, while deleting: nothing was deleted. Sign in again and try again."
+    const val SESSION_ENDED = "Your session ended: nothing was deleted. Sign in again and try again."
+    const val TOO_MANY = "Too many attempts. Wait a while, then try again."
+    const val FAILED = "Something went wrong, and your account was not deleted. Try again."
+    const val OUTCOME_UNKNOWN =
+        "The server didn't answer in a way that says whether your account was deleted: it may have been. Check below, or sign in again: if your account is gone, the deletion went through."
+    const val NOT_DELETED_AFTER_CHECK = "Your account is still here: it was not deleted. You can try again."
+    const val SESSION_ENDED_OUTCOME_UNKNOWN =
+        "Your session ended, so andvari can't tell whether your account was deleted. Sign in to find out, or sign out to make this iPhone forget the account."
+    const val PREVIEW_FAILED = "Couldn't check what deleting your account would do. Try again."
+
+    private fun people(n: Int): String = if (n == 1) "1 other person" else "$n other people"
+
+    /** One sentence per blocker; a kind this version does not know is listed as one it cannot explain, never dropped. */
+    fun blocker(kind: String, vault: String?, others: Int): String = when (kind) {
+        "shared_vault" -> {
+            val verb = if (others == 1) "still uses it" else "still use it"
+            if (vault != null) "You own “$vault”, and ${people(others)} $verb. Delete it, or make one of them its owner, first (Shared vaults)."
+            else "You own a shared vault that ${people(others)} $verb. Delete it, or make one of them its owner, first (Shared vaults)."
+        }
+        "last_admin" ->
+            "You're the only admin of this andvari server, and ${people(others)} ${if (others == 1) "has an account" else "have accounts"} on it. " +
+                "andvari can't make an existing account an admin: an account is an admin only if it was invited as one. Invite a new admin first, from the web app's Administration, then come back."
+        else -> "The server reports something else that stops this account being deleted, which this version of andvari can't explain. Update andvari, or ask whoever runs your server."
+    }
+
+    private fun quoted(names: List<String>): String {
+        val q = names.map { "“$it”" }
+        return if (q.size <= 1) q.joinToString("") else q.dropLast(1).joinToString(", ") + " and " + q.last()
+    }
+
+    /** What goes for good: the account, its personal vault and the vaults only it holds (by name), the recovery paths. */
+    fun deletes(personal: Boolean, onlyMine: List<String?>): List<String> {
+        val named = onlyMine.filterNotNull()
+        val unnamed = onlyMine.size - named.size
+        val vaults = buildList {
+            if (personal) add("your Personal vault")
+            if (named.isNotEmpty()) add((if (named.size == 1) "the vault" else "the vaults") + " only you use, " + quoted(named))
+            if (unnamed > 0) add(if (unnamed == 1) "1 other vault only you hold" else "$unnamed other vaults only you hold")
+        }
+        return buildList {
+            add("Your account, and its sign-in on every device.")
+            if (vaults.isNotEmpty()) add(joinAnd(vaults).replaceFirstChar { it.uppercase() } + ": every item, file and earlier version in them.")
+            add("Your recovery phrase and your household recovery backup: nobody, an admin included, can bring the account back.")
+            add("Invites you sent that nobody has used yet.")
+        }
+    }
+
+    /** The shared vaults the account leaves; what it saved there stays for the people who still use them. */
+    fun leaves(vaults: List<String?>): List<String> {
+        if (vaults.isEmpty()) return emptyList()
+        val named = vaults.filterNotNull()
+        val unnamed = vaults.size - named.size
+        val what = buildList {
+            if (named.isNotEmpty()) add(quoted(named))
+            if (unnamed > 0) add(if (unnamed == 1) "1 other shared vault" else "$unnamed other shared vaults")
+        }
+        return listOf("You'll leave ${joinAnd(what)}. What you saved there stays for the people who still use ${if (vaults.size == 1) "it" else "them"}.")
+    }
+
+    private fun joinAnd(parts: List<String>): String =
+        if (parts.size <= 1) parts.joinToString("") else parts.dropLast(1).joinToString(", ") + " and " + parts.last()
+
+    fun deleted(email: String): String = "The account $email was deleted, with everything this iPhone kept for it."
+
+    /** A request whose answer says nothing about what happened: no answer, a server error, or a reply not the server's. */
+    fun outcomeUnknown(t: Throwable): Boolean = when {
+        t is ApiException -> t.status >= 500 || t.code.startsWith("http_")
+        else -> t !is ReauthFailedException && t !is ReauthStaleSessionException && t !is KdfPolicyViolationException && t !is CryptoUnavailableException
+    }
+
+    fun forPreview(t: Throwable): String = when {
+        t is ApiException && t.code == "account_delete_public_disabled" -> PUBLIC_ORIGIN
+        t is ApiException && t.code == "totp_enrollment_required" -> TOTP_ENROLL_FIRST
+        t is ApiException -> HouseholdCopy.forError(t).takeIf { t.status == 401 || t.status == 429 || t.status == 426 } ?: PREVIEW_FAILED
+        else -> HouseholdCopy.forError(t)
+    }
+
+    /** One sentence per refusal of the deletion (or of the local password proof before it): nothing was deleted. */
+    fun forError(t: Throwable): String = when {
+        t is ReauthFailedException -> HouseholdCopy.REAUTH_FAILED
+        t is ReauthStaleSessionException -> HouseholdCopy.REAUTH_STALE_SESSION
+        t is ApiException -> when (t.code) {
+            "reauth_failed" -> HouseholdCopy.REAUTH_FAILED
+            "totp_code_required" -> CODE_REQUIRED
+            "bad_totp_code" -> BAD_CODE
+            "confirm_email_mismatch" -> EMAIL_MISMATCH
+            "account_delete_public_disabled" -> PUBLIC_ORIGIN
+            "totp_enrollment_required" -> TOTP_ENROLL_FIRST
+            "credential_changed" -> CREDENTIAL_CHANGED
+            "rate_limited" -> TOO_MANY
+            else -> if (t.status == 401) SESSION_ENDED else if (t is UpgradeRequiredException) HouseholdCopy.forError(t) else FAILED
+        }
+        else -> HouseholdCopy.forError(t)
+    }
+
+    /** After an answer that said nothing, a refused session no longer says "nothing was deleted": the account may be gone. */
+    fun forErrorAfterUnknown(t: Throwable): String =
+        if (t is ApiException && t.status == 401 && t.code != "credential_changed") SESSION_ENDED_OUTCOME_UNKNOWN else forError(t)
 }
 
 /** What the members screen and a comparison of identity codes say (the web app's words, where it has them). */

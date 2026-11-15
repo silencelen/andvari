@@ -566,6 +566,26 @@ final class AppModel: ObservableObject {
         await run { try await $0.reshareWithMember(userId: userId) }
     }
 
+    // MARK: - Deleting the account
+
+    func openAccountDeletion() async -> Outcome {
+        await run { try await $0.openAccountDeletion() }
+    }
+
+    func closeAccountDeletion() {
+        controller.closeAccountDeletion()
+    }
+
+    /// The address as typed, the master password (proved on this iPhone first) and the two-step code if the account has one.
+    func deleteAccount(email: String, password: String, code: String) async -> Outcome {
+        await run { try await $0.deleteAccount(email: email, password: password, code: code) }
+    }
+
+    /// After an answer that did not say whether the account was deleted.
+    func checkAccountDeletion() async -> Outcome {
+        await run { try await $0.checkAccountDeletion() }
+    }
+
     // MARK: - Shared vaults awaiting review
 
     /// Trust on first use: the vault's key as the server delivered it is vouched for, and the vault opens for saving.

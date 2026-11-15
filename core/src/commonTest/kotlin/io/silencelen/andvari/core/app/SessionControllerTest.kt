@@ -2394,6 +2394,86 @@ open class SessionControllerTest {
         assertTrue(controller.state.vaultNotices.isEmpty())
     }
 
+    // ---- deleting the account ----
+
+    /**
+     * Settings › Delete account (spec 03 §13): what goes and what stands in the way, from the server's preview, with a
+     * kind this version does not know listed rather than dropped; the address and the master password checked here first
+     * (a wrong one is never sent); a refusal for blockers shows the server's; an answer that says nothing is never taken
+     * for "deleted" or "not deleted"; and once the server deleted the account, this device keeps nothing of it.
+     */
+    @Test
+    fun deletingTheAccountShowsWhatGoesThenLeavesNothingOfItOnThisDevice() = test {
+        unlockedWithAPersonalVault()
+        twoStepServer() // the account's keys as the server serves them: what the master password is proved against
+        var blockers = listOf(io.silencelen.andvari.core.model.AccountDeleteBlocker("shared_vault", "00000000-0000-4000-8000-0000000000f1", 2), io.silencelen.andvari.core.model.AccountDeleteBlocker("future_kind"))
+        var fail502 = false
+        val sent = mutableListOf<io.silencelen.andvari.core.model.AccountDeleteRequest>()
+        routes["/account/delete/preview"] = {
+            val p = io.silencelen.andvari.core.model.AccountDeletePreview(blockers, deletedVaults = listOf(reg.personalVault.vaultId), leftVaults = listOf("00000000-0000-4000-8000-0000000000f2"), totpRequired = true)
+            respond(json.encodeToString(io.silencelen.andvari.core.model.AccountDeletePreview.serializer(), p), HttpStatusCode.OK, headers)
+        }
+        routes["/account/delete"] = { request ->
+            val req = json.decodeFromString(io.silencelen.andvari.core.model.AccountDeleteRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            sent += req
+            when {
+                fail502 -> respond("bad gateway", HttpStatusCode.BadGateway, headersOf(HttpHeaders.ContentType, "text/plain"))
+                blockers.isNotEmpty() -> respond(
+                    json.encodeToString(io.silencelen.andvari.core.model.AccountDeleteBlockedError.serializer(), io.silencelen.andvari.core.model.AccountDeleteBlockedError("account_delete_blocked", "blocked", blockers)),
+                    HttpStatusCode.Conflict, headers,
+                )
+                req.totp != "123456" -> respond("""{"error":"bad_totp_code","message":"no"}""", HttpStatusCode.BadRequest, headers)
+                else -> respond("""{"deletedAt":5000}""", HttpStatusCode.OK, headers)
+            }
+        }
+        assertEquals(ActionResult.Ok, controller.openAccountDeletion())
+        val open = assertNotNull(controller.state.accountDeletion)
+        assertEquals(EMAIL, open.email)
+        val preview = assertNotNull(open.preview)
+        assertTrue(preview.totpRequired)
+        assertEquals(listOf(DeletionCopy.blocker("shared_vault", null, 2), DeletionCopy.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
+        assertTrue(preview.deleted.any { it.startsWith("Your Personal vault") })
+        assertEquals(DeletionCopy.leaves(listOf(null)), preview.left)
+
+        // Checked here first, and nothing sent: the address, the code the account needs, the master password.
+        assertEquals(ActionResult.Failed(DeletionCopy.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
+        assertEquals(ActionResult.Failed(HouseholdCopy.REAUTH_FAILED), controller.deleteAccount(EMAIL, "not it", "123456"))
+        assertTrue(sent.isEmpty(), "a wrong password never leaves this device")
+
+        // Refused for blockers: the server's show, and nothing was deleted.
+        assertEquals(ActionResult.Failed(DeletionCopy.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
+        assertEquals(EMAIL, sent.single().confirmEmail)
+        assertEquals("123456", sent.single().totp)
+        assertEquals(AppScreen.VAULT, controller.state.screen)
+
+        // No answer that says what happened: never "deleted" or "not deleted"; a check finds the account still here.
+        fail502 = true
+        assertEquals(ActionResult.Failed(DeletionCopy.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertTrue(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
+        assertEquals(ActionResult.Ok, controller.checkAccountDeletion())
+        assertFalse(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
+        assertEquals(DeletionCopy.NOT_DELETED_AFTER_CHECK, controller.state.notice)
+        fail502 = false
+
+        // The blockers resolved: a wrong code is refused, the right one deletes the account.
+        blockers = emptyList()
+        assertEquals(ActionResult.Failed(DeletionCopy.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
+        val namespace = "$homeKey/${reg.userId}"
+        assertTrue(namespaces.devices.containsKey(namespace))
+        assertNotNull(queue.key, "the save key the extensions seal to")
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+        assertEquals(DeletionCopy.deleted(EMAIL), controller.state.notice)
+        assertNull(controller.state.accountDeletion)
+        assertNull(store.load(), "no session and no tokens")
+        assertTrue(namespace in namespaces.deleted, "the vault cache")
+        assertFalse(namespaces.devices.containsKey(namespace), "the device state")
+        assertTrue(quickKeys.wiped.isNotEmpty(), "quick unlock")
+        assertNull(queue.key, "the save queue and its key")
+        assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
+    }
+
     // ---- vaults: where a new item goes, moving and copying ----
 
     @Test

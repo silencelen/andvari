@@ -80,6 +80,8 @@ data class AppState(
     val legacyReviews: List<LegacyReviewView> = emptyList(),
     /** "You own <vault>?" while it is open ([SessionController.describeOwnership]); null otherwise. */
     val ownershipClaim: OwnershipClaimView? = null,
+    /** Settings › Delete account while its screen is open ([SessionController.openAccountDeletion]); null otherwise. */
+    val accountDeletion: AccountDeletionView? = null,
     /** Two-step sign-in while its screen is open ([SessionController.loadTwoStep]); null otherwise. */
     val twoStep: TwoStepView?,
     /** The server's trash while it is open ([SessionController.openTrash]); null otherwise. */
@@ -334,6 +336,30 @@ data class LegacyReviewView(
     val itemCount: Int,
     /** What the server calls the vault's owner, once it said; null before (or when it could not say). */
     val owner: String?,
+)
+
+/** Deleting the account (spec 03 §13): the address to type, and what the server says deleting would do now. */
+data class AccountDeletionView(
+    /** This account's address, which the person types to confirm. */
+    val email: String,
+    /** Null until the server answered. */
+    val preview: AccountDeletionPreviewView?,
+    /**
+     * The last deletion request got no answer that says what happened (no answer, a server error, a reply that is not the
+     * server's): the account may have been deleted. [SessionController.checkAccountDeletion] finds out.
+     */
+    val outcomeUnknown: Boolean = false,
+)
+
+data class AccountDeletionPreviewView(
+    /** What goes for good, a sentence each: the account, the vaults only it holds (by name), the recovery paths. */
+    val deleted: List<String>,
+    /** The shared vaults it leaves, in a sentence; empty when none. */
+    val left: List<String>,
+    /** What stands in the way now, a sentence each; empty when nothing does. A refused deletion shows the server's. */
+    val blockers: List<String>,
+    /** The account has two-step sign-in: the deletion needs the current code. */
+    val totpRequired: Boolean,
 )
 
 /**

@@ -20,6 +20,12 @@ interface NamespaceStorage {
 
     /** Delete the durable vault cache of [userId] at [originKey], its journal files included. Never throws. */
     fun deleteVaultCache(originKey: String, userId: String)
+
+    /**
+     * Delete the device state of [userId] at [originKey]: only for an account the server deleted (spec 03 §13), whose
+     * device state can never be used again. Every other purge keeps it. Never throws.
+     */
+    fun deleteDeviceState(originKey: String, userId: String) {}
 }
 
 /**
