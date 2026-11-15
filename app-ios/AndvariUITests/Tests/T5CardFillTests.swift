@@ -188,21 +188,40 @@ final class T5CardFillTests: UITestCase {
         }
     }
 
-    /// ?layout=lure (round 12): the shop asks for the security code alone, beside another site's "rewards" widget that
-    /// mounts provider frames of its own. What the person typed there never joins the code's fill: the Fill names the
-    /// security code alone, and the widget's fields keep what was typed.
+    /// ?layout=lure (rounds 12 and 13): the shop asks for the security code alone, beside another site's "rewards" widget
+    /// that mounts provider frames of its own. A field tapped there and the shop's code are two payment forms (round 13):
+    /// the popup fills neither, says so and offers Start over. Once the person starts over and taps the code, the Fill
+    /// names the security code alone, and the widget's fields keep what was typed.
     func test08_LureWidgetFieldsNeverJoinTheFill() {
         requireProviderReachable()
         // field.html labels its input by kind: the widget's frames are the page's only number and expiry.
         let rewardsNumber = providerField("Card number")
         let rewardsExpiry = providerField("Expiry")
         let code = providerField("Security code")
+        let fill = fillButton()
+        let mixed = popupSays("two different payment forms")
+        let startOver = popupWebView.buttons.matching(NSPredicate(format: "label == 'Start over'")).firstMatch
         step("typed-into-the-rewards-widget") {
             openInSafari(checkout("lure"), heading: "Checkout")
             typeDigits("5555", into: rewardsNumber, what: "the rewards number")
             typeDigits("0101", into: rewardsExpiry, what: "the rewards expiry")
         }
-        step("code-tapped-and-filled") {
+        step("code-tapped-and-two-forms-refused") {
+            require(code, "the shop's security code")
+            tapField(code)
+            if !openPopup(until: { mixed.exists || fill.exists }, reach: .addressBar) {
+                XCTFail("the popup showed neither a Fill nor why it fills none. It says: \(popupWords())")
+                return
+            }
+            XCTAssertFalse(fill.exists, "the popup offers a Fill with fields of two payment forms chosen: \(fill.exists ? fill.label : "")")
+            XCTAssertTrue(mixed.exists, "the popup does not say the fields are in two payment forms. It says: \(popupWords())")
+            require(startOver, "the popup's Start over")
+            scrollToComfort(startOver, in: safari)
+            tapWhereItIs(startOver, in: safari)
+            XCTAssertTrue(waitUntil(10) { !self.mixed.exists }, "Start over left the two-forms line. The popup says: \(popupWords())")
+            closePopup()
+        }
+        step("code-tapped-again-and-filled") {
             tapAndFill(code, "the shop's security code", reach: .addressBar, checkLabel: { label in
                 XCTAssertTrue(label.contains("security code"), "the Fill does not name the security code: \(label)")
                 XCTAssertFalse(label.contains("card number") || label.contains("expiry"), "the Fill would write the rewards widget's fields: \(label)")
