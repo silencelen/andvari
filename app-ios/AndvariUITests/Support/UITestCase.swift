@@ -20,6 +20,15 @@ enum Fixture {
     static let httpOrigin = value("UITEST_HTTP_ORIGIN", "http://plainhttp-uitest.test:8081")
     static let otherOrigin = value("UITEST_OTHER_ORIGIN", "https://other-uitest.test:8443")
     static let otherHost = value("UITEST_OTHER_HOST", "other-uitest.test")
+    /// The test site's plain-http port on the loopback address, for the control requests (Backend.swift).
+    static let controlOrigin = value("UITEST_CONTROL_ORIGIN", "http://127.0.0.1:8081")
+    /// The test site's stand-in payment provider, the one origin a card is filled into here (owner decision 2026-11-14);
+    /// only the Safari extension's UI-test build lists it.
+    static let providerOrigin = value("UITEST_PROVIDER_ORIGIN", "https://pay.andvari-uitest.test:8443")
+    static let cardNumber = "4111111111111111"
+    /// The seeded card's expiry, 12/2031, as the digits a field shows it in ("12/31", "12 / 31" or "12/2031").
+    static let cardExpiryDigits: Set<String> = ["1231", "122031"]
+    static let cardCode = "123"
     static let secondItem = "UITest Site second"
     static let secondUser = "alice.second"
     static let secondPassword = "second-Passw0rd-site"
@@ -169,8 +178,9 @@ class UITestCase: XCTestCase {
     /// Tap where [element] is now, without failing the test if it went away in the meantime (a retry button that
     /// the thing it retries has just replaced). The tap lands on the app's own coordinates.
     func tapWhereItIs(_ element: XCUIElement, in application: XCUIApplication) {
-        guard element.exists else { return }
-        let frame = element.frame
+        // A snapshot, not `frame`: an element gone since `exists` throws here instead of failing the test.
+        guard element.exists, let snapshot = try? element.snapshot() else { return }
+        let frame = snapshot.frame
         guard !frame.isEmpty else { return }
         application.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
     }
@@ -218,7 +228,7 @@ class UITestCase: XCTestCase {
     func enter(_ text: String, into field: XCUIElement, what: String, file: StaticString = #filePath, line: UInt = #line) {
         require(field, what, file: file, line: line)
         // On a slow runner the field exists before it can be touched (a sheet still arriving, the cover still leaving).
-        _ = waitUntil(15) { field.isHittable }
+        _ = waitUntil(15) { self.safelyHittable(field) }
         // The keyboard takes a moment to belong to the field, longer the first time a simulator shows one; a tap
         // that lands while something else still has the focus is tried again.
         for _ in 0..<3 {
@@ -243,7 +253,7 @@ class UITestCase: XCTestCase {
         for _ in 0..<tries {
             if element.exists {
                 let frame = element.frame
-                if frame.minY > height * 0.18 && frame.maxY < height * 0.8 && element.isHittable { return true }
+                if frame.minY > height * 0.18 && frame.maxY < height * 0.8 && safelyHittable(element) { return true }
                 // Above the comfortable band: drag the list down; below it: drag it up. A third of a screen at a time.
                 if frame.minY <= height * 0.18 {
                     drag(at(0.45), to: at(0.75))
@@ -255,7 +265,7 @@ class UITestCase: XCTestCase {
             }
             Thread.sleep(forTimeInterval: 0.6)
         }
-        return element.exists && element.isHittable
+        return self.safelyHittable(element)
     }
 
     /// A slow drag that holds at its end, so the list stops where the finger does instead of coasting on.

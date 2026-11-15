@@ -2,6 +2,7 @@ package io.silencelen.andvari.uitestseed
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.java.Java
+import io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 import io.silencelen.andvari.core.client.Account
 import io.silencelen.andvari.core.client.AndvariApi
 import io.silencelen.andvari.core.client.CardData
@@ -10,11 +11,21 @@ import io.silencelen.andvari.core.client.ItemDoc
 import io.silencelen.andvari.core.client.LoginData
 import io.silencelen.andvari.core.client.SyncEngine
 import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.crypto.CryptoProvider
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.InviteRequest
+import io.silencelen.andvari.core.model.LoginRequest
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.io.File
+import java.net.URI
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import kotlin.system.exitProcess
 
 /**
@@ -29,6 +40,12 @@ import kotlin.system.exitProcess
  *                                       confirm its recovery phrase so a sign-in lands in the vault, and save the
  *                                       logins the tests look for; with the last two, the first account (an admin)
  *                                       also invites a second, empty account and enrolls it, for a test to delete
+ *   vault <create|delete|restore> <origin> <email> <master password> <vault name>
+ *                                       sign in as another device of the account and create, delete or restore one of
+ *                                       its shared vaults: what the app on the simulator then learns at its next sync
+ *   share <origin> <email> <master password> <vault name> <item name>
+ *                                       a second account shares a vault holding one login READ-ONLY with the account,
+ *                                       and another device of the account accepts it (see [share])
  *
  * Nothing here is a backdoor: the server is unmodified and every call is one the apps make.
  */
@@ -40,12 +57,17 @@ fun main(args: Array<String>) {
             9 -> seed(args[1], args[2], args[3], args[4], args[5], args[6], args[7] to args[8])
             else -> usage()
         }
+        "vault" -> if (args.size == 6 && args[1] in setOf("create", "delete", "restore")) vault(args[1], args[2], args[3], args[4], args[5]) else usage()
+        "share" -> if (args.size == 6) share(args[1], args[2], args[3], args[4], args[5]) else usage()
         else -> usage()
     }
 }
 
 private fun usage(): Nothing {
-    System.err.println("usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site> [<throwaway email> <throwaway password>]")
+    System.err.println(
+        "usage: uitest-seed env <file> | seed <origin> <token> <email> <password> <https site> <http site> [<throwaway email> <throwaway password>] | " +
+            "vault <create|delete|restore> <origin> <email> <password> <vault name> | share <origin> <email> <password> <vault name> <item name>",
+    )
     exitProcess(2)
 }
 
@@ -126,4 +148,112 @@ private fun seed(origin: String, token: String, email: String, password: String,
     println("seeded ${logins.size} items for $email at $origin")
     // The HTTP client's threads are not daemons.
     exitProcess(0)
+}
+
+/** A sign-in as a new device of the account, as any client makes one. */
+private suspend fun signIn(origin: String, email: String, password: String, crypto: CryptoProvider): Pair<AndvariApi, Account> {
+    val api = AndvariApi(origin, HttpClient(Java), platform = "linux")
+    val pre = api.prelogin(email)
+    val authKey = Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams, crypto)
+    val session = api.login(LoginRequest(email, authKey, Account.deviceInfo("uitest-other-device", "linux")))
+    return api to Account.unlock(session.userId, password, session.accountKeys, crypto)
+}
+
+/** Another device of the account creates, deletes or restores the shared vault named [name], as its owner. */
+private fun vault(action: String, origin: String, email: String, password: String, name: String): Unit = runBlocking {
+    val crypto = createCryptoProvider()
+    val (api, account) = signIn(origin, email, password, crypto)
+    val engine = SyncEngine(api, account, InMemoryVaultCache())
+    engine.sync()
+    when (action) {
+        "create" -> engine.createSharedVault(name)
+        "delete" -> {
+            val found = engine.vaultInfos().filter { it.type == "shared" && it.name == name }
+            check(found.size == 1) { "expected one shared vault named \"$name\", found ${found.size}" }
+            engine.deleteSharedVault(found.single().vaultId)
+        }
+        else -> {
+            val found = engine.listDeleted().filter { it.name == name }
+            check(found.size == 1) { "expected one deleted vault named \"$name\", found ${found.size}" }
+            engine.restoreSharedVault(found.single().vaultId, found.single().deleteId)
+        }
+    }
+    api.logout()
+    println("$action: \"$name\" done")
+    exitProcess(0)
+}
+
+/**
+ * A vault the account only READS, reached the way a person reaches one. The test account (the server's admin) mints
+ * an invite for a new second account, as the admin page does, and the second account enrolls with it. That account
+ * creates the shared vault [vaultName] holding the login [itemName], checks the test account's identity code and adds
+ * it as a reader. Another device of the test account then accepts the invitation, typing the sharer's identity code.
+ * Accepting posts the account's own wrap of the vault key, so the app on the simulator adopts the vault at its next
+ * sync without an invitation screen of its own.
+ */
+private fun share(origin: String, email: String, password: String, vaultName: String, itemName: String): Unit = runBlocking {
+    val crypto = createCryptoProvider()
+    val (api, account) = signIn(origin, email, password, crypto)
+    val engine = SyncEngine(api, account, InMemoryVaultCache())
+    engine.sync()
+
+    val sharerEmail = "sharer-${Bytes.toHexLower(crypto.randomBytes(4))}@andvari-uitest.test"
+    val sharerPassword = "sharer ${Bytes.toHexLower(crypto.randomBytes(16))}"
+    val inviteToken = adminInvite(origin, api.currentTokens()?.accessToken ?: error("the sign-in kept no session"), sharerEmail)
+    val sharerApi = AndvariApi(origin, HttpClient(Java), platform = "linux")
+    val policy = sharerApi.clientPolicy()
+    val (request, sharer) = Account.enroll(
+        inviteToken = inviteToken,
+        email = sharerEmail,
+        displayName = "UI test sharer",
+        password = sharerPassword,
+        params = policy.kdfParams,
+        recoveryPublicKey = Bytes.fromB64(sharerApi.recoveryPubkey()),
+        recoveryFingerprint = policy.recoveryFingerprint,
+        deviceName = "uitest-sharer",
+        crypto = crypto,
+        platform = "linux",
+    )
+    val sharerSession = sharerApi.register(request)
+    sharerApi.recoverySelfConfirm(sharerSession.recoveryPieceId)
+    val sharerEngine = SyncEngine(sharerApi, sharer, InMemoryVaultCache())
+    sharerEngine.sync()
+    val vaultId = sharerEngine.createSharedVault(vaultName)
+    sharerEngine.save(null, ItemDoc(type = "login", name = itemName, login = LoginData("reader", "read-Only-Passw0rd", listOf("https://read-only.example.com"))), vaultId)
+    sharerEngine.sync()
+    val served = sharerEngine.lookupMember(email)
+    checkNotNull(sharerEngine.verifyMemberTyped(served, account.identityFingerprintShort(), email)) { "the test account's identity code did not match the key the server serves" }
+    sharerEngine.addVaultMember(vaultId, served.userId, "reader", email)
+
+    engine.sync()
+    val invitation = engine.pendingInvitations().singleOrNull { it.vaultId == vaultId } ?: error("no invitation to \"$vaultName\" reached the test account")
+    check(engine.acceptInvitation(invitation, sharer.identityFingerprintShort())) { "the test account could not accept the invitation to \"$vaultName\"" }
+    engine.sync()
+    check(engine.items().any { it.vaultId == vaultId && it.doc.name == itemName }) { "\"$itemName\" is not readable in \"$vaultName\" after accepting" }
+    sharerApi.logout()
+    api.logout()
+    // What the simulator's app then sees at its next sync (another device of the account that accepted nothing, holding
+    // the vault through the account's own wrap as a reader) is the UI test's to check; each sign-in here costs the
+    // runner a key derivation.
+    println("share: \"$vaultName\" shared read-only by $sharerEmail and accepted")
+    exitProcess(0)
+}
+
+/** POST /api/v1/admin/users as the admin page sends it (no email: the invite token is used here at once). */
+private fun adminInvite(origin: String, accessToken: String, email: String): String {
+    val body = buildJsonObject {
+        put("email", email)
+        put("isAdmin", false)
+        put("sendEmail", false)
+        put("escrowPolicy", "required")
+    }.toString()
+    val request = HttpRequest.newBuilder(URI.create("$origin/api/v1/admin/users"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer $accessToken")
+        .header("X-Andvari-Client", "linux/$ANDVARI_CLIENT_VERSION")
+        .POST(HttpRequest.BodyPublishers.ofString(body))
+        .build()
+    val response = java.net.http.HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
+    check(response.statusCode() == 200) { "the server refused the invite: ${response.statusCode()} ${response.body()}" }
+    return Json.parseToJsonElement(response.body()).jsonObject["inviteToken"]?.jsonPrimitive?.content ?: error("the invite response has no token")
 }

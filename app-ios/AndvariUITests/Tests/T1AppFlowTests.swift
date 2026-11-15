@@ -46,6 +46,8 @@ final class T1AppFlowTests: UITestCase {
             XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Keep '")).count, 0, "a vault to keep is offered where there is only one")
         }
         step("personal-vault-confirmed") {
+            // iOS can offer to save the password just typed, over the notice: that is answered first.
+            _ = waitUntil(10) { self.safelyHittable(self.usePersonalVaultButton) }
             usePersonalVaultButton.tap()
             XCTAssertTrue(waitUntil(15) { !self.personalVaultNotice.exists }, "the notice stayed after Use")
         }
