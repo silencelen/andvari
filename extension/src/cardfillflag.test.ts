@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import * as esbuild from "esbuild";
 import { CARD_FILL, CARD_FILL_OFF } from "./cardfillflag.ts";
-import { CARD_FILL_FROM_APP } from "./errors.ts";
+import { CARD_FILL_FROM_APP, CARD_FILL_OFF_COPY, cardFillErrorCopy, cardFillOffLine } from "./errors.ts";
 
 const read = (f: string): string => readFileSync(new URL(f, import.meta.url), "utf8");
 
@@ -68,8 +68,17 @@ test("without card fill the content script chooses nothing and reports nothing, 
   assert.match(content, /function reportCardForm\(\): void \{[\s\S]{0,200}?if \(!CARD_FILL\) return;/);
   const popup = read("./popup.ts");
   assert.match(popup, /if \(!CARD_FILL\) \{\s*cardFill = \{ fillable: false, origin: null, frames: \[\], pageFormOnly: false, fillOff: true \};/);
-  assert.match(popup, /if \(cardFill\.fillOff === true\) return CARD_FILL_FROM_APP;/);
+  assert.match(popup, /if \(cardFill\.fillOff === true\) return cardFillOffLine\(safari\);/);
+  assert.match(popup, /const why = cardCopyReason\(BUILD_TARGET === "safari"\);/, "the target decides the line");
+  // Per target (0.30.0 release prep): only the Safari popup, which copies no card number or code, sends the person to
+  // the app; a Chrome or Firefox build made with CARDFILL=0 copies every detail itself, and says so.
   assert.equal(CARD_FILL_FROM_APP, "andvari fills no cards here: copy a card's number and code in the andvari app.");
+  assert.equal(CARD_FILL_OFF_COPY, "This build of andvari fills no cards into pages: copy a card's details with the buttons below.");
+  assert.equal(cardFillOffLine(true), CARD_FILL_FROM_APP);
+  assert.equal(cardFillOffLine(false), CARD_FILL_OFF_COPY);
+  assert.ok(!CARD_FILL_OFF_COPY.includes("andvari app"), "a desktop build never sends the person to the app for a card");
+  assert.equal(cardFillErrorCopy("fill_off", undefined, true), CARD_FILL_FROM_APP);
+  assert.equal(cardFillErrorCopy("fill_off", undefined, false), CARD_FILL_OFF_COPY, "the fill's refusal says the same");
 });
 
 test("build.mjs: the Safari build has card fill only with CARDFILL=1, the desktop builds unless CARDFILL=0, and it checks the bundle", () => {
