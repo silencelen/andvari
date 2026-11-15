@@ -252,10 +252,20 @@ class UITestCase: XCTestCase {
         let application = application ?? app
         let height = application.windows.firstMatch.frame.height
         let at = { (y: CGFloat) in application.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: y)) }
+        var asked = false
         for _ in 0..<tries {
             if element.exists {
                 let frame = element.frame
-                if frame.minY > height * 0.18 && frame.maxY < height * 0.8 && safelyHittable(element) { return true }
+                let placed = frame.minY > height * 0.18 && frame.maxY < height * 0.8
+                if placed && safelyHittable(element) { return true }
+                if placed && !asked {
+                    // Where it should be and still not to be tapped: something is over it. iOS puts questions of its
+                    // own over the app (its offer to save a password just typed): answered once, and looked at again.
+                    asked = true
+                    answerSystemAlerts()
+                    Thread.sleep(forTimeInterval: 0.8)
+                    continue
+                }
                 // Above the comfortable band: drag the list down; below it: drag it up. A third of a screen at a time.
                 if frame.minY <= height * 0.18 {
                     drag(at(0.45), to: at(0.75))
