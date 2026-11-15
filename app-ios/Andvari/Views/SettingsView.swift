@@ -132,6 +132,11 @@ struct SettingsView: View {
                     } label: {
                         Label("Trash", systemImage: "trash")
                     }
+                    NavigationLink {
+                        ImportView()
+                    } label: {
+                        Label("Import passwords", systemImage: "square.and.arrow.down")
+                    }
                 } header: {
                     Text("Vault")
                 } footer: {

@@ -24,6 +24,7 @@ import io.silencelen.andvari.core.client.Staleness
 import io.silencelen.andvari.core.client.UsageLedger
 import io.silencelen.andvari.core.client.VaultHealth
 import io.silencelen.andvari.core.client.CoHolder
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
@@ -3219,6 +3220,164 @@ open class SessionController(
         }
     }
 
+    // ---- importing a CSV export (spec 06; the universal importer, design 2026-07-11; the Android app's flow) ----
+    //
+    // The file is read, parsed and planned on this device. Nothing of it goes to the server as it is: each planned item
+    // is encrypted here under the chosen vault's key and sent like any other save. The plan is made against the items
+    // already in that vault (core's dedupe), and only ever sent into the vault it was made for.
+
+    /** The import screen's file and plan, while it is open. */
+    private var csv: CsvSession? = null
+
+    /**
+     * Read a CSV export and plan its import into the personal vault, against what is already there. [bytes] are zeroed
+     * once read. Nothing is sent until [confirmImport].
+     */
+    @Throws(CancellationException::class)
+    suspend fun importCsv(bytes: ByteArray): ActionResult = action {
+        try {
+            val live = session.get() ?: return@action ActionResult.NotDone(null)
+            if (bytes.size > CsvImport.MAX_BYTES) return@action ActionResult.Failed(ImportCopy.TOO_LARGE)
+            // Planned only against a vault this device holds: an empty projection would quietly switch the dedupe off.
+            val personal = live.account.personalVaultId
+            if (personal.isEmpty() || vaultList(live).none { it.vaultId == personal }) return@action ActionResult.Failed(ImportCopy.NO_VAULT)
+            busy()
+            val read = try {
+                withContext(Dispatchers.Default) { CsvImport.parse(bytes) to CsvImport.rowOrdinalsByLine(bytes) }
+            } catch (e: CsvImport.ImportException) {
+                return@action failure(e) { ImportCopy.forCode(e.code) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                return@action failure(t, HouseholdCopy::forImportError)
+            }
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            val s = CsvSession(read.first, read.second, looksMangled(read.first))
+            s.vaultId = personal
+            val existing = live.engine.importProjections(personal)
+            s.plan = withContext(Dispatchers.Default) { CsvImport.plan(s.parsed, existing) { live.account.newItemId() } }
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            csv = s
+            publishImport(live)
+            idle()
+            ActionResult.Ok
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    /** Import into [vaultId] instead: the plan is made again against that vault's items. Only before the import began. */
+    @Throws(CancellationException::class)
+    suspend fun setImportVault(vaultId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val s = csv ?: return@action ActionResult.NotDone(null)
+        if (s.busy || s.error != null || s.done || vaultId == s.vaultId) return@action ActionResult.NotDone(null)
+        if (writableVaults(live).none { it.vaultId == vaultId }) return@action ActionResult.Failed(ImportCopy.VAULT_GONE)
+        s.busy = true
+        publishImport(live)
+        val plan = try {
+            val existing = live.engine.importProjections(vaultId)
+            withContext(Dispatchers.Default) { CsvImport.plan(s.parsed, existing) { live.account.newItemId() } }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            null
+        } finally {
+            s.busy = false
+        }
+        if (session.get() !== live || csv !== s) return@action ActionResult.NotDone(null)
+        if (plan == null) {
+            publishImport(live)
+            return@action ActionResult.Failed(ImportCopy.NO_VAULT)
+        }
+        // The plan and its vault change together: a plan is never sent into another vault than the one it was made for.
+        s.plan = plan
+        s.vaultId = vaultId
+        publishImport(live)
+        ActionResult.Ok
+    }
+
+    /**
+     * Encrypt and send the planned items into the chosen vault. A failure keeps the plan: Retry sends the same items,
+     * under the same ids, so nothing is imported twice.
+     */
+    @Throws(CancellationException::class)
+    suspend fun confirmImport(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val s = csv ?: return@action ActionResult.NotDone(null)
+        val plan = s.plan ?: return@action ActionResult.NotDone(null)
+        if (s.busy || s.done || plan.items.isEmpty()) return@action ActionResult.NotDone(null)
+        val vaultId = s.vaultId
+        s.busy = true
+        s.error = null
+        s.retryable = true
+        s.progress = ScanProgressView(0, plan.items.size)
+        publishImport(live)
+        val failed = try {
+            runBounded(BoundedOps.importMs(plan.items.size)) {
+                live.engine.importAll(plan.items, onProgress = { done, total ->
+                    if (csv === s) {
+                        s.progress = ScanProgressView(done, total)
+                        publishImport(live)
+                    }
+                }, vaultId = vaultId)
+            }
+            null
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            t
+        }
+        s.busy = false
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (failed is UpgradeRequiredException) return@action failure(failed, HouseholdCopy::forError)
+        when {
+            failed != null -> {
+                s.retryable = importRetryable(failed)
+                s.error = if (s.retryable) ImportCopy.INTERRUPTED else HouseholdCopy.forError(failed)
+            }
+            // A vault deleted while importing parks the items rather than refusing them: that is not a success.
+            vaultList(live).none { it.vaultId == vaultId } -> {
+                s.retryable = false
+                s.error = ImportCopy.PARKED
+            }
+            else -> {
+                s.done = true
+                s.progress = null
+            }
+        }
+        update { it.copy(items = summaries(it.query)) }
+        writeFillSnapshot()
+        publishImport(live)
+        ActionResult.Ok
+    }
+
+    /** Close the import: the parsed file and the plan go. */
+    fun closeImport() {
+        csv = null
+        update { it.copy(csvImport = null) }
+    }
+
+    private fun publishImport(live: VaultSession.Unlocked) {
+        val s = csv ?: return
+        val names = vaultList(live).associate { it.vaultId to it.name }
+        update { it.copy(csvImport = csvImportView(s, { id -> names[id] ?: "this vault" }, writableVaults(live).map(::choiceOf))) }
+    }
+
+    /** A failed import push worth a Retry: a transport blip, a rate limit or a server error converge on the same items. */
+    private fun importRetryable(t: Throwable): Boolean = when {
+        t is KdfPolicyViolationException -> false
+        t is ApiException -> t.code == "rate_limited" || t.status == 429 || t.status >= 500
+        else -> true
+    }
+
+    /** A file copied out of a web page arrives HTML-escaped: said when more than one value carries an entity. */
+    private fun looksMangled(parsed: CsvImport.Parsed): Boolean {
+        val entity = Regex("&(amp|lt|gt|quot|#\\d+);")
+        var hits = 0
+        for (r in parsed.rows) for (v in listOf(r.name, r.url, r.username, r.password, r.notes, r.totp ?: "")) {
+            if (entity.containsMatchIn(v) && ++hits >= 2) return true
+        }
+        return false
+    }
+
     /** Sync now. */
     @Throws(CancellationException::class)
     suspend fun refresh(): ActionResult = action {
@@ -3995,6 +4154,7 @@ open class SessionController(
         claim = null
         health = null
         breaches = null
+        csv = null
     }
 
     private fun lock(reason: String?) {
@@ -4084,7 +4244,7 @@ open class SessionController(
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
         attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
-        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null,
+        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null, csvImport = null,
     )
 
     private companion object {
