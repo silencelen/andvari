@@ -218,7 +218,7 @@ final class T5CardFillTests: UITestCase {
             require(startOver, "the popup's Start over")
             scrollToComfort(startOver, in: safari)
             tapWhereItIs(startOver, in: safari)
-            XCTAssertTrue(waitUntil(10) { !self.mixed.exists }, "Start over left the two-forms line. The popup says: \(popupWords())")
+            XCTAssertTrue(waitUntil(10) { !mixed.exists }, "Start over left the two-forms line. The popup says: \(popupWords())")
             closePopup()
         }
         step("code-tapped-again-and-filled") {
