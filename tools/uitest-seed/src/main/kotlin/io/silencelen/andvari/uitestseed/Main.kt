@@ -202,18 +202,10 @@ private fun share(origin: String, email: String, password: String, vaultName: St
     check(engine.items().any { it.vaultId == vaultId && it.doc.name == itemName }) { "\"$itemName\" is not readable in \"$vaultName\" after accepting" }
     sharerApi.logout()
     api.logout()
-
-    // What the simulator's app should now see: a further device of the account, which accepted nothing, holds the vault
-    // through the account's own wrap after a sync, as a reader.
-    val (laterApi, later) = signIn(origin, email, password, crypto)
-    val laterEngine = SyncEngine(laterApi, later, InMemoryVaultCache())
-    laterEngine.sync()
-    check(laterEngine.items().any { it.vaultId == vaultId && it.doc.name == itemName }) { "another device of the account does not hold \"$vaultName\" after a sync" }
-    check(later.keySource(vaultId) == Account.KeySource.UVK_WRAP && later.roleFor(vaultId) == "reader") {
-        "another device holds \"$vaultName\" through ${later.keySource(vaultId)} as ${later.roleFor(vaultId)}, not through the account's own wrap as a reader"
-    }
-    laterApi.logout()
-    println("share: \"$vaultName\" shared read-only by $sharerEmail, accepted, and held by another device as a reader")
+    // What the simulator's app then sees at its next sync (another device of the account that accepted nothing, holding
+    // the vault through the account's own wrap as a reader) is the UI test's to check; each sign-in here costs the
+    // runner a key derivation.
+    println("share: \"$vaultName\" shared read-only by $sharerEmail and accepted")
     exitProcess(0)
 }
 

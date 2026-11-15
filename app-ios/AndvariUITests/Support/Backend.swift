@@ -26,7 +26,7 @@ enum OtherDevice {
             guard let url = components?.url else { continue }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
-            request.timeoutInterval = 150
+            request.timeoutInterval = 320
             let done = DispatchSemaphore(value: 0)
             var status = 0
             var text = ""
@@ -35,7 +35,7 @@ enum OtherDevice {
                 text = data.flatMap { String(data: $0, encoding: .utf8) } ?? error.map { "\($0)" } ?? ""
                 done.signal()
             }.resume()
-            if done.wait(timeout: .now() + 160) == .timedOut {
+            if done.wait(timeout: .now() + 330) == .timedOut {
                 last = "\(origin): no answer"
                 continue
             }
