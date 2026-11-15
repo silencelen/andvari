@@ -31,9 +31,23 @@ extension UITestCase {
     @discardableResult
     func waitForScreen(_ timeout: TimeInterval = 60, file: StaticString = #filePath, line: UInt = #line) -> AppScreen {
         var seen: AppScreen?
-        if !waitUntil(timeout, { seen = currentScreen(); return seen != nil }) {
+        let search = app.searchFields.firstMatch
+        let look: () -> Bool = {
+            seen = self.currentScreen()
+            // A search left open (an earlier test's) hides the vault's bar, and with it every mark of the screen.
+            if seen == nil && self.safelyHittable(search) { self.endSearch() }
+            return seen != nil
+        }
+        // A sheet an earlier test left open (it stopped halfway) hides the screen under it: start the app again, which
+        // comes up locked, rather than fail every test after it.
+        let first = min(20, timeout)
+        if waitUntil(first, look) { return seen ?? .chooseServer }
+        dumpTree(app, as: "no-screen-so-relaunched")
+        app.terminate()
+        app.launch()
+        if !waitUntil(max(timeout - first, 20), look) {
             dumpTree(app, as: "no-screen")
-            XCTFail("the app showed none of its screens within \(Int(timeout)) s", file: file, line: line)
+            XCTFail("the app showed none of its screens within \(Int(timeout)) s, nor after it was started again", file: file, line: line)
         }
         return seen ?? .chooseServer
     }
@@ -134,17 +148,18 @@ extension UITestCase {
         enter(text, into: search, what: "the search field")
     }
 
-    /// Leave the search, whichever way this iOS offers it.
+    /// Leave the search, whichever way this iOS offers it: the round close button beside iOS 26's search bar, or an
+    /// older Cancel. The clear-text button inside the field only empties it: the search stays open, with its keyboard,
+    /// and the vault's bar stays hidden.
     func endSearch() {
-        let cancel = app.buttons["Cancel"].firstMatch
-        let clear = app.searchFields.firstMatch.buttons.firstMatch
-        if cancel.exists && cancel.isHittable {
-            cancel.tap()
-        } else if clear.exists && clear.isHittable {
-            clear.tap()
+        let close = app.buttons.matching(NSPredicate(format: "label == 'close' OR label == 'Close' OR label == 'Cancel'")).firstMatch
+        if self.safelyHittable(close) {
+            close.tap()
+        } else {
+            let keyboardDone = app.keyboards.buttons.matching(NSPredicate(format: "label == 'search' OR label == 'Search' OR label == 'done' OR label == 'Done'")).firstMatch
+            if app.keyboards.firstMatch.exists && keyboardDone.exists && keyboardDone.isEnabled { keyboardDone.tap() }
         }
-        let keyboardDone = app.keyboards.buttons.matching(NSPredicate(format: "label == 'search' OR label == 'Search' OR label == 'done' OR label == 'Done'")).firstMatch
-        if app.keyboards.firstMatch.exists && keyboardDone.exists { keyboardDone.tap() }
+        _ = waitUntil(5) { !self.app.keyboards.firstMatch.exists }
     }
 
     /// A vault row whose text (name, then username) contains [text].
@@ -180,6 +195,8 @@ extension UITestCase {
     func confirmPersonalVaultIfAsked() {
         guard waitUntil(4, { self.personalVaultNotice.exists }) else { return }
         require(usePersonalVaultButton, "the notice's Use button", timeout: 20)
+        // iOS can offer to save the password just typed, over the notice: that is answered first.
+        _ = waitUntil(10) { self.safelyHittable(self.usePersonalVaultButton) }
         usePersonalVaultButton.tap()
         if !waitUntil(15, { !self.personalVaultNotice.exists }) {
             dumpTree(app, as: "personal-vault-still-asked")
@@ -213,7 +230,7 @@ extension UITestCase {
     func confirmSignOut() {
         // The confirmation repeats the title of the button that raised it; the dialog's own has no identifier.
         let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign out' AND identifier == ''")).firstMatch
-        if !waitUntil(8, { confirm.exists && confirm.isHittable }) {
+        if !waitUntil(8, { self.safelyHittable(confirm) }) {
             dumpTree(app, as: "no-sign-out-confirmation")
             XCTFail("the sign-out confirmation did not appear")
         }

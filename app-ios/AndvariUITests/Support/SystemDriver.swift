@@ -1,10 +1,39 @@
 import CryptoKit
 import XCTest
 
+/// The screen, in the coordinates every element's frame uses: read once.
+enum Screen {
+    static let bounds = XCUIApplication(bundleIdentifier: "com.apple.springboard").frame
+}
+
+/// How Safari's page menu (the way to andvari's popup) is reached while a page field has the keyboard.
+enum PopupReach {
+    /// Close the keyboard with its Done first. That takes the focus from the field while the page keeps it.
+    case keyboardDone
+    /// Leave the keyboard up: the menu as it is, or Safari's bar brought back by a tap on its shrunk address.
+    case addressBar
+}
+
 /// iOS itself: Settings, Safari, and the pieces of the keyboard that belong to AutoFill.
 extension UITestCase {
     var settingsApp: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.Preferences") }
     var safari: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.mobilesafari") }
+
+    /// Whether [element] can be tapped, false for one caught mid-change with no frame on screen (isHittable fails the
+    /// test for such an element instead of answering).
+    func safelyHittable(_ element: XCUIElement) -> Bool {
+        guard onScreen(element) else { return false }
+        return element.isHittable
+    }
+
+    /// Whether [element] is there with a frame on screen, from one snapshot. Unlike `frame` or `isHittable`, a snapshot
+    /// of an element that went away throws a Swift error instead of failing the test: an element that flickers (the
+    /// popup's unlock button while its own prompt is on its way) reads as not there.
+    func onScreen(_ element: XCUIElement) -> Bool {
+        guard element.exists, let snapshot = try? element.snapshot() else { return false }
+        let frame = snapshot.frame
+        return frame.width >= 1 && frame.height >= 1 && frame.intersects(Screen.bounds)
+    }
 
     /// "26.2" as (26, 2).
     var systemVersion: (major: Int, minor: Int) {
@@ -31,14 +60,14 @@ extension UITestCase {
     @discardableResult
     func scrollToAndTap(_ element: XCUIElement, in application: XCUIApplication, swipes: Int = 8) -> Bool {
         for _ in 0..<swipes {
-            if element.exists && element.isHittable {
+            if self.safelyHittable(element) {
                 element.tap()
                 return true
             }
             application.swipeUp()
             Thread.sleep(forTimeInterval: 0.4)
         }
-        if element.exists && element.isHittable {
+        if self.safelyHittable(element) {
             element.tap()
             return true
         }
@@ -250,6 +279,58 @@ extension UITestCase {
         XCTAssertTrue(enableSafariExtension(), "the Safari extension could not be turned on")
     }
 
+    /// Settings > Apps > Safari > Extensions > andvari > Other Websites: Allow, as a person lets the extension run on
+    /// every website (what the popup asks for when a payment provider's frame is one Safari keeps it out of). Each
+    /// screen on the way is a step of [test]'s. True when the row reads Allow at the end.
+    @discardableResult
+    func allowExtensionOnEveryWebsite() -> Bool {
+        if SystemState.everyWebsiteAllowed { return true }
+        let settings = settingsApp
+        let other = settings.cells["Other Websites"]
+        step("settings-andvari-websites") {
+            settings.terminate()
+            settings.launch()
+            XCTAssertTrue(scrollToAndTap(labelled("Apps", in: settings), in: settings), "Settings has no Apps row")
+            Thread.sleep(forTimeInterval: 1.5)
+            let search = settings.searchFields.firstMatch
+            if search.exists {
+                search.tap()
+                search.typeText("Safari")
+                Thread.sleep(forTimeInterval: 1.5)
+            }
+            let row = settings.cells.matching(NSPredicate(format: "label BEGINSWITH 'Safari'")).firstMatch
+            XCTAssertTrue(scrollToAndTap(row.exists ? row : labelled("Safari", in: settings), in: settings, swipes: 12), "Settings > Apps has no Safari row")
+            Thread.sleep(forTimeInterval: 1.5)
+            XCTAssertTrue(scrollToAndTap(labelled("Extensions", in: settings), in: settings, swipes: 10), "Safari's settings have no Extensions row")
+            Thread.sleep(forTimeInterval: 1.5)
+            let entry = settings.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH[c] 'andvari'")).firstMatch
+            // A tap while the Extensions screen is still sliding in opens nothing: tap again until it opens.
+            for _ in 0..<3 where !other.exists {
+                XCTAssertTrue(scrollToAndTap(entry, in: settings, swipes: 4), "andvari is not listed under Safari's extensions")
+                _ = waitUntil(4) { other.exists }
+            }
+            dumpTree(settings, as: "settings-andvari-websites")
+        }
+        var allowed = false
+        step("every-website-allowed") {
+            XCTAssertTrue(scrollToAndTap(other, in: settings, swipes: 6), "andvari's settings have no Other Websites row")
+            Thread.sleep(forTimeInterval: 1.5)
+            dumpTree(settings, as: "settings-other-websites")
+            XCTAssertTrue(scrollToAndTap(labelled("Allow", in: settings), in: settings, swipes: 4), "Other Websites offers no Allow")
+            Thread.sleep(forTimeInterval: 1)
+            // iOS may ask to confirm a permission this wide.
+            let confirm = settings.alerts.buttons.matching(NSPredicate(format: "label == 'Allow' OR label == 'OK'")).firstMatch
+            if confirm.exists { confirm.tap() }
+            settings.navigationBars.buttons.firstMatch.tap()
+            allowed = waitUntil(8) { other.exists && other.label.hasSuffix("Allow") }
+            dumpTree(settings, as: "settings-every-website-allowed")
+            XCTAssertTrue(allowed, "Other Websites does not read Allow: \(other.exists ? other.label : "no row")")
+        }
+        settings.terminate()
+        SystemState.everyWebsiteAllowed = allowed
+        return allowed
+    }
+
     /// Bring the app forward and unlock it: the app applies what the extensions queued at an unlock.
     func applySavesNow() {
         bringAppForward()
@@ -278,13 +359,28 @@ extension UITestCase {
 
     /// Open [url] in a fresh Safari and wait for the page's heading. A Safari that has just started sometimes comes
     /// up on its start page and drops the address it was opened with, or leaves a load pending; so it is started
-    /// first, the address is typed when opening it did not take, and Safari is started again halfway. Four tries in
-    /// all, then the test is told, with Safari's tree.
+    /// first, the address is typed when opening it did not take, and Safari is started again every other try. The
+    /// simulator also has spells of several minutes in which every TLS connection to the test site fails ("bad
+    /// certificate format" in its log, after a stall of about 20 s) and then passes again; so the tries go on for up to
+    /// nine minutes before the test is told, with Safari's tree.
     func openInSafari(_ url: String, heading: String) {
         let browser = safari
-        let shown = { browser.webViews.staticTexts[heading].exists }
-        for attempt in 1...4 {
-            if attempt == 1 || attempt == 3 {
+        openInSafari(url, until: { browser.webViews.staticTexts[heading].exists })
+    }
+
+    /// As openInSafari(_:heading:), for a page known by a line that contains [text].
+    func openInSafari(_ url: String, containing text: String) {
+        let line = safari.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+        openInSafari(url, until: { line.exists })
+    }
+
+    private func openInSafari(_ url: String, until shown: @escaping () -> Bool) {
+        let browser = safari
+        let deadline = Date().addingTimeInterval(9 * 60)
+        var attempt = 0
+        while true {
+            attempt += 1
+            if attempt % 2 == 1 {
                 browser.terminate()
                 browser.launch()
                 _ = waitUntil(20) { browser.textFields["TabBarItemTitle"].exists || browser.buttons["TabBarItemTitle"].exists || browser.otherElements["TabBarItemTitle"].exists }
@@ -293,17 +389,19 @@ extension UITestCase {
             if waitUntil(15, shown) { break }
             closeSafariTips()
             let address = browser.textFields["TabBarItemTitle"]
-            if address.exists && address.isHittable {
+            if self.safelyHittable(address) {
                 address.tap()
                 Thread.sleep(forTimeInterval: 1)
                 browser.typeText(url + "\n")
                 if waitUntil(20, shown) { break }
             }
-            if attempt == 4 {
+            if Date() > deadline {
                 dumpTree(browser, as: "safari-no-page")
-                XCTFail("Safari did not show \(url) in four tries")
+                XCTFail("Safari did not show \(url) in \(attempt) tries over nine minutes")
+                break
             }
-            Thread.sleep(forTimeInterval: 5)
+            if attempt == 4 { dumpTree(browser, as: "safari-no-page-yet") }
+            Thread.sleep(forTimeInterval: attempt < 4 ? 5 : 15)
         }
         // The page is there; give Safari's own first-run tips a moment to appear, and close them.
         Thread.sleep(forTimeInterval: 1.5)
@@ -392,24 +490,44 @@ extension UITestCase {
     // MARK: - The Safari extension's popup
 
     /// Open andvari's popup on the page Safari shows and look at the phone until [done], answering Safari's
-    /// per-site questions on the way. The popup asks for Face ID by itself once it has painted.
+    /// per-site questions on the way. The popup asks for Face ID by itself once it has painted. [reach] is how
+    /// Safari's page menu is reached while a page field has the keyboard.
     @discardableResult
-    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true) -> Bool {
+    func openPopup(until done: @escaping () -> Bool, timeout: TimeInterval = 45, showFace: Bool = true, reach: PopupReach = .keyboardDone) -> Bool {
         closePopup()
         _ = waitUntil(4) { self.fillOfferButton.exists }
         closeFillOffer()
-        // The keyboard's bar has a Done of its own, and the keyboard hides Safari's toolbar.
-        let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
-        if safari.keyboards.firstMatch.exists && keyboardDone.exists { tapWhereItIs(keyboardDone, in: safari) }
         let menu = safari.buttons["PageFormatMenuButton"]
-        if !waitUntil(10, { menu.exists && menu.isHittable }) {
+        let menuInReach = { menu.exists && self.safelyHittable(menu) }
+        let keyboardDone = safari.buttons.matching(NSPredicate(format: "label == 'Done'")).firstMatch
+        if safari.keyboards.firstMatch.exists {
+            switch reach {
+            case .keyboardDone:
+                // The keyboard's bar has a Done of its own, and the keyboard can hide Safari's toolbar.
+                if keyboardDone.exists { tapWhereItIs(keyboardDone, in: safari) }
+            case .addressBar where !menuInReach():
+                // In the Compact and Bottom layouts the bar shrinks to the page's address above the keyboard: a tap on
+                // it brings the bar, and its page menu, back. A tap that opened the address for typing is cancelled.
+                let address = safari.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'CapsuleNavigationBar'")).firstMatch
+                if address.exists { tapWhereItIs(address, in: safari) }
+                if !waitUntil(5, menuInReach) {
+                    let cancel = safari.buttons["Cancel"]
+                    if cancel.exists { tapWhereItIs(cancel, in: safari) }
+                }
+                shot("page-menu-by-the-address-bar")
+                dumpTree(safari, as: "page-menu-by-the-address-bar")
+            case .addressBar:
+                break
+            }
+        }
+        if !waitUntil(10, menuInReach) {
             dumpTree(safari, as: "no-page-menu")
             XCTFail("Safari's page menu button is not reachable")
             return false
         }
         menu.tap()
         let entry = safari.cells["andvari"]
-        if !waitUntil(8, { entry.exists && entry.isHittable }) {
+        if !waitUntil(8, { self.safelyHittable(entry) }) {
             dumpTree(safari, as: "no-andvari-in-page-menu")
             XCTFail("andvari is not in Safari's page menu")
             return false
@@ -420,7 +538,7 @@ extension UITestCase {
         var unlockSeenSince: Date?
         let check: () -> Bool = {
             // Safari asks, per site, whether the extension may see it; the popup waits behind that.
-            if allow.exists && allow.isHittable {
+            if self.safelyHittable(allow) {
                 self.tapWhereItIs(allow, in: self.safari)
                 return false
             }
@@ -429,7 +547,7 @@ extension UITestCase {
             // The button is the retry after a prompt that was cancelled or missed. It is also on screen for a moment
             // while the popup's own prompt is still on its way, so it is used only once it has stayed for a while,
             // and tapped where it was: a button that has just gone must not fail the test.
-            if unlock.exists && unlock.isHittable {
+            if self.onScreen(unlock) {
                 if let since = unlockSeenSince {
                     if Date().timeIntervalSince(since) > 9 && !done() {
                         unlockSeenSince = nil
@@ -504,7 +622,7 @@ extension UITestCase {
     /// attach a debugger to a Safari extension on iOS, in the simulator's CI even less.
     func popupDetails() -> String {
         let details = safari.webViews.descendants(matching: .any).matching(NSPredicate(format: "label == 'Details'")).firstMatch
-        if details.exists && details.isHittable {
+        if self.safelyHittable(details) {
             details.tap()
             Thread.sleep(forTimeInterval: 4)
         }
@@ -526,7 +644,7 @@ extension UITestCase {
     /// Safari's first-run tips are popovers that take every tap until they are closed.
     func closeSafariTips() {
         let tip = safari.buttons["xmark.circle.fill"]
-        if tip.exists && tip.isHittable {
+        if self.safelyHittable(tip) {
             tip.tap()
             Thread.sleep(forTimeInterval: 1)
         }
@@ -581,7 +699,7 @@ extension UITestCase {
             for index in 0..<min(matches.count, 8) {
                 let candidate = matches.element(boundBy: index)
                 // The page's own fields carry the word too ("Username"); what iOS offers sits in the lower half.
-                if candidate.exists && candidate.isHittable && candidate.frame.minY > application.frame.height * 0.45 {
+                if self.safelyHittable(candidate) && candidate.frame.minY > application.frame.height * 0.45 {
                     return candidate
                 }
             }
@@ -635,4 +753,5 @@ enum SystemState {
     static var queueSnapshots: [[String]] = []
     static var providerEnabled = false
     static var extensionEnabled = false
+    static var everyWebsiteAllowed = false
 }
