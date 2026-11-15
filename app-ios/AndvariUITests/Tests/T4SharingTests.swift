@@ -1,7 +1,7 @@
 import XCTest
 
-/// Shared vaults on the simulator, against the throwaway server (app-ios/uitest/README.md), as far as one account can
-/// take them by itself. It runs last: the vault it makes stays on the server.
+/// Shared vaults and vault health on the simulator, against the throwaway server (app-ios/uitest/README.md), as far as
+/// one account can take them by itself. It runs last: the vault it makes, and the verdict it records, stay on the server.
 final class T4SharingTests: UITestCase {
     /// A vault made here is on this account's own record: its screen asks no "You own" question and its members screen
     /// offers adding someone. The people this account verified start empty, and an address the server doesn't know is
@@ -58,6 +58,41 @@ final class T4SharingTests: UITestCase {
             require(app.staticTexts["No active account has that email."], "the server's answer for an unknown address", timeout: 30)
             XCTAssertTrue(app.staticTexts["Nobody yet."].exists, "nothing was recorded")
             shot("verified-people")
+        }
+    }
+
+    /// Vault health counts the logins, and a check run records only what the person says: "It worked" on the first
+    /// login, then Stop. No breach check here: it would depend on the breach service the server relays to.
+    func test02_VaultHealthRecordsACheck() {
+        launchApp()
+        step("vault") {
+            reachVault()
+        }
+        step("health") {
+            openSettings()
+            settingsControl("Vault health", "Vault health in Settings").tap()
+            let logins = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Logins: '")).firstMatch
+            require(logins, "the Logins count", timeout: 30)
+            shot("health")
+        }
+        step("run") {
+            app.buttons["Checked"].tap()
+            let start = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Check the '")).firstMatch
+            require(start, "the button that checks the never-checked logins", timeout: 15)
+            start.tap()
+            require(app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH 'Check 1 of '")).firstMatch, "the run on its first login", timeout: 15)
+            shot("run")
+            app.buttons["It worked"].tap()
+            require(app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH 'Check 2 of '")).firstMatch, "the run on its second login", timeout: 30)
+            app.buttons["Stop"].tap()
+        }
+        step("recorded") {
+            let recorded = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Checked recently: it worked'")).firstMatch
+            if !scrollToComfort(recorded) {
+                dumpTree(app, as: "no-recorded-check")
+                XCTFail("the login checked does not show the verdict")
+            }
+            shot("recorded")
         }
     }
 }
