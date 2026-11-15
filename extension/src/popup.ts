@@ -2051,7 +2051,9 @@ let appAnswered: "set" | "none" | "unavailable" | null = null;
 /**
  * Safari: have the worker adopt the app's server before anything shows a server; whether the app has none. The worker
  * asks the app itself; when that ask got no answer (on a device it timed out while this page's, a moment later,
- * resolved), this page asks the app and relays what it said, which the worker adopts the same way.
+ * resolved), this page asks the app and relays what it said, which the worker adopts the same way. That the app has no
+ * server is relayed too: the worker then forgets one it still keeps from the app (an account deleted in the app leaves
+ * the device with none).
  */
 async function adoptAppServer(): Promise<boolean> {
   if (BUILD_TARGET !== "safari") return false;
@@ -2064,7 +2066,8 @@ async function adoptAppServer(): Promise<boolean> {
       const relayed = await ask({ type: "appServerAnswer", url: own.answer.url, nativeSave: own.nativeSave, askedAt });
       appAnswered = relayed?.app ?? "unavailable";
     } else if (own.answer.kind === "none") {
-      appAnswered = "none";
+      await ask({ type: "appServerAnswer", url: null, nativeSave: own.nativeSave, askedAt });
+      appAnswered = "none"; // the app said so itself, whatever the worker made of it
     }
   }
   return appAnswered === "none";

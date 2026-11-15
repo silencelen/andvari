@@ -67,7 +67,7 @@ import { captureBinding, derivedPageOrigin, requestHost, webOriginOfUrl, type Or
 import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
-import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, setServerUrl } from "./serverurl";
+import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, SERVER_URL_KEY, setServerUrl } from "./serverurl";
 import { idbKv, openBoundedIdb, trustedStore, type KvArea } from "./trustedkv";
 import { plainSessionArea, SEAL_DB_NAME, SessionSeal } from "./sessionseal";
 import { A15_OWED_KEY, attestsPreA15Upgrade, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail, UNATTESTED_SERVER_KEY, type InstallSignal, type MigrationOutcome } from "./trustmigrate";
@@ -79,7 +79,7 @@ import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
-import { appServerToAdopt, askAppServerDetailed, nativeSender, parseAppServerReply, type AppServerAnswer } from "./appserver";
+import { appServerToAdopt, appServerToForget, askAppServerDetailed, nativeSender, parseAppServerReply, type AppServerAnswer } from "./appserver";
 import { queueSaveToApp, savesThroughApp } from "./appsave";
 import { AppVault, vaultFromApp, type AppVaultCardFields, type CardFieldName } from "./appvault";
 
@@ -1367,6 +1367,35 @@ async function adoptAppServerUnkept(canonical: string): Promise<boolean> {
 }
 
 /**
+ * Safari: the app has no server now, so the one this extension adopted from it goes too (spec 03 §13: an account deleted
+ * in the app leaves the device as a fresh install, with nothing of the account's server). The kept choice goes FIRST: if
+ * the store holds it and will not let it go, nothing changes and the next ask tries again. Then the worker returns to
+ * the build's placeholder origin through the origin-clean switch, whatever it kept under the old origin is removed
+ * (purgeOriginNamespace), the app's vault is closed, and the block a first install starts with stands again until the
+ * app names a server. True when no server is in effect afterwards.
+ */
+async function forgetAppServer(): Promise<boolean> {
+  const oldKey = currentOriginKey;
+  try {
+    await trusted.remove([SERVER_URL_KEY]);
+  } catch {
+    if (trustedStoreOk) return false;
+    // No store in this worker life: the server was never kept, only used ([adoptAppServerUnkept]).
+  }
+  APP_VAULT?.close();
+  switchChain = switchChain.then(() => applyServerChange(DEFAULT_SERVER_URL)).catch(() => {});
+  await switchChain;
+  if (!noServerChosen()) return false;
+  await purgeOriginNamespace(oldKey).catch(() => {});
+  dialBlock = { kind: "unsettled" };
+  // A block that stands dials nothing, a live socket included (as at worker start, applyServerState).
+  events?.close();
+  events = null;
+  await registerAutofillScripts();
+  return true;
+}
+
+/**
  * Safari on iOS: ask the andvari app for the server it chose and adopt it when this worker dials another, through
  * commitServerUrl (the trusted store, then the origin-clean switch) and with no Trust Gate of its own: the person
  * confirmed this origin in the app. Asked at worker start and on every popup open; concurrent asks share one round
@@ -1420,6 +1449,13 @@ function adoptAppAnswer(answer: AppServerAnswer, via: string, askedAt: number): 
     newestAppAnswerAt = askedAt;
     const adopt = appServerToAdopt(answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
     if (adopt === null) {
+      // The app has no server (an account deleted in it leaves the device as a fresh install): the one adopted from it
+      // goes from here too.
+      if (appServerToForget(answer, !noServerChosen(), BUILD_TARGET)) {
+        const forgotten = await forgetAppServer();
+        appServerDiag.adopt = `${forgotten ? "forgotten: the app has no server" : "the app has no server, but this one could not be forgotten"}${via}`;
+        return { app: "none" };
+      }
       if (answer.kind === "set") appServerDiag.adopt = `already in effect${via}`;
       else if (via === "") appServerDiag.adopt = null;
       return { app: answer.kind };
