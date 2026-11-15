@@ -4,7 +4,7 @@ options:
     iOS: "17.0"
 settings:
   base:
-    MARKETING_VERSION: "0.29.1"
+    MARKETING_VERSION: "0.30.0"
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: A6J378XKW6
     CODE_SIGN_STYLE: Manual
