@@ -207,7 +207,7 @@ class AddMemberIdentityTest {
     }
 
     @Test
-    fun `a pin another device made shows a changed key as changed, never as merely unverified`() = runBlocking {
+    fun `a pin another device made shows a changed key as changed and never as merely unverified`() = runBlocking {
         // Sharing review 2026-11 (item 9): the pin is in account state but not confirmed on this device.
         val owner = enroll("q00-owner")
         val bea = enroll("q00-bea")

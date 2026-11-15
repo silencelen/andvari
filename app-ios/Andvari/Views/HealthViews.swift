@@ -18,46 +18,80 @@ struct VaultHealthView: View {
     /// What the run's offer asked for, done once the run's sheet has gone: one presentation at a time.
     @State private var afterRun: AfterRun?
 
+    // The screen is built in parts (the list, its sections, the picker, then what it presents): as one expression it took
+    // the Swift type checker longer than it allows.
     var body: some View {
+        screen
+            .navigationDestination(item: $openedItem) { itemId in
+                ItemDetailView(itemId: itemId)
+            }
+            .sheet(isPresented: running, onDismiss: {
+                switch afterRun {
+                case .open(let itemId): openedItem = itemId
+                case .renew(let itemId): renewing = RenewTarget(id: itemId)
+                case nil: break
+                }
+                afterRun = nil
+            }) {
+                CheckRunSheet(open: { afterRun = .open($0) }, renew: { afterRun = .renew($0) })
+                    .environmentObject(model)
+                    .tint(Palette.goldText)
+                    .privacyShield()
+            }
+            .sheet(item: $renewing, onDismiss: {
+                model.closeAttachmentDraft()
+                model.refreshHealth()
+            }) { target in
+                LoginEditorView(itemId: target.id, generateOnOpen: true)
+                    .environmentObject(model)
+                    .tint(Palette.goldText)
+                    .privacyShield()
+            }
+            .confirmationDialog("Merge these copies?", isPresented: mergeAsked, titleVisibility: .visible, presenting: merging) { cluster in
+                Button("Merge") {
+                    Task { _ = await model.mergeDuplicates(cluster.signature) }
+                }
+            } message: { cluster in
+                Text(cluster.mergeConfirm ?? "")
+            }
+            .confirmationDialog("Keep this copy?", isPresented: keepAsked, titleVisibility: .visible, presenting: keeping) { choice in
+                Button("Keep it") {
+                    Task { _ = await model.keepDuplicate(choice.signature, keep: choice.id) }
+                }
+            } message: { choice in
+                Text(choice.detail)
+            }
+            .alert("Can't keep that copy here", isPresented: refusalShown) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(refusal ?? "")
+            }
+    }
+
+    private var screen: some View {
+        list
+            .scrollContentBackground(.hidden)
+            .background(Palette.background)
+            .navigationTitle("Vault health")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    scanButton
+                }
+            }
+            .onAppear {
+                if model.state.health == nil { model.openHealth() } else { model.refreshHealth() }
+            }
+            .onDisappear {
+                // An item opened from here is pushed over this screen, which stays open until it leaves the stack itself.
+                if !isPresented { model.closeHealth() }
+            }
+    }
+
+    private var list: some View {
         List {
             if let health = model.state.health {
-                tilesSection(health.tiles)
-                if let message = health.message {
-                    Section {
-                        HStack(alignment: .top, spacing: 10) {
-                            Text(message)
-                                .font(.subheadline)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Button("Dismiss") {
-                                model.dismissHealthMessage()
-                            }
-                            .font(.subheadline)
-                            .buttonStyle(.borderless)
-                        }
-                    }
-                    .listRowBackground(Palette.raised)
-                }
-                if health.run == nil {
-                    HealthOffers(health: health, open: { openedItem = $0 }, renew: { renewing = RenewTarget(id: $0) })
-                }
-                Section {
-                    Picker("Show", selection: $tab) {
-                        ForEach(HealthTab.allCases) { tab in
-                            Text(tab.title).tag(tab)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(Color.clear)
-                }
-                switch tab {
-                case .passwords:
-                    passwordsSection(health)
-                case .duplicates:
-                    duplicatesSections(health)
-                case .checked:
-                    checkedSections(health)
-                }
+                sections(health)
             } else {
                 Section {
                     ProgressView()
@@ -66,65 +100,54 @@ struct VaultHealthView: View {
                 .listRowBackground(Color.clear)
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(Palette.background)
-        .navigationTitle("Vault health")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                scanButton
+    }
+
+    @ViewBuilder
+    private func sections(_ health: HealthView) -> some View {
+        tilesSection(health.tiles)
+        if let message = health.message {
+            messageSection(message)
+        }
+        if health.run == nil {
+            HealthOffers(health: health, open: { openedItem = $0 }, renew: { renewing = RenewTarget(id: $0) })
+        }
+        tabPicker
+        switch tab {
+        case .passwords:
+            passwordsSection(health)
+        case .duplicates:
+            duplicatesSections(health)
+        case .checked:
+            checkedSections(health)
+        }
+    }
+
+    private func messageSection(_ message: String) -> some View {
+        Section {
+            HStack(alignment: .top, spacing: 10) {
+                Text(message)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Dismiss") {
+                    model.dismissHealthMessage()
+                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
             }
         }
-        .onAppear {
-            if model.state.health == nil { model.openHealth() } else { model.refreshHealth() }
-        }
-        .onDisappear {
-            // An item opened from here is pushed over this screen, which stays open until it leaves the stack itself.
-            if !isPresented { model.closeHealth() }
-        }
-        .navigationDestination(item: $openedItem) { itemId in
-            ItemDetailView(itemId: itemId)
-        }
-        .sheet(isPresented: running, onDismiss: {
-            switch afterRun {
-            case .open(let itemId): openedItem = itemId
-            case .renew(let itemId): renewing = RenewTarget(id: itemId)
-            case nil: break
+        .listRowBackground(Palette.raised)
+    }
+
+    private var tabPicker: some View {
+        Section {
+            Picker("Show", selection: $tab) {
+                ForEach(HealthTab.allCases) { choice in
+                    Text(choice.title).tag(choice)
+                }
             }
-            afterRun = nil
-        }) {
-            CheckRunSheet(open: { afterRun = .open($0) }, renew: { afterRun = .renew($0) })
-                .environmentObject(model)
-                .tint(Palette.goldText)
-                .privacyShield()
-        }
-        .sheet(item: $renewing, onDismiss: {
-            model.closeAttachmentDraft()
-            model.refreshHealth()
-        }) { target in
-            LoginEditorView(itemId: target.id, generateOnOpen: true)
-                .environmentObject(model)
-                .tint(Palette.goldText)
-                .privacyShield()
-        }
-        .confirmationDialog("Merge these copies?", isPresented: mergeAsked, titleVisibility: .visible, presenting: merging) { cluster in
-            Button("Merge") {
-                Task { _ = await model.mergeDuplicates(cluster.signature) }
-            }
-        } message: { cluster in
-            Text(cluster.mergeConfirm ?? "")
-        }
-        .confirmationDialog("Keep this copy?", isPresented: keepAsked, titleVisibility: .visible, presenting: keeping) { choice in
-            Button("Keep it") {
-                Task { _ = await model.keepDuplicate(choice.signature, keep: choice.id) }
-            }
-        } message: { choice in
-            Text(choice.detail)
-        }
-        .alert("Can't keep that copy here", isPresented: refusalShown) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(refusal ?? "")
+            .pickerStyle(.segmented)
+            .listRowBackground(Color.clear)
         }
     }
 

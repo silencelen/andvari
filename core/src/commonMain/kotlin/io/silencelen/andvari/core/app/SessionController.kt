@@ -3415,7 +3415,7 @@ open class SessionController(
 
     fun closeExport() {
         exporting = null
-        update { it.copy(export = null) }
+        update { it.copy(exporting = null) }
     }
 
     /**
@@ -3535,7 +3535,7 @@ open class SessionController(
         } else {
             exportView(s, null, 0, items.size, ExportPlanner.planAttachments(items))
         }
-        update { it.copy(export = view) }
+        update { it.copy(exporting = view) }
     }
 
     /** spec 07 §2: build in memory, then open again and read every file back; the made file and what it holds. */
@@ -4521,7 +4521,7 @@ open class SessionController(
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
         attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
-        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null, csvImport = null, export = null,
+        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null, csvImport = null, exporting = null,
     )
 
     private companion object {

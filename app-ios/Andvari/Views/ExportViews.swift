@@ -45,7 +45,7 @@ struct ExportScreen: View {
     @State private var choosing = false
 
     private var export: ExportView? {
-        model.state.export.flatMap { $0.kind == kind ? $0 : nil }
+        model.state.exporting.flatMap { $0.kind == kind ? $0 : nil }
     }
 
     var body: some View {
