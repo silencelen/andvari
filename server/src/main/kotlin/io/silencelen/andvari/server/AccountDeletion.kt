@@ -31,7 +31,7 @@ internal object AccountDeletion {
      */
     val RETAINED_AUDIT_TYPES: Set<String> = setOf(
         // sign-in and sessions
-        "register", "login", "login_fail", "login_fail_totp", "logout", "refresh_reuse",
+        "register", "login", "login_fail", "login_fail_totp", "logout", "refresh_reuse", "refresh_grace",
         // credentials and the second factor
         "password_change", "password_change_fail", "personal_wrap_reauth_fail", "escrow_self_upload",
         "totp_enroll", "totp_rotate", "totp_disable", "totp_verify_fail", "totp_setup_reauth_fail",

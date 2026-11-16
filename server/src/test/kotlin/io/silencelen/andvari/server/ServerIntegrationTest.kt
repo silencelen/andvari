@@ -210,6 +210,12 @@ class ServerIntegrationTest {
         assertEquals(HttpStatusCode.OK, r1.status)
         val pair = json.decodeFromString(TokenPair.serializer(), r1.bodyAsText())
         assertTrue(pair.refreshToken != session.refreshToken, "refresh must rotate")
+        // The new pair is used, so the reply was received: a repeat of the old token is no longer covered by the
+        // 60-second refresh grace (RefreshGraceTest) and is token reuse.
+        val used = client.get("/api/v1/sync?since=0") {
+            header("Authorization", "Bearer ${pair.accessToken}"); header("X-Andvari-Client", "test/1.0.0")
+        }
+        assertEquals(HttpStatusCode.OK, used.status)
 
         // Reusing the now-consumed original refresh token → 401 + device revoked.
         val reuse = client.post("/api/v1/auth/refresh") {
