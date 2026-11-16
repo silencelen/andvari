@@ -6,9 +6,10 @@ operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
 ## 0.30.0 (2026-11-14) — account deletion, and a card goes only where the card belongs · fleet 0.30.0, extension 0.30.0
 
-*This release adds account deletion on the web, changes where the browser extension fills a payment card, and moves
-the Android app's sign-in, unlock and session handling onto shared code that the coming iPhone app also uses. Nothing in
-it lets the server read your passwords. The changes you will see are listed first.*
+*This release adds account deletion on the web, Android and desktop, changes where the browser extension fills a
+payment card, and moves the Android app's sign-in, unlock and session handling onto shared code that the coming iPhone
+app also uses. It also closes four weaknesses a security review found in the server. Nothing in it lets the server read
+your passwords. The changes you will see are listed first.*
 
 **What you will notice**
 - **Browser extension (Chrome, Firefox): a card is filled only into a payment provider's own card form, and only after
@@ -25,8 +26,14 @@ it lets the server read your passwords. The changes you will see are listed firs
   still use, or while you are the only admin of an instance that has other accounts; it says which, with a link to fix
   it. To delete, type your email address, your master password and, if you use two-step sign-in, a code. Back up your
   vault first: deletion cannot be undone. Afterwards the browser forgets the account and you are signed out.
-- **Android and desktop have no delete button yet.** When an account is deleted on the web, the Android app signs out at
-  its next contact with the server ("Your session ended — sign in again."), and the desktop app at its next unlock.
+- **Android and desktop: you can delete your account from Settings too**, with the same preview, the same checks (the
+  account's email address, your master password, checked on the device first, and a two-step code if you use one) and
+  the same refusals as the web. An answer that is lost on the way is never taken for "deleted" or "not deleted": the
+  app offers to check.
+- **After an account is deleted, the device is left as a fresh install** (web, Android, desktop): the app forgets the
+  account and its server (the address, the vault copy, quick unlock, the session) and starts at the server screen. When
+  the account is deleted from another device, the Android app signs out at its next contact with the server ("Your
+  session ended — sign in again."), and the desktop app at its next unlock.
 - **Android: when the server ends your session, the app signs out at once.** If the server refuses to renew the
   session (the device was signed out from another device, or the account was deleted), the app now locks, removes this
   device's copy of the vault and returns to the sign-in screen straight away instead of at the next unlock. Changes
@@ -41,9 +48,17 @@ it lets the server read your passwords. The changes you will see are listed firs
   parts, control characters and the invisible characters that can reverse how a name reads are removed, `:` becomes
   `-`, and a name is cut to 120 characters, keeping its extension. The stored file and your backups keep the original
   name.
-- **Known issue — Android and desktop, a device's first sign-in only:** the personal-vault notice can read "Your
-  account's personal vault is Personal, but the server sent Personal." when both name the same vault. Choosing either
-  button keeps that same vault. Devices that already confirmed their personal vault see nothing new.
+- **Android and desktop: the personal-vault notice tells one vault from two of the same name.** On a device's first
+  sign-in, when the account's record and the server name the same vault, the notice asks you to confirm that one vault
+  on this device (it no longer reads "Your account's personal vault is Personal, but the server sent Personal."). When
+  they name two vaults it says so, and every vault offered shows its item count, when it was created and last changed,
+  and the end of its id. Devices that already confirmed their personal vault see nothing new.
+- **Browser extension: the save prompt reads the password you typed**, not a hidden trap field a page places next to it.
+- **Browser extension: a card is filled into one payment form only.** If you tapped card fields in two different payment
+  forms on one page, nothing is filled until you choose again; the popup says so and offers "Start over".
+- **Sharing: a vault handover is shown as verified only for an offer your account made.** If the server reports that a
+  vault you own passed to someone else without such an offer, the apps keep your ownership record and warn you. "Make
+  owner" is offered only for a member you verified on that device.
 
 **Security fixes**
 - **Card fill:** a saved card could be filled into a shop page's own form, where every script on that page, including a
@@ -53,6 +68,17 @@ it lets the server read your passwords. The changes you will see are listed firs
   program shown as a document). Those characters are no longer shown, and are not used in the suggested save name.
 - **Android:** the account's keys are wiped from memory when the vault locks or the account is replaced, and a sign-in
   that the app never stores is ended at the server instead of being left open until it expires.
+- **Server, found by a security review on 2026-11-15** (none of these lets anyone read a vault; they are about keeping the
+  server up and the guessing limits real):
+  - A sync request could make the server build a very large answer in memory, and store copies of an item's encrypted
+    content in its sync journal for 180 days outside every quota. An answer now carries each stored item at most once
+    and at most 8 MiB of them; the journal keeps outcomes and ids only, and at most 1,000 rows per device.
+  - Requests to addresses that do not exist could each add a permanent entry to the server's metrics, slowly using up
+    its memory. They now share one entry.
+  - Sign-in attempts for one email address sent at the same moment from many addresses all got a password check before
+    the lock counted them. Each attempt is now counted before the check, so the lock after five failures holds.
+  - Every per-address request limit counted each IPv6 address on its own, though one home connection usually has
+    millions of them. The limits now count an IPv6 address by its /64 network.
 
 **For self-hosters**
 - **Schema v16 and v17, applied automatically at the first start, forward only.** v16 adds `retired_ids` (a deleted
@@ -65,6 +91,13 @@ it lets the server read your passwords. The changes you will see are listed firs
 - **An instance whose last account is deleted opens for bootstrap again.** Every invite is cleared, and a start with no
   account re-creates the bootstrap invite from `ANDVARI_BOOTSTRAP_TOKEN` (72 hours). Without that variable no invite
   exists. An instance that has accounts is not affected.
+- **Per-IP rate limits key an IPv6 client on its /64** (an IPv4-mapped address on its IPv4 address). Audit rows keep
+  the full address.
+- **The push journal (`mutations`) keeps no vault content.** Rows written from 0.30.0 on hold the outcome and, for a
+  conflict, the stored item's ids and revs; a replayed conflict reads the item back from the live row or its history.
+  Rows written before the upgrade keep their item until they age out. Each device keeps its newest 1,000 rows (the
+  180-day limit still applies), and a delete of an item that never existed is not journaled.
+- **Request metrics:** a request that matches no route is tagged `route="n/a"`, and an unknown method `method="OTHER"`.
 - No new settings, and the minimum client version is not raised: 0.29.1 apps and extensions keep working against this
   server. Update the server first; the web app's delete page needs it.
 
