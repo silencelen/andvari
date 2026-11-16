@@ -310,6 +310,33 @@ test("forceRefresh: a network throw → 'transient' + restored; a missing refres
   assert.equal(await api.forceRefresh(), "revoked", "no refresh token ⇒ cannot rotate ⇒ definitive");
 });
 
+test("forceRefresh: an answer that arrives after another sign-in set its own pair changes nothing (doRefresh's outcome guard)", async () => {
+  for (const answer of [() => jsonResp(200, { accessToken: "redeem-a2", refreshToken: "redeem-r2" }), () => jsonResp(401, { error: "invalid_grant" }), () => jsonResp(503, {})]) {
+    const api = new AndvariApi("https://x", "1.2.3");
+    let notified = 0;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let posted!: () => void;
+    const onWire = new Promise<void>((r) => (posted = r));
+    globalThis.fetch = (async () => {
+      posted();
+      await held;
+      return answer();
+    }) as unknown as typeof fetch;
+    api.setTokens("redeem-a1", "redeem-r1");
+    api.onTokensChanged = () => void notified++;
+    const rot = api.forceRefresh();
+    await onWire;
+    // The person gave up on the PIN and signed in with the master password (as any account): its pair is installed.
+    api.setTokens("signin-a", "signin-r");
+    const before = notified;
+    release();
+    assert.equal(await rot, "transient", "the late answer is not this pair's");
+    assert.deepEqual(api.getTokens(), { access: "signin-a", refresh: "signin-r" }, "the sign-in's pair stands");
+    assert.equal(notified, before, "and nothing is persisted on its behalf");
+  }
+});
+
 test("E1-3: ApiError parses the server {error, message} body", async () => {
   const api = new AndvariApi("https://x", "1.2.3");
   globalThis.fetch = (async () => jsonResp(401, { error: "invalid_credentials", message: "authentication failed" })) as unknown as typeof fetch;

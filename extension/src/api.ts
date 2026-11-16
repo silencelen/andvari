@@ -377,13 +377,21 @@ export class AndvariApi {
    * the master password this time; `rotated` = a fresh pair is now held. AM1 parity: the consumed
    * refresh token is persisted (refresh:null) via onTokensChanged BEFORE the POST, so a mid-refresh
    * SW death never resurrects a spent token. A missing refresh token is treated as `revoked`.
+   *
+   * The outcome guard of doRefresh applies here too: the answer is applied only while the pair is the one this call
+   * consumed. Without it, a redeem whose refresh was answered late (after the person gave up on the PIN and signed in
+   * with the master password, possibly as another account) wrote the redeem's pair over the new sign-in's pair, and the
+   * new session then ran on (and persisted) another session's tokens. Not owned: nothing is set, cleared, restored or
+   * notified, and the answer is `transient` (the caller's own generation check has already moved on).
    */
   async forceRefresh(): Promise<"rotated" | "revoked" | "transient"> {
     const rt = this.refreshToken;
     if (!rt) return "revoked";
     if (!this.dialAllowed()) return "transient"; // nothing consumed, nothing sent: keep the blob
     this.refreshToken = null; // consume + persist the consumed state before the POST (AM1)
+    const atConsume = this.accessToken;
     await this.onTokensChanged?.();
+    const owns = (): boolean => this.refreshToken === null && this.accessToken === atConsume;
     try {
       if (!this.dialAllowed()) throw this.refuseDial(); // a block since the consume: restored below, like a transport failure
       const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
@@ -391,6 +399,7 @@ export class AndvariApi {
         headers: { "content-type": "application/json", "X-Andvari-Client": this.clientHeader },
         body: JSON.stringify({ refreshToken: rt }),
       });
+      if (!owns()) return "transient";
       if (!resp.ok) {
         if (resp.status === 401 || resp.status === 403) {
           this.accessToken = null;
@@ -403,11 +412,13 @@ export class AndvariApi {
         return "transient";
       }
       const s = (await resp.json()) as { accessToken: string; refreshToken: string };
+      if (!owns()) return "transient";
       this.accessToken = s.accessToken;
       this.refreshToken = s.refreshToken;
       await this.onTokensChanged?.();
       return "rotated";
     } catch {
+      if (!owns()) return "transient";
       this.refreshToken = rt; // transport failure — transient-keep (same as a 5xx)
       await this.onTokensChanged?.();
       return "transient";
