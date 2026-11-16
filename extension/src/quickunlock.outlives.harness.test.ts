@@ -105,7 +105,7 @@ test("a password sign-in from the locked-armed screen keeps no stashed token pai
 
 // ---------------------------------------------------------------- 2. a late forced refresh (aade6862)
 
-test.skip("a PIN unlock whose refresh is answered after another account signed in leaves that sign-in its own tokens", async () => {
+test("a PIN unlock whose refresh is answered after another account signed in leaves that sign-in its own tokens", async () => {
   const { world, server, acct: alice, w } = await signedInWorld();
   const bob = server.addAccount({ email: "bob@example.com", password: "bob horse" });
   bob.addItem(bob.personalVaultId, { type: "login", name: "bob's shop", login: { username: "bob", password: "bob-pw", uris: ["https://shop.example"] } });
