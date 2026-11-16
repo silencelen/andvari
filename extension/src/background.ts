@@ -2147,11 +2147,15 @@ async function resync(): Promise<void> {
   if (dialBlock) return;
   if (!session || writesInFlight > 0) return; // a save is landing — don't race its rev
   try {
+    // Work that outlives its session: the feed belongs to the session that asked for it. A lock, a sign-out or another
+    // account's sign-in while it was on the wire ends that session, and the feed is then dropped: never decrypted with,
+    // nor installed into, the session that holds the worker now.
+    const asker = session;
     const sync = await api.sync(0);
-    if (writesInFlight > 0 || !session) return; // a write started mid-sync — its result would be clobbered
+    if (writesInFlight > 0 || session !== asker) return; // a write started mid-sync — its result would be clobbered
     // A1b INV-HOME: the snapshot's rows are admitted against this browser's homes BEFORE anything is decrypted.
     const homed = await homeAndDecrypt(sync, session.vaultKeys, session.userId, session.homes);
-    if (writesInFlight > 0 || !session) return;
+    if (writesInFlight > 0 || session !== asker) return;
     session.items = homed.items;
     session.wrongVault = homed.wrongVault;
     session.vaultMeta = vaultMetaOf(sync.vaults); // A11 (q14)
@@ -5193,6 +5197,7 @@ async function commitPendingSave(
 ): Promise<{ res: Res<"resolvePendingSave">; wrote: boolean }> {
   if (!session) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
   if (!session.personalVaultId) return { res: { ok: false, code: "no_personal_vault", error: "no personal vault" }, wrote: false }; // A9 review MEDIUM-1
+  const owner = session;
   // Re-decide save-vs-update NOW (the capture-time decision is stale if the vault was LOCKED then —
   // matchesFor was empty ⇒ updatesItemId null). resolveSaveAction only auto-updates on UNAMBIGUOUS
   // same-account signals: it NEVER runs the ambiguous "lone host login" (2b) fallback here (a
@@ -5235,6 +5240,9 @@ async function commitPendingSave(
     // H124: a pending persisted by a pre-H124 SW has no `uri` — fall back to the old spelling.
     result = await putNewLogin(pending.host, pending.username, pending.password, pending.uri ?? `https://${pending.host}`);
   }
+  // A lock while the write was on the wire already dropped every pending ([S3-lock] allow-list); [st] is the record from
+  // before it, so it is not put back (it would bring the dropped fields back with it).
+  if (session !== owner) return { res: result, wrote: result.ok };
   if (result.ok) {
     st.pending = undefined;
     tabs.set(tabId, st);
@@ -5438,28 +5446,31 @@ function putLanded(r: MutationResult | undefined): r is MutationResult & { statu
  *  deterministic over (itemId, winner rev) so a peer, our retry and the pull fallback converge on
  *  one item — its own `conflict`/`duplicate` answer is that convergence, not an error. A reader
  *  vault never materializes (its push would be denied — the web twin's first check). */
-async function materializeConflictCopy(r: MutationResult, vaultId: string): Promise<void> {
-  if (r.status !== "conflict" || r.newItemRev === undefined || !session) return;
+async function materializeConflictCopy(r: MutationResult, vaultId: string, owner: Session | null): Promise<void> {
+  // Work that outlives its session: [owner] is the session the landed write was made under. A lock, a sign-out or
+  // another account's sign-in while that write was on the wire ends it, and nothing of it may then be decrypted with, or
+  // added to, whatever session holds the worker now; the next unlock of that account pulls the copy instead.
+  if (r.status !== "conflict" || r.newItemRev === undefined || owner === null || session !== owner) return;
   const losing = r.serverItem;
   if (!losing || losing.deleted || !losing.blob) return;
   // A1b INV-CONFLICT: the displaced value must be the item we wrote, in the vault we wrote it to and its home.
-  if (serverItemDecision(vaultId, losing.vaultId, session.homes.get(losing.itemId)) === "abort") return;
-  if (session.vaultRoles.get(vaultId) === "reader") return;
+  if (serverItemDecision(vaultId, losing.vaultId, owner.homes.get(losing.itemId)) === "abort") return;
+  if (owner.vaultRoles.get(vaultId) === "reader") return;
   // Through decryptItems — the ONE wire-open site (the fv read ceiling, the per-vault key, the AD
   // binding and the undecryptable-skip all live there; a second open here would dodge those pins).
-  const [displaced] = decryptItems({ rev: 0, vaults: [], grants: [], items: [losing] }, session.vaultKeys);
+  const [displaced] = decryptItems({ rev: 0, vaults: [], grants: [], items: [losing] }, owner.vaultKeys);
   if (!displaced) return; // above the read ceiling, no key, or not ours to read — nothing safe to copy
   const losingDoc = displaced.doc;
   const copyId = conflictCopyId(losing.itemId, r.newItemRev);
-  if (session.items.some((i) => i.itemId === copyId)) return; // already materialized (peer / retry / pull fallback)
+  if (owner.items.some((i) => i.itemId === copyId)) return; // already materialized (peer / retry / pull fallback)
   const copyDoc: ItemDoc = { ...losingDoc, name: conflictCopyName(losingDoc.name, losing.updatedAt ?? Date.now()) };
   // Seal the copy at the fv the displaced version carried (floored by its doc type, the monotonic
   // rule every re-seal here follows) — the copy IS that version, so that is the fv its semantics are.
   const fv = Math.max(losingDoc.type === "card" ? CARD_FORMAT_VERSION : LOGIN_FORMAT_VERSION, losing.formatVersion);
   try {
     const cr = await putItem(copyId, vaultId, copyDoc, 0, fv);
-    if (putLanded(cr)) {
-      session.items.push({ itemId: copyId, vaultId, rev: cr.newItemRev ?? 1, formatVersion: fv, doc: copyDoc });
+    if (putLanded(cr) && session === owner) {
+      owner.items.push({ itemId: copyId, vaultId, rev: cr.newItemRev ?? 1, formatVersion: fv, doc: copyDoc });
       persistSession();
     }
   } catch {
@@ -5474,13 +5485,14 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
   // "the extension never writes card docs" invariant — CARDS re-seal via the card-aware putCard
   // (floor CARD_FORMAT_VERSION), NEVER here (a login floor would down-seal a card).
   const fv = Math.max(LOGIN_FORMAT_VERSION, target.formatVersion);
+  const owner = session; // the session this write is made under (materializeConflictCopy)
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
   if (!putLanded(r)) return saveFailure(r?.status);
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv; // what this write actually sealed at (web store.ts parity)
-  persistSession();
-  await materializeConflictCopy(r, target.vaultId); // H20: no-op unless status === "conflict"
+  if (session === owner) persistSession(); // ended meanwhile: its items are gone, nothing of them is written
+  await materializeConflictCopy(r, target.vaultId, owner); // H20: no-op unless status === "conflict"
   return { ok: true };
 }
 
@@ -5492,12 +5504,17 @@ async function putNewLogin(host: string, username: string, password: string, uri
   const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [uri] } };
   // NEW logins seal at the login doc floor (format.ts). G2 added card creation via a SEPARATE
   // card-aware seal (CARD_FORMAT_VERSION); this path is logins-only.
-  const r = await putItem(itemId, session.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
+  const owner = session;
+  const r = await putItem(itemId, owner.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
   if (!putLanded(r)) return saveFailure(r?.status); // H20: a conflict on a fresh id still LANDED
+  // Work that outlives its session: a lock, a sign-out or another account's sign-in while this write was on the wire
+  // ended [owner]. The write landed under its account (the next unlock there pulls it); the new login is never added to
+  // the session that holds the worker now, which may be another account's.
+  if (session !== owner) return { ok: true };
   const rev = r.newItemRev ?? 1; // matchable immediately:
-  session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
+  owner.items.push({ itemId, vaultId: owner.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
   persistSession();
-  await materializeConflictCopy(r, session.personalVaultId);
+  await materializeConflictCopy(r, owner.personalVaultId, owner);
   return { ok: true };
 }
 
@@ -5520,12 +5537,14 @@ async function putNewCard(rec: {
   if (rec.cardholderName) card.cardholderName = rec.cardholderName;
   if (rec.postalCode) card.postalCode = rec.postalCode;
   const doc: ItemDoc = { type: "card", name: rec.host, card };
-  const r = await putItem(itemId, session.personalVaultId, doc, 0, CARD_FORMAT_VERSION);
+  const owner = session;
+  const r = await putItem(itemId, owner.personalVaultId, doc, 0, CARD_FORMAT_VERSION);
   if (!putLanded(r)) return saveFailure(r?.status); // H20: a conflict on a fresh id still LANDED
+  if (session !== owner) return { ok: true }; // ended while on the wire: as putNewLogin
   const rev = r.newItemRev ?? 1;
-  session.items.push({ itemId, vaultId: session.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc });
+  owner.items.push({ itemId, vaultId: owner.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc });
   persistSession();
-  await materializeConflictCopy(r, session.personalVaultId);
+  await materializeConflictCopy(r, owner.personalVaultId, owner);
   return { ok: true };
 }
 
@@ -5574,6 +5593,7 @@ async function setTotp(
  *  login putExisting (LOGIN_FORMAT_VERSION floor). Monotonic; the server refuses fv downgrades. */
 async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
   const fv = Math.max(CARD_FORMAT_VERSION, target.formatVersion);
+  const owner = session; // the session this write is made under (materializeConflictCopy)
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
   // H20 (recheck R01): the FOURTH put path — a card UPDATE conflicts exactly like a login update
   // (the server applied our value, the displaced card comes back as serverItem), so it gets the
@@ -5582,8 +5602,8 @@ async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boole
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv;
-  persistSession();
-  await materializeConflictCopy(r, target.vaultId); // H20: no-op unless status === "conflict"
+  if (session === owner) persistSession(); // ended meanwhile: its items are gone, nothing of them is written
+  await materializeConflictCopy(r, target.vaultId, owner); // H20: no-op unless status === "conflict"
   return { ok: true };
 }
 
