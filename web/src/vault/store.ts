@@ -32,7 +32,7 @@ import {
 import { randomBytes, sha256, sha256Sync } from "../crypto/provider";
 import type { ImportProjections } from "../import/csv";
 import { ITEM_FORMAT_VERSION, type Account, type ItemUpload, type LegacyVouchKind, ReauthFailedError, ReauthStaleSessionError, VaultKeyNotVerifiedError } from "./account";
-import { type ConsumedNonce, type Contact, withIssued, withMemberReceived, withoutIssued, withOwned, withoutOwned, withPersonal } from "./accountstate";
+import { type ConsumedNonce, type Contact, type OwnOffer, withIssued, withMemberReceived, withoutIssued, withOwned, withOwnOffers, withoutOwned, withPersonal } from "./accountstate";
 import {
   admitRow,
   chosenProvenance,
@@ -360,6 +360,9 @@ export const REMOVAL_REPLAY = "removal";
 export const ALREADY_RECORDED = "already-recorded";
 /** LifecycleNotice.reason on a `removed` notice attributed by a v1 (legacy) proof, in-window (A7 review LOW-3). */
 export const REMOVED_LEGACY = "legacy";
+/** LifecycleNotice.reason on a `transfer-anomaly` whose proof checks, for an offer this account did not make or had
+ *  cancelled (sharing review 2026-11, finding 1): the ownership record is kept. Core `TRANSFER_NOT_OFFERED`. */
+export const TRANSFER_NOT_OFFERED = "not-offered";
 
 /** A restorable in-grace deleted vault (GET /vaults/deleted), name decrypted locally. */
 export interface DeletedVaultInfo {
@@ -1692,7 +1695,9 @@ export class VaultStore {
     // (register, an accepted change) is written back by one more refresh.
     // A11 (c01): the decision no longer reads whether this browser merged account state before the refresh; a
     // designation moving away from the cached vault is always the human's call.
-    await this.accountState.refresh().catch(() => {});
+    // Sharing review 2026-11 (finding 1; core twin): a handover held back for this account's record of its own offers is
+    // decided once the record was read.
+    if (await this.accountState.refresh().then(() => true, () => false)) await this.decideHeldHandovers();
     this.decidePersonalLocally();
     if (this.designationDirty) {
       this.designationDirty = false;
@@ -3143,6 +3148,65 @@ export class VaultStore {
     this.recordPullOp((b) => b.dropVault(vaultId));
   }
 
+  // ---- sharing review 2026-11 (finding 1; core SyncEngine twin): the offers this account made to hand a vault over ----
+  //
+  // A transfer's proofs are MACs under the vault's key, which every member holds. An owner's handover is recognised by
+  // this account's own record of the offers it made, written before an offer is sent and marked cancelled before a cancel
+  // is sent, in the account state every device of the account reads.
+
+  /** Every offer this account made (its account state); a cancel wins. */
+  ownOffers(): OwnOffer[] {
+    return this.accountState.doc.ownOffers ?? [];
+  }
+
+  /** True when `offerId` is an offer this account made, for `vaultId` to `toUserId`, and has not cancelled. */
+  isOwnLiveOffer(vaultId: string, offerId: string, toUserId: string): boolean {
+    return this.ownOffers().some((o) => o.offerId === offerId && o.vaultId === vaultId && o.toUserId === toUserId && o.cancelledAt === undefined);
+  }
+
+  /** Put `offers` on record: local first (in force here even if the write fails; the next sync writes it back). */
+  private async recordOwnOffers(offers: OwnOffer[]): Promise<void> {
+    if (offers.length === 0) return;
+    await this.accountState.update((d) => withOwnOffers(d, offers)).catch(() => {});
+  }
+
+  /** Mark this account's offers that `which` picks as cancelled now. */
+  private async cancelOwnOffers(which: (o: OwnOffer) => boolean): Promise<void> {
+    const at = Date.now();
+    await this.recordOwnOffers(this.ownOffers().filter((o) => o.cancelledAt === undefined && which(o)).map((o) => ({ ...o, cancelledAt: at })));
+  }
+
+  /** Vaults whose handover away from this account applyTransferState held back (vaultId → noticeable). */
+  private readonly heldHandovers = new Map<string, boolean>();
+
+  /**
+   * Decide the handovers applyTransferState held back, once this browser has read the account's record (core
+   * `decideHeldHandovers` twin). An offer this account made and did not cancel, or a vault its record no longer says it
+   * owns: applied as any other. Anything else is a `transfer-anomaly` ("not-offered"), and the ownership record is kept.
+   */
+  private async decideHeldHandovers(): Promise<void> {
+    for (const [vaultId, noticeable] of [...this.heldHandovers.entries()]) {
+      this.heldHandovers.delete(vaultId);
+      const vault = this.vaultsById.get(vaultId);
+      const lt = vault?.lastTransfer;
+      if (!vault || !lt || !this.account.hasVault(vaultId)) continue;
+      if (this.isOwnLiveOffer(vaultId, lt.offerId, lt.newOwnerUserId) || !this.ownsVault(vaultId)) {
+        await this.applyTransferState(vault, noticeable);
+        continue;
+      }
+      if (noticeable) {
+        this.pushNotice({
+          id: crypto.randomUUID(),
+          vaultId,
+          vaultName: this.account.decryptVaultName(vaultId, vault.metaBlob),
+          kind: "transfer-anomaly",
+          newOwnerUserId: lt.newOwnerUserId,
+          reason: TRANSFER_NOT_OFFERED,
+        });
+      }
+    }
+  }
+
   /**
    * Recompute transfer state for one vault row (spec 03 §11). A pending offer TO us surfaces
    * ONLY after its proof verifies under the held VK, is unexpired, and its seq is not a replay
@@ -3187,6 +3251,14 @@ export class VaultStore {
           verified = false;
         }
       }
+      // Sharing review 2026-11 (finding 1; core twin): any member can make a proof that checks. Away from this account
+      // while its record says it owns the vault, the handover waits until this browser has read the account's record of
+      // its own offers (decideHeldHandovers).
+      if (verified && lt.newOwnerUserId !== this.account.userId && this.ownsVault(vaultId) && !this.isOwnLiveOffer(vaultId, lt.offerId, lt.newOwnerUserId)) {
+        this.heldHandovers.set(vaultId, noticeable || this.heldHandovers.get(vaultId) === true);
+        return;
+      }
+      this.heldHandovers.delete(vaultId);
       if (verified) {
         // Only a VERIFIED completion advances the seen-seq chain — an unverifiable row must
         // not suppress the notice when the genuine wrapHash arrives on a later pull, nor
@@ -4145,7 +4217,14 @@ export class VaultStore {
     const expiresAt = Date.now() + 14 * 86_400_000;
     const key = await this.account.lifecycleKeyFor(vaultId);
     const proof = await offerProof(key, vaultId, offerId, toUserId, expiresAt, seq);
-    await this.api.offerTransfer(vaultId, { toUserId, offerId, expiresAt, proof });
+    // Finding 1 (core twin): on this account's record before it is sent; one the server refuses is marked cancelled.
+    await this.recordOwnOffers([{ vaultId, offerId, toUserId, createdAt: Date.now() }]);
+    try {
+      await this.api.offerTransfer(vaultId, { toUserId, offerId, expiresAt, proof });
+    } catch (e) {
+      if (e instanceof ApiError) await this.cancelOwnOffers((o) => o.offerId === offerId);
+      throw e;
+    }
     try {
       await this.sync();
     } catch (e) {
@@ -4153,8 +4232,10 @@ export class VaultStore {
     }
   }
 
-  /** TRANSFER cancel (owner) or decline (target). */
+  /** TRANSFER cancel (owner) or decline (target). The owner's offers for the vault are on record as cancelled before
+   *  the cancel is sent (finding 1; core twin). */
   async cancelTransfer(vaultId: string): Promise<void> {
+    await this.cancelOwnOffers((o) => o.vaultId === vaultId);
     await this.api.cancelTransfer(vaultId);
     this.incomingByVault.delete(vaultId);
     try {
@@ -4170,10 +4251,15 @@ export class VaultStore {
    * creation), and posts acceptProof over sha256(wrappedVk). Fails loudly rather than
    * post an unopenable wrap.
    */
-  async acceptTransfer(vaultId: string): Promise<void> {
+  async acceptTransfer(vaultId: string, offerId: string): Promise<void> {
     const vault = this.vaultsById.get(vaultId);
     const pt = vault?.pendingTransfer;
     if (!pt || pt.toUserId !== this.account.userId) throw new ApiError(409, "transfer_not_pending", "no ownership offer pending for you");
+    // Sharing review 2026-11 (item 2; core twin): only the offer shown, newer than the last handover verified here.
+    if (pt.offerId !== offerId || this.incomingByVault.get(vaultId)?.offerId !== offerId) {
+      throw new ApiError(409, "transfer_not_pending", "this ownership offer is no longer the one shown");
+    }
+    if (pt.seq <= (this.lastTransferSeqSeen.get(vaultId) ?? 0)) throw new ApiError(409, "transfer_not_pending", "this ownership offer was already used");
     if (pt.expiresAt <= Date.now()) throw new ApiError(409, "transfer_not_pending", "this ownership offer has expired");
     const key = await this.account.lifecycleKeyFor(vaultId);
     if (!verifyProof(pt.proof, await offerProof(key, vaultId, pt.offerId, pt.toUserId, pt.expiresAt, pt.seq))) {

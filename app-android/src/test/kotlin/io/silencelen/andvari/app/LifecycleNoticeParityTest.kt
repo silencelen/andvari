@@ -21,6 +21,7 @@ class LifecycleNoticeParityTest {
             notice("removed"), notice("removed", SyncEngine.ALREADY_RECORDED), notice("removed", SyncEngine.REMOVED_LEGACY),
             notice("left"), notice("left", SyncEngine.LEFT_UNPROVEN), notice("left", SyncEngine.ALREADY_RECORDED),
             notice("restored"), notice("transfer-complete"), notice("transfer-complete", mine = true), notice("transfer-anomaly"),
+            notice("transfer-anomaly", SyncEngine.TRANSFER_NOT_OFFERED),
             notice("replay-denied", parked = 2), notice("replay-denied", SyncEngine.REMOVAL_REPLAY),
             notice("added"), notice("added", by = "Alice"), notice("grant-anomaly", "signer_not_pinned_key"), notice("grant-anomaly", "vk_mismatch"),
             notice("write-rejected", "unknown_attachment", parked = 2), notice("vk-mismatch"), notice("key-unreadable"),

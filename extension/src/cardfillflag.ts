@@ -5,8 +5,11 @@
  * on unless built with CARDFILL=0.
  *
  * With it off, the worker's card release entry points answer [CARD_FILL_OFF] and are not even bundled (background.ts
- * gates them on the define itself, so esbuild drops them; build.mjs and cardfillflag.test.ts check), no card field is
- * chosen and no chip shows (content.ts), and the popup lists cards with the line errors.ts CARD_FILL_FROM_APP.
+ * gates them on the define itself, so esbuild drops them; build.mjs and cardfillflag.test.ts check); nor is the content
+ * script's in-page card fill: its chip, its choice of a field, its report of a frame's card forms and its fill (content.ts
+ * gates them the same way, and build.mjs and cardfillflag.test.ts check that too; card capture stays). The popup lists
+ * cards with the line errors.ts cardFillOffLine gives for the target (Safari: copy the number and code in the app; Chrome
+ * and Firefox: the popup's own copy buttons).
  *
  * Anything that loads the source unbundled (node --test, tsc) sees it on, so the card-fill rules stay tested.
  *

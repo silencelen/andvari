@@ -34,12 +34,17 @@ export interface LoginForm {
   password: HTMLInputElement | null;
   /** Generator fill targets: every new-password field (primary + confirm). Empty when !isSignup. */
   newPasswords: HTMLInputElement[];
+  /** Every password field of the form, in document order: the fields the capture engine may read (content.ts captureField,
+   *  [chooseEnteredCapture]). Each passed the detection visibility rules ([isVisible]) when the form was scanned, as every
+   *  collected field does. Empty on a username-step form. */
+  passwords: HTMLInputElement[];
   /** H04 (2026-09-13 audit): the field whose value the CAPTURE engine records as "the password"
    *  — distinct from `password`, which is the FILL target. On a change-password form the fill
    *  target is the current-password field (that is what a login fill must write), but the value
    *  worth saving is the NEW one; reading `password` for capture saved the OLD password (or, with
    *  the generator, nothing the vault ever learned — the generated value went only into
-   *  newPasswords). Chosen by chooseCapturePassword; null only on a username-step form. */
+   *  newPasswords). Chosen by chooseCapturePassword; null only on a username-step form. The capture engine reads it only
+   *  while the person has entered nothing into the form's passwords: what they entered comes first ([chooseEnteredCapture]). */
   capturePassword: HTMLInputElement | null;
   isSignup: boolean;
   /** CVV-negative rule (cards design 2026-07-09): true when the form's LONE password-typed
@@ -1189,6 +1194,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       username: users[0]!.input,
       password: null,
       newPasswords: [],
+      passwords: [],
       capturePassword: null,
       isSignup: false,
       suppressSave: isCardForm,
@@ -1239,7 +1245,7 @@ function buildLoginForm(form: HTMLFormElement | null, container: Scope, fields: 
       primary.input.type === "password" &&
       (isCvvNameOrId(primary.input.name) || isCvvNameOrId(primary.input.id)));
 
-  return { kind: "login", form, container, username, password: primary.input, newPasswords, capturePassword, isSignup, suppressSave };
+  return { kind: "login", form, container, username, password: primary.input, newPasswords, passwords: passwords.map((p) => p.input), capturePassword, isSignup, suppressSave };
 }
 
 /**
@@ -1264,6 +1270,28 @@ export function chooseCapturePassword<T>(passwords: readonly T[], newPasswords: 
   if (newPasswords.length > 0) return newPasswords[0]!;
   if (passwords.length >= 3) return passwords[1]!;
   return fillTarget;
+}
+
+/**
+ * The field the capture engine reads, preferring what the person ENTERED (0.30.0 release check): a field that received
+ * trusted input (typed, pasted, the browser's own autofill), or one andvari filled or generated a password into at their
+ * request ([entered]; content.ts records both). Pure, like [chooseCapturePassword], over the form's password fields in
+ * document order, every one of which passed the detection visibility rules.
+ *
+ * A honeypot trap is a password field the page keeps from people, so nobody enters anything into it. Most traps fail the
+ * visibility rules and are never fields at all; one drawn under another field passes them (the hit test is a fill-time
+ * rule), and two such traps beside the real password read as the three-field change-password shape, whose capture is the
+ * SECOND field: a trap, empty, so the person's password was never offered for saving (or a trap a script filled was).
+ * So: [chooseCapturePassword]'s pick when the person entered it, or entered nothing at all; otherwise the same rule over
+ * the fields they did enter. A change of password the person typed out keeps its pick (they typed every field), and a
+ * field they typed into is never passed over for one they did not.
+ */
+export function chooseEnteredCapture<T>(passwords: readonly T[], newPasswords: readonly T[], fillTarget: T, entered: (field: T) => boolean): T {
+  const chosen = chooseCapturePassword(passwords, newPasswords, fillTarget);
+  if (entered(chosen)) return chosen;
+  const typed = passwords.filter(entered);
+  if (typed.length === 0) return chosen;
+  return chooseCapturePassword(typed, newPasswords.filter(entered), entered(fillTarget) ? fillTarget : typed[0]!);
 }
 
 interface FieldGroup {
@@ -1324,6 +1352,51 @@ export interface CardForm {
   fields: CardFormFieldRef[];
 }
 
+/**
+ * A hosted provider page's card kind for a field (round-13 review): only from its `autocomplete` hint (a cc-* token),
+ * never from its name, id or label. Null for any field without one.
+ */
+export function hostedCardKind(autocomplete: string | null): CardFieldKind | null {
+  for (const raw of (autocomplete ?? "").split(/\s+/)) {
+    const k = HOSTED_HINTS[raw.toLowerCase()];
+    if (k !== undefined) return k;
+  }
+  return null;
+}
+
+/** The cc-* autocomplete tokens (HTML's autofill field names) and the card kind each names. */
+const HOSTED_HINTS: Record<string, CardFieldKind> = {
+  "cc-number": "cardnumber",
+  "cc-exp": "cardexpiry",
+  "cc-exp-month": "cardexpmonth",
+  "cc-exp-year": "cardexpyear",
+  "cc-csc": "cardcvv",
+  "cc-name": "cardname",
+  "cc-type": "cardtype",
+};
+
+/**
+ * A hosted provider page's card form (round-13 review): the fields with a card autocomplete hint, exactly one per kind.
+ * Null when there is none, or when two fields claim one kind: nothing then tells which the page means.
+ */
+export function hostedCardKinds(autocompletes: readonly (string | null)[]): (CardFieldKind | null)[] | null {
+  const kinds = autocompletes.map(hostedCardKind);
+  const named = kinds.filter((k): k is CardFieldKind => k !== null);
+  if (named.length === 0 || new Set(named).size !== named.length) return null;
+  return kinds;
+}
+
+function buildHostedCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[]): CardForm | null {
+  const kinds = hostedCardKinds(fields.map((f) => f.input.getAttribute("autocomplete")));
+  if (kinds === null) return null;
+  const refs: CardFormFieldRef[] = [];
+  fields.forEach((f, i) => {
+    const kind = kinds[i];
+    if (kind !== null && kind !== undefined) refs.push({ kind, input: f.input });
+  });
+  return refs.length > 0 ? { form, container, fields: refs } : null;
+}
+
 function buildCardForm(form: HTMLFormElement | null, container: Scope, fields: Field[], numberless: boolean): CardForm | null {
   // A card form REQUIRES the PAN anchor, except in a payment provider's card document, where a security code alone
   // (saved-card re-authentication) or one field of a form split across frames is a card form of its own.
@@ -1371,10 +1444,11 @@ export function postalIsAmbiguous(kinds: readonly (CardFieldKind | null)[]): boo
 /** All same-page card forms under `root`, document order — same grouping as findLoginForms so the
  *  two views never disagree on which fields belong to which form. [numberless]: a payment provider's card document
  *  (content.ts cardBox), where a group of card fields with no card number is a card form too. */
-export function findCardForms(root: Document | ShadowRoot, opts: { numberless?: boolean } = {}): CardForm[] {
+export function findCardForms(root: Document | ShadowRoot, opts: { numberless?: boolean; hintsOnly?: boolean } = {}): CardForm[] {
   const out: CardForm[] = [];
   for (const g of groupFields(root)) {
-    const built = buildCardForm(g.form, g.container, g.fields, opts.numberless === true);
+    // [hintsOnly]: a provider's hosted page (content.ts hostedCardPage): card fields by their autocomplete hint only.
+    const built = opts.hintsOnly === true ? buildHostedCardForm(g.form, g.container, g.fields) : buildCardForm(g.form, g.container, g.fields, opts.numberless === true);
     if (built) out.push(built);
   }
   return out;

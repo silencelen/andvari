@@ -22,6 +22,12 @@ import io.silencelen.andvari.core.client.BackupRequest
 import io.silencelen.andvari.core.client.BackupResult
 import io.silencelen.andvari.core.client.BackupSkipped
 import io.silencelen.andvari.core.client.BackupVault
+import io.silencelen.andvari.core.app.AccountDeletionFlow
+import io.silencelen.andvari.core.app.AccountDeletionPreviewView
+import io.silencelen.andvari.core.app.AccountDeletionView
+import io.silencelen.andvari.core.app.DeletionCheck
+import io.silencelen.andvari.core.app.DeletionCopy
+import io.silencelen.andvari.core.app.DeletionOutcome
 import io.silencelen.andvari.core.app.VaultMoves
 import io.silencelen.andvari.core.client.CopyDeniedException
 import io.silencelen.andvari.core.client.ClientPolicyClamps
@@ -71,6 +77,8 @@ import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.MemberRecovery
 import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.AccountDeleteBlocker
+import io.silencelen.andvari.core.model.AccountDeletePreview
 import io.silencelen.andvari.core.model.AccountKeys
 import io.silencelen.andvari.core.model.ClientPolicy
 import io.silencelen.andvari.core.model.LoginRequest
@@ -182,6 +190,9 @@ sealed interface Screen {
     // staleness ranking with its guided verification run.
     data object Health : Screen
     data object AutofillStatus : Screen
+    // Settings › Delete account (spec 03 §13): what deleting would do, then the typed address, the master password and
+    // the two-step code; core's AccountDeletionFlow takes the steps, as on iOS and the web.
+    data object DeleteAccount : Screen
     // Shown-once recovery-phrase gate (design 2026-07-12 §F.4/§F.7): the per-member self-service
     // piece is MANDATORY, so a member who never SEES it is silently unrecoverable. This screen
     // reveals it once — after a fresh enroll, or a fresh piece via the RecoveryCapture gate below —
@@ -339,6 +350,14 @@ data class UiState(
     val totpStatus: TotpStatus? = null,
     val totpSetup: TotpSetupResponse? = null,
     val totpMessage: String? = null,
+    /** Settings › Delete account while its screen is open: the address to type and the server's preview (null until it
+     *  answered), and whether the last request's outcome is unknown. Cleared by every session end. */
+    val accountDeletion: AccountDeletionView? = null,
+    /** Why the deletion screen's last step did nothing, or what a check found; the screen shows it. */
+    val deletionMessage: String? = null,
+    /** On the sign-in screen: the session ended while a deletion was on its way and its answer never came, so it most
+     *  likely went through. The card offers to forget the account on this phone, or to sign in and check. */
+    val deletionForgetOffer: DeletionForgetOffer? = null,
     // CSV import (spec 06) — a preview/plan kept across a retry so an interrupted import
     // replays the SAME itemIds idempotently instead of duplicating.
     val importPlan: CsvImport.ImportPlan? = null,
@@ -496,6 +515,7 @@ data class UiState(
 internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     items = emptyList(), needsUpdateCount = 0,
     notice = null, loginTotpRequired = false, totpStatus = null, totpSetup = null, totpMessage = null,
+    accountDeletion = null, deletionMessage = null,
     backupPreflight = null, backupResult = null, csvPreflight = null, csvVaults = emptyList(), csvSelectedVaults = emptySet(), csvAcknowledged = null,
     lifecycleNotices = emptyList(), incomingTransfers = emptyList(), transferOwnerNames = emptyMap(),
     sharingMembers = emptyMap(), deletedVaults = emptyList(), heldVaults = emptyList(),
@@ -529,6 +549,9 @@ internal fun UiState.sessionCleared(reason: String?): UiState = copy(
     policyFetchFailed = policy == null && policyFetchFailed,
     lockReason = reason,
 )
+
+/** The account whose deletion's answer was lost while its session ended (spec 03 §13): what forgetting it here wipes. */
+data class DeletionForgetOffer(val originKey: String, val userId: String, val email: String, val message: String)
 
 /** Human label for a detected format — the preview's "From … export" line. Stays under
  *  the universal importer (pin 6: it is FORMAT-keyed, not pick-keyed). Keyed on the core
@@ -1993,6 +2016,20 @@ class AndvariViewModel(
     /** The pending offer on a vault (owner's "Ownership offer to …" chip), or null. */
     fun pendingTransferFor(vaultId: String): PendingTransfer? = engine?.pendingTransferFor(vaultId)
 
+    /** Whether that offer is this account's own: its proof checks and it is on record (sharing review 2026-11, item 5). */
+    fun pendingTransferIsOwn(vaultId: String): Boolean = runCatching { engine?.pendingTransferIsOwn(vaultId) }.getOrNull() == true
+
+    /**
+     * The address, else the name, recorded when this device verified [userId], when it did and the server still serves
+     * that key ([identityPub]); null otherwise. Only such a member can be made a vault's owner (sharing review 2026-11,
+     * item 4; the engine checks again).
+     */
+    fun verifiedNameFor(userId: String, identityPub: String): String? {
+        val e = engine ?: return null
+        if (runCatching { e.memberPinState(userId, identityPub) }.getOrNull() != SyncEngine.MemberPinState.PINNED) return null
+        return e.accountState.currentPin(userId)?.let { it.email ?: it.label }
+    }
+
     fun dismissNotice(id: String) {
         engine?.dismissNotice(id)
         refreshLifecycle()
@@ -2176,9 +2213,10 @@ class AndvariViewModel(
         refreshItems(); reloadSharing()
     }
 
-    /** Accept an ownership offer — the engine re-verifies the proof before acting. */
-    fun acceptTransfer(vaultId: String) = op {
-        engine!!.acceptTransfer(vaultId)
+    /** Accept the ownership offer [offerId] shown — the engine re-verifies the proof, and that it is that offer, before
+     *  acting (sharing review 2026-11, item 2). */
+    fun acceptTransfer(vaultId: String, offerId: String) = op {
+        engine!!.acceptTransfer(vaultId, offerId)
         refreshItems(); reloadSharing()
     }
 
@@ -2316,6 +2354,9 @@ class AndvariViewModel(
         // Mid-reveal gets NO grace: leaving a secret on an unattended screen is the wrong trade.
         val idleReason = if (pendingRecoverySecret != null) REASON_IDLE_RECOVERY else REASON_IDLE
         if (VaultSession.get() == null) {
+            // Spec 03 §13: a session end heard while a deletion request is on its way is held until the request settles,
+            // and [deleteAccount] acts on it then: landing on the sign-in screen now would leave before the outcome is known.
+            if (deletionInFlight) return
             // A definitive rejection ended the session, whichever client heard it (the autofill unlock binds
             // sessions this screen adopts). It is over, not idle: the sign-in surface, with the reason.
             if (VaultSession.takeRejected()) {
@@ -2329,7 +2370,7 @@ class AndvariViewModel(
             // are unlocked views too — a reveal over a dead session must die with it.
             // Security review 2026-10 (wave-6 LOW): Health was missing — it renders item names,
             // usernames, URIs and breach/reuse verdicts, all decrypted state that must die with the lock.
-            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash || s.screen is Screen.RecoverySetup || s.screen is Screen.RecoveryCapture || s.screen is Screen.Health) lock(idleReason)
+            if (s.screen is Screen.Vault || s.screen is Screen.Sharing || s.screen is Screen.Settings || s.screen is Screen.AutofillStatus || s.screen is Screen.Trash || s.screen is Screen.RecoverySetup || s.screen is Screen.RecoveryCapture || s.screen is Screen.Health || s.screen is Screen.DeleteAccount) lock(idleReason)
             return
         }
         // A-copyGate: the rescue copy holds `busy`, but any OTHER op finishing mid-copy
@@ -2726,6 +2767,9 @@ class AndvariViewModel(
     suspend fun acceptLegacyVault(vaultId: String) {
         requireNotNull(engine) { "locked" }.acceptLegacyVault(vaultId)
     }
+
+    /** What tells [vaultId] from another vault of the same name (item count, dates, id tail), from this device's copy. */
+    fun vaultFacts(vaultId: String): String = engine?.let { io.silencelen.andvari.core.client.PersonalVaultCopy.facts(it, vaultId) }.orEmpty()
 
     /** A vault's display name for the personal-vault notices. */
     fun vaultDisplayName(vaultId: String): String =
@@ -3268,7 +3312,11 @@ class AndvariViewModel(
         moves.drop()
         movePickerMode = null
         movePickerItemId = null
-        _ui.value = _ui.value.sessionCleared(REASON_SESSION_ENDED).copy(
+        // Spec 03 §13: after a deletion whose outcome is unknown, an end this phone cannot tie to it (a revocation, a
+        // refused check) is said as one that leaves the account's fate open; the self-identity records stay.
+        val reason = if (deletionUnknown) deletion.copy.SESSION_ENDED_OUTCOME_UNKNOWN else REASON_SESSION_ENDED
+        deletionUnknown = false
+        _ui.value = _ui.value.sessionCleared(reason).copy(
             screen = Screen.Welcome, busy = false,
             quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
             mustChangePassword = false, // the purge dropped the persisted F58 flag with the session
@@ -3294,6 +3342,257 @@ class AndvariViewModel(
 
     fun closeSettings() {
         _ui.value = _ui.value.copy(screen = Screen.Vault, totpSetup = null, totpMessage = null)
+    }
+
+    // ---- deleting the account (spec 03 §13; core's AccountDeletionFlow, as on iOS and the web) ----
+    //
+    // Settings › Delete account: what deleting would do (the server's preview: what goes, what stands in the way), then
+    // the typed address, the master password (proved on this phone first: a wrong one is never sent) and the two-step
+    // code when the account has one. Once the server says it is done, this phone forgets everything it kept for the
+    // account and lands signed out. An answer that says nothing is never taken for "deleted" or "not deleted".
+
+    private val deletion = AccountDeletionFlow(DeletionCopy.PHONE)
+
+    /** The preview as last read: the vaults' names and whether a code is needed. */
+    private var deletionRead: AccountDeletePreview? = null
+
+    /** A deletion request is on its way: a session end heard meanwhile is held until it settles ([checkIdleLock]). */
+    private var deletionInFlight = false
+
+    /** The last request's outcome is unknown and nothing since has settled it ([endRejectedSession]). */
+    private var deletionUnknown = false
+
+    /** Open Settings › Delete account and ask the server what deleting would do now. */
+    fun openAccountDeletion() {
+        val live = VaultSession.get() ?: return
+        if (_ui.value.busy) return
+        deletionRead = null
+        _ui.value = _ui.value.copy(
+            screen = Screen.DeleteAccount, deletionMessage = null,
+            accountDeletion = AccountDeletionView(email = store.load()?.email ?: "", preview = null, outcomeUnknown = deletionUnknown),
+        )
+        loadDeletionPreview(live)
+    }
+
+    /** The preview again, after it could not be read. */
+    fun retryDeletionPreview() {
+        val live = VaultSession.get() ?: return
+        if (_ui.value.busy || _ui.value.accountDeletion == null) return
+        loadDeletionPreview(live)
+    }
+
+    private fun loadDeletionPreview(live: VaultSession.Unlocked) {
+        _ui.value = _ui.value.copy(busy = true, deletionMessage = null)
+        viewModelScope.launch {
+            val read = try {
+                deletion.preview(live.api)
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                if (VaultSession.get() !== live || _ui.value.accountDeletion == null) {
+                    _ui.value = _ui.value.copy(busy = false)
+                    return@launch
+                }
+                _ui.value = if (t is UpgradeRequiredException) _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+                else _ui.value.copy(busy = false, deletionMessage = deletion.copy.forPreview(t))
+                return@launch
+            }
+            if (VaultSession.get() !== live || _ui.value.accountDeletion == null) {
+                _ui.value = _ui.value.copy(busy = false)
+                return@launch
+            }
+            deletionRead = read
+            _ui.value = _ui.value.copy(busy = false, accountDeletion = _ui.value.accountDeletion?.copy(preview = deletionPreviewView(live, read)))
+        }
+    }
+
+    private fun deletionPreviewView(live: VaultSession.Unlocked, p: AccountDeletePreview, blockers: List<AccountDeleteBlocker> = p.blockers): AccountDeletionPreviewView {
+        val names = live.engine.vaultInfos().associate { it.vaultId to it.name }
+        return deletion.previewView(p, live.account.personalVaultId, names::get, blockers)
+    }
+
+    /** Back to Settings; not while a request is on its way. */
+    fun closeAccountDeletion() {
+        if (deletionInFlight) return
+        deletionRead = null
+        _ui.value = _ui.value.copy(screen = Screen.Settings, accountDeletion = null, deletionMessage = null)
+    }
+
+    /**
+     * Delete this account: [email] as typed, the master [password] and the two-step [code] when the account has one.
+     * Nothing is sent when the address is not the account's. Once the server says it is done, this phone forgets the
+     * account ([forgetAccount]) and lands on the sign-in screen saying so.
+     */
+    fun deleteAccount(email: String, password: String, code: String) {
+        if (_ui.value.busy || deletionInFlight) return
+        val live = VaultSession.get() ?: return
+        val stored = store.load() ?: return
+        val open = _ui.value.accountDeletion ?: return
+        val preview = deletionRead ?: return
+        deletion.refusal(email, stored.email, password, code, preview.totpRequired)?.let {
+            _ui.value = _ui.value.copy(deletionMessage = it)
+            return
+        }
+        val originKey = store.currentOriginKey()
+        _ui.value = _ui.value.copy(busy = true, deletionMessage = null)
+        deletionInFlight = true
+        viewModelScope.launch {
+            val outcome = try {
+                deletion.delete(live.api, live.account, email, password, code)
+            } finally {
+                deletionInFlight = false
+            }
+            // A session end heard while the request was on its way was held for this moment.
+            val ended = VaultSession.get() !== live
+            when (outcome) {
+                DeletionOutcome.Deleted -> {
+                    // Whatever ended the session meanwhile (the deletion revokes every session of the account), it is gone.
+                    forgetAccount(originKey, stored.userId)
+                    landSignedOut(deletion.copy.deleted(stored.email))
+                }
+                DeletionOutcome.Unknown -> if (ended) {
+                    if (VaultSession.takeRejected()) {
+                        // The session ended while the request was on its way and the answer never came: most likely the
+                        // deletion's own end. The sign-in screen offers to forget the account here, or to sign in and check.
+                        deletionUnknown = false
+                        endRejectedSession()
+                        _ui.value = _ui.value.copy(
+                            lockReason = null,
+                            deletionForgetOffer = DeletionForgetOffer(originKey, stored.userId, stored.email, deletion.copy.MOST_LIKELY_DELETED),
+                        )
+                    } else {
+                        sessionEndedDuringDeletion()
+                    }
+                } else {
+                    deletionUnknown = true
+                    _ui.value = _ui.value.copy(
+                        busy = false, deletionMessage = deletion.copy.OUTCOME_UNKNOWN,
+                        accountDeletion = _ui.value.accountDeletion?.copy(outcomeUnknown = true),
+                    )
+                }
+                is DeletionOutcome.Blocked -> if (ended) sessionEndedDuringDeletion() else {
+                    // Refused: the account is still here, and the server's blockers now show in place of the preview's.
+                    deletionUnknown = false
+                    _ui.value = _ui.value.copy(
+                        busy = false, deletionMessage = deletion.copy.BLOCKED,
+                        accountDeletion = _ui.value.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, preview, outcome.blockers)),
+                    )
+                }
+                is DeletionOutcome.Refused -> if (ended) sessionEndedDuringDeletion() else {
+                    val t = outcome.cause
+                    if (t is UpgradeRequiredException) {
+                        _ui.value = _ui.value.copy(busy = false, upgradeRequired = UPGRADE_REQUIRED_MSG)
+                        return@launch
+                    }
+                    // The server had asked for no code, but the account has one now: the field shows, and the person types it.
+                    if (outcome.codeNowRequired) {
+                        deletionRead = preview.copy(totpRequired = true)
+                        _ui.value = _ui.value.copy(accountDeletion = _ui.value.accountDeletion?.let { d -> d.copy(preview = d.preview?.copy(totpRequired = true)) })
+                    }
+                    _ui.value = _ui.value.copy(busy = false, deletionMessage = deletion.refusedMessage(t, open.outcomeUnknown))
+                }
+            }
+        }
+    }
+
+    /** A refused request, or none sent, with the session ended meanwhile: that end was real, and lands as any end does. */
+    private fun sessionEndedDuringDeletion() {
+        _ui.value = _ui.value.copy(busy = false)
+        checkIdleLock()
+    }
+
+    /**
+     * After an answer that said nothing: ask the server for the preview again. An answer means the account is still here;
+     * a refused session says only that this session ended, which a revocation does too, so the account may still exist.
+     */
+    fun checkAccountDeletion() {
+        val live = VaultSession.get() ?: return
+        if (_ui.value.busy || _ui.value.accountDeletion?.outcomeUnknown != true) return
+        _ui.value = _ui.value.copy(busy = true, deletionMessage = null)
+        viewModelScope.launch {
+            val check = deletion.check(live.api)
+            if (VaultSession.get() !== live) {
+                sessionEndedDuringDeletion()
+                return@launch
+            }
+            if (check !is DeletionCheck.StillHere) {
+                _ui.value = _ui.value.copy(busy = false, deletionMessage = deletion.checkMessage(check))
+                return@launch
+            }
+            deletionUnknown = false
+            deletionRead = check.preview
+            _ui.value = _ui.value.copy(
+                busy = false, deletionMessage = deletion.copy.NOT_DELETED_AFTER_CHECK,
+                accountDeletion = _ui.value.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, check.preview)),
+            )
+        }
+    }
+
+    /** The sign-in screen's card after a lost answer: forget the account on this phone (the same wipe as a deletion). */
+    fun forgetDeletedAccount() {
+        val offer = _ui.value.deletionForgetOffer ?: return
+        forgetAccount(offer.originKey, offer.userId)
+        landSignedOut(deletion.copy.FORGOTTEN)
+    }
+
+    /** "Sign in to check" instead: the card goes, and this phone keeps its records of the account. */
+    fun dismissDeletionForgetOffer() {
+        _ui.value = _ui.value.copy(deletionForgetOffer = null)
+    }
+
+    /**
+     * The server deleted the account: this phone is left as a fresh install (spec 03 §13, owner decision 2026-11-15),
+     * with nothing of the account and nothing of its server. What the account kept goes: its session and tokens, the
+     * apps confirmed for its fills, uses not yet sent, unfinished moves, every secret held for a screen, and what the
+     * autofill status screen recorded of its last fills. So does everything kept under that server's origin, whoever's
+     * it is: every vault cache, device state and quick-unlock key (its Keystore key with it), the policy mirrors, cached
+     * keys, stamps, and the spec 01 §5 self-identity records, so the address can register again here. The server's
+     * address goes last: the phone dials the default server again, as a first launch does. Another server's namespace is
+     * never touched (§4.2).
+     */
+    private fun forgetAccount(originKey: String, userId: String) {
+        UsageRecorder.clear() // a deleted account's uses go nowhere: the lock's flush would only be refused
+        VaultSession.lock() // the engine releases the cache database before it is deleted
+        runCatching { io.silencelen.andvari.app.autofill.AppSignerBindings.clearAll(appContext) }
+        pendingBackupRequest = null
+        zeroPendingRecovery()
+        zeroPendingRecover()
+        pendingCaptureAuthKey = null
+        closeEditor()
+        importDismiss()
+        moves.drop()
+        movePickerMode = null
+        movePickerItemId = null
+        runCatching { io.silencelen.andvari.app.autofill.AutofillDebugLog.forget(appContext) }
+        // Every account's namespace at that server, each quick-unlock key first (its blob names the Keystore key).
+        runCatching { QuickUnlock.wipe(cacheDir, originKey, userId) }
+        AndroidNamespaceStorage(cacheDir).deleteOrigin(originKey)
+        store.forgetServer(originKey) // the session, everything under that origin, and the address itself
+        coordinator.originChanged() // a policy probe still on its way writes nothing back
+        VaultSession.takeRejected() // the server ended the session: that is this deletion, not a second event
+    }
+
+    /** The sign-in screen once the account is gone, with [notice]: the default server, as on a first launch. */
+    private fun landSignedOut(notice: String) {
+        deletionRead = null
+        deletionUnknown = false
+        _ui.value = _ui.value.sessionCleared(null).copy(
+            screen = Screen.Welcome, busy = false,
+            quickUnlockEnrolled = false, quickUnlockFresh = false, quickUnlockOffer = false, quickUnlockMessage = null,
+            mustChangePassword = false, upgradeRequired = null, deletionForgetOffer = null,
+            baseUrl = store.baseUrl, policy = null, policyFetchFailed = false, lastExportAt = store.lastExportAt,
+            trustGate = null, pendingSwitch = null, pendingReconcile = null,
+            notice = notice,
+        )
+        refreshQuickUnlockState()
+        // The sign-in screen needs the policy of the server the phone dials now (the default one), as at a launch.
+        probeJob?.cancel()
+        probeJob = viewModelScope.launch {
+            when (val probed = serverSwitch.probePolicy()) {
+                is PolicyProbe.Applied -> showPolicy(probed.policy)
+                is PolicyProbe.Failed -> if (probed.current) _ui.value = _ui.value.copy(policy = null, policyFetchFailed = true)
+                PolicyProbe.Stale, PolicyProbe.NoOrigin -> {}
+            }
+        }
     }
 
     // ---- autofill status (diagnostic surface; reached from Settings) ----
@@ -3889,6 +4188,9 @@ class AndvariViewModel(
     }
 
     private fun toVault() {
+        // A new session (spec 03 §13): an unknown deletion outcome of an earlier one, and its forget card, do not carry.
+        deletionUnknown = false
+        if (_ui.value.deletionForgetOffer != null) _ui.value = _ui.value.copy(deletionForgetOffer = null)
         // lockReason clears HERE — the one success landing shared by unlock, sign-in, quick
         // unlock, and enroll (F26: the explanation must not outlive the event it explains).
         // §F.9 gate state clears with it (recoveryPhrase always did; the capture error and the

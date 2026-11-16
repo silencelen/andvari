@@ -349,20 +349,22 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
       ({ origin, forms, anchor, ...(anchor !== null ? { anchorAt: at } : {}), ancestors });
     const full: CardFieldKind[] = ["cardnumber", "cardexpiry", "cardcvv", "cardname"];
     // The shop's richer top-frame form, chosen more recently, never out-bids the provider's frame…
-    expect(chosenCardFrame({ 0: rec(SHOP, [full], 0, NOW - 10), 3: rec(STRIPE, [["cardnumber"]], 0, NOW - 5_000) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardnumber"] });
+    expect(chosenCardFrame({ 0: rec(SHOP, [full], 0, NOW - 10), 3: rec(STRIPE, [["cardnumber"]], 0, NOW - 5_000) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardnumber"], ancestors: [SHOP] });
     // …and with no provider frame, nothing is chosen at all, however many forms the shop's frames hold.
     expect(chosenCardFrame({ 0: rec(SHOP, [full], 0), 2: rec(SHOP, [full], 0) }, NOW)).toBe(null);
     // The form is the one holding the chosen field, never the frame's richest; no choice made, none.
-    expect(chosenCardFrame({ 3: rec(STRIPE, [full, ["cardcvv"]], 1) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardcvv"] });
+    expect(chosenCardFrame({ 3: rec(STRIPE, [full, ["cardcvv"]], 1) }, NOW)).toEqual({ frameId: 3, origin: STRIPE, kinds: ["cardcvv"], ancestors: [SHOP] });
     expect(chosenCardFrame({ 3: rec(STRIPE, [full], null) }, NOW)).toBe(null);
     // A split provider: the frames the person tapped in one quick chain, each with its own form's kinds; an untapped frame
     // gets nothing…
     const split = { 1: rec(BRAINTREE, [["cardnumber"]], 0, NOW - 2_000), 2: rec(BRAINTREE, [["cardexpiry"]], 0, NOW - 1_000), 3: rec(BRAINTREE, [["cardcvv"]], null) };
-    expect(cardFillPlan(split, NOW)).toEqual({ ok: true, targets: [{ frameId: 2, origin: BRAINTREE, kinds: ["cardexpiry"] }, { frameId: 1, origin: BRAINTREE, kinds: ["cardnumber"] }] });
-    // …round-12 review: a field typed into for something else (a rewards widget's lure, inside another chain of
-    // documents, or long before) never joins a later fill: only the newest choice and its quick chain of taps.
+    expect(cardFillPlan(split, NOW)).toEqual({ ok: true, targets: [{ frameId: 2, origin: BRAINTREE, kinds: ["cardexpiry"], ancestors: [SHOP] }, { frameId: 1, origin: BRAINTREE, kinds: ["cardnumber"], ancestors: [SHOP] }] });
+    // …round-12 and round-13 review: a field typed into for something else (a rewards widget's lure, inside another chain
+    // of documents) never joins a fill, and no order of taps decides between two payment forms: while the person's
+    // choices sit in two forms, nothing is filled (the popup offers Start over).
     const lure = { 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 90_000, ["https://rewards.example", SHOP]) };
-    expect(cardFillPlan(lure, NOW)).toEqual({ ok: true, targets: [{ frameId: 1, origin: STRIPE, kinds: ["cardcvv"] }] });
+    expect(cardFillPlan(lure, NOW)).toEqual({ ok: false, reason: "mixed_forms" });
+    expect(cardFillPlan({ ...lure, 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 90_000), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 1_000, ["https://rewards.example", SHOP]) }, NOW)).toEqual({ ok: false, reason: "mixed_forms" });
     // …and a provider frame the page shows that has not reported refuses everything (the hint can only refuse).
     expect(cardFillPlan(split, NOW, "https://js.stripe.com")).toEqual({ ok: false, reason: "unreported", origin: "https://js.stripe.com" });
     // …and a frame the page mounts beside or over the provider's (its own merchant account) offering a kind another
@@ -518,7 +520,11 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     const offers = spanOf(bg, "async function cardFillOffers(", "function asCardFillOutcome(");
     expect(offers).toContain('const none: Res<"cardFillOffers"> = { fillable: false, origin: null, frames: [], pageFormOnly: false };');
     expect(offers).toContain("if (kindsOfferedTwice(records).length > 0) return { ...none, doubled: true };");
-    expect(offers).toContain("const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin, kinds }) => ({ frameId, origin, kinds }));");
+    expect(offers).toContain("const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin, kinds, ancestors }) => ({ frameId, origin, kinds, ancestors: ancestors ?? null }));");
+    // Round-13 review: card fields tapped in two payment forms fill neither; the popup says so and offers Start over.
+    expect(offers).toContain("if (choicesSpanForms(records, Date.now())) return { ...none, mixed: true };");
+    expect(offers.indexOf("if (kindsOfferedTwice(records).length > 0)")).toBeLessThan(offers.indexOf("if (choicesSpanForms(records, Date.now()))"));
+    expect(er).toContain(`export const CARD_MIXED_FORMS = "You tapped card fields in two different payment forms; tap the one you want to pay with, then Fill.";`);
     // Round-12 review: a provider frame the page shows that has not reported refuses before anything is offered.
     expect(offers.indexOf("if (allow !== null) return originless ? { ...none, noFrameOrigin: true } : { ...none, allowOrigin: allow };")).toBeLessThan(offers.indexOf("if (provider.length > 0) {"));
     expect(offers).toContain("return { fillable: true, origin: frames[0]?.origin ?? provider[0]!.origin, frames, pageFormOnly: false };");
@@ -529,9 +535,16 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(bg).toContain("return heard?.hints.find((o) => !heard.origins.has(o)) ?? null;");
     expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\(\s*"fill"/);
     // The Fill names exactly which card details it writes, never a bare count (round-12 review).
-    expect(pp).toContain('dest.textContent = cardFill.frames.length > 0 ? `Fill → ${[...new Set(cardFill.frames.map((f) => new URL(f.origin).host))].join(", ")}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;');
+    // Round-13 review: and names the documents a provider frame sits in below the top one ("js.stripe.com inside
+    // rewards.example"; cardrelease.ts fillDestination).
+    expect(pp).toContain('dest.textContent = cardFill.frames.length > 0 ? `Fill → ${fillDestination(cardFill.frames)}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;');
     expect(pp).not.toMatch(/fields\)`/);
     const reason = spanOf(pp, "function cardCopyReason(", "function renderCards(");
+    expect(reason).toMatch(/if \(cardFill\.fillOff === true\) return cardFillOffLine\(safari\);\s*if \(cardFill\.mixed === true\) return CARD_MIXED_FORMS;\s*if \(cardFill\.fillable\) return null;/);
+    // Start over lets every choice in the tab go (the worker, popup-only), then asks again what a Fill would reach; it
+    // shows only with the two-forms line, whose remedy it is.
+    expect(pp).toMatch(/cardsStartOver\.addEventListener\("click", \(\) => \{[\s\S]{0,120}?await ask\(\{ type: "clearCardChoices" \}\);\s*cardFill = cardFillOf\(await ask\(\{ type: "cardFillOffers" \}\)\);/);
+    expect(pp).toContain("cardsStartOver.hidden = items.length === 0 || cardFill.mixed !== true;");
     expect(reason).toMatch(/if \(cardFill\.fillable\) return null;\s*if \(cardFill\.doubled === true\) return CARD_DUPLICATE_FIELDS;\s*if \(cardFill\.noFrameOrigin === true\) return CARD_NO_FRAME_ORIGIN;\s*if \(cardFill\.allowOrigin !== undefined\) return cardProviderNotAllowedCopy\(cardFill\.allowOrigin, safari\);\s*if \(cardFill\.pageFormOnly\) return CARD_PAGE_FORM;\s*if \(cardFill\.allowEverywhere === true\) return cardProviderNotAllowedCopy\(undefined, safari\);\s*return null;/);
     expect(pp).toContain('const why = cardCopyReason(BUILD_TARGET === "safari");');
     // The Fill sends back exactly the frames this popup showed (round-11 review).
@@ -1244,7 +1257,7 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     // real user click, but it lands in the popup's document, so a site that submits itself the
     // moment its fields change (fill → the page's change handler → requestSubmit()) found no
     // gesture in THIS document, captured nothing, and the Save banner simply never appeared.
-    const branch = spanOf(ct, 'if (msg.type === "fillItem") {', 'if (msg.type === "fillCard")');
+    const branch = spanOf(ct, 'if (msg.type === "fillItem") {', 'if (__ANDVARI_CARDFILL__ && msg.type === "fillCard")');
     expect(branch).toContain("recordLoginGesture();");
     // Armed BEFORE the fill: fillForm's input/change events can drive the page's requestSubmit()
     // synchronously, so an arm placed after the round-trip is an arm after the submit it exists for.

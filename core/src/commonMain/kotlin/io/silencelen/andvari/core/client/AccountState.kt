@@ -105,6 +105,25 @@ data class IssuedGrant(val vaultId: String, val userId: String, val keyHash: Str
 data class PersonalDesignation(val vaultId: String, val at: Long)
 
 /**
+ * An offer this account made to hand one of its vaults over (sharing review 2026-11, finding 1): which offer, to whom,
+ * when it was made and when this account cancelled it. The offering device records it before the offer is sent, and a
+ * cancel before the cancel is sent, so every device of the account can tell a completed transfer of an offer it made
+ * from one it never made or had cancelled ([SyncEngine] warns of the second and keeps the ownership record). The offer
+ * proof is a MAC under the vault's key, which every member holds, so the proof alone cannot tell the two apart.
+ */
+@Serializable
+data class OwnOffer(
+    val vaultId: String,
+    val offerId: String,
+    val toUserId: String,
+    val createdAt: Long,
+    /** When this account asked for the offer to be cancelled (or the server refused it); null while it stands. */
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val cancelledAt: Long? = null,
+)
+
+/**
  * The account-state plaintext (root cause A §4.2): `Envelope(UVK, JSON, Ad.accountState(userId))`.
  * Only this user's UVK can seal or open it, so the server can withhold or roll it back but never add
  * to it. [seq] is the authenticated high-water counter; the server's own `seq` is only a CAS token.
@@ -135,6 +154,11 @@ data class AccountStateDoc(
     @OptIn(ExperimentalSerializationApi::class)
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val personal: PersonalDesignation? = null,
+    /** Sharing review 2026-11 (finding 1): the offers this account made to hand a vault over ([OwnOffer]); absent in
+     *  older documents and omitted from the encoding while empty, so a document with none stays readable by older clients. */
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val ownOffers: List<OwnOffer> = emptyList(),
 ) {
     fun contact(userId: String): Contact? = contacts.firstOrNull { it.userId == userId }
 
@@ -152,7 +176,7 @@ data class AccountStateDoc(
     /** True when there is nothing in the document worth writing. */
     fun isBlank(): Boolean = contacts.isEmpty() && consumedNonces.isEmpty() && orgRecoveryFp == null &&
         issuedGrants.isEmpty() && issuedTombstones.isEmpty() && ownedVaults.isEmpty() && ownedTombstones.isEmpty() &&
-        memberReceived.isEmpty() && personal == null
+        memberReceived.isEmpty() && personal == null && ownOffers.isEmpty()
 }
 
 class AccountStateException(message: String) : Exception(message)
@@ -169,6 +193,9 @@ object AccountState {
 
     /** Server-side size cap for the sealed blob (base64url chars), mirrored by the client before a PUT. */
     const val SEALED_MAX = 65536
+
+    /** Newest own offers kept (finding 1): an offer stands 14 days, so this is years of handovers. */
+    const val OFFER_CAP = 64
 
     private val UUID_RE = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
     private val HEX64_RE = Regex("^[0-9a-f]{64}$")
@@ -222,7 +249,41 @@ object AccountState {
             if (!UUID_RE.matches(p.vaultId)) throw AccountStateException("personal designation vault id is not a uuid")
             if (p.at < 0) throw AccountStateException("personal designation at is negative")
         }
+        for (o in doc.ownOffers) {
+            if (!UUID_RE.matches(o.vaultId) || !UUID_RE.matches(o.offerId) || !UUID_RE.matches(o.toUserId)) throw AccountStateException("own offer id is not a uuid")
+            if (o.createdAt < 0 || (o.cancelledAt ?: 0L) < 0) throw AccountStateException("own offer time is negative")
+        }
+        if (doc.ownOffers.map { it.offerId }.toSet().size != doc.ownOffers.size) throw AccountStateException("duplicate own offer")
         return doc
+    }
+
+    /** True when [o] is well formed for the document ([decode]'s rule): a record that is not is never written. */
+    fun isOwnOffer(o: OwnOffer): Boolean =
+        UUID_RE.matches(o.vaultId) && UUID_RE.matches(o.offerId) && UUID_RE.matches(o.toUserId) && o.createdAt >= 0 && (o.cancelledAt ?: 0L) >= 0
+
+    /**
+     * Own offers merged by offerId (finding 1): a cancel recorded anywhere wins (the latest `cancelledAt`), the earliest
+     * `createdAt` is kept, and the newest [OFFER_CAP] stay, ordered by vault, time and offerId. Order-independent.
+     */
+    fun mergeOffers(offers: List<OwnOffer>): List<OwnOffer> {
+        val byId = HashMap<String, OwnOffer>()
+        for (o in offers) {
+            val cur = byId[o.offerId]
+            byId[o.offerId] = if (cur == null) {
+                o
+            } else {
+                val base = when {
+                    o.createdAt != cur.createdAt -> if (o.createdAt < cur.createdAt) o else cur
+                    else -> if ("${o.vaultId}|${o.toUserId}" < "${cur.vaultId}|${cur.toUserId}") o else cur
+                }
+                val cancelled = listOfNotNull(o.cancelledAt, cur.cancelledAt).maxOrNull()
+                base.copy(cancelledAt = cancelled)
+            }
+        }
+        return byId.values
+            .sortedWith(compareByDescending<OwnOffer> { it.createdAt }.thenBy { it.offerId })
+            .take(OFFER_CAP)
+            .sortedWith(compareBy<OwnOffer> { it.vaultId }.thenBy { it.createdAt }.thenBy { it.offerId })
     }
 
     /** The outcome of [merge]: the merged document (seq = the high-water, not yet bumped) and whether
@@ -239,6 +300,7 @@ object AccountState {
      *  - nonces union per vault keeping the EARLIEST time of a repeated nonce (A13 review RF3, see [withConsumed]),
      *    newest [NONCE_CAP] kept;
      *  - `personal` (A9): the designation with the newest `at` (tie: the smaller vaultId);
+     *  - `ownOffers` (sharing review 2026-11, finding 1): union by offerId, a cancel recorded anywhere wins ([mergeOffers]);
      *  - seq = max(local, served, highWater).
      * Rollback: a served seq below this device's [highWater], or a withheld blob once one was seen,
      * raises [Merged.rollback]. The flag changes ONE field: `orgRecoveryFp` is then taken from the local
@@ -316,12 +378,16 @@ object AccountState {
             .sortedWith(compareByDescending<PersonalDesignation> { it.at }.thenBy { it.vaultId })
             .firstOrNull()
 
+        // Sharing review 2026-11 (finding 1): own offers union by offerId, a cancel recorded anywhere wins ([mergeOffers]).
+        // Like the other records, a rollback cannot drop an offer the local copy holds.
+        val ownOffers = mergeOffers(docs.flatMap { it.ownOffers })
+
         val seq = maxOf(localSeq, servedSeq, highWater, 0)
         return Merged(
             AccountStateDoc(
                 VERSION, userId, seq, contacts, tombstones.sortedByKey(), fp, cappedNonces,
                 issued, issuedTomb.sortedByKey(), ownedLive.sortedByKey(), ownedTomb.sortedByKey(), memberReceived.sortedByKey(),
-                personal,
+                personal, ownOffers,
             ),
             rollback,
         )
@@ -388,6 +454,15 @@ object AccountState {
     }
 
     /**
+     * Put [offers] on record (finding 1): an offer this account is about to send, or one it cancelled (`cancelledAt` set),
+     * merged by offerId ([mergeOffers]: a cancel wins). A malformed one is not recorded.
+     */
+    fun withOwnOffers(doc: AccountStateDoc, offers: List<OwnOffer>): AccountStateDoc {
+        val valid = offers.filter { isOwnOffer(it) }
+        return if (valid.isEmpty()) doc else doc.copy(ownOffers = mergeOffers(doc.ownOffers + valid))
+    }
+
+    /**
      * Fold this device's consumed removal nonces (root cause A §6.2, branch A7) into [doc]: the same rule as [merge]
      * (union per vault, the EARLIER time for a repeated nonce, newest [NONCE_CAP] kept). Nothing else changes.
      *
@@ -416,10 +491,13 @@ object AccountState {
         a != null && b != null && a.copy(seq = 0) == b.copy(seq = 0)
 
     /** A new pin, replacing any older one for the same user and clearing an older tombstone. */
-    fun withContact(doc: AccountStateDoc, c: Contact): AccountStateDoc {
+    fun withContact(doc: AccountStateDoc, pin: Contact): AccountStateDoc {
+        val prev = doc.contacts.firstOrNull { it.userId == pin.userId }
+        // Sharing review 2026-11 (item 7): verifying the same person's same key again without typing their address (from
+        // a members list) keeps the address recorded when they were verified with one; it is never dropped by a re-check.
+        val c = if (pin.email == null && prev != null && prev.identityPub == pin.identityPub && prev.email != null) pin.copy(email = prev.email) else pin
         // A13 (q01): the newest HUMAN act wins the merge whatever this device's clock says. A pin replacing a different
         // pin, or a tombstone, is pushed past it (the withPersonal / withIssued rule); the same pin re-saved keeps its time.
-        val prev = doc.contacts.firstOrNull { it.userId == c.userId }
         var at = c.verifiedAt
         doc.contactTombstones[c.userId]?.let { at = maxOf(at, it + 1) }
         if (prev != null) at = if (prev == c.copy(verifiedAt = prev.verifiedAt)) maxOf(at, prev.verifiedAt) else maxOf(at, prev.verifiedAt + 1)

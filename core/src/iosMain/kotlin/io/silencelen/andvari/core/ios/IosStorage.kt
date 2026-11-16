@@ -47,6 +47,8 @@ import platform.Foundation.NSFileModificationDate
 import platform.Foundation.NSFileProtectionKey
 import platform.Foundation.timeIntervalSinceDate
 import platform.Foundation.NSFileSize
+import platform.Foundation.NSMutableData
+import platform.Foundation.appendBytes
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSString
 import platform.Foundation.NSURL
@@ -88,6 +90,10 @@ internal class UserDefaultsPrefs(suite: String?) : KeyValuePrefs {
     override fun putString(key: String, value: String?) {
         if (value == null) defaults.removeObjectForKey(key) else defaults.setObject(value, forKey = key)
     }
+
+    /** The keys of these defaults under [prefix] (the system's own keys, which the list also holds, start otherwise). */
+    override fun keysWithPrefix(prefix: String): List<String> =
+        defaults.dictionaryRepresentation().keys.mapNotNull { it as? String }.filter { it.startsWith(prefix) }
 }
 
 /**
@@ -247,6 +253,15 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
         }
     }
 
+    /** The origin's whole directory: every user's vault cache and device state there. The users are its sub-directories. */
+    override fun deleteOrigin(originKey: String): List<String> {
+        val fm = NSFileManager.defaultManager
+        val origin = "$root/${OriginCanon.pathSafe(originKey)}"
+        val users = runCatching { fm.contentsOfDirectoryAtPath(origin, error = null)?.mapNotNull { it as? String } }.getOrNull().orEmpty()
+        runCatching { fm.removeItemAtPath(origin, error = null) }
+        return users
+    }
+
     companion object {
         fun defaultRoot(): String {
             val support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, true).firstOrNull() as? String
@@ -259,6 +274,13 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
 /** Bytes for the Security framework. */
 internal fun ByteArray.toNSData(): NSData =
     if (isEmpty()) NSData() else usePinned { NSData.create(bytes = it.addressOf(0), length = size.convert()) }
+
+/** Bytes the app zeroes once it has used them (a plaintext export): a copy it can write over. */
+internal fun ByteArray.toNSMutableData(): NSMutableData {
+    val data = NSMutableData()
+    if (isNotEmpty()) usePinned { data.appendBytes(it.addressOf(0), size.convert()) }
+    return data
+}
 
 /** Bytes out of the Security framework. */
 internal fun NSData.toByteArray(): ByteArray {

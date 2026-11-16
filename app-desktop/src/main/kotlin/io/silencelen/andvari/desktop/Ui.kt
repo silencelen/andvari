@@ -56,6 +56,7 @@ import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.EnrollCeremony
 import io.silencelen.andvari.core.client.EnrollLink
 import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.HeldVaultCopy
 import io.silencelen.andvari.core.client.HeldVaultInfo
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.SyncEngine
@@ -205,7 +206,8 @@ fun DesktopApp(state: DesktopState) {
         // decision here (Loading/Welcome/Unlock render nothing; lock() clears every source
         // anyway, so a lock-screen dead-action card is structurally impossible).
         when (state.screen) {
-            is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing -> AttentionArea(state)
+            is DesktopScreen.Vault, is DesktopScreen.Settings, is DesktopScreen.Trash, is DesktopScreen.Sharing,
+            is DesktopScreen.DeleteAccount -> AttentionArea(state)
             // RecoverySetup is a mid-enroll gate (no account chrome yet), like Welcome/Unlock — no
             // attention area; RecoveryCapture (v2 #15) is the same gate reached from unlock/sign-in;
             // Recover is the pre-session forgot-password flow (no account chrome by definition).
@@ -232,6 +234,7 @@ fun DesktopApp(state: DesktopState) {
                 is DesktopScreen.RecoverySetup -> AuthPane { RecoverySetupScreen(state) }
                 is DesktopScreen.RecoveryCapture -> AuthPane { RecoveryCaptureScreen(state) }
                 is DesktopScreen.Recover -> AuthPane { RecoverScreen(state) }
+                is DesktopScreen.DeleteAccount -> DeleteAccountScreen(state)
             }
         }
     }
@@ -548,6 +551,8 @@ private fun Welcome(state: DesktopState) {
         // Self-recovery lands here with "Master password reset — sign in with your new password."
         // — Welcome composed no notice surface before, so the line was silently lost.
         NoticeBar(state.notice, state::clearNotice)
+        // Spec 03 §13: the session ended while a deletion was on its way and its answer never came.
+        state.deletionForgetOffer?.let { DeletionForgetCard(state, it) }
         if (showEnroll) Enroll(state) else SignIn(state)
         Spacer(Modifier.height(20.dp))
         if (pending == null) {
@@ -1903,11 +1908,16 @@ internal fun noticeBody(n: LifecycleNotice): Pair<String, Boolean> {
             if (n.becameMine) "You are now the owner of “$name”." else "“$name” now has a new owner.",
             false,
         )
-        "transfer-anomaly" -> Pair(
-            "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
-                "If nobody in your household did this, tell your admin — the server may be misbehaving.",
-            true,
-        )
+        // Sharing review 2026-11 (finding 1): a proof that checks, for an offer this account did not make or had cancelled.
+        "transfer-anomaly" -> if (n.reason == SyncEngine.TRANSFER_NOT_OFFERED) {
+            Pair(HouseholdCopy.transferNotOfferedNotice(name), true)
+        } else {
+            Pair(
+                "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
+                    "If nobody in your household did this, tell your admin — the server may be misbehaving.",
+                true,
+            )
+        }
         // TWIN → core [HouseholdCopy.replayDeniedNotice] (ux-copy--3): the one §11 sentence that
         // interpolates, and the one every surface hand-wrote — it had drifted three ways from web.
         // Canon now; web carries the byte-equal template and is pinned to the Kotlin source.
@@ -1979,14 +1989,17 @@ private fun IncomingTransferCards(state: DesktopState) {
                 Text("$owner wants to make you the owner of “${t.vaultName}”.", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "✓ This offer was verified with the vault's own key. To be sure it really came from $owner — " +
-                        "and not a compromised server — confirm with them in person or by phone. As owner you'd manage " +
-                        "members and be the only one who can rename, transfer, or delete it.",
+                    // Sharing review 2026-11: the proof is made with the vault's key, which every member holds.
+                    "This offer checks with the vault's key, which every member holds, so it can't tell you who made it. " +
+                        "To be sure it really came from $owner — and not from another member or a compromised server — " +
+                        "confirm with them in person or by phone. As owner you'd manage members and be the only one who can " +
+                        "rename, transfer, or delete it.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { state.acceptTransfer(t.vaultId) }, enabled = !state.busy, modifier = Modifier.weight(1f)) {
+                    // Item 2: accepting accepts the offer shown, and no other.
+                    Button(onClick = { state.acceptTransfer(t.vaultId, t.offerId) }, enabled = !state.busy, modifier = Modifier.weight(1f)) {
                         Text("Become the owner")
                     }
                     OutlinedButton(onClick = { state.cancelTransfer(t.vaultId) }, enabled = !state.busy) { Text("Decline") }
@@ -2335,12 +2348,18 @@ private fun TransferControl(state: DesktopState, v: VaultInfo) {
     val pending = remember(state.items, state.lifecycleTick, v.vaultId) { state.pendingTransferFor(v.vaultId) }
     val members = state.sharingMembers[v.vaultId]
     if (pending != null) {
-        val pendingName = members?.find { it.userId == pending.toUserId }?.displayName ?: "a member"
+        val target = members?.find { it.userId == pending.toUserId }
+        val pendingName = target?.let { state.verifiedNameFor(it.userId, it.identityPub) ?: it.displayName } ?: "a member"
+        // Sharing review 2026-11 (item 5): this account's own offer only when its proof checks and it is on record.
+        val mine = remember(state.items, state.lifecycleTick, v.vaultId, pending.offerId) { state.pendingTransferIsOwn(v.vaultId) }
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}",
+                    if (mine) "Ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}"
+                    else "The server reports an ownership offer to $pendingName — expires ${fmtDay(pending.expiresAt)}. " +
+                        "This device has no record that you made it; if you didn't, cancel it and tell your admin.",
                     Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                    color = if (mine) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
                 )
                 TextButton(
                     onClick = { state.cancelTransfer(v.vaultId) }, enabled = !state.busy,
@@ -2351,24 +2370,34 @@ private fun TransferControl(state: DesktopState, v: VaultInfo) {
         }
         return
     }
-    // Transfer targets: active members who are not the owner and not disabled (F22 badge).
-    val targets = (members ?: emptyList()).filter { it.role != "owner" && (it.status ?: "active") == "active" }
-    if (targets.isEmpty()) return
+    // Transfer targets: active members who are not the owner and not disabled (F22 badge), and (sharing review 2026-11,
+    // item 4) verified on this device with the key the server serves now, named as they were recorded then.
+    val active = (members ?: emptyList()).filter { it.role != "owner" && (it.status ?: "active") == "active" }
+    if (active.isEmpty()) return
+    val names = remember(state.items, state.lifecycleTick, v.vaultId, members) { active.associate { it.userId to state.verifiedNameFor(it.userId, it.identityPub) } }
+    val targets = active.filter { names[it.userId] != null }
     var confirming by remember(v.vaultId) { mutableStateOf<String?>(null) } // userId pending confirm
     Column {
         Text("Make someone else the owner", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         targets.forEach { m ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("${m.displayName} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                Text("${names[m.userId]} (${m.email})", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1)
                 TextButton(onClick = { confirming = m.userId }, enabled = !state.busy) { Text("Transfer ownership…") }
             }
+        }
+        if (targets.size < active.size) {
+            Text(
+                "Only someone you verified on this device can be made the owner: compare codes with them first.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
     confirming?.let { userId ->
         val m = targets.find { it.userId == userId } ?: return
+        val name = names[m.userId] ?: m.displayName
         AlertDialog(
             onDismissRequest = { confirming = null },
-            title = { Text("Make ${m.displayName} the owner of “${v.name}”?") },
+            title = { Text("Make $name the owner of “${v.name}”?") },
             text = {
                 Text(
                     "Nothing changes until they accept in their app (they have 14 days; you can cancel anytime). " +
@@ -2378,7 +2407,7 @@ private fun TransferControl(state: DesktopState, v: VaultInfo) {
             },
             confirmButton = {
                 TextButton(onClick = { confirming = null; state.offerTransfer(v.vaultId, m.userId) }, enabled = !state.busy) {
-                    Text("Ask ${m.displayName} to take over")
+                    Text("Ask $name to take over")
                 }
             },
             dismissButton = { TextButton(onClick = { confirming = null }) { Text("Cancel") } },
@@ -2537,15 +2566,11 @@ private fun RecentlyRemovedSection(held: List<HeldVaultInfo>) {
             held.forEach { h ->
                 Column(Modifier.padding(vertical = 4.dp)) {
                     Text("“${h.name}”", style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                    val line = when {
-                        h.reason == "deleted" && h.verified -> "deleted by its owner · kept sealed until ${fmtDay(h.purgeAt ?: h.expungeAt)}"
-                        h.reason == "left" -> "you left · kept until ${fmtDay(h.expungeAt)}"
-                        h.verified -> "access removed · kept until ${fmtDay(h.expungeAt)}"
-                        else -> "unverified removal · kept until ${fmtDay(h.expungeAt)}"
-                    }
+                    // Sharing review 2026-11 (item 6): by how the removal's proof checked here (core [HeldVaultCopy]).
+                    val (line, warning) = HeldVaultCopy.fragment(h, ::fmtDay)
                     Text(
                         line, style = MaterialTheme.typography.bodySmall,
-                        color = if (h.verified || h.reason == "left") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                        color = if (warning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -3334,6 +3359,157 @@ private fun SettingsScreen(state: DesktopState) {
                         Button(onClick = { state.beginTotpSetup(totpPassword); totpPassword = "" }, enabled = totpPassword.isNotEmpty() && !state.busy) { Text("Enable") }
                     }
                 }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        DeleteAccountCard(state)
+    }
+}
+
+// ---- deleting the account (spec 03 §13; the state takes core's AccountDeletionFlow) ----
+
+/** Settings' entry: what deleting does, in one line, and the way in. */
+@Composable
+private fun DeleteAccountCard(state: DesktopState) {
+    val words = state.deletionCopy
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(words.TITLE, style = MaterialTheme.typography.titleLarge)
+            Text(words.ENTRY_ABOUT, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = state::openAccountDeletion, enabled = !state.busy, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(words.ENTRY) }
+        }
+    }
+}
+
+/**
+ * Settings › Delete account: what deleting would do now, as the server says (what goes for good, the shared vaults it
+ * leaves, what stands in the way), then the address typed to confirm, the master password (proved on this computer
+ * before anything is sent) and the two-step code when the account has one, behind a last confirmation.
+ */
+@Composable
+private fun DeleteAccountScreen(state: DesktopState) {
+    val words = state.deletionCopy
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    var confirming by remember { mutableStateOf(false) }
+    val deletion = state.accountDeletion
+    val preview = deletion?.preview
+    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
+        TextButton(onClick = state::closeAccountDeletion, enabled = !state.busy) { Icon(Icons.Default.ArrowBack, null); Text(" back") }
+        Text(words.TITLE, style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(16.dp))
+        if (deletion == null || preview == null) {
+            if (state.busy) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Checking with your server…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                state.deletionMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = state::retryDeletionPreview) { Text("Try again") }
+            }
+            return@Column
+        }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text(words.GOES_HEADING, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                preview.deleted.forEach { line -> Text("• $line", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp)) }
+                preview.left.forEach { line ->
+                    Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 2.dp))
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        if (preview.blockers.isNotEmpty()) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(words.BLOCKERS_HEADING, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    preview.blockers.forEach { line ->
+                        Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 2.dp))
+                    }
+                    Text(words.BLOCKERS_FOOTER, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = state::openAccountDeletion, enabled = !state.busy) { Text(words.CHECK_AGAIN) }
+                }
+            }
+        } else {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(words.CONFIRM_HEADING, style = MaterialTheme.typography.titleMedium)
+                    Text(words.confirmFooter(deletion.email), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    Field(words.EMAIL_LABEL, email, { email = it })
+                    Secret(words.PASSWORD_LABEL, password) { password = it }
+                    if (preview.totpRequired) {
+                        Field(words.CODE_LABEL, code, { code = it.filter { c -> c.isDigit() || c == ' ' }.take(9) }, mono = true)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { confirming = true },
+                        enabled = !state.busy && email.isNotBlank() && password.isNotEmpty() && (!preview.totpRequired || code.isNotBlank()),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    ) { Text(words.DELETE_BUTTON) }
+                }
+            }
+        }
+        if (deletion.outcomeUnknown) {
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(onClick = state::checkAccountDeletion, enabled = !state.busy) { Text(words.CHECK_OUTCOME) }
+        }
+        if (state.busy) {
+            Spacer(Modifier.height(12.dp))
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        state.deletionMessage?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text(words.CONFIRM_TITLE) },
+            text = { Text(words.CONFIRM_BODY) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirming = false
+                        val typed = password
+                        password = "" // the master password is not kept on the screen once it is sent
+                        state.deleteAccount(email, typed, code)
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(words.CONFIRM_BUTTON) }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+/** On the Welcome screen: the session ended while a deletion was on its way and its answer never came (spec 03 §13). */
+@Composable
+private fun DeletionForgetCard(state: DesktopState, offer: DeletionForgetOffer) {
+    val words = state.deletionCopy
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text(offer.message, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+            Row {
+                OutlinedButton(
+                    onClick = state::forgetDeletedAccount, enabled = !state.busy,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(words.FORGET_BUTTON) }
+                Spacer(Modifier.width(8.dp))
+                TextButton(onClick = state::dismissDeletionForgetOffer) { Text(words.SIGN_IN_TO_CHECK) }
             }
         }
     }

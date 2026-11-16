@@ -191,7 +191,9 @@ struct SharedVaultDetailView: View {
     var body: some View {
         Form {
             if let vault {
-                if vault.role == "owner" {
+                // A vault awaiting review is shown as a member's, whatever role the server reports: it can be read, accepted
+                // or left, and the server's owner label never keeps this account in it.
+                if vault.role == "owner" && !vault.awaitingReview {
                     ownerSections(vault)
                 } else {
                     memberSections(vault)
@@ -332,7 +334,11 @@ struct SharedVaultDetailView: View {
         }
         Section {
             LabeledContent("Your role", value: vault.role ?? "member")
-            Text(vault.role == "reader" ? "You can view what is in this vault." : "You can add and edit items in this vault.")
+            Text(
+                vault.awaitingReview
+                    ? "Until you accept it, you can only view what is in this vault: nothing is saved into it."
+                    : (vault.role == "reader" ? "You can view what is in this vault." : "You can add and edit items in this vault.")
+            )
                 .font(.footnote)
                 .foregroundStyle(Palette.inkDim)
         }

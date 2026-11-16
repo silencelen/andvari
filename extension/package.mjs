@@ -2,9 +2,16 @@
 // → artifacts/andvari-extension-{chrome,firefox}-<version>.zip, ready for the server's
 // /downloads dir (the web Devices hub links them via manifest.json `browserExtension`).
 // The zip roots the files directly (manifest.json at top level) — unzip → Load unpacked.
+//
+// `node package.mjs --check` (scripts/verify.sh and CI): every target built as it ships, Safari's too, with the
+// packaging's refusals applied, and no zip. It skips the tests (the gate has just run them) and the A15 release check
+// (between releases the tree may carry the last release's version). The 0.30.0 release check found the packaging
+// refusing the Chrome and Firefox builds while both gates were green, because neither built them this way.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { a15ReleaseProblem } from "./src/releasegate.ts";
+
+const check = process.argv.includes("--check");
 
 const version = JSON.parse(readFileSync("manifest.json", "utf8")).version;
 // The version lives in three hand-edited files; a forgotten bump would silently ship a
@@ -20,27 +27,35 @@ if (version !== ffVersion || version !== safariVersion || version !== pkgVersion
 // Security review 2026-10 (the A16 review): a release of this tree must be newer than the last release without the A15
 // trusted store, or the next update would be taken for the pre-A15 upgrade (src/releasegate.ts). Here, not in verify.sh:
 // between releases the tree may carry the last release's version.
-const a15 = a15ReleaseProblem(version);
-if (a15 !== null) throw new Error(a15);
-mkdirSync("artifacts", { recursive: true });
+if (!check) {
+  const a15 = a15ReleaseProblem(version);
+  if (a15 !== null) throw new Error(a15);
+  mkdirSync("artifacts", { recursive: true });
 
-// A7: refuse to zip a build whose tests fail — mirrors the version-drift refusal above.
-// (verify.sh also runs these, but package.mjs is callable standalone and must self-defend.)
-// Same GLOB as `npm test` — node expands it itself — so a future test file can never be
-// silently skipped here while npm test runs it.
-execFileSync(process.execPath, ["--test", "src/**/*.test.ts"], { stdio: "inherit" });
+  // A7: refuse to zip a build whose tests fail — mirrors the version-drift refusal above.
+  // (verify.sh also runs these, but package.mjs is callable standalone and must self-defend.)
+  // Same GLOB as `npm test` — node expands it itself — so a future test file can never be
+  // silently skipped here while npm test runs it.
+  execFileSync(process.execPath, ["--test", "src/**/*.test.ts"], { stdio: "inherit" });
+}
 
 // A8: content.js is injected into EVERY page — it must never carry the ~144 KB PSL blob
 // (pslData is imported ONLY by psl.ts, which only background.ts uses). Cap it well below
 // blob size so a future import-chain slip fails the package, not the users' page loads.
-const CONTENT_JS_CAP = 60 * 1024; // today ~50 KB / 83% used (card autofill + the in-page chip ride in content.js)
+// 96 KiB since the card-release rules (rounds 5 to 13: the choice, viewport and frame-count checks ride in content.js)
+// took it to ~72 KiB: still far below the blob, so a leak fails the package as it did.
+const CONTENT_JS_CAP = 96 * 1024; // today ~73 KiB (Chrome and Firefox release builds)
 
 // firefox first, chrome last: dist/ is left holding the CHROME build, which is what the
-// README's "Load + verify" (chrome://extensions → Load unpacked → extension/dist) assumes.
-for (const target of ["firefox", "chrome"]) {
+// README's "Load + verify" (chrome://extensions → Load unpacked → extension/dist) assumes. The check builds Safari's
+// too (packaged with the app, not here): its content.js is injected into every page just the same. It builds each
+// target as it ships by default, whatever CARDFILL the environment holds, so no build is checked without the card code
+// it carries; the packaging itself passes CARDFILL through (a CARDFILL=0 release of the desktop builds).
+const { CARDFILL: _cardFill, ...defaultEnv } = process.env;
+for (const target of check ? ["firefox", "safari", "chrome"] : ["firefox", "chrome"]) {
   execFileSync(process.execPath, ["build.mjs"], {
     stdio: "inherit",
-    env: { ...process.env, RELEASE: "1", TARGET: target === "firefox" ? "firefox" : "" },
+    env: { ...(check ? defaultEnv : process.env), RELEASE: "1", TARGET: target === "chrome" ? "" : target },
   });
   const contentSize = statSync("dist/content.js").size;
   if (contentSize > CONTENT_JS_CAP) {
@@ -48,12 +63,17 @@ for (const target of ["firefox", "chrome"]) {
       `dist/content.js is ${contentSize} bytes (> ${CONTENT_JS_CAP}) — did the PSL blob leak into the per-page bundle? (design A8)`,
     );
   }
+  if (check) {
+    console.log(`checked the ${target} release build (content.js ${(contentSize / 1024).toFixed(1)} KiB, cap ${CONTENT_JS_CAP / 1024} KiB)`);
+    continue;
+  }
   const zip = `artifacts/andvari-extension-${target}-${version}.zip`;
   rmSync(zip, { force: true });
   // -X: no extended attrs; cwd=dist so manifest.json sits at the zip root.
   execFileSync("zip", ["-rX", `../${zip}`, "."], { cwd: "dist", stdio: "inherit" });
   console.log(`packaged ${zip} (${(statSync(zip).size / 1024).toFixed(0)} KiB, content.js ${(contentSize / 1024).toFixed(1)} KiB)`);
 }
+if (check) process.exit(0);
 console.log(`\nextension ${version} packaged. Publish both zips to the server's downloads directory`);
 console.log("(ANDVARI_DOWNLOADS_DIR) and merge a browserExtension entry into its manifest.json —");
 console.log("keep the existing linux/windows entries and bump only browserExtension.version + the urls.");

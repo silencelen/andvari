@@ -71,6 +71,7 @@ const EXPECTED_REFUSAL: Record<string, unknown> = {
   setTotp: { ok: false, code: "not_allowed", error: "popup only" },
   updateStatus: { current: "", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null },
   cardFillOffers: { fillable: false, origin: null, frames: [], pageFormOnly: false },
+  clearCardChoices: { ok: false },
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
   serverInfo: { url: "", trustedStore: false, block: null },
   appServer: { app: "unavailable" },

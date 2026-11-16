@@ -1025,13 +1025,14 @@ function IncomingTransferCard({ offer, account, store, client, onChanged }: { of
       <h2>Become the owner of “{offer.vaultName}”?</h2>
       <p style={{ marginTop: 0 }}>{ownerName} wants to make you the owner of “{offer.vaultName}”.</p>
       <p className="muted">
-        ✓ This offer was verified with the vault's own key. To be sure it really came from {ownerName} —
-        and not a compromised server — confirm with them in person or by phone. As owner you'd manage
-        members and be the only one who can rename, transfer, or delete it.
+        This offer checks with the vault's key, which every member holds, so it can't tell you who made it.
+        To be sure it really came from {ownerName} — and not from another member or a compromised server —
+        confirm with them in person or by phone. As owner you'd manage members and be the only one who can
+        rename, transfer, or delete it.
       </p>
       {err && <Msg kind="err">{err}</Msg>}
       <div className="actions">
-        <button type="button" className="primary" disabled={busy} onClick={() => act(() => store.acceptTransfer(offer.vaultId))}>{busy ? "Taking over…" : "Become the owner"}</button>
+        <button type="button" className="primary" disabled={busy} onClick={() => act(() => store.acceptTransfer(offer.vaultId, offer.offerId))}>{busy ? "Taking over…" : "Become the owner"}</button>
         <button type="button" className="ghost" disabled={busy} onClick={() => act(() => store.cancelTransfer(offer.vaultId))}>Decline</button>
       </div>
     </div>

@@ -53,7 +53,9 @@ struct SecretTextField: UIViewRepresentable {
     var keyboard: UIKeyboardType = .asciiCapable
     var contentType: UITextContentType?
     var returnKey: UIReturnKeyType = .default
-    /// Whether the field should hold the keyboard; [onFocusChange] reports what it does.
+    /// Whether the field should hold the keyboard, for a caller that moves the keyboard itself (InputField's focus): the
+    /// field follows a CHANGE of it, never its value alone, so a caller that leaves it at false (the editors) never takes
+    /// the keyboard from a field being typed in. [onFocusChange] reports what the field does.
     var focused: Bool = false
     var onFocusChange: (Bool) -> Void = { _ in }
     var onSubmit: () -> Void = {}
@@ -88,16 +90,31 @@ struct SecretTextField: UIViewRepresentable {
         field.font = bodyFont(monospaced: monospaced)
         field.textColor = UIColor(Palette.ink)
         field.tintColor = UIColor(Palette.gold)
-        if focused, !field.isFirstResponder {
-            DispatchQueue.main.async { field.becomeFirstResponder() }
-        } else if !focused, field.isFirstResponder {
-            DispatchQueue.main.async { field.resignFirstResponder() }
+        // Every key typed changes the binding, and every change runs this update. Focus is therefore applied only when the
+        // caller's request changes: an update that merely repeats "false" must never resign the field the person is typing
+        // in (it did, after every key, in the login and card editors, which pass no focus at all). The first update asks
+        // for the keyboard only when the caller wants it, and resigns nothing.
+        let coordinator = context.coordinator
+        if coordinator.requestedFocus != focused {
+            let first = coordinator.requestedFocus == nil
+            coordinator.requestedFocus = focused
+            if focused {
+                DispatchQueue.main.async {
+                    if coordinator.requestedFocus == true, !field.isFirstResponder { field.becomeFirstResponder() }
+                }
+            } else if !first {
+                DispatchQueue.main.async {
+                    if coordinator.requestedFocus == false, field.isFirstResponder { field.resignFirstResponder() }
+                }
+            }
         }
     }
 
     @MainActor
     final class Coordinator: NSObject, UITextFieldDelegate {
         var parent: SecretTextField
+        /// The caller's focus request as last applied; nil before the first update.
+        var requestedFocus: Bool?
 
         init(_ parent: SecretTextField) {
             self.parent = parent

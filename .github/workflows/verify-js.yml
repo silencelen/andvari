@@ -118,3 +118,10 @@ jobs:
             exit 1
           fi
           echo "$pass tests passed across $files files"
+
+      # The release packaging's own refusals (scripts/verify.sh runs the same): every target built with RELEASE=1 as it
+      # ships, Safari's too, content.js under its cap, no zip. The 0.30.0 release check found package.mjs refusing the
+      # Chrome and Firefox builds while this job and verify.sh were green.
+      - name: Release packaging checks
+        working-directory: extension
+        run: node package.mjs --check

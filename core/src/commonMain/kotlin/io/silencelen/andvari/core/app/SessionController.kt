@@ -1,6 +1,5 @@
 package io.silencelen.andvari.core.app
 
-import io.silencelen.andvari.core.client.AccountDeleteBlockedException
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.AttachmentRef
 import io.silencelen.andvari.core.client.Account
@@ -19,11 +18,19 @@ import io.silencelen.andvari.core.client.VaultKeyNotVerifiedException
 import io.silencelen.andvari.core.client.PendingInvitation
 import io.silencelen.andvari.core.client.CardData
 import io.silencelen.andvari.core.client.ClientPolicyClamps
+import io.silencelen.andvari.core.client.Duplicates
+import io.silencelen.andvari.core.client.Staleness
+import io.silencelen.andvari.core.client.UsageLedger
+import io.silencelen.andvari.core.client.VaultHealth
 import io.silencelen.andvari.core.client.CoHolder
+import io.silencelen.andvari.core.client.CsvImport
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.DecryptedItemVersion
 import io.silencelen.andvari.core.client.DeletedItemView
 import io.silencelen.andvari.core.client.DeletedVaultInfo
+import io.silencelen.andvari.core.client.HeldVaultCopy
+import io.silencelen.andvari.core.client.ExportCsv
+import io.silencelen.andvari.core.client.ExportPlanner
 import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.client.LifecycleNoticeCopy
 import io.silencelen.andvari.core.client.VaultInfo
@@ -88,7 +95,7 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Fingerprint
 import io.silencelen.andvari.core.model.AccountDeleteBlocker
 import io.silencelen.andvari.core.model.AccountDeletePreview
-import io.silencelen.andvari.core.model.AccountDeleteRequest
+import io.silencelen.andvari.core.crypto.Hibp
 import io.silencelen.andvari.core.crypto.GeneratorOptions
 import io.silencelen.andvari.core.crypto.SharedGrant
 import io.silencelen.andvari.core.crypto.MemberRecovery
@@ -113,6 +120,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.datetime.toLocalDateTime
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -1557,14 +1565,9 @@ open class SessionController(
     private fun removedVaults(live: VaultSession.Unlocked): List<RemovedVaultView> =
         // A vault this account can still restore is listed once, under Recently deleted, not again here.
         runCatching { live.engine.heldVaultInfos() }.getOrDefault(emptyList()).filter { it.vaultId !in deletedVaults }.map { h ->
-            val day = LifecycleNoticeCopy::englishDay
-            val line = when {
-                h.reason == "deleted" && h.verified -> "Deleted by its owner. Kept sealed until ${day(h.purgeAt ?: h.expungeAt)}."
-                h.reason == "left" -> "You left. Kept until ${day(h.expungeAt)}."
-                h.verified -> "Your access was removed. Kept until ${day(h.expungeAt)}."
-                else -> "The server says your access was removed, but this couldn't be verified. Kept until ${day(h.expungeAt)}."
-            }
-            RemovedVaultView(h.vaultId, h.name, line, warning = !h.verified && h.reason != "left")
+            // Sharing review 2026-11 (item 6): by how the removal's proof checked here, the same words on every client.
+            val (line, warning) = HeldVaultCopy.sentence(h)
+            RemovedVaultView(h.vaultId, h.name, line, warning)
         }
 
     private fun sharingView(live: VaultSession.Unlocked, copied: String? = state.sharing?.copied): SharingView = SharingView(
@@ -1732,7 +1735,10 @@ open class SessionController(
         val vault = runCatching { live.engine.vaultInfos() }.getOrDefault(emptyList()).firstOrNull { it.vaultId == vaultId }
             ?: return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
         if (vault.type != "shared") return@action ActionResult.Failed(SharingCopy.VAULT_GONE)
-        if (vault.role == "owner") return@action ActionResult.Failed(SharingCopy.OWNER_CANNOT_LEAVE)
+        // Sharing review 2026-11 (item 8): the server's owner label never keeps this account in a vault awaiting review, one
+        // whose key nothing verified; leaving it is the safe way out. The server refuses an owner that really is one.
+        val awaitingReview = runCatching { live.engine.legacyReviewVaults() }.getOrDefault(emptyList()).any { it.vaultId == vaultId }
+        if (vault.role == "owner" && !awaitingReview) return@action ActionResult.Failed(SharingCopy.OWNER_CANNOT_LEAVE)
         busy()
         runBounded(BoundedOps.FLAT_MS) { live.engine.leaveSharedVault(vaultId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
@@ -1783,9 +1789,10 @@ open class SessionController(
         val owner = vault.role == "owner"
         val rows = membersRead?.map { m ->
             val you = m.userId == live.account.userId
+            val check = if (you) null else memberCheck(live, m.userId, m.identityPub)
             MemberView(
                 userId = m.userId, name = m.displayName, email = m.email, role = m.role, disabled = (m.status ?: "active") != "active", you = you,
-                check = if (you) null else memberCheck(live, m.userId, m.identityPub),
+                check = check, verifiedName = if (check == MemberCheck.VERIFIED) verifiedNameOf(live, m.userId) else null,
             )
         }
         val pending = if (owner) runCatching { live.engine.pendingTransferFor(vaultId) }.getOrNull() else null
@@ -1794,7 +1801,12 @@ open class SessionController(
             canAdd = owner && runCatching { live.engine.ownsVault(vaultId) }.getOrDefault(false),
             members = rows, adding = newMember?.takeIf { it.vaultId == vaultId }?.let { newMemberView(live, it) },
             offer = pending?.takeIf { it.toUserId != live.account.userId && it.expiresAt > clocks.wallMs() }?.let { p ->
-                OwnerOfferView(p.toUserId, membersRead?.firstOrNull { it.userId == p.toUserId }?.displayName ?: MembersCopy.A_MEMBER, p.expiresAt)
+                // Sharing review 2026-11 (item 5): "You asked" only for this account's own offer, whose proof checks.
+                val target = rows?.firstOrNull { it.userId == p.toUserId }
+                OwnerOfferView(
+                    p.toUserId, target?.verifiedName ?: target?.name ?: MembersCopy.A_MEMBER, p.expiresAt,
+                    mine = runCatching { live.engine.pendingTransferIsOwn(vaultId) }.getOrDefault(false),
+                )
             },
             legacy = if (owner) legacyGrantViews(live, vaultId) else emptyList(),
         )
@@ -1838,6 +1850,10 @@ open class SessionController(
             SyncEngine.MemberPinState.KEY_CHANGED -> MemberCheck.KEY_CHANGED
             SyncEngine.MemberPinState.NEEDS_VERIFICATION -> MemberCheck.NOT_VERIFIED
         }
+
+    /** What this device recorded when it verified [userId]: the address typed then, else the name shown then. */
+    private fun verifiedNameOf(live: VaultSession.Unlocked, userId: String): String? =
+        live.engine.accountState.currentPin(userId)?.let { it.email ?: it.label }
 
     /**
      * Where adding [n] stands, by this account's pins (A11): the server's name for them is shown as its word, and a
@@ -2043,8 +2059,10 @@ open class SessionController(
 
     /**
      * Offer to make a member the owner (owner). Nothing changes until they accept in their app, within 14 days; until
-     * then the owner can cancel. The offer is signed under the vault's key ([SyncEngine.offerTransfer]), so their devices
-     * can tell it from one the server made up. Afterwards they manage the vault and this account stays in it as a writer.
+     * then the owner can cancel. Only to someone verified on this device (sharing review 2026-11, item 4), named as they
+     * were recorded then. The offer's proof is made with the vault's key, which every member holds, so it tells their
+     * devices only that some member made it; this account's devices know it as their own by their record of the offers
+     * it made ([SyncEngine.offerTransfer]). Afterwards they manage the vault and this account stays in it as a writer.
      */
     @Throws(CancellationException::class)
     suspend fun offerOwnership(userId: String): ActionResult = action {
@@ -2056,12 +2074,19 @@ open class SessionController(
         val member = membersRead?.firstOrNull { it.userId == userId } ?: return@action ActionResult.Failed(MembersCopy.MEMBER_GONE)
         if (member.role == "owner" || member.userId == live.account.userId) return@action ActionResult.Failed(MembersCopy.OWNER_ALREADY)
         if ((member.status ?: "active") != "active") return@action ActionResult.Failed(MembersCopy.DISABLED_CANNOT_OWN)
+        if (memberCheck(live, member.userId, member.identityPub) != MemberCheck.VERIFIED) return@action ActionResult.Failed(MembersCopy.VERIFY_BEFORE_HANDOVER)
+        val name = verifiedNameOf(live, member.userId) ?: member.displayName
         val token = membersScreen.now()
         busy()
-        runBounded(BoundedOps.FLAT_MS) { live.engine.offerTransfer(open.vaultId, userId) }
+        try {
+            runBounded(BoundedOps.FLAT_MS) { live.engine.offerTransfer(open.vaultId, userId) }
+        } catch (e: MemberNotVerifiedException) {
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action idleFailed(MembersCopy.VERIFY_BEFORE_HANDOVER)
+        }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         rereadMembers(live, open.vaultId, token) { it }
-        update { it.copy(busy = false, members = if (membersScreen.still(token)) membersView(live, open.vaultId) else it.members, notice = MembersCopy.offered(member.displayName, open.vaultName)) }
+        update { it.copy(busy = false, members = if (membersScreen.still(token)) membersView(live, open.vaultId) else it.members, notice = MembersCopy.offered(name, open.vaultName)) }
         ActionResult.Ok
     }
 
@@ -2089,7 +2114,8 @@ open class SessionController(
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         val offer = state.ownershipOffers.firstOrNull { it.vaultId == vaultId } ?: return@action ActionResult.Failed(MembersCopy.OFFER_GONE)
         busy()
-        runBounded(BoundedOps.FLAT_MS) { live.engine.acceptTransfer(vaultId) }
+        // Sharing review 2026-11 (item 2): the offer shown, and no other.
+        runBounded(BoundedOps.FLAT_MS) { live.engine.acceptTransfer(vaultId, offer.offerId) }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         publishSharing(live, MembersCopy.ownershipAccepted(offer.vaultName))
         ActionResult.Ok
@@ -2112,7 +2138,7 @@ open class SessionController(
         val now = clocks.wallMs()
         val offers = runCatching { live.engine.incomingTransfers() }.getOrDefault(emptyList()).filter { it.expiresAt > now }
         for (o in offers) if (o.vaultId !in offerOwners && offerOwnerAsks.add(o.vaultId)) askOfferOwner(live, o.vaultId)
-        return offers.sortedBy { it.vaultName }.map { OwnershipOfferView(it.vaultId, it.vaultName, offerOwners[it.vaultId], it.expiresAt) }
+        return offers.sortedBy { it.vaultName }.map { OwnershipOfferView(it.vaultId, it.vaultName, it.offerId, offerOwners[it.vaultId], it.expiresAt) }
     }
 
     private fun askOfferOwner(live: VaultSession.Unlocked, vaultId: String) {
@@ -2836,6 +2862,796 @@ open class SessionController(
         ActionResult.Ok
     }
 
+    // ---- vault health (design 2026-08-23; the Android app's health screen) ----
+    //
+    // Every ranking, cluster, survivor and refusal is core's (VaultHealth, Duplicates, Staleness); this carries them to the
+    // screen and writes only what they plan, each write an ordinary save or delete of the item in its own vault. A breach
+    // check sends the server the first 5 hex characters of each distinct password's SHA-1 and nothing more: the server
+    // fetches that range of the breach list for this device and the match is made here. The verdicts stay in memory, by
+    // item, for the session. andvari never tries a password anywhere: a person signs in and says what happened.
+
+    /** What the health screen holds while it is open. */
+    private var health: HealthSession? = null
+
+    /** The last breach check of this session; a lock forgets it. */
+    private var breaches: BreachVerdicts? = null
+
+    /** Open vault health ([AppState.health]). The usage record (when each login was last used) is read in the background. */
+    fun openHealth() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = HealthSession()
+            health = h
+            publishHealth(live)
+            readUsage(live, h)
+        }
+    }
+
+    fun closeHealth() {
+        health = null
+        update { it.copy(health = null) }
+    }
+
+    /** The screen again from the vault as it is now (an item opened from it may have changed). */
+    fun refreshHealth() {
+        guarded({}) { session.get()?.let(::publishHealth) }
+    }
+
+    /** List the logins snoozed for now too. The counts at the top never change with it. */
+    fun setHealthShowSnoozed(show: Boolean) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.showSnoozed = show
+            publishHealth(live)
+        }
+    }
+
+    fun dismissHealthMessage() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.message = null
+            publishHealth(live)
+        }
+    }
+
+    private fun publishHealth(live: VaultSession.Unlocked) {
+        val view = healthNow(live) ?: return
+        update { it.copy(health = view) }
+    }
+
+    /** The open health screen as the vault is now; null when it is closed. A run whose login is gone ends. */
+    private fun healthNow(live: VaultSession.Unlocked): HealthView? {
+        val h = health ?: return null
+        val names = vaultList(live).associate { it.vaultId to it.name }
+        fun build() = healthView(
+            h, live.engine.items(), runCatching { live.engine.pendingSyncItemIds() }.getOrDefault(emptySet()), breaches,
+            { live.account.roleFor(it) }, { names[it] ?: "Shared" }, clocks.wallMs(),
+        )
+        val view = build()
+        if (!h.running || view.run != null) return view
+        h.queue = emptyList()
+        h.index = 0
+        return build()
+    }
+
+    /** The usage record, for "last used" (other devices record uses). A ranking hint: nothing is said when it can't be read. */
+    private fun readUsage(live: VaultSession.Unlocked, h: HealthSession) {
+        scope.launch {
+            val read = try {
+                val sealed = runBounded(BoundedOps.FLAT_MS) { live.api.usage() }.sealedUsage
+                if (sealed == null) emptyMap() else UsageLedger.parse(live.account.openUsage(sealed).decodeToString())
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                return@launch
+            }
+            if (session.get() !== live || health !== h) return@launch
+            h.usage = read
+            publishHealth(live)
+        }
+    }
+
+    /**
+     * Check every login's password against known breaches (spec 03 §8, k-anonymity). Each distinct password is hashed
+     * here, and only the first 5 hex characters of its SHA-1 go to the server, which fetches that range for this device;
+     * the match is made here. A range that can't be fetched leaves its logins without a verdict, never "none", and a check
+     * in which no range came back keeps the last verdicts. Closing the screen or locking stops it, keeping nothing.
+     */
+    @Throws(CancellationException::class)
+    suspend fun checkBreaches(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val h = health ?: return@action ActionResult.NotDone(null)
+        if (h.scan != null) return@action ActionResult.NotDone(null)
+        val items = live.engine.items()
+        val rows = VaultHealth.healthRows(items)
+        if (rows.isEmpty()) return@action ActionResult.Ok
+        // The revision each verdict is about, taken with the passwords: a sync during the check must not pair the two.
+        val revs = items.associate { it.itemId to it.rev }
+        val crypto = live.account.cryptoProvider()
+        val hashes = withContext(Dispatchers.Default) { rows.map { it.password }.distinct().associateWith { Hibp.sha1UpperHex(crypto, it) } }
+        val byPrefix = hashes.entries.groupBy({ Hibp.prefix(it.value) }, { it.key })
+        h.message = null
+        h.scan = ScanProgressView(0, byPrefix.size)
+        publishHealth(live)
+        val counts = HashMap<String, Long>()
+        var failed = 0
+        var done = 0
+        for ((prefix, passwords) in byPrefix) {
+            val range = try {
+                runBounded(BoundedOps.FLAT_MS) { live.api.hibpRange(prefix) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                null
+            }
+            if (session.get() !== live || health !== h) return@action ActionResult.NotDone(null)
+            if (range == null) failed++ else for (pw in passwords) counts[pw] = Hibp.countInRange(range, hashes.getValue(pw))
+            done++
+            h.scan = ScanProgressView(done, byPrefix.size)
+            publishHealth(live)
+        }
+        h.scan = null
+        if (failed == byPrefix.size) {
+            h.message = HealthCopy.SCAN_FAILED
+        } else {
+            val byItem = rows.mapNotNull { r -> counts[r.password]?.let { r.itemId to it } }.toMap()
+            breaches = BreachVerdicts(byItem, byItem.keys.mapNotNull { id -> revs[id]?.let { id to it } }.toMap(), incomplete = failed > 0)
+            h.message = if (failed > 0) HealthCopy.SCAN_INCOMPLETE else HealthCopy.scanDone(rows.count { (byItem[it.itemId] ?: 0L) > 0L })
+        }
+        publishHealth(live)
+        ActionResult.Ok
+    }
+
+    /** One health action: a refusal or failure is said on the health screen, where it was asked for. */
+    private suspend fun healthAction(block: suspend (VaultSession.Unlocked, HealthSession) -> ActionResult): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val h = health ?: return@action ActionResult.NotDone(null)
+        val result = try {
+            block(live, h)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            failure(t, HouseholdCopy::forSaveError)
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (health === h && result is ActionResult.Failed) h.message = result.message
+        update { it.copy(busy = false, items = summaries(it.query), health = healthNow(live) ?: it.health) }
+        writeFillSnapshot()
+        result
+    }
+
+    private fun clusterOf(live: VaultSession.Unlocked, signature: String): Duplicates.DuplicateCluster? =
+        Duplicates.duplicateClusters(live.engine.items()) { live.account.roleFor(it) }.firstOrNull { it.signature == signature }
+
+    private suspend fun saveIn(live: VaultSession.Unlocked, itemId: String, doc: ItemDoc) {
+        // INV-EDIT: in the vault the item is in now; core refuses a save that would move it.
+        val vaultId = live.engine.item(itemId)?.vaultId
+        saves.exclusive { live.engine.save(itemId, doc, vaultId) }
+    }
+
+    private suspend fun trash(live: VaultSession.Unlocked, itemId: String) {
+        saves.exclusive { live.engine.remove(itemId).also { if (session.get() === live) runCatching { saves.itemDeletedLocked(live, itemId) } } }
+    }
+
+    /**
+     * Save the survivor core composed, then move the other copies to the trash. The survivor goes first, so nothing is
+     * removed before what it carries has landed; a failure after it is a partial state, and [partial] says so.
+     */
+    private suspend fun runMerge(live: VaultSession.Unlocked, h: HealthSession, plan: Duplicates.MergePlan, success: (Int) -> String, partial: String): ActionResult {
+        busy()
+        saveIn(live, plan.survivorId, plan.doc)
+        try {
+            for (id in plan.loserIds) trash(live, id)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return ActionResult.Failed(partial)
+        }
+        h.message = success(plan.loserIds.size)
+        return ActionResult.Ok
+    }
+
+    /** Merge copies that have the same password (core's plan: saved sites from every copy are kept). */
+    @Throws(CancellationException::class)
+    suspend fun mergeDuplicates(signature: String): ActionResult = healthAction { live, h ->
+        val cluster = clusterOf(live, signature)
+        val plan = cluster?.merge ?: return@healthAction ActionResult.Failed(cluster?.mergeRefusal ?: HealthCopy.GROUP_CHANGED)
+        runMerge(live, h, plan, HealthCopy::merged, HealthCopy.MERGE_DIDNT_FINISH)
+    }
+
+    /**
+     * Keep one of copies with different passwords, the one the person found still works: the others go to the trash, and
+     * their passwords into the kept login's password history first.
+     */
+    @Throws(CancellationException::class)
+    suspend fun keepDuplicate(signature: String, keepId: String): ActionResult = healthAction { live, h ->
+        val cluster = clusterOf(live, signature) ?: return@healthAction ActionResult.Failed(HealthCopy.GROUP_CHANGED)
+        val plan = Duplicates.planKeep(live.engine.items(), cluster.members.map { it.itemId }, keepId, { live.account.roleFor(it) }, clocks.wallMs())
+        val keep = plan.keep ?: return@healthAction ActionResult.Failed(plan.keepRefusal ?: HealthCopy.GROUP_CHANGED)
+        runMerge(live, h, keep, HealthCopy::kept, HealthCopy.KEEP_DIDNT_FINISH)
+    }
+
+    /** "Not duplicates": every copy is marked with the group as it is, so it stays quiet until one of them changes. */
+    @Throws(CancellationException::class)
+    suspend fun markNotDuplicates(signature: String): ActionResult = acknowledgeCluster(signature, restoring = false)
+
+    /** Put a group marked "not duplicates" back on the list. */
+    @Throws(CancellationException::class)
+    suspend fun restoreDuplicates(signature: String): ActionResult = acknowledgeCluster(signature, restoring = true)
+
+    private suspend fun acknowledgeCluster(signature: String, restoring: Boolean): ActionResult = healthAction { live, h ->
+        val cluster = clusterOf(live, signature) ?: return@healthAction ActionResult.Failed(HealthCopy.GROUP_CHANGED)
+        val plan = Duplicates.planDismiss(live.engine.items(), cluster.members.map { it.itemId }, if (restoring) "" else cluster.signature) { live.account.roleFor(it) }
+        val writes = plan.writes ?: return@healthAction ActionResult.Failed(plan.dismissRefusal ?: HealthCopy.GROUP_CHANGED)
+        busy()
+        var written = 0
+        try {
+            for (w in writes) {
+                saveIn(live, w.itemId, w.doc)
+                written++
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (written == 0) throw t // nothing landed: the ordinary save failure is the honest sentence
+            return@healthAction ActionResult.Failed(HealthCopy.NOT_EVERY_COPY)
+        }
+        h.message = if (restoring) HealthCopy.BACK_ON_THE_LIST else HealthCopy.NOT_DUPLICATES
+        ActionResult.Ok
+    }
+
+    /** Check logins one at a time, from the list as it is shown: all of them, worst first, or only the never-checked. */
+    fun startCheckRun(neverCheckedOnly: Boolean) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = health ?: return@guarded
+            val rows = healthNow(live)?.staleness.orEmpty().filter { !neverCheckedOnly || it.neverChecked }
+            beginRun(live, h, rows.map { it.itemId })
+        }
+    }
+
+    /** Check one login. */
+    fun checkLogin(itemId: String) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = health ?: return@guarded
+            beginRun(live, h, listOf(itemId))
+        }
+    }
+
+    private fun beginRun(live: VaultSession.Unlocked, h: HealthSession, queue: List<String>) {
+        if (queue.isEmpty()) return
+        h.queue = queue
+        h.index = 0
+        h.message = null
+        h.offerDelete = null
+        h.offerBad = null
+        publishHealth(live)
+    }
+
+    /** Move on without a verdict: "I didn't check this" is not one, so nothing is written. */
+    fun skipCheck() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.let(::advanceRun)
+            publishHealth(live)
+        }
+    }
+
+    fun stopCheckRun() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.let { it.queue = emptyList(); it.index = 0 }
+            publishHealth(live)
+        }
+    }
+
+    private fun advanceRun(h: HealthSession) {
+        val next = h.index + 1
+        if (next < h.queue.size) {
+            h.index = next
+            return
+        }
+        h.queue = emptyList()
+        h.index = 0
+        h.message = HealthCopy.RUN_FINISHED
+    }
+
+    /**
+     * What the person found when they signed in at the site themselves: "ok", "bad", "gone", or "blocked" (couldn't
+     * finish, which also snoozes the login for 30 days). Only the verdict is written, on the item. A refusal keeps the
+     * run where it is; a verdict on the login the run stands on moves it on. "gone" offers the trash, "bad" a new password.
+     */
+    @Throws(CancellationException::class)
+    suspend fun recordCheck(itemId: String, result: String): ActionResult = healthAction { live, h ->
+        if (result !in HealthCopy.CHECK_RESULTS) return@healthAction ActionResult.Failed(HealthCopy.CHOOSE_RESULT)
+        val snooze = if (result == "blocked") Staleness.SNOOZE_MS else null
+        val plan = Staleness.planCheck(live.engine.items(), itemId, result, clocks.wallMs(), { live.account.roleFor(it) }, snooze)
+        val write = plan.write ?: return@healthAction ActionResult.Failed(plan.refusal ?: HealthCopy.GROUP_CHANGED)
+        busy()
+        h.message = null
+        saveIn(live, write.itemId, write.doc)
+        h.offerDelete = if (result == "gone") itemId else null
+        h.offerBad = if (result == "bad") itemId else null
+        if (h.running && h.queue.getOrNull(h.index) == itemId) advanceRun(h)
+        ActionResult.Ok
+    }
+
+    /** Bring a snoozed login back into the list now; its verdict stays. */
+    @Throws(CancellationException::class)
+    suspend fun unsnoozeLogin(itemId: String): ActionResult = healthAction { live, h ->
+        val plan = Staleness.planUnsnooze(live.engine.items(), itemId) { live.account.roleFor(it) }
+        val write = plan.write ?: return@healthAction plan.refusal?.let { ActionResult.Failed(it) } ?: ActionResult.Ok
+        busy()
+        saveIn(live, write.itemId, write.doc)
+        h.message = HealthCopy.BACK_ON_THE_LIST
+        ActionResult.Ok
+    }
+
+    /** The login just marked as gone, to the trash (it can be restored from there for 30 days). */
+    @Throws(CancellationException::class)
+    suspend fun trashGoneLogin(): ActionResult = healthAction { live, h ->
+        val itemId = h.offerDelete ?: return@healthAction ActionResult.NotDone(null)
+        busy()
+        trash(live, itemId)
+        h.offerDelete = null
+        h.message = HealthCopy.TRASHED
+        ActionResult.Ok
+    }
+
+    /** "Keep it": the verdict stays recorded; only the offer goes. */
+    fun keepGoneLogin() {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            health?.offerDelete = null
+            publishHealth(live)
+        }
+    }
+
+    /**
+     * The offer after "bad", answered. Taken ([opening]): the person is about to change that password, so the run ends
+     * here rather than waiting behind them. Declined: only the offer goes. Nothing is written either way.
+     */
+    fun answerBadOffer(opening: Boolean) {
+        guarded({}) {
+            val live = session.get() ?: return@guarded
+            val h = health ?: return@guarded
+            h.offerBad = null
+            if (opening) {
+                h.offerDelete = null
+                h.queue = emptyList()
+                h.index = 0
+            }
+            publishHealth(live)
+        }
+    }
+
+    // ---- importing a CSV export (spec 06; the universal importer, design 2026-07-11; the Android app's flow) ----
+    //
+    // The file is read, parsed and planned on this device. Nothing of it goes to the server as it is: each planned item
+    // is encrypted here under the chosen vault's key and sent like any other save. The plan is made against the items
+    // already in that vault (core's dedupe), and only ever sent into the vault it was made for.
+
+    /** The import screen's file and plan, while it is open. */
+    private var csv: CsvSession? = null
+
+    /**
+     * Read a CSV export and plan its import into the personal vault, against what is already there. [bytes] are zeroed
+     * once read. Nothing is sent until [confirmImport].
+     */
+    @Throws(CancellationException::class)
+    suspend fun importCsv(bytes: ByteArray): ActionResult = action {
+        try {
+            val live = session.get() ?: return@action ActionResult.NotDone(null)
+            if (bytes.size > CsvImport.MAX_BYTES) return@action ActionResult.Failed(ImportCopy.TOO_LARGE)
+            // Planned only against a vault this device holds: an empty projection would quietly switch the dedupe off.
+            val personal = live.account.personalVaultId
+            if (personal.isEmpty() || vaultList(live).none { it.vaultId == personal }) return@action ActionResult.Failed(ImportCopy.NO_VAULT)
+            busy()
+            val read = try {
+                withContext(Dispatchers.Default) { CsvImport.parse(bytes) to CsvImport.rowOrdinalsByLine(bytes) }
+            } catch (e: CsvImport.ImportException) {
+                return@action failure(e) { ImportCopy.forCode(e.code) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                return@action failure(t, HouseholdCopy::forImportError)
+            }
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            val s = CsvSession(read.first, read.second, looksMangled(read.first))
+            s.vaultId = personal
+            val existing = live.engine.importProjections(personal)
+            s.plan = withContext(Dispatchers.Default) { CsvImport.plan(s.parsed, existing) { live.account.newItemId() } }
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            csv = s
+            publishImport(live)
+            idle()
+            ActionResult.Ok
+        } finally {
+            bytes.fill(0)
+        }
+    }
+
+    /** Import into [vaultId] instead: the plan is made again against that vault's items. Only before the import began. */
+    @Throws(CancellationException::class)
+    suspend fun setImportVault(vaultId: String): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val s = csv ?: return@action ActionResult.NotDone(null)
+        if (s.busy || s.error != null || s.done || vaultId == s.vaultId) return@action ActionResult.NotDone(null)
+        if (writableVaults(live).none { it.vaultId == vaultId }) return@action ActionResult.Failed(ImportCopy.VAULT_GONE)
+        s.busy = true
+        publishImport(live)
+        val plan = try {
+            val existing = live.engine.importProjections(vaultId)
+            withContext(Dispatchers.Default) { CsvImport.plan(s.parsed, existing) { live.account.newItemId() } }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            null
+        } finally {
+            s.busy = false
+        }
+        if (session.get() !== live || csv !== s) return@action ActionResult.NotDone(null)
+        if (plan == null) {
+            publishImport(live)
+            return@action ActionResult.Failed(ImportCopy.NO_VAULT)
+        }
+        // The plan and its vault change together: a plan is never sent into another vault than the one it was made for.
+        s.plan = plan
+        s.vaultId = vaultId
+        publishImport(live)
+        ActionResult.Ok
+    }
+
+    /**
+     * Encrypt and send the planned items into the chosen vault. A failure keeps the plan: Retry sends the same items,
+     * under the same ids, so nothing is imported twice.
+     */
+    @Throws(CancellationException::class)
+    suspend fun confirmImport(): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        val s = csv ?: return@action ActionResult.NotDone(null)
+        val plan = s.plan ?: return@action ActionResult.NotDone(null)
+        if (s.busy || s.done || plan.items.isEmpty()) return@action ActionResult.NotDone(null)
+        val vaultId = s.vaultId
+        s.busy = true
+        s.error = null
+        s.retryable = true
+        s.progress = ScanProgressView(0, plan.items.size)
+        publishImport(live)
+        val failed = try {
+            runBounded(BoundedOps.importMs(plan.items.size)) {
+                live.engine.importAll(plan.items, onProgress = { done, total ->
+                    if (csv === s) {
+                        s.progress = ScanProgressView(done, total)
+                        publishImport(live)
+                    }
+                }, vaultId = vaultId)
+            }
+            null
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            t
+        }
+        s.busy = false
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        if (failed is UpgradeRequiredException) return@action failure(failed, HouseholdCopy::forError)
+        when {
+            failed != null -> {
+                s.retryable = importRetryable(failed)
+                s.error = if (s.retryable) ImportCopy.INTERRUPTED else HouseholdCopy.forError(failed)
+            }
+            // A vault deleted while importing parks the items rather than refusing them: that is not a success.
+            vaultList(live).none { it.vaultId == vaultId } -> {
+                s.retryable = false
+                s.error = ImportCopy.PARKED
+            }
+            else -> {
+                s.done = true
+                s.progress = null
+            }
+        }
+        update { it.copy(items = summaries(it.query)) }
+        writeFillSnapshot()
+        publishImport(live)
+        ActionResult.Ok
+    }
+
+    /** Close the import: the parsed file and the plan go. */
+    fun closeImport() {
+        csv = null
+        update { it.copy(csvImport = null) }
+    }
+
+    // ---- export and backup (spec 07; the Android and desktop apps' flows on core's Export and ExportPlanner) ----
+    //
+    // The file is made in memory when the person has chosen a folder, handed to the platform to write there once, read
+    // back and compared; it is never written anywhere else, so no copy of a plaintext CSV outlives the export.
+
+    private var exporting: ExportSession? = null
+
+    /**
+     * Open the export screen for [kind]: a sync first (spec 07: an export holds what the server has; offline, the vault as
+     * of the last sync, which the screen says), then what the export would hold, by vault. Nothing is made until the
+     * person has chosen a folder ([csvFile], [backupFile]).
+     */
+    @Throws(CancellationException::class)
+    suspend fun openExport(kind: ExportKind): ActionResult = action {
+        val live = session.get() ?: return@action ActionResult.NotDone(null)
+        busy()
+        val offline = try {
+            runBounded(BoundedOps.FLAT_MS) { syncNow(live.engine) }
+            false
+        } catch (e: kotlinx.io.IOException) {
+            true
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (session.get() !== live) return@action ActionResult.NotDone(null)
+            return@action failure(t, HouseholdCopy::forError) // a refused sync is said, never exported over
+        }
+        if (session.get() !== live) return@action ActionResult.NotDone(null)
+        val s = ExportSession(kind, ExportPlanner.vaultLines(live.engine, live.account), live.account.personalVaultId)
+        if (offline) s.offlineNote = ExportCopy.offline(store.lastSyncAt.takeIf { it > 0 }?.let(LifecycleNoticeCopy::englishDay))
+        exporting = s
+        publishExport(live)
+        idle()
+        ActionResult.Ok
+    }
+
+    /** Put a shared vault in the export or leave it out; the personal vault is always in. */
+    fun setExportVault(vaultId: String, included: Boolean) {
+        val live = session.get() ?: return
+        val s = exporting ?: return
+        if (s.busy || vaultId == s.personalId || s.lines.none { it.vaultId == vaultId }) return
+        s.included = if (included) s.included + vaultId else s.included - vaultId
+        s.error = null
+        s.done = null
+        publishExport(live)
+    }
+
+    /** Backup: whether the files attached to its items go in (up to the 64 MiB cap; the rest are named). */
+    fun setExportAttachments(include: Boolean) {
+        val live = session.get() ?: return
+        val s = exporting?.takeIf { it.kind == ExportKind.BACKUP && !it.busy } ?: return
+        s.includeAttachments = include
+        s.done = null
+        publishExport(live)
+    }
+
+    fun closeExport() {
+        exporting = null
+        update { it.copy(exporting = null) }
+    }
+
+    /**
+     * The CSV for the folder the person chose: exactly the logins the screen counted, once the tick ([acknowledged])
+     * covers the formula cells it listed. The cells are worked out again from what is written: a vault that changed
+     * meanwhile writes nothing, and the screen comes back with the new list. Null when nothing is to be written (the
+     * screen says why). The bytes are plaintext: the caller writes them once, to that folder, and zeroes them.
+     */
+    fun csvFile(acknowledged: Boolean): ExportFile? {
+        val live = session.get() ?: return null
+        val s = exporting?.takeIf { it.kind == ExportKind.CSV && !it.busy } ?: return null
+        s.done = null
+        val docs = ExportPlanner.orderedItems(live.engine, s.order()).map { it.doc }
+        val refusal = when {
+            docs.none { it.type == "login" } -> ExportCopy.NOTHING_TO_EXPORT
+            s.shownCells.isNotEmpty() && !acknowledged -> ExportCopy.FORMULA_ACK_NEEDED
+            else -> null
+        }
+        if (refusal != null) {
+            s.error = refusal
+            publishExport(live)
+            return null
+        }
+        return when (val gated = ExportCsv.gatedWrite(docs, if (acknowledged) s.shownCells else null)) {
+            is ExportCsv.GatedWrite.NeedsAcknowledgement -> {
+                s.error = ExportCopy.VAULT_CHANGED
+                publishExport(live)
+                null
+            }
+            is ExportCsv.GatedWrite.Ready -> {
+                s.error = null
+                s.made = ExportMade(gated.loginCount, 0, 0, 0, emptyList())
+                ExportFile("andvari-export-${exportDate()}.csv", gated.csv.encodeToByteArray())
+            }
+        }
+    }
+
+    /**
+     * The backup for the folder the person chose (spec 07 §2): made in memory under [passphrase], which must be typed
+     * twice the same and be at least "good", then opened again under it, every file in it read back, before it is handed
+     * over: what is written is a backup that opens. Files go in when chosen, up to the 64 MiB cap; one that does not
+     * download twice is left out, by name. Null when nothing is to be written (the screen says why).
+     */
+    @Throws(CancellationException::class)
+    suspend fun backupFile(passphrase: String, confirm: String): ExportFile? {
+        val live = session.get() ?: return null
+        val s = exporting?.takeIf { it.kind == ExportKind.BACKUP && !it.busy } ?: return null
+        s.done = null
+        val refusal = when {
+            passphrase.isEmpty() -> ExportCopy.PASSPHRASE_REQUIRED
+            passphrase != confirm -> ExportCopy.PASSPHRASES_DIFFER
+            Strength.estimateStrength(passphrase) < Strength.BACKUP_FLOOR -> ExportCopy.PASSPHRASE_WEAK
+            s.order().isEmpty() -> ExportCopy.NOTHING_TO_EXPORT
+            else -> null
+        }
+        if (refusal != null) {
+            s.error = refusal
+            publishExport(live)
+            return null
+        }
+        s.busy = true
+        s.error = null
+        publishExport(live)
+        try {
+            val made = withContext(Dispatchers.Default) { makeBackup(live, s, passphrase) }
+            if (session.get() !== live || exporting !== s) {
+                made.second.fill(0)
+                return null
+            }
+            s.made = made.first
+            return ExportFile("andvari-backup-${exportDate()}.andvari", made.second)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            if (exporting === s) s.error = if (t is BackupVerifyException) ExportCopy.VERIFY_FAILED else HouseholdCopy.forError(t)
+            return null
+        } finally {
+            s.busy = false
+            if (session.get() === live && exporting === s) publishExport(live)
+        }
+    }
+
+    /** The file was written to [folder] as [fileName] and read back the same: the screen says what it holds. */
+    fun exportSaved(fileName: String, folder: String) {
+        val live = session.get() ?: return
+        val s = exporting ?: return
+        val made = s.made ?: return
+        s.made = null
+        s.error = null
+        s.done = when (s.kind) {
+            ExportKind.CSV -> ExportCopy.csvSaved(fileName, folder, made.logins)
+            ExportKind.BACKUP -> ExportCopy.backupSaved(fileName, folder, made.items, made.vaults, made.files) +
+                (if (made.skipped.isEmpty()) "" else " " + ExportCopy.filesSkipped(made.skipped))
+        }
+        session.touch() // an export counts as use, for the idle lock
+        publishExport(live)
+    }
+
+    /** Nothing was saved: the folder could not be written to, or ([written]) the file did not read back the same and the
+     *  caller removed it. */
+    fun exportNotSaved(written: Boolean) {
+        val live = session.get() ?: return
+        val s = exporting ?: return
+        s.made = null
+        s.error = if (written) ExportCopy.READ_BACK_FAILED else ExportCopy.WRITE_FAILED
+        publishExport(live)
+    }
+
+    private fun publishExport(live: VaultSession.Unlocked) {
+        val s = exporting ?: return
+        val items = ExportPlanner.orderedItems(live.engine, s.order())
+        val view = if (s.kind == ExportKind.CSV) {
+            val docs = items.map { it.doc }
+            val warnings = ExportCsv.warnings(docs)
+            // What a tick acknowledges: the cells shown now (re-checked against what is written, [csvFile]).
+            s.shownCells = warnings.formulaCells
+            exportView(s, warnings, docs.count { it.type == "login" }, items.size, null)
+        } else {
+            exportView(s, null, 0, items.size, ExportPlanner.planAttachments(items))
+        }
+        update { it.copy(exporting = view) }
+    }
+
+    /** spec 07 §2: build in memory, then open again and read every file back; the made file and what it holds. */
+    private suspend fun makeBackup(live: VaultSession.Unlocked, s: ExportSession, passphrase: String): Pair<ExportMade, ByteArray> {
+        val account = live.account
+        val engine = live.engine
+        val crypto = account.cryptoProvider()
+        val order = s.order()
+        val lines = s.lines.filter { it.vaultId in order }
+        val items = ExportPlanner.orderedItems(engine, order)
+        val undecryptable = ExportPlanner.undecryptable(engine).filter { it.vaultId in order }
+        val formatVersions = engine.envelopes().associate { it.itemId to it.formatVersion }
+        val plan = if (s.includeAttachments) ExportPlanner.planAttachments(items) else io.silencelen.andvari.core.client.AttachmentPlan(emptyList(), 0L, emptyList())
+        val fetched = ArrayList<Pair<io.silencelen.andvari.core.client.PlannedAttachment, ByteArray>>()
+        val fetchFailed = ArrayList<String>()
+        try {
+            for (p in plan.included) {
+                var bytes: ByteArray? = null
+                for (attempt in 0 until 2) {
+                    bytes = runCatching { runBounded(BoundedOps.attachmentMs(p.ref.size)) { engine.downloadAttachment(p.ref) } }.getOrNull()
+                    if (bytes != null) break
+                }
+                if (bytes == null) fetchFailed.add(AttachmentRules.safeFileName(p.ref.name)) else fetched.add(p to bytes)
+            }
+            // Each file goes in under a fresh key of its own (spec 07 §2.4); the items keep theirs.
+            val freshKeys = fetched.map { account.newFileKey() }
+            val manifest = fetched.mapIndexed { i, (p, bytes) ->
+                io.silencelen.andvari.core.client.BackupAttachmentEntry(
+                    section = i + 1, attachmentId = p.ref.id, itemId = p.item.itemId,
+                    name = p.ref.name, size = bytes.size.toLong(), fileKey = Bytes.toB64(freshKeys[i]),
+                )
+            }
+            val payload = io.silencelen.andvari.core.client.BackupPayload(
+                exportedAt = clocks.wallMs(),
+                origin = store.baseUrl ?: "",
+                userId = account.userId,
+                identityFingerprint = account.identityFingerprintShort(),
+                vaults = lines.map { io.silencelen.andvari.core.client.BackupVault(it.vaultId, it.type, it.name, it.role) },
+                items = items.map { io.silencelen.andvari.core.client.BackupItem(it.itemId, it.vaultId, formatVersions[it.itemId] ?: 1, it.updatedAt, it.doc) },
+                attachments = manifest,
+                skipped = io.silencelen.andvari.core.client.BackupSkipped(undecryptable, plan.overCap, fetchFailed),
+            )
+            // The policy's KDF cost, within what a backup may ask of the device that opens it (spec 07 §2.2).
+            val policyParams = coordinator.livePolicy?.kdfParams ?: io.silencelen.andvari.core.crypto.KdfParams.DEFAULT
+            val kdfParams = if (policyParams.ops <= io.silencelen.andvari.core.client.Backup.MAX_KDF_OPS && policyParams.memBytes <= io.silencelen.andvari.core.client.Backup.MAX_KDF_MEM_BYTES) {
+                policyParams
+            } else {
+                io.silencelen.andvari.core.crypto.KdfParams.DEFAULT
+            }
+            val chunks = ArrayList<ByteArray>()
+            val sections = fetched.mapIndexed { i, (_, bytes) -> io.silencelen.andvari.core.client.Backup.AttachmentSection(freshKeys[i]) { bytes } }
+            io.silencelen.andvari.core.client.Backup.build(
+                crypto = crypto, passphrase = passphrase,
+                fileId = account.newItemId(), kdfSalt = crypto.randomBytes(io.silencelen.andvari.core.crypto.KdfParams.SALT_BYTES),
+                kdfParams = kdfParams, payload = payload, attachments = sections,
+            ) { chunks.add(it.copyOf()) }
+            val file = ByteArray(chunks.sumOf { it.size })
+            var at = 0
+            for (c in chunks) {
+                c.copyInto(file, at)
+                at += c.size
+            }
+            // Opened again under the same passphrase, every file read back (spec 07 §2.6): only a backup that opens leaves.
+            val opened = try {
+                io.silencelen.andvari.core.client.Backup.open(crypto, passphrase, file)
+            } catch (e: Exception) {
+                file.fill(0)
+                throw BackupVerifyException()
+            }
+            if (opened.payload != payload) {
+                file.fill(0)
+                throw BackupVerifyException()
+            }
+            for (entry in opened.payload.attachments) {
+                val plain = opened.readAttachment(entry)
+                val ok = plain.size.toLong() == entry.size
+                plain.fill(0)
+                if (!ok) {
+                    file.fill(0)
+                    throw BackupVerifyException()
+                }
+            }
+            return ExportMade(0, items.size, lines.size, manifest.size, plan.overCap + fetchFailed) to file
+        } finally {
+            fetched.forEach { it.second.fill(0) } // Backup.build zeroes what it consumed; a throw before it leaves stragglers
+        }
+    }
+
+    /** Today's date for the file's name, as the other apps name it (yyyy-MM-dd, this device's time zone). */
+    private fun exportDate(): String =
+        kotlinx.datetime.Instant.fromEpochMilliseconds(clocks.wallMs()).toLocalDateTime(kotlinx.datetime.TimeZone.currentSystemDefault()).date.toString()
+
+    /** A made backup did not open again as made (spec 07 §2.6): nothing is handed over. */
+    private class BackupVerifyException : Exception("the backup did not open again as made")
+
+    private fun publishImport(live: VaultSession.Unlocked) {
+        val s = csv ?: return
+        val names = vaultList(live).associate { it.vaultId to it.name }
+        update { it.copy(csvImport = csvImportView(s, { id -> names[id] ?: "this vault" }, writableVaults(live).map(::choiceOf))) }
+    }
+
+    /** A failed import push worth a Retry: a transport blip, a rate limit or a server error converge on the same items. */
+    private fun importRetryable(t: Throwable): Boolean = when {
+        t is KdfPolicyViolationException -> false
+        t is ApiException -> t.code == "rate_limited" || t.status == 429 || t.status >= 500
+        else -> true
+    }
+
+    /** A file copied out of a web page arrives HTML-escaped: said when more than one value carries an entity. */
+    private fun looksMangled(parsed: CsvImport.Parsed): Boolean {
+        val entity = Regex("&(amp|lt|gt|quot|#\\d+);")
+        var hits = 0
+        for (r in parsed.rows) for (v in listOf(r.name, r.url, r.username, r.password, r.notes, r.totp ?: "")) {
+            if (entity.containsMatchIn(v) && ++hits >= 2) return true
+        }
+        return false
+    }
+
     /** Sync now. */
     @Throws(CancellationException::class)
     suspend fun refresh(): ActionResult = action {
@@ -2854,7 +3670,7 @@ open class SessionController(
         update {
             it.copy(
                 busy = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations, ownershipOffers = offers,
-                legacyReviews = reviews, notice = SYNCED,
+                legacyReviews = reviews, health = healthNow(live) ?: it.health, notice = SYNCED,
             )
         }
         writeFillSnapshot()
@@ -2920,8 +3736,10 @@ open class SessionController(
     // two-step code when the account has one. What it would do is shown first (its preview): what goes, and what stands
     // in the way. Once it is done, everything this device kept for the account goes too. A request whose answer says
     // nothing (no answer, a server error) may have deleted the account: that is said, never "deleted" or "not deleted".
+    // The steps are core's AccountDeletionFlow, which the Android and desktop apps take too.
 
     private val deletionScreen = ScreenToken()
+    private val deletion = AccountDeletionFlow(DeletionCopy.IPHONE)
 
     /** The preview as last read, for the blockers' and vaults' names. */
     private var deletionRead: AccountDeletePreview? = null
@@ -2935,12 +3753,12 @@ open class SessionController(
         update { it.copy(accountDeletion = AccountDeletionView(email = store.load()?.email ?: "", preview = null)) }
         busy()
         val preview = try {
-            runBounded(BoundedOps.FLAT_MS) { live.api.accountDeletePreview() }
+            deletion.preview(live.api)
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             if (session.get() !== live) return@action ActionResult.NotDone(null)
             if (!deletionScreen.still(token)) return@action screenGone()
-            return@action failure(t, DeletionCopy::forPreview)
+            return@action failure(t, deletion.copy::forPreview)
         }
         if (session.get() !== live) return@action ActionResult.NotDone(null)
         if (!deletionScreen.still(token)) return@action screenGone()
@@ -2957,23 +3775,16 @@ open class SessionController(
 
     private fun deletionPreviewView(live: VaultSession.Unlocked, p: AccountDeletePreview, blockers: List<AccountDeleteBlocker> = p.blockers): AccountDeletionPreviewView {
         val names = vaultList(live).associate { it.vaultId to it.name }
-        val name = { id: String? -> id?.let(names::get) }
-        val personal = live.account.personalVaultId
-        return AccountDeletionPreviewView(
-            deleted = DeletionCopy.deletes(p.deletedVaults.contains(personal), p.deletedVaults.filter { it != personal }.take(DELETION_LISTED).map(name)),
-            left = DeletionCopy.leaves(p.leftVaults.take(DELETION_LISTED).map(name)),
-            blockers = blockers.take(DELETION_LISTED).map { DeletionCopy.blocker(it.kind, name(it.vaultId), it.others) },
-            totpRequired = p.totpRequired,
-        )
+        return deletion.previewView(p, live.account.personalVaultId, names::get, blockers)
     }
 
     /**
      * Delete this account: [email] typed as on the screen, the master [password] (proved on this device against the key
      * this session holds, then sent as the fresh proof the server checks) and the two-step [code] when the account has
      * one. Nothing is sent when the address does not match. Once the server says it is done, this device keeps nothing
-     * of the account: the session, its tokens and keys, quick unlock, the vault cache and its device state, the snapshot
-     * and save queue the extensions share, kept saves and their files, the saved list and unfinished moves. The app then
-     * stands on the server screen.
+     * of the account: the session, its tokens and keys, quick unlock, the vault cache and its device state, the
+     * self-identity records, the snapshot and save queue the extensions share, kept saves and their files, the saved list
+     * and unfinished moves. The app then stands on the server screen.
      */
     @Throws(CancellationException::class)
     suspend fun deleteAccount(email: String, password: String, code: String): ActionResult = action {
@@ -2981,53 +3792,45 @@ open class SessionController(
         val stored = store.load() ?: return@action ActionResult.NotDone(null)
         val open = state.accountDeletion ?: return@action ActionResult.NotDone(null)
         val preview = deletionRead ?: return@action ActionResult.NotDone(null)
-        if (email.trim().lowercase() != stored.email.trim().lowercase()) return@action ActionResult.Failed(DeletionCopy.EMAIL_MISMATCH)
-        if (password.isEmpty()) return@action ActionResult.Failed(DeletionCopy.PASSWORD_REQUIRED)
-        val digits = code.filter { it.isDigit() }
-        if (preview.totpRequired && digits.isEmpty()) return@action ActionResult.Failed(DeletionCopy.CODE_REQUIRED)
+        deletion.refusal(email, stored.email, password, code, preview.totpRequired)?.let { return@action ActionResult.Failed(it) }
         busy()
-        // The proof first, on this device: a wrong password is caught here and never sent.
-        val proof = try {
-            val keys = runBounded(BoundedOps.FLAT_MS) { live.api.accountKeys() }
-            withContext(Dispatchers.Default) { live.account.reauthAuthKey(password, keys) }
-        } catch (t: Throwable) {
-            if (t is CancellationException) throw t
-            if (session.get() !== live) return@action ActionResult.NotDone(null)
-            return@action failure(t, DeletionCopy::forError)
-        }
-        try {
-            runBounded(BoundedOps.FLAT_MS) {
-                live.api.deleteAccount(AccountDeleteRequest(confirmEmail = email.trim(), currentAuthKey = proof, totp = digits.ifEmpty { null }))
+        when (val outcome = deletion.delete(live.api, live.account, email, password, code)) {
+            // Done: whatever ended the session meanwhile (the deletion revokes every session of the account), the account is
+            // gone, and this device forgets it.
+            DeletionOutcome.Deleted -> {
+                wipeDeletedAccount(stored)
+                // As on a first launch: no server chosen, nobody signed in, no policy known.
+                update {
+                    cleared(it, null).copy(
+                        screen = landingScreen(), server = store.baseUrl, policy = null, serverUnreachable = false,
+                        accountEmail = null, mustChangePassword = false, upgradeMessage = null,
+                        notice = deletion.copy.deleted(stored.email),
+                    )
+                }
+                refreshQuick()
+                return@action ActionResult.Ok
             }
-        } catch (t: Throwable) {
-            if (t is CancellationException) throw t
-            if (session.get() !== live) return@action ActionResult.NotDone(null)
-            if (t is AccountDeleteBlockedException) {
+            is DeletionOutcome.Blocked -> {
+                if (session.get() !== live) return@action ActionResult.NotDone(null)
                 // The server's blockers now, in place of the preview's.
-                update { s -> s.copy(busy = false, accountDeletion = s.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, preview, t.blockers))) }
-                return@action ActionResult.Failed(DeletionCopy.BLOCKED)
+                update { s -> s.copy(busy = false, accountDeletion = s.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, preview, outcome.blockers))) }
+                return@action ActionResult.Failed(deletion.copy.BLOCKED)
             }
-            if (DeletionCopy.outcomeUnknown(t)) {
+            DeletionOutcome.Unknown -> {
+                if (session.get() !== live) return@action ActionResult.NotDone(null)
                 update { s -> s.copy(busy = false, accountDeletion = s.accountDeletion?.copy(outcomeUnknown = true)) }
-                return@action ActionResult.Failed(DeletionCopy.OUTCOME_UNKNOWN)
+                return@action ActionResult.Failed(deletion.copy.OUTCOME_UNKNOWN)
             }
-            // The server had asked for no code, but the account has one now: the field shows, and the person types it.
-            if (t is ApiException && t.code == "totp_code_required") {
-                deletionRead = preview.copy(totpRequired = true)
-                update { s -> s.copy(accountDeletion = s.accountDeletion?.let { d -> d.copy(preview = d.preview?.copy(totpRequired = true)) }) }
+            is DeletionOutcome.Refused -> {
+                if (session.get() !== live) return@action ActionResult.NotDone(null)
+                // The server had asked for no code, but the account has one now: the field shows, and the person types it.
+                if (outcome.codeNowRequired) {
+                    deletionRead = preview.copy(totpRequired = true)
+                    update { s -> s.copy(accountDeletion = s.accountDeletion?.let { d -> d.copy(preview = d.preview?.copy(totpRequired = true)) }) }
+                }
+                return@action failure(outcome.cause) { deletion.refusedMessage(it, open.outcomeUnknown) }
             }
-            return@action failure(t, if (open.outcomeUnknown) DeletionCopy::forErrorAfterUnknown else DeletionCopy::forError)
         }
-        if (session.get() !== live) return@action ActionResult.NotDone(null)
-        wipeDeletedAccount(stored)
-        update {
-            cleared(it, null).copy(
-                screen = AppScreen.CHOOSE_SERVER, accountEmail = null, mustChangePassword = false, upgradeMessage = null,
-                notice = DeletionCopy.deleted(stored.email),
-            )
-        }
-        refreshQuick()
-        ActionResult.Ok
     }
 
     /**
@@ -3040,34 +3843,45 @@ open class SessionController(
         val live = session.get() ?: return@action ActionResult.NotDone(null)
         if (state.accountDeletion?.outcomeUnknown != true) return@action ActionResult.NotDone(null)
         busy()
-        val preview = try {
-            runBounded(BoundedOps.FLAT_MS) { live.api.accountDeletePreview() }
-        } catch (t: Throwable) {
-            if (t is CancellationException) throw t
-            if (session.get() !== live) return@action ActionResult.NotDone(null)
-            idle()
-            return@action ActionResult.Failed(if (t is ApiException && t.status == 401) DeletionCopy.SESSION_ENDED_OUTCOME_UNKNOWN else DeletionCopy.OUTCOME_UNKNOWN)
-        }
+        val check = deletion.check(live.api)
         if (session.get() !== live) return@action ActionResult.NotDone(null)
-        deletionRead = preview
-        update { it.copy(busy = false, notice = DeletionCopy.NOT_DELETED_AFTER_CHECK, accountDeletion = it.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, preview))) }
+        if (check !is DeletionCheck.StillHere) {
+            idle()
+            return@action ActionResult.Failed(deletion.checkMessage(check) ?: deletion.copy.OUTCOME_UNKNOWN)
+        }
+        deletionRead = check.preview
+        update { it.copy(busy = false, notice = deletion.copy.NOT_DELETED_AFTER_CHECK, accountDeletion = it.accountDeletion?.copy(outcomeUnknown = false, preview = deletionPreviewView(live, check.preview))) }
         ActionResult.Ok
     }
 
-    /** Everything this device kept for [stored]'s account, which the server no longer has. */
+    /**
+     * The server deleted [stored]'s account: this device is left as a fresh install (spec 03 §13, owner decision
+     * 2026-11-15), with nothing of the account and nothing of its server. What the account kept goes (the session and its
+     * tokens, the snapshot and save queue the extensions share, kept saves and their files, the saved list, unfinished
+     * moves, every screen's state), and so does everything kept under that server's origin, whoever's it is: every vault
+     * cache and device state, every quick-unlock key, the policy mirrors, cached account keys, full-password stamps and
+     * the spec 01 §5 self-identity records. The address itself goes last, so the app stands where a first launch does:
+     * at the server choice, in this process and the next. Another server's namespace is never touched (§4.2).
+     */
     private fun wipeDeletedAccount(stored: StoredSession) {
         session.lock() // the engine releases its cache before the cache is deleted
         forgetSessionViews() // kept saves and their files, unfinished moves, every screen's state
         zeroSecrets()
         dropFillSnapshot() // the snapshot, the save queue and its key, the saved list
-        store.baseUrl?.let(OriginCanon::originKey)?.let { originKey ->
-            namespaces.deleteVaultCache(originKey, stored.userId)
-            namespaces.deleteDeviceState(originKey, stored.userId)
-            quickKeys.wipe(originKey, stored.userId)
-            store.origin(originKey).clearPasswordStamp(stored.userId)
-            store.origin(originKey).clearAccountKeys(stored.userId)
+        val originKey = (stored.baseUrl.takeIf { it.isNotEmpty() } ?: store.baseUrl)?.let(OriginCanon::originKey)
+        if (originKey == null) {
+            store.clear()
+        } else {
+            // Every account's namespace at that server, and the quick-unlock key of each (a sign-out wipes its own, so
+            // none but this account's is expected; whatever is there goes).
+            val users = (runCatching { namespaces.deleteOrigin(originKey) }.getOrDefault(emptyList()) + OriginCanon.pathSafe(stored.userId)).distinct()
+            users.forEach { user -> runCatching { quickKeys.wipe(originKey, user) } }
+            store.forgetServer(originKey)
         }
-        store.clear()
+        // A policy probe still on its way writes nothing back, and the live policy was that server's.
+        coordinator.originChanged()
+        gateTarget = null
+        publishServer() // the extensions' copy of the address goes with it
         session.takeRejected() // the server ended the session: that is this deletion, not a second event
     }
 
@@ -3610,6 +4424,10 @@ open class SessionController(
         reviewOwners.clear()
         reviewOwnerAsks.clear()
         claim = null
+        health = null
+        breaches = null
+        csv = null
+        exporting = null
     }
 
     private fun lock(reason: String?) {
@@ -3672,7 +4490,7 @@ open class SessionController(
                     update {
                         it.copy(
                             syncing = false, items = summaries(it.query), vaultNotices = vaultNotices(live), invitations = invitations, ownershipOffers = offers,
-                            legacyReviews = reviews,
+                            legacyReviews = reviews, health = healthNow(live) ?: it.health,
                         )
                     }
                 } else {
@@ -3699,7 +4517,7 @@ open class SessionController(
         trustGate = null, recoveryWaived = false, recoveryCaptureError = null, recoveryReplacedNotice = false, lockReason = reason,
         personalVault = null, pendingSaves = emptyList(), appliedSaves = emptyList(), vaultNotices = emptyList(), sharing = null, twoStep = null, trash = null, history = null,
         attachmentDraft = null, upload = null, members = null, verifying = null, household = null, invitations = emptyList(), ownershipOffers = emptyList(),
-        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null,
+        legacyReviews = emptyList(), ownershipClaim = null, accountDeletion = null, health = null, csvImport = null, exporting = null,
     )
 
     private companion object {
@@ -3711,9 +4529,6 @@ open class SessionController(
 
         /** The roles an owner gives a member. */
         val MEMBER_ROLES = setOf("writer", "reader")
-
-        /** At most this many of a deletion preview's vaults and blockers are listed. */
-        const val DELETION_LISTED = 50
 
         /** What a typed identity code is counted in ([Fingerprint.matchesShort] drops everything else). */
         const val HEX_DIGITS = "0123456789abcdef"
@@ -3805,118 +4620,6 @@ internal object SharingCopy {
     const val OWNER_CANNOT_LEAVE = "You own this vault, so you can't leave it: make someone else the owner, or delete it."
 }
 
-/** What deleting the account says (the web app's sentences, spec 03 §13), in this app's words. */
-internal object DeletionCopy {
-    const val UNNAMED_VAULT = "a vault this iPhone can't name"
-    const val EMAIL_MISMATCH = "That isn't this account's email address."
-    const val PASSWORD_REQUIRED = "Type your master password."
-    const val CODE_REQUIRED = "Type the code from your authenticator app."
-    const val BAD_CODE = "That code is wrong or was already used. Wait for the next one and try again."
-    const val BLOCKED = "The server didn't delete your account: something below stands in the way. Nothing was deleted."
-    const val PUBLIC_ORIGIN = "Deleting an account isn't available from this emergency address. Use your household's usual andvari address."
-    const val TOTP_ENROLL_FIRST = "This server requires two-step sign-in: turn it on first, then delete the account."
-    const val CREDENTIAL_CHANGED =
-        "Your password was changed, or this iPhone was signed out, while deleting: nothing was deleted. Sign in again and try again."
-    const val SESSION_ENDED = "Your session ended: nothing was deleted. Sign in again and try again."
-    const val TOO_MANY = "Too many attempts. Wait a while, then try again."
-    const val FAILED = "Something went wrong, and your account was not deleted. Try again."
-    const val OUTCOME_UNKNOWN =
-        "The server didn't answer in a way that says whether your account was deleted: it may have been. Check below, or sign in again: if your account is gone, the deletion went through."
-    const val NOT_DELETED_AFTER_CHECK = "Your account is still here: it was not deleted. You can try again."
-    const val SESSION_ENDED_OUTCOME_UNKNOWN =
-        "Your session ended, so andvari can't tell whether your account was deleted. Sign in to find out, or sign out to make this iPhone forget the account."
-    const val PREVIEW_FAILED = "Couldn't check what deleting your account would do. Try again."
-
-    private fun people(n: Int): String = if (n == 1) "1 other person" else "$n other people"
-
-    /** One sentence per blocker; a kind this version does not know is listed as one it cannot explain, never dropped. */
-    fun blocker(kind: String, vault: String?, others: Int): String = when (kind) {
-        "shared_vault" -> {
-            val verb = if (others == 1) "still uses it" else "still use it"
-            if (vault != null) "You own “$vault”, and ${people(others)} $verb. Delete it, or make one of them its owner, first (Shared vaults)."
-            else "You own a shared vault that ${people(others)} $verb. Delete it, or make one of them its owner, first (Shared vaults)."
-        }
-        "last_admin" ->
-            "You're the only admin of this andvari server, and ${people(others)} ${if (others == 1) "has an account" else "have accounts"} on it. " +
-                "andvari can't make an existing account an admin: an account is an admin only if it was invited as one. Invite a new admin first, from the web app's Administration, then come back."
-        else -> "The server reports something else that stops this account being deleted, which this version of andvari can't explain. Update andvari, or ask whoever runs your server."
-    }
-
-    private fun quoted(names: List<String>): String {
-        val q = names.map { "“$it”" }
-        return if (q.size <= 1) q.joinToString("") else q.dropLast(1).joinToString(", ") + " and " + q.last()
-    }
-
-    /** What goes for good: the account, its personal vault and the vaults only it holds (by name), the recovery paths. */
-    fun deletes(personal: Boolean, onlyMine: List<String?>): List<String> {
-        val named = onlyMine.filterNotNull()
-        val unnamed = onlyMine.size - named.size
-        val vaults = buildList {
-            if (personal) add("your Personal vault")
-            if (named.isNotEmpty()) add((if (named.size == 1) "the vault" else "the vaults") + " only you use, " + quoted(named))
-            if (unnamed > 0) add(if (unnamed == 1) "1 other vault only you hold" else "$unnamed other vaults only you hold")
-        }
-        return buildList {
-            add("Your account, and its sign-in on every device.")
-            if (vaults.isNotEmpty()) add(joinAnd(vaults).replaceFirstChar { it.uppercase() } + ": every item, file and earlier version in them.")
-            add("Your recovery phrase and your household recovery backup: nobody, an admin included, can bring the account back.")
-            add("Invites you sent that nobody has used yet.")
-        }
-    }
-
-    /** The shared vaults the account leaves; what it saved there stays for the people who still use them. */
-    fun leaves(vaults: List<String?>): List<String> {
-        if (vaults.isEmpty()) return emptyList()
-        val named = vaults.filterNotNull()
-        val unnamed = vaults.size - named.size
-        val what = buildList {
-            if (named.isNotEmpty()) add(quoted(named))
-            if (unnamed > 0) add(if (unnamed == 1) "1 other shared vault" else "$unnamed other shared vaults")
-        }
-        return listOf("You'll leave ${joinAnd(what)}. What you saved there stays for the people who still use ${if (vaults.size == 1) "it" else "them"}.")
-    }
-
-    private fun joinAnd(parts: List<String>): String =
-        if (parts.size <= 1) parts.joinToString("") else parts.dropLast(1).joinToString(", ") + " and " + parts.last()
-
-    fun deleted(email: String): String = "The account $email was deleted, with everything this iPhone kept for it."
-
-    /** A request whose answer says nothing about what happened: no answer, a server error, or a reply not the server's. */
-    fun outcomeUnknown(t: Throwable): Boolean = when {
-        t is ApiException -> t.status >= 500 || t.code.startsWith("http_")
-        else -> t !is ReauthFailedException && t !is ReauthStaleSessionException && t !is KdfPolicyViolationException && t !is CryptoUnavailableException
-    }
-
-    fun forPreview(t: Throwable): String = when {
-        t is ApiException && t.code == "account_delete_public_disabled" -> PUBLIC_ORIGIN
-        t is ApiException && t.code == "totp_enrollment_required" -> TOTP_ENROLL_FIRST
-        t is ApiException -> HouseholdCopy.forError(t).takeIf { t.status == 401 || t.status == 429 || t.status == 426 } ?: PREVIEW_FAILED
-        else -> HouseholdCopy.forError(t)
-    }
-
-    /** One sentence per refusal of the deletion (or of the local password proof before it): nothing was deleted. */
-    fun forError(t: Throwable): String = when {
-        t is ReauthFailedException -> HouseholdCopy.REAUTH_FAILED
-        t is ReauthStaleSessionException -> HouseholdCopy.REAUTH_STALE_SESSION
-        t is ApiException -> when (t.code) {
-            "reauth_failed" -> HouseholdCopy.REAUTH_FAILED
-            "totp_code_required" -> CODE_REQUIRED
-            "bad_totp_code" -> BAD_CODE
-            "confirm_email_mismatch" -> EMAIL_MISMATCH
-            "account_delete_public_disabled" -> PUBLIC_ORIGIN
-            "totp_enrollment_required" -> TOTP_ENROLL_FIRST
-            "credential_changed" -> CREDENTIAL_CHANGED
-            "rate_limited" -> TOO_MANY
-            else -> if (t.status == 401) SESSION_ENDED else if (t is UpgradeRequiredException) HouseholdCopy.forError(t) else FAILED
-        }
-        else -> HouseholdCopy.forError(t)
-    }
-
-    /** After an answer that said nothing, a refused session no longer says "nothing was deleted": the account may be gone. */
-    fun forErrorAfterUnknown(t: Throwable): String =
-        if (t is ApiException && t.status == 401 && t.code != "credential_changed") SESSION_ENDED_OUTCOME_UNKNOWN else forError(t)
-}
-
 /** What the members screen and a comparison of identity codes say (the web app's words, where it has them). */
 internal object MembersCopy {
     const val EMAIL_REQUIRED = "Type their email address."
@@ -3931,7 +4634,10 @@ internal object MembersCopy {
     const val OWNER_ALREADY = "They already own this vault."
     const val DISABLED_CANNOT_OWN = "Their account is disabled, so they can't take the vault over."
     const val OFFER_PENDING = "An offer to hand this vault over is already waiting. Cancel it first."
-    const val OFFER_CANCELLED = "Offer cancelled. You still own the vault."
+    const val OFFER_CANCELLED =
+        "Offer cancelled. Should the server complete it anyway, your devices warn you and keep their record that you own the vault."
+    const val VERIFY_BEFORE_HANDOVER =
+        "Verify them on this device first, by comparing codes with them in person or on a call you trust: only someone you verified can be made the owner."
     const val OFFER_GONE = "That offer is no longer waiting."
     const val CONTACT_GONE = "They're no longer on your list."
     const val RECORD_ROLLED_BACK = "The server sent an older copy of the people you verified. Your newer copy was kept. If this keeps happening, tell your admin."

@@ -5,9 +5,11 @@ import * as esbuild from "esbuild";
 import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-// RELEASE=1 → minified, no sourcemaps (what gets zipped for /downloads).
-// Default = debuggable dev build for load-unpacked iteration.
-const release = process.env.RELEASE === "1";
+// The release build is the default (round-13 review): minified, no sourcemaps, and no payment provider's test host
+// (cardproviders.ts). DEBUG=1 → the readable dev build for load-unpacked iteration, which lists the providers' test hosts;
+// UITEST=1 (the Safari UI-test build) lists them too. RELEASE=1 is still accepted, and changes nothing.
+const debug = process.env.DEBUG === "1";
+const release = !debug;
 // TARGET=firefox → the Firefox manifest (background.scripts event page); TARGET=safari → the Safari
 // manifest (non-persistent page, for the iOS app's Safari Web Extension); default = Chrome (SW).
 const target = process.env.TARGET === "firefox" || process.env.TARGET === "safari" ? process.env.TARGET : "chrome";
@@ -49,6 +51,9 @@ const cardFill = target === "safari" ? process.env.CARDFILL === "1" : process.en
 /** Strings only the card path's handlers hold (background.ts fillCardFromPopup and revealCardForFill): a build without
  *  card fill must not contain them, a build with it must. */
 const CARD_PATH_MARKERS = ["card fill wrote nothing", "no card grant"];
+// And the content script's in-page card fill: the report of a frame's card forms and choice, the chip, and the fill's
+// redemption (content.ts gates each on the define, so a build without card fill bundles none of them).
+const CONTENT_CARD_MARKERS = ["cardFormInfo", "cardChipOffer", "Fill card with andvari", "revealCardForFill"];
 
 // The pages the Safari build does not ship: the server is chosen in the andvari app (no Options page), quick unlock is
 // the app's Face ID (no WebAuthn connector window), and Chrome's offscreen clipboard document has no use there. The
@@ -82,9 +87,9 @@ await esbuild.build({
   define: {
     __ANDVARI_TARGET__: JSON.stringify(target),
     __ANDVARI_UITEST_PROVIDER__: JSON.stringify(uitest ? UITEST_PROVIDER : ""),
-    // Round-12 review: the payment providers' sandbox and test hosts are card-entry origins in the debug and UI-test
-    // builds only (cardproviders.ts CARD_PROVIDER_TEST_ORIGINS); a release build fails if one is left in it (below).
-    __ANDVARI_PROVIDER_TEST_HOSTS__: JSON.stringify(!release || uitest),
+    // Round-12 and round-13 review: the payment providers' sandbox and test hosts are card-entry origins in the DEBUG=1
+    // and UI-test builds only (cardproviders.ts CARD_PROVIDER_TEST_ORIGINS); any other build fails if one is left in it.
+    __ANDVARI_PROVIDER_TEST_HOSTS__: JSON.stringify(debug || uitest),
     __ANDVARI_CARDFILL__: JSON.stringify(cardFill),
   },
   plugins: target === "safari" ? [noDefaultServer] : [],
@@ -132,7 +137,7 @@ if (target === "safari") {
     if (leaked.length > 0) throw new Error(`only the UI-test build may name ${testHost}, but it is in: ${leaked.join(", ")}`);
   }
 }
-if (release && !uitest) {
+if (!debug && !uitest) {
   // The providers' sandbox and test hosts never ship (cardproviders.ts): read from the source, so a host added there is
   // checked too.
   const source = readFileSync("src/cardproviders.ts", "utf8");
@@ -149,5 +154,9 @@ if (release && !uitest) {
   const held = CARD_PATH_MARKERS.filter((m) => worker.includes(m));
   if (!cardFill && held.length > 0) throw new Error(`a build without card fill must not bundle the card path, but dist/background.js holds: ${held.join(", ")}`);
   if (cardFill && held.length !== CARD_PATH_MARKERS.length) throw new Error("a build with card fill lost its card path markers: build.mjs and background.ts disagree");
+  const content = readFileSync("dist/content.js", "utf8");
+  const inPage = CONTENT_CARD_MARKERS.filter((m) => content.includes(m));
+  if (!cardFill && inPage.length > 0) throw new Error(`a build without card fill must not bundle the content script's card fill, but dist/content.js holds: ${inPage.join(", ")}`);
+  if (cardFill && inPage.length !== CONTENT_CARD_MARKERS.length) throw new Error("a build with card fill lost its content-side card markers: build.mjs and content.ts disagree");
 }
 console.log(`built → dist/ (${target}${release ? ", release" : ""}${uitest ? ", UI-test provider" : ""}${cardFill ? "" : ", no card fill"}; Load unpacked: extension/dist)`);

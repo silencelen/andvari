@@ -432,11 +432,22 @@ class ReissueAuthorityTest {
         val offerId = "11111111-1111-4111-8111-111111111111"
         val lifecycle = engineLifecycleKey(engine, vaultId)
         val proof = LifecycleProof.acceptFromHash(crypto, lifecycle, vaultId, offerId, member.userId, 1, wrapHash)
-        val rev = server.feed.rev + 1
-        server.feed = server.feed.copy(
-            rev = rev, full = true,
-            vaults = server.feed.vaults.map { if (it.vaultId == vaultId) it.copy(rev = rev, lastTransfer = TransferRecord(offerId, member.userId, proof, 1, wrapHash)) else it },
-        )
+        fun handOver() {
+            val rev = server.feed.rev + 1
+            server.feed = server.feed.copy(
+                rev = rev, full = true,
+                vaults = server.feed.vaults.map { if (it.vaultId == vaultId) it.copy(rev = rev, lastTransfer = TransferRecord(offerId, member.userId, proof, 1, wrapHash)) else it },
+            )
+        }
+        // Sharing review 2026-11 (finding 1): the proof is a MAC under the vault's key, which every member holds. A
+        // handover of an offer this account never made is warned of, and the ownership record is kept.
+        handOver()
+        engine.sync()
+        assertTrue(engine.ownsVault(vaultId), "not this account's offer: the record stays")
+        assertEquals(SyncEngine.TRANSFER_NOT_OFFERED, engine.notices().single { it.vaultId == vaultId }.reason)
+        // On this account's record (another of its devices made the offer): the same handover ends the ownership evidence.
+        engine.accountState.update { AccountState.withOwnOffers(it, listOf(OwnOffer(vaultId, offerId, member.userId, 1))) }
+        handOver()
         engine.sync()
         assertFalse(engine.ownsVault(vaultId), "a verified transfer to someone else ends this account's ownership evidence")
         assertFailsWith<OwnershipNotConfirmedException> { engine.offerTransfer(vaultId, member.userId) }

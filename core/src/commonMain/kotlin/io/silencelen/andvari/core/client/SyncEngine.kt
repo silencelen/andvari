@@ -223,6 +223,8 @@ data class HeldVaultInfo(
     val verified: Boolean,
     val purgeAt: Long?,
     val expungeAt: Long,
+    /** How its proof checked ([HeldVaultRecord.proof]); null for an entry kept before that was recorded. */
+    val proof: String? = null,
 )
 
 /** One attachment of a move/copy gesture: fresh id + fresh fileKey minted at gesture time. */
@@ -343,6 +345,21 @@ class SyncEngine(
 
         /** A9 (M-3): one [TrustRecords.Tombstone] per member THIS device removed (durable device state). */
         internal const val ISSUED_TOMBSTONES_KEY = "grant.issued.tombstones"
+
+        /** Sharing review 2026-11 (finding 1): this device's own record of the offers it made ([OwnOffer] JSON list). */
+        internal const val OWN_OFFERS_KEY = "transfer.own.offers"
+
+        /** [LifecycleNotice.reason] on a `transfer-anomaly` whose proof checks under the vault's key, for an offer this
+         *  account did not make or had cancelled (finding 1): the ownership record is kept. */
+        const val TRANSFER_NOT_OFFERED = "not-offered"
+
+        /** [HeldVaultRecord.proof] for a delete (sharing review 2026-11, item 6); a removal or leave records its
+         *  [io.silencelen.andvari.core.crypto.RemovalProof.Verdict] name. */
+        const val PROOF_VALID = "VALID"
+        const val PROOF_ANOMALY = "ANOMALY"
+
+        /** The removal and leave verdicts that verified (item 6): the held copy reads as verified. */
+        internal val VERIFIED_REMOVAL_PROOFS = setOf("VALID", "VALID_LEGACY", "ALREADY_RECORDED")
     }
 
     // ---- vault lifecycle state (spec 03 §11); session-scoped — the durable halves
@@ -1116,6 +1133,9 @@ class SyncEngine(
             "vault $vaultId has a grant that failed verification or awaits it; it cannot be accepted on trust"
         }
         vouchLegacy(vaultId, frozen = false)
+        // Sharing review 2026-11 (item 3): its key's proofs count from now on, so the offers and handovers under it are
+        // looked at again (quietly: what they say was already seen).
+        cache.vaults().firstOrNull { it.vaultId == vaultId }?.let { v -> runCatching { applyTransferState(v, noticeable = false) } }
         cache.grants().firstOrNull { it.vaultId == vaultId }?.let { postSelfWrapIfAuthorized(it) }
     }
 
@@ -1126,7 +1146,8 @@ class SyncEngine(
         /** Pinned, current on this device, and the served key is the pinned key: no fingerprint step. */
         PINNED,
 
-        /** Pinned, but the server now serves ANOTHER key for them: refuse, and verify again in person. */
+        /** Pinned (here, or on another device of this account: item 9), but the server now serves ANOTHER key for them:
+         *  refuse, and verify again in person. */
         KEY_CHANGED,
 
         /** Not pinned here (or the pin is not current on this device, L-3): run the verification ceremony. */
@@ -1152,8 +1173,13 @@ class SyncEngine(
     }
 
     fun memberPinState(userId: String, servedIdentityPub: String): MemberPinState {
-        val pin = accountState.currentPin(userId) ?: return MemberPinState.NEEDS_VERIFICATION
-        return when (ContactPin.pinState(accountState.doc, ServedIdentity(userId, servedIdentityPub))) {
+        val state = ContactPin.pinState(accountState.doc, ServedIdentity(userId, servedIdentityPub))
+        val pin = accountState.currentPin(userId)
+            // Sharing review 2026-11 (item 9): a pin another device of this account made, not yet confirmed here, still
+            // records the key that was verified. A served key that differs from it shows as changed, never as merely
+            // unverified; either way nothing is done for them here until they are verified on this device.
+            ?: return if (state == ContactPin.PinState.PINNED_MISMATCH) MemberPinState.KEY_CHANGED else MemberPinState.NEEDS_VERIFICATION
+        return when (state) {
             ContactPin.PinState.PINNED_MATCH -> if (pin.userId == userId) MemberPinState.PINNED else MemberPinState.NEEDS_VERIFICATION
             ContactPin.PinState.PINNED_MISMATCH -> MemberPinState.KEY_CHANGED
             ContactPin.PinState.UNPINNED -> MemberPinState.NEEDS_VERIFICATION
@@ -1368,6 +1394,50 @@ class SyncEngine(
         personalSet(ISSUED_TOMBSTONES_KEY, TrustRecords.encodeTombstones(rows + TrustRecords.Tombstone(vaultId, userId, at)))
     }
 
+    // ---- sharing review 2026-11 (finding 1): the offers this account made to hand a vault over ----
+    //
+    // A transfer's proofs are MACs under the vault's key, which every member holds, so a proof that checks says only
+    // that some member, with the server, made it. An owner's handover is recognised by this account's own record of the
+    // offers it made: written before an offer is sent and marked cancelled before a cancel is sent, on this device and in
+    // the account state every device of the account reads.
+
+    private val offersJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    private val offersSerializer = kotlinx.serialization.builtins.ListSerializer(OwnOffer.serializer())
+
+    /** This device's own record of the offers it made ([OWN_OFFERS_KEY]). */
+    private fun ownOffersHere(): List<OwnOffer> = personalGet(OWN_OFFERS_KEY)?.let { raw ->
+        runCatching { offersJson.decodeFromString(offersSerializer, raw) }.getOrNull()
+    }.orEmpty()
+
+    /** Every offer this account made, by its account state and this device's record; a cancel in either one wins. */
+    fun ownOffers(): List<OwnOffer> = AccountState.mergeOffers(accountState.doc.ownOffers + ownOffersHere())
+
+    /** True when [offerId] is an offer this account made, for [vaultId] to [toUserId], and has not cancelled. */
+    fun isOwnLiveOffer(vaultId: String, offerId: String, toUserId: String): Boolean =
+        ownOffers().any { it.offerId == offerId && it.vaultId == vaultId && it.toUserId == toUserId && it.cancelledAt == null }
+
+    /** Put [offers] on record: this device first, then account state (local first there too, so in force here even when
+     *  the write fails; the next sync writes it back). */
+    private suspend fun recordOwnOffers(offers: List<OwnOffer>) {
+        val valid = offers.filter { AccountState.isOwnOffer(it) }
+        if (valid.isEmpty()) return
+        personalSet(OWN_OFFERS_KEY, offersJson.encodeToString(offersSerializer, AccountState.mergeOffers(ownOffersHere() + valid)))
+        runCatching { accountState.update { AccountState.withOwnOffers(it, valid) } }
+    }
+
+    /** Mark this account's offers that [which] picks as cancelled now, wherever they were recorded. */
+    private suspend fun cancelOwnOffers(which: (OwnOffer) -> Boolean) {
+        val at = nowMs()
+        recordOwnOffers(ownOffers().filter { it.cancelledAt == null && which(it) }.map { it.copy(cancelledAt = at) })
+    }
+
+    /**
+     * Sharing review 2026-11 (item 3): proofs under a vault's key count only when this device trusts that key, which it
+     * does not for a vault awaiting review (only an unconfirmed v1 seal vouches for its key) nor for one whose held key
+     * contradicts this device's earlier vouch. Under such a key no offer is listed and no proof verifies.
+     */
+    private fun lifecycleKeyTrusted(vaultId: String): Boolean = !account.isLegacyReadOnly(vaultId) && !account.heldKeyContradictsVouch(vaultId)
+
     /** The rows the last [loadLegacyGrants] for [vaultId] returned (empty until one ran). */
     fun legacyGrantRows(vaultId: String): List<LegacyGrantRow> = legacyRowsByVault[vaultId].orEmpty()
 
@@ -1473,7 +1543,8 @@ class SyncEngine(
         // (register, an accepted change) is written back by one more refresh.
         // A11 (c01): the decision no longer reads whether this device merged account state before the refresh; a
         // designation moving away from the cached vault is always the human's call.
-        runCatching { accountState.refresh() }
+        // Finding 1: a handover held back for this account's record of its own offers is decided once the record was read.
+        if (runCatching { accountState.refresh() }.isSuccess) decideHeldHandovers()
         decidePersonalLocally()
         if (designationDirty) {
             designationDirty = false
@@ -1954,7 +2025,7 @@ class SyncEngine(
         val verdict = if (verifyRemoval(vaultId, reason, info)) "valid" else "anomaly"
 
         // Snapshot ciphertext + move to holding BEFORE forgetting the VK.
-        val parkedCount = moveToHolding(vaultId, reason, info, verdict == "valid")
+        val parkedCount = moveToHolding(vaultId, reason, info, verdict == "valid", proof = if (verdict == "valid") PROOF_VALID else PROOF_ANOMALY)
 
         when {
             verdict == "anomaly" -> pushNotice(LifecycleNotice(account.newItemId(), vaultId, cachedName, "anomaly"))
@@ -1977,7 +2048,10 @@ class SyncEngine(
      * every verdict: holding area, 30 days.
      */
     private fun handleRemovalOrLeave(vaultId: String, reason: String, info: RemovedGrantInfo?, cachedName: String) {
-        val decision = runCatching {
+        // Sharing review 2026-11 (item 3): under a key this device does not trust, no removal proof verifies.
+        val decision = if (!lifecycleKeyTrusted(vaultId)) {
+            io.silencelen.andvari.core.crypto.RemovalProof.Decision(io.silencelen.andvari.core.crypto.RemovalProof.Verdict.ANOMALY, "untrusted key")
+        } else runCatching {
             io.silencelen.andvari.core.crypto.RemovalProof.decide(
                 crypto = account.cryptoProvider(),
                 lifecycleKey = account.lifecycleKeyFor(vaultId),
@@ -1999,7 +2073,8 @@ class SyncEngine(
         val consumeNonce = decision.consumeNonce
         val consumeAt = decision.consumeIssuedAt
         if (consumeNonce != null && consumeAt != null) cache.addConsumedNonce(vaultId, consumeNonce, consumeAt)
-        moveToHolding(vaultId, reason, info, verifiedDelete = false)
+        // Item 6: the verdict is kept with the held copy, so "Recently removed" says what this device found.
+        moveToHolding(vaultId, reason, info, verifiedDelete = false, proof = decision.verdict.name)
         val n = when (decision.verdict) {
             io.silencelen.andvari.core.crypto.RemovalProof.Verdict.VALID ->
                 LifecycleNotice(account.newItemId(), vaultId, cachedName, if (reason == "left") "left" else "removed")
@@ -2023,6 +2098,7 @@ class SyncEngine(
      *  [handleRemovalOrLeave] instead (branch A7). */
     private fun verifyRemoval(vaultId: String, reason: String, info: RemovedGrantInfo?): Boolean {
         if (info == null || reason != "deleted") return false // a bare revocation of a held vault is never "valid"
+        if (!lifecycleKeyTrusted(vaultId)) return false // sharing review 2026-11 (item 3)
         return runCatching {
             val key = account.lifecycleKeyFor(vaultId)
             val crypto = account.cryptoProvider()
@@ -2046,6 +2122,7 @@ class SyncEngine(
         reason: String,
         info: RemovedGrantInfo?,
         verifiedDelete: Boolean,
+        proof: String,
     ): Int {
         val items = cache.envelopes().filter { it.vaultId == vaultId && !it.deleted }
         val staged = preParkedByVault.remove(vaultId)?.map { it.mutation } ?: emptyList()
@@ -2059,11 +2136,13 @@ class SyncEngine(
                 grant = cache.grants().find { it.vaultId == vaultId }, // retained (normative, design §6)
                 items = items,
                 reason = reason,
-                verified = verifiedDelete,
+                // Item 6: a removal or leave whose proof verified is verified too (it used to read as unverified).
+                verified = verifiedDelete || proof in VERIFIED_REMOVAL_PROOFS,
                 purgeAt = info?.purgeAt,
                 deleteId = info?.deleteId,
                 parked = parked,
                 expungeAt = expungeAt,
+                proof = proof,
             ),
         )
         hardDropLocal(vaultId)
@@ -2106,6 +2185,10 @@ class SyncEngine(
      * unverifiable row must not suppress the notice when the genuine wrapHash arrives on a
      * later pull, nor (via a fabricated huge seq) mute future offers. A verified completion
      * also retracts any earlier transfer-anomaly warning for the vault.
+     *
+     * Sharing review 2026-11: under a key this device does not trust no offer is listed and no completion verifies (item
+     * 3, [lifecycleKeyTrusted]); and a completion away from this account, while its own record says it owns the vault,
+     * is believed only for an offer this account made and did not cancel (finding 1, [decideHeldHandovers]).
      */
     private fun applyTransferState(vault: WireVault, noticeable: Boolean) {
         val vaultId = vault.vaultId
@@ -2115,8 +2198,9 @@ class SyncEngine(
         incomingByVault.remove(vaultId)
         val crypto = account.cryptoProvider()
         val seenSeq = cache.lastVerifiedTransferSeq(vaultId)
+        val keyTrusted = lifecycleKeyTrusted(vaultId)
         val pt = vault.pendingTransfer
-        if (pt != null && pt.toUserId == account.userId && pt.expiresAt > nowMs() && pt.seq > seenSeq) {
+        if (keyTrusted && pt != null && pt.toUserId == account.userId && pt.expiresAt > nowMs() && pt.seq > seenSeq) {
             runCatching {
                 val key = account.lifecycleKeyFor(vaultId)
                 val expected = LifecycleProof.offer(crypto, key, vaultId, pt.offerId, pt.toUserId, pt.expiresAt, pt.seq)
@@ -2134,12 +2218,19 @@ class SyncEngine(
         val lt = vault.lastTransfer
         if (lt != null && lt.seq > seenSeq) {
             val wrapHash = lt.wrapHash
-            val verified = wrapHash != null && runCatching {
+            val verified = keyTrusted && wrapHash != null && runCatching {
                 val key = account.lifecycleKeyFor(vaultId)
                 val expected = LifecycleProof.acceptFromHash(crypto, key, vaultId, lt.offerId, lt.newOwnerUserId, lt.seq, wrapHash)
                 LifecycleProof.verify(expected, lt.acceptProof)
             }.getOrDefault(false)
             val name = account.decryptVaultName(vaultId, vault.metaBlob) ?: VAULT_NAME_FALLBACK
+            // Finding 1: any member can make a proof that checks. Away from this account while its record says it owns
+            // the vault, the handover waits until this device has read the account's record of its own offers.
+            if (verified && lt.newOwnerUserId != account.userId && ownsVault(vaultId) && !isOwnLiveOffer(vaultId, lt.offerId, lt.newOwnerUserId)) {
+                heldHandovers[vaultId] = noticeable || heldHandovers[vaultId] == true
+                return
+            }
+            heldHandovers.remove(vaultId)
             if (verified) {
                 cache.setLastVerifiedTransferSeq(vaultId, lt.seq)
                 // A6b: a verified transfer to someone else ends this account's ownership evidence (only ever removes).
@@ -2168,6 +2259,33 @@ class SyncEngine(
         noticeList.add(n)
     }
 
+    /** Finding 1: vaults whose handover away from this account [applyTransferState] held back (vaultId → noticeable). */
+    private val heldHandovers = LinkedHashMap<String, Boolean>()
+
+    /**
+     * Finding 1: decide the handovers [applyTransferState] held back, once this device has read the account's record (run
+     * after a successful account-state read in [sync]). An offer this account made and did not cancel, or a vault its
+     * record no longer says it owns: the handover is applied as any other. Anything else is a `transfer-anomaly`
+     * ([TRANSFER_NOT_OFFERED]), and the account's ownership record is kept, so its devices go on treating the vault as its
+     * own; the transfer's seq is not taken as verified.
+     */
+    private fun decideHeldHandovers() {
+        for ((vaultId, noticeable) in heldHandovers.toList()) {
+            heldHandovers.remove(vaultId)
+            val vault = cache.vaults().find { it.vaultId == vaultId } ?: continue
+            val lt = vault.lastTransfer ?: continue
+            if (!account.hasVault(vaultId)) continue
+            if (isOwnLiveOffer(vaultId, lt.offerId, lt.newOwnerUserId) || !ownsVault(vaultId)) {
+                applyTransferState(vault, noticeable)
+                continue
+            }
+            if (noticeable) {
+                val name = account.decryptVaultName(vaultId, vault.metaBlob) ?: VAULT_NAME_FALLBACK
+                pushNotice(LifecycleNotice(account.newItemId(), vaultId, name, "transfer-anomaly", newOwnerUserId = lt.newOwnerUserId, reason = TRANSFER_NOT_OFFERED))
+            }
+        }
+    }
+
     // ==== vault lifecycle: read surfaces ====
 
     /** The pending lifecycle notices for the UI banner (spec 03 §11). */
@@ -2191,6 +2309,7 @@ class SyncEngine(
                 verified = h.verified,
                 purgeAt = h.purgeAt,
                 expungeAt = h.expungeAt,
+                proof = h.proof,
             )
         }
     }
@@ -2201,6 +2320,20 @@ class SyncEngine(
     /** The pending offer on a vault (for the owner's "Ownership offer to …" chip), or null. */
     fun pendingTransferFor(vaultId: String): PendingTransfer? =
         cache.vaults().find { it.vaultId == vaultId }?.pendingTransfer
+
+    /**
+     * Whether the pending offer on [vaultId] is this account's own (sharing review 2026-11, item 5): its proof checks under
+     * the vault's key, one this device trusts, and it is an offer this account made and did not cancel. Otherwise it is
+     * only what the server reports, and a screen must not say "You asked".
+     */
+    fun pendingTransferIsOwn(vaultId: String): Boolean {
+        val pt = pendingTransferFor(vaultId) ?: return false
+        if (!lifecycleKeyTrusted(vaultId) || !isOwnLiveOffer(vaultId, pt.offerId, pt.toUserId)) return false
+        return runCatching {
+            val expected = LifecycleProof.offer(account.cryptoProvider(), account.lifecycleKeyFor(vaultId), vaultId, pt.offerId, pt.toUserId, pt.expiresAt, pt.seq)
+            LifecycleProof.verify(expected, pt.proof)
+        }.getOrDefault(false)
+    }
 
     // ==== vault lifecycle: actions (spec 03 §11) ====
 
@@ -2293,37 +2426,61 @@ class SyncEngine(
         reconcileSync()
     }
 
-    /** TRANSFER offer. seq = the vault's last completed transfer seq + 1 (= transferSeq+1). */
+    /**
+     * TRANSFER offer. seq = the vault's last completed transfer seq + 1 (= transferSeq+1). Sharing review 2026-11: only to
+     * a member verified on this device whose key the server still serves (item 4; [MemberNotVerifiedException] otherwise),
+     * and the offer is on this account's record before it is sent (finding 1); one the server refuses is marked cancelled.
+     */
     suspend fun offerTransfer(vaultId: String, toUserId: String) {
         requireOwned(vaultId) // A6b: an owner-only action, never on the server's role label alone
+        val target = api.vaultMembers(vaultId).firstOrNull { it.userId == toUserId } ?: throw MemberNotVerifiedException(toUserId)
+        if (memberPinState(toUserId, target.identityPub) != MemberPinState.PINNED) throw MemberNotVerifiedException(toUserId)
         val seq = (cache.vaults().find { it.vaultId == vaultId }?.lastTransfer?.seq ?: 0L) + 1
         val offerId = account.newItemId()
         val expiresAt = nowMs() + 14 * DAY_MS
         val key = account.lifecycleKeyFor(vaultId)
         val proof = LifecycleProof.offer(account.cryptoProvider(), key, vaultId, offerId, toUserId, expiresAt, seq)
-        api.offerTransfer(vaultId, TransferOfferRequest(toUserId, offerId, expiresAt, proof))
+        recordOwnOffers(listOf(OwnOffer(vaultId, offerId, toUserId, nowMs())))
+        try {
+            api.offerTransfer(vaultId, TransferOfferRequest(toUserId, offerId, expiresAt, proof))
+        } catch (e: ApiException) {
+            // Refused: the offer does not stand, so a handover of it later is never taken for this account's own.
+            cancelOwnOffers { it.offerId == offerId }
+            throw e
+        }
         reconcileSync()
     }
 
-    /** TRANSFER cancel (owner) or decline (target). */
+    /**
+     * TRANSFER cancel (owner) or decline (target). The owner's offers for the vault are on record as cancelled before the
+     * cancel is sent (finding 1): the server can keep serving the offer and complete it, and this account's devices then
+     * warn instead of taking it for a handover this account made.
+     */
     suspend fun cancelTransfer(vaultId: String) {
+        cancelOwnOffers { it.vaultId == vaultId }
         api.cancelTransfer(vaultId)
         incomingByVault.remove(vaultId)
         reconcileSync()
     }
 
     /**
-     * TRANSFER accept (design §4 TRANSFER 3). Re-verifies the offer proof under the held VK
-     * BEFORE acting, mints + round-trip-verifies the owner wrap (same construction as vault
-     * creation), and posts acceptProof over sha256(wrappedVk). Fails loudly rather than
-     * post an unopenable wrap.
+     * TRANSFER accept (design §4 TRANSFER 3) of the offer [offerId] shown to the person. Re-verifies the offer proof under
+     * the held VK BEFORE acting, mints + round-trip-verifies the owner wrap (same construction as vault creation), and
+     * posts acceptProof over sha256(wrappedVk). Fails loudly rather than post an unopenable wrap.
      */
-    suspend fun acceptTransfer(vaultId: String) {
+    suspend fun acceptTransfer(vaultId: String, offerId: String) {
         val pt = cache.vaults().find { it.vaultId == vaultId }?.pendingTransfer
         if (pt == null || pt.toUserId != account.userId) {
             throw ApiException(409, "transfer_not_pending", "no ownership offer pending for you")
         }
+        // Sharing review 2026-11 (item 2): only the offer the person was shown ([incomingTransfers]), and only one newer
+        // than the last handover this device verified.
+        if (pt.offerId != offerId || incomingByVault[vaultId]?.offerId != offerId) {
+            throw ApiException(409, "transfer_not_pending", "this ownership offer is no longer the one shown")
+        }
+        if (pt.seq <= cache.lastVerifiedTransferSeq(vaultId)) throw ApiException(409, "transfer_not_pending", "this ownership offer was already used")
         if (pt.expiresAt <= nowMs()) throw ApiException(409, "transfer_not_pending", "this ownership offer has expired")
+        if (!lifecycleKeyTrusted(vaultId)) throw ApiException(400, "not_transfer_target", "the offer could not be verified with the vault's key")
         val key = account.lifecycleKeyFor(vaultId)
         val crypto = account.cryptoProvider()
         val expected = LifecycleProof.offer(crypto, key, vaultId, pt.offerId, pt.toUserId, pt.expiresAt, pt.seq)

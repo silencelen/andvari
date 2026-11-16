@@ -210,7 +210,10 @@ recoveryAuthKey = HKDF-SHA-256(ikm = recoverySecret, salt = empty, info = "andva
   record is removed by hand. **Amended for account deletion (spec 03 §13, 2026-11-10):** the device
   that RAN the deletion removes its own records when the server confirms it — the userId-keyed pin,
   and the email binding only where it names the deleted userId — so the address can register again
-  there; every OTHER device that unlocked the old account keeps refusing an account re-registered
+  there. A native app, which then forgets the account's server altogether (spec 03 §13, 2026-11-15),
+  removes every record it holds for that origin: another account that had unlocked there on that
+  device is pinned afresh at its next unlock on it, as after a reinstall. Every OTHER device that
+  unlocked the old account keeps refusing an account re-registered
   under that email until its record is removed by hand. That refusal is the backstop working: no
   device can tell a new account at the same address from a server that swapped the account, so the
   residual is accepted (spec 05 R19(c)), never relaxed.

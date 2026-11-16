@@ -3,6 +3,7 @@ package io.silencelen.andvari.core.client.session
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.MemoryDeviceState
+import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.SelfIdentityPin
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultCache
@@ -88,6 +89,20 @@ internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPe
         stored = null
     }
 
+    /** The origins forgotten ([forgetServer]), in order. */
+    val forgotten = mutableListOf<String>()
+
+    override fun forgetServer(originKey: String) {
+        forgotten += originKey
+        if (stored?.baseUrl.isNullOrEmpty() || OriginCanon.originKey(stored!!.baseUrl) == originKey) stored = null
+        origins.remove(originKey)
+        if (baseUrl?.let(OriginCanon::originKey) == originKey) {
+            pendingServer = null
+            lastSyncAt = 0L
+            baseUrl = null
+        }
+    }
+
     override var mustChangePassword = false
     override var highWaterWallMs = 0L
     override var lastSyncAt = 0L
@@ -138,6 +153,17 @@ internal class FakeNamespaces : NamespaceStorage {
 
     override fun deleteVaultCache(originKey: String, userId: String) {
         deleted += "$originKey/$userId"
+    }
+
+    /** The origins forgotten ([deleteOrigin]), in order. */
+    val deletedOrigins = mutableListOf<String>()
+
+    override fun deleteOrigin(originKey: String): List<String> {
+        deletedOrigins += originKey
+        val users = (devices.keys + caches.keys + opened).filter { it.startsWith("$originKey/") }.map { it.substringAfter('/') }.distinct()
+        devices.keys.removeAll { it.startsWith("$originKey/") }
+        caches.keys.removeAll { it.startsWith("$originKey/") }
+        return users
     }
 }
 

@@ -23,6 +23,7 @@ import io.silencelen.andvari.core.client.session.FakeNamespaces
 import io.silencelen.andvari.core.client.session.FakeQuickKeys
 import io.silencelen.andvari.core.client.session.FakeSessionPersistence
 import io.silencelen.andvari.core.client.session.HttpClients
+import io.silencelen.andvari.core.client.session.QuickEnroll
 import io.silencelen.andvari.core.client.session.QuickGate
 import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.SessionPersistence
@@ -115,7 +116,7 @@ open class SessionControllerTest {
     private val headers = headersOf(HttpHeaders.ContentType, "application/json")
 
     /** Everything one test drives, built on the test's event loop. */
-    private inner class Rig(ui: CoroutineContext, origin: String?) {
+    private inner class Rig(private val ui: CoroutineContext, origin: String?) {
         val clocks = FakeClocks(wall = 100 * DAY, mono = 5 * DAY, boot = "7")
         val store = newStore(origin)
         val namespaces = FakeNamespaces()
@@ -158,6 +159,12 @@ open class SessionControllerTest {
         val pendingLog = InMemoryFillSnapshots()
         val pendingFiles = InMemoryBlobs()
         val controller = SessionController(
+            store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
+            pendingLog, pendingFiles,
+        )
+
+        /** A new process of the app over what this one left on the device: another controller on the same stores. */
+        fun newProcess() = SessionController(
             store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
             pendingLog, pendingFiles,
         )
@@ -1196,7 +1203,15 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Failed(MembersCopy.OWNER_ALREADY), controller.offerOwnership(reg.userId))
         assertEquals(ActionResult.Failed(MembersCopy.MEMBER_GONE), controller.offerOwnership("00000000-0000-4000-8000-0000000000ff"))
         assertEquals(ActionResult.Failed(MembersCopy.DISABLED_CANNOT_OWN), controller.offerOwnership(cy.userId))
+        // Sharing review 2026-11 (item 4): only someone verified on this device can be made the owner.
+        assertEquals(MemberCheck.NOT_VERIFIED, controller.state.members?.members?.single { it.userId == bea.userId }?.check)
+        assertEquals(ActionResult.Failed(MembersCopy.VERIFY_BEFORE_HANDOVER), controller.offerOwnership(bea.userId))
         assertTrue(server.offers.isEmpty())
+        assertEquals(ActionResult.Ok, controller.verifyListedMember(bea.userId))
+        assertEquals(ActionResult.Ok, controller.verifyWithCode(bea.code))
+        val verifiedBea = controller.state.members?.members?.single { it.userId == bea.userId }
+        assertEquals(MemberCheck.VERIFIED, verifiedBea?.check)
+        assertEquals("Bea", verifiedBea?.verifiedName, "named as recorded when verified")
 
         assertEquals(ActionResult.Ok, controller.offerOwnership(bea.userId))
         val (vaultId, offer) = server.offers.single()
@@ -1207,7 +1222,7 @@ open class SessionControllerTest {
         val left = offer.expiresAt - kotlinx.datetime.Clock.System.now().toEpochMilliseconds()
         assertTrue(left in 13 * DAY..14 * DAY, "$left")
         val shown = assertNotNull(controller.state.members?.offer)
-        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt), shown)
+        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt, mine = true), shown, "this account's own offer")
         assertTrue(assertNotNull(controller.state.notice).startsWith("Asked Bea to take over “Family”."))
         assertEquals(ActionResult.Failed(MembersCopy.OFFER_PENDING), controller.offerOwnership(bea.userId), "one offer at a time")
 
@@ -1216,6 +1231,15 @@ open class SessionControllerTest {
         assertNull(controller.state.members?.offer)
         assertEquals(MembersCopy.OFFER_CANCELLED, controller.state.notice)
         assertEquals("owner", controller.state.members?.members?.single { it.you }?.role, "nothing changed")
+
+        // Item 5: an offer the server lists after it was cancelled is only the server's word, never "You asked".
+        server.vaults[family] = server.vaults.getValue(family).copy(
+            rev = ++server.rev, pendingTransfer = io.silencelen.andvari.core.model.PendingTransfer(bea.userId, offer.offerId, offer.proof, offer.expiresAt, 1),
+        )
+        assertEquals(ActionResult.Ok, controller.refresh())
+        controller.closeMembers()
+        assertEquals(ActionResult.Ok, controller.openMembers(family))
+        assertEquals(OwnerOfferView(bea.userId, "Bea", offer.expiresAt, mine = false), controller.state.members?.offer)
     }
 
     /**
@@ -1409,8 +1433,17 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.leaveSharedVault(boat))
         assertTrue(controller.state.legacyReviews.isEmpty())
         assertTrue(assertNotNull(controller.state.sharing).vaults.none { it.vaultId == boat })
+
+        // Sharing review 2026-11 (item 8): the server's owner label never keeps this account in a vault awaiting review.
+        val raft = shareTheOlderWay(owner("ray@example.com", "Ray"), "Raft")
+        server.grants[raft] = server.grants.getValue(raft).copy(role = "owner")
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(listOf(raft), controller.state.legacyReviews.map { it.vaultId })
+        assertEquals(ActionResult.Ok, controller.leaveSharedVault(raft))
+        assertNull(server.vaults[raft], "the leave was sent")
+        assertTrue(controller.state.legacyReviews.isEmpty(), "and it is no longer awaiting review here")
         controller.lock()
-        assertTrue(controller.state.legacyReviews.isEmpty())
+        assertTrue(controller.state.legacyReviews.isEmpty(), "after the lock")
     }
 
     /**
@@ -2431,47 +2464,460 @@ open class SessionControllerTest {
         assertEquals(EMAIL, open.email)
         val preview = assertNotNull(open.preview)
         assertTrue(preview.totpRequired)
-        assertEquals(listOf(DeletionCopy.blocker("shared_vault", null, 2), DeletionCopy.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
+        assertEquals(listOf(DeletionCopy.IPHONE.blocker("shared_vault", null, 2), DeletionCopy.IPHONE.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
         assertTrue(preview.deleted.any { it.startsWith("Your Personal vault") })
-        assertEquals(DeletionCopy.leaves(listOf(null)), preview.left)
+        assertEquals(DeletionCopy.IPHONE.leaves(listOf(null)), preview.left)
 
         // Checked here first, and nothing sent: the address, the code the account needs, the master password.
-        assertEquals(ActionResult.Failed(DeletionCopy.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
-        assertEquals(ActionResult.Failed(DeletionCopy.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
         assertEquals(ActionResult.Failed(HouseholdCopy.REAUTH_FAILED), controller.deleteAccount(EMAIL, "not it", "123456"))
         assertTrue(sent.isEmpty(), "a wrong password never leaves this device")
 
         // Refused for blockers: the server's show, and nothing was deleted.
-        assertEquals(ActionResult.Failed(DeletionCopy.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
         assertEquals(EMAIL, sent.single().confirmEmail)
         assertEquals("123456", sent.single().totp)
         assertEquals(AppScreen.VAULT, controller.state.screen)
 
         // No answer that says what happened: never "deleted" or "not deleted"; a check finds the account still here.
         fail502 = true
-        assertEquals(ActionResult.Failed(DeletionCopy.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertTrue(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
         assertEquals(ActionResult.Ok, controller.checkAccountDeletion())
         assertFalse(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
-        assertEquals(DeletionCopy.NOT_DELETED_AFTER_CHECK, controller.state.notice)
+        assertEquals(DeletionCopy.IPHONE.NOT_DELETED_AFTER_CHECK, controller.state.notice)
         fail502 = false
 
         // The blockers resolved: a wrong code is refused, the right one deletes the account.
         blockers = emptyList()
-        assertEquals(ActionResult.Failed(DeletionCopy.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
+        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
         val namespace = "$homeKey/${reg.userId}"
         assertTrue(namespaces.devices.containsKey(namespace))
         assertNotNull(queue.key, "the save key the extensions seal to")
+        // The self-identity records this unlock left: the address answered with another account is the spec 01 §5 fault.
+        val newAccountAtTheSameAddress = "00000000-0000-4000-8000-0000000000aa"
+        val pins = store.origin(homeKey).identityPins()
+        pins.record(reg.userId, EMAIL, enrolled.account)
+        assertTrue(runCatching { pins.pinFor(EMAIL, newAccountAtTheSameAddress) }.isFailure)
+        // What else this device keeps: of another account that signed in to the same server here and signed out since
+        // (its device state, a stamp, its self-identity pin), and of another server, left by an earlier switch.
+        val earlier = "00000000-0000-4000-8000-0000000000bb"
+        val otherKey = OriginCanon.originKey("https://other.example")
+        namespaces.deviceState(homeKey, earlier).set("personal.last", "v1")
+        namespaces.deviceState(otherKey, earlier).set("personal.last", "v1")
+        store.origin(homeKey).setPasswordStamp(earlier, io.silencelen.andvari.core.client.session.PasswordStamp(10, 5, 5, "7"))
+        store.origin(otherKey).policyFetchedAt = 5
+        store.lastSyncAt = 7
+        assertNotNull(snapshots.read(), "the snapshot the extensions read")
+        assertEquals(HOME, shared.last(), "the server's address, as the extensions are told it")
+
         assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
-        assertEquals(DeletionCopy.deleted(EMAIL), controller.state.notice)
+        assertEquals(DeletionCopy.IPHONE.deleted(EMAIL), controller.state.notice)
         assertNull(controller.state.accountDeletion)
+        assertNull(controller.state.server, "no server chosen")
+        assertNull(controller.state.policy)
+        assertNull(controller.state.accountEmail)
+
+        // Nothing of the account (owner decision 2026-11-15: the device is left as a fresh install)...
         assertNull(store.load(), "no session and no tokens")
-        assertTrue(namespace in namespaces.deleted, "the vault cache")
-        assertFalse(namespaces.devices.containsKey(namespace), "the device state")
-        assertTrue(quickKeys.wiped.isNotEmpty(), "quick unlock")
+        assertNull(snapshots.read(), "the snapshot the extensions read")
         assertNull(queue.key, "the save queue and its key")
+        assertTrue(queue.entries().isEmpty())
+        assertNull(appliedLog.read(), "the list of automatic saves")
+        assertNull(pendingLog.read(), "kept saves")
+        assertTrue(pendingFiles.ids().isEmpty(), "and their files")
         assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
+        // ...and nothing of its server: its address, and everything kept under its origin, whoever's.
+        assertNull(store.baseUrl, "the server's address")
+        assertNull(shared.last(), "nor the copy of it the extensions read")
+        assertEquals(listOf(homeKey), namespaces.deletedOrigins, "every namespace at that server")
+        assertFalse(namespaces.devices.keys.any { it.startsWith("$homeKey/") }, "every device state there")
+        assertTrue("$homeKey/${reg.userId}" in quickKeys.wiped && "$homeKey/$earlier" in quickKeys.wiped, "every quick-unlock key there: ${quickKeys.wiped}")
+        assertNull(store.origin(homeKey).passwordStamp(earlier), "the stamps")
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, newAccountAtTheSameAddress), "the self-identity records: the address can register again here")
+        assertEquals(0L, store.origin(homeKey).policyFetchedAt, "the policy mirrors")
+        assertEquals(0L, store.lastSyncAt)
+        // §4.2: another server's namespace is not this deletion's.
+        assertTrue(namespaces.devices.containsKey("$otherKey/$earlier"))
+        assertEquals(5L, store.origin(otherKey).policyFetchedAt)
+        assertFalse(quickKeys.wiped.any { it.startsWith("$otherKey/") })
+
+        // A new process starts where a first launch does: at the server choice, with nothing to probe.
+        calls.clear()
+        val next = newProcess()
+        try {
+            next.startAndLand()
+            assertEquals(AppScreen.CHOOSE_SERVER, next.state.screen)
+            assertNull(next.state.server)
+            assertNull(next.state.accountEmail)
+            assertTrue(calls.isEmpty(), "no server, no probe")
+        } finally {
+            next.close()
+        }
+    }
+
+    /**
+     * After a deletion the device is as a fresh install, and a vault made on it afterwards works like any other: the same
+     * address can enroll again as a new account (the self-identity records of the deleted one are gone), the app opens
+     * the new vault, the snapshot the extensions read is written again, and the AutoFill extension opens it with the new
+     * account's quick-unlock key. In the same process as the deletion, which holds whatever the deleted session left in
+     * memory.
+     */
+    @Test
+    fun aVaultMadeAfterADeletionOpensInTheAppAndInTheExtension() = test {
+        unlockedWithAPersonalVault()
+        twoStepServer()
+        store.origin(homeKey).identityPins().record(reg.userId, EMAIL, enrolled.account)
+        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
+        routes["/account/delete/preview"] = {
+            val p = io.silencelen.andvari.core.model.AccountDeletePreview(emptyList(), deletedVaults = listOf(reg.personalVault.vaultId), leftVaults = emptyList(), totpRequired = false)
+            respond(json.encodeToString(io.silencelen.andvari.core.model.AccountDeletePreview.serializer(), p), HttpStatusCode.OK, headers)
+        }
+        routes["/account/delete"] = { respond("""{"deletedAt":5000}""", HttpStatusCode.OK, headers) }
+        assertEquals(ActionResult.Ok, controller.openAccountDeletion())
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, ""))
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability(), "nobody is signed in: the extension says to open the app")
+        assertFalse(quickKeys.isEnrolled(homeKey, reg.userId), "the deleted account's quick-unlock key is gone")
+        routes["/account/keys"] = { throw IOException("unreachable") } // the deleted account's keys are served no more
+
+        // The same server again, through the Trust Gate as on a first launch, and a new account at the same address.
+        assertIs<ServerChoice.NeedsGate>(controller.chooseServer(HOME))
+        assertEquals(ActionResult.Ok, controller.confirmTrustGate())
+        assertEquals(AppScreen.WELCOME, controller.state.screen)
+        assertEquals(HOME, shared.last(), "the extensions are told the server again")
+        var newUserId = ""
+        routes["/auth/register"] = { request ->
+            val req = json.decodeFromString(RegisterRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            newUserId = req.userId
+            val keys = AccountKeys(req.kdfSalt, req.kdfParams, req.wrappedUvk, req.encryptedIdentitySeed, req.identityPub, "", personalWrap = req.personalWrap)
+            respond(json.encodeToString(SessionResponse.serializer(), SessionResponse(req.userId, DEVICE, "a2", "r2", keys, false, recoveryPieceId = "piece-2")), HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = { respond(EMPTY_SYNC, HttpStatusCode.OK, headers) }
+        assertEquals(ActionResult.Ok, controller.enroll(EnrollForm("tok", EMAIL, "", PASSWORD, false, "")))
+        assertEquals(ActionResult.Ok, controller.confirmRecoveryPhrase(assertNotNull(controller.recoveryPhrase())))
+        assertEquals(AppScreen.VAULT, controller.state.screen, "the new vault opens")
+        assertNotEquals(reg.userId, newUserId, "a new account, at the address of the deleted one")
+        assertEquals(newUserId, store.load()?.userId)
+        settle { queue.key != null } // the key the extensions seal saves to is published again
+
+        // The extension: nothing until Face ID is on for the new account (as after any sign-in), then the new vault.
+        val fill = autofill()
+        assertEquals(FillAvailability.OpenApp(AutofillVault.NOT_ENROLLED), fill.availability())
+        var uvk: ByteArray? = null
+        quickKeys.enrollNext = { account -> uvk = account.uvkCopyForPlatformWrap(); QuickEnroll.Ok }
+        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
+        assertEquals(FillAvailability.Ready(EMAIL), fill.availability(), "the snapshot is the new account's")
+        quickKeys.next = { QuickRecover.Ok(assertNotNull(uvk).copyOf()) }
+        assertEquals(FillUnlock.Unlocked, fill.unlock(BiometricHost.None), "the extension opens the vault made after the deletion")
+        fill.close()
+    }
+
+    // ---- vault health ----
+
+    /**
+     * Vault health (the Android app's screen, core's rules): weak and reused passwords; a breach check that sends only
+     * 5-character hash prefixes, one request per range, and keeps no verdict for a range that failed or a login changed
+     * since; copies merged, or one kept with the other's password in its history; and a check run that writes only the
+     * verdict a person gives, offering the trash for a login that is gone. A lock forgets it all.
+     */
+    @Test
+    fun vaultHealthChecksBreachesByPrefixCleansUpCopiesAndRecordsOnlyWhatThePersonSays() = test {
+        unlockedWithAPersonalVault()
+        onlineServer()
+        for (input in listOf(
+            LoginInput("Bank", "me", "Brisk-Otter-Lamp-41", listOf("https://bank.example"), "", "", false),
+            LoginInput("Bank again", "me", "Brisk-Otter-Lamp-41", listOf("https://bank.example/login"), "", "", false),
+            LoginInput("Shop", "sam", "Quiet-Maple-Door-73", listOf("https://shop.example"), "", "", false),
+            LoginInput("Shop old", "sam", "Older-Pine-Gate-19", listOf("https://shop.example"), "", "", false),
+            LoginInput("Forum", "fam", "hunter2", listOf("https://forum.example"), "", "", false),
+        )) assertEquals(ActionResult.Ok, controller.saveLogin(null, input))
+        val hibp = io.silencelen.andvari.core.crypto.Hibp
+        val breached = hibp.sha1UpperHex(crypto, "hunter2")
+        val unreachable = hibp.prefix(hibp.sha1UpperHex(crypto, "Quiet-Maple-Door-73"))
+        val asked = mutableListOf<String>()
+        prefixRoutes["/api/v1/hibp/range/"] = { request ->
+            val prefix = request.url.encodedPath.substringAfterLast('/')
+            asked += prefix
+            if (prefix == unreachable) throw IOException("unreachable")
+            val body = if (prefix == hibp.prefix(breached)) "${hibp.suffix(breached)}:4200\r\n00000000000000000000000000000000000:3" else "00000000000000000000000000000000000:1"
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
+        }
+
+        controller.openHealth()
+        val opened = assertNotNull(controller.state.health)
+        assertEquals(6, opened.tiles.logins, "the five saved here and the one the cache held")
+        assertNull(opened.tiles.breached, "never checked is not none")
+        assertEquals(HealthCopy.RUN_A_SCAN, opened.tiles.breachedHint)
+        val forum = opened.passwords.single { it.name == "Forum" }
+        assertTrue(forum.weak)
+        assertEquals(1, forum.reused, "the cached login has the same password")
+        assertNull(forum.breaches)
+        val exact = opened.duplicates.single { it.exact }
+        val differs = opened.duplicates.single { !it.exact }
+        assertEquals(setOf("Bank", "Bank again"), exact.members.map { it.name }.toSet())
+        assertNotNull(exact.mergeConfirm)
+        assertNull(exact.mergeRefusal)
+        assertEquals(setOf("Shop", "Shop old"), differs.members.map { it.name }.toSet())
+        assertEquals(6, opened.tiles.unchecked)
+        assertTrue(opened.staleness.all { it.neverChecked })
+
+        assertEquals(ActionResult.Ok, controller.checkBreaches())
+        val checked = assertNotNull(controller.state.health)
+        assertNull(checked.scan)
+        assertTrue(checked.scanned)
+        assertEquals(HealthCopy.SCAN_INCOMPLETE, checked.message)
+        assertTrue(asked.isNotEmpty() && asked.all { it.length == 5 }, "only 5 hex characters of a hash leave the device")
+        assertEquals(asked.size, asked.toSet().size, "each range is asked for once")
+        assertTrue(asked.size <= 4, "one request per range, for 4 distinct passwords")
+        assertEquals(4200L, checked.passwords.single { it.name == "Forum" }.breaches)
+        assertEquals(4200L, checked.passwords.single { it.name == "Example" }.breaches)
+        assertEquals(0L, checked.passwords.single { it.name == "Bank" }.breaches)
+        assertNull(checked.passwords.single { it.name == "Shop" }.breaches, "its range failed: no verdict, never none")
+        assertEquals(2, checked.tiles.breached)
+        assertEquals(HealthCopy.INCOMPLETE, checked.tiles.breachedHint)
+
+        // Copies with the same password merge into one; the survivor changed, so its verdict is retired.
+        assertEquals(ActionResult.Ok, controller.mergeDuplicates(exact.signature))
+        val merged = assertNotNull(controller.state.health)
+        assertEquals(HealthCopy.merged(1), merged.message)
+        assertTrue(merged.duplicates.none { it.exact })
+        val survivor = controller.state.items.single { it.name.startsWith("Bank") }
+        assertNull(merged.passwords.single { it.itemId == survivor.itemId }.breaches, "changed since the check")
+        assertEquals(ActionResult.Failed(HealthCopy.GROUP_CHANGED), controller.mergeDuplicates(exact.signature), "the group is gone")
+
+        // Copies with different passwords: one is kept, and the other's password goes into its history first.
+        val shop = differs.members.single { it.name == "Shop" }
+        assertNull(shop.keepRefusal)
+        assertNotNull(shop.keepConfirm)
+        assertEquals(ActionResult.Ok, controller.keepDuplicate(differs.signature, shop.itemId))
+        assertEquals(HealthCopy.kept(1), controller.state.health?.message)
+        assertTrue(controller.state.items.none { it.name == "Shop old" })
+        assertEquals(1, assertNotNull(controller.itemDetail(shop.itemId)).previousPasswords)
+
+        // The check run: a person signs in themselves and says what happened; only that verdict is written.
+        controller.startCheckRun(neverCheckedOnly = true)
+        val first = assertNotNull(controller.state.health?.run)
+        assertEquals(1, first.position)
+        assertEquals(4, first.total, "the never-checked logins left")
+        assertEquals(ActionResult.Failed(HealthCopy.CHOOSE_RESULT), controller.recordCheck(first.itemId, "maybe"))
+        assertEquals(first.itemId, controller.state.health?.run?.itemId, "a refusal keeps the run where it is")
+        assertEquals(ActionResult.Ok, controller.recordCheck(first.itemId, "ok"))
+        assertNull(controller.state.health?.message)
+        assertEquals(2, controller.state.health?.run?.position)
+        controller.skipCheck()
+        val third = assertNotNull(controller.state.health?.run)
+        assertEquals(3, third.position)
+        assertEquals(ActionResult.Ok, controller.recordCheck(third.itemId, "gone"))
+        assertEquals(third.itemId, controller.state.health?.offerDelete?.itemId, "gone offers the trash")
+        assertEquals(ActionResult.Ok, controller.trashGoneLogin())
+        assertEquals(HealthCopy.TRASHED, controller.state.health?.message)
+        assertNull(controller.state.health?.offerDelete)
+        assertTrue(controller.state.items.none { it.itemId == third.itemId })
+        val fourth = assertNotNull(controller.state.health?.run)
+        assertEquals(ActionResult.Ok, controller.recordCheck(fourth.itemId, "blocked"))
+        assertNull(controller.state.health?.run)
+        assertEquals(HealthCopy.RUN_FINISHED, controller.state.health?.message)
+        val after = assertNotNull(controller.state.health)
+        assertTrue(after.staleness.none { it.itemId == fourth.itemId }, "couldn't finish: snoozed, off the list")
+        assertEquals("Checked recently: it worked", after.staleness.single { it.itemId == first.itemId }.state)
+        controller.setHealthShowSnoozed(true)
+        assertTrue(assertNotNull(controller.state.health).staleness.single { it.itemId == fourth.itemId }.snoozed)
+        assertEquals(ActionResult.Ok, controller.unsnoozeLogin(fourth.itemId))
+        assertEquals(HealthCopy.BACK_ON_THE_LIST, controller.state.health?.message)
+        assertFalse(assertNotNull(controller.state.health).staleness.single { it.itemId == fourth.itemId }.snoozed)
+
+        controller.lock()
+        assertNull(controller.state.health)
+    }
+
+    // ---- importing a CSV export ----
+
+    /**
+     * A CSV export is parsed and planned on this device against the items already in the vault (a login already there is
+     * skipped, a duplicate in the file merged, a row that can't be read named); nothing is sent until Import, and an
+     * interrupted import is finished by Retry with the same items under the same ids. The file's bytes are zeroed once read.
+     */
+    @Test
+    fun aCsvExportIsPlannedAgainstTheVaultThenImportedIntoItOnce() = test {
+        unlockedWithAPersonalVault()
+        // A server holding the personal vault's row, as a synced device sees it, and the items pushed to it.
+        val server = VaultServer(this)
+        val rows = mutableListOf<WireItem>()
+        val sent = mutableListOf<List<String>>()
+        val applying: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            sent += body.mutations.map { it.itemId }
+            val results = body.mutations.map { m ->
+                val rev = ++server.rev
+                rows.removeAll { it.itemId == m.itemId }
+                val up = m.item
+                rows += WireItem(m.itemId, m.vaultId, rev, 3_000, 3_000, deleted = up == null, conflict = false, formatVersion = up?.formatVersion ?: 1, attachmentIds = up?.attachmentIds.orEmpty(), blob = up?.blob)
+                io.silencelen.andvari.core.model.MutationResult(m.mutationId, "applied", newItemRev = rev)
+            }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(server.rev, results)), HttpStatusCode.OK, headers)
+        }
+        routes["/sync/push"] = applying
+        routes["/sync"] = { request ->
+            val since = request.url.parameters["since"]?.toLongOrNull() ?: 0L
+            val body = io.silencelen.andvari.core.model.SyncResponse(++server.rev, since == 0L, server.vaults.values.toList(), server.grants.values.toList(), rows.filter { it.rev > since }, emptyList())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+        }
+        assertEquals(ActionResult.Ok, controller.refresh())
+        val unrecognized = "hello,world\n1,2\n".encodeToByteArray()
+        assertEquals(ActionResult.Failed(ImportCopy.UNRECOGNIZED), controller.importCsv(unrecognized))
+        assertNull(controller.state.csvImport)
+
+        val file = (
+            "name,url,username,password,note\n" +
+                "Example,https://login.example.com/x,fam,hunter2,\n" +
+                "Bank,https://bank.example,me,Brisk-Otter-Lamp-41,\n" +
+                "Bank,https://bank.example,me,Brisk-Otter-Lamp-41,\n" +
+                "Mail,https://mail.example,me@mail,Quiet-Maple-Door-73,\n" +
+                ",,,,\n" +
+                "Broken,https://broken.example,me\n"
+            ).encodeToByteArray()
+        val pushes = calls.count { it.endsWith("/sync/push") }
+        assertEquals(ActionResult.Ok, controller.importCsv(file))
+        assertTrue(file.all { it == 0.toByte() }, "the file's bytes are zeroed once read")
+        val preview = assertNotNull(controller.state.csvImport)
+        assertEquals("Chrome or another Chromium browser", preview.source)
+        assertEquals(reg.personalVault.vaultId, preview.vaultId)
+        assertEquals(2, preview.toImport, "Bank once, and Mail")
+        assertEquals(listOf("Example"), preview.buckets.single { it.title == ImportCopy.ALREADY }.names)
+        assertTrue(ImportCopy.collapsed(1) in preview.counts)
+        assertTrue(preview.errors.single().endsWith(": the wrong number of fields"))
+        assertNull(preview.done)
+        assertEquals(pushes, calls.count { it.endsWith("/sync/push") }, "nothing is sent before Import")
+
+        // Interrupted: the items stay planned, and Retry sends the same ones again.
+        routes["/sync/push"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Ok, controller.confirmImport())
+        val interrupted = assertNotNull(controller.state.csvImport)
+        assertEquals(ImportCopy.INTERRUPTED, interrupted.error)
+        assertTrue(interrupted.retryable)
+        assertNull(interrupted.done)
+        routes["/sync/push"] = applying
+        assertEquals(ActionResult.Ok, controller.confirmImport())
+        val done = assertNotNull(controller.state.csvImport)
+        assertNull(done.error)
+        assertTrue(assertNotNull(done.done).startsWith("Added 2 items to “"))
+        assertEquals(2, sent.flatten().toSet().size, "two items, each sent under its planned id")
+        assertEquals(1, controller.state.items.count { it.name == "Bank" })
+        assertEquals(1, controller.state.items.count { it.name == "Mail" })
+        assertEquals(ActionResult.NotDone(null), controller.confirmImport(), "imported once")
+
+        controller.closeImport()
+        assertNull(controller.state.csvImport)
+    }
+
+    // ---- export and backup (spec 07) ----
+
+    /** A server holding the personal vault's row and every item pushed to it, as a synced device sees them. */
+    private fun Rig.syncedVaultServer(): VaultServer {
+        val server = VaultServer(this)
+        val rows = mutableListOf<WireItem>()
+        routes["/sync/push"] = { request ->
+            val body = json.decodeFromString(io.silencelen.andvari.core.model.PushRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+            val results = body.mutations.map { m ->
+                val rev = ++server.rev
+                rows.removeAll { it.itemId == m.itemId }
+                val up = m.item
+                rows += WireItem(m.itemId, m.vaultId, rev, 3_000, 3_000, deleted = up == null, conflict = false, formatVersion = up?.formatVersion ?: 1, attachmentIds = up?.attachmentIds.orEmpty(), blob = up?.blob)
+                io.silencelen.andvari.core.model.MutationResult(m.mutationId, "applied", newItemRev = rev)
+            }
+            respond(json.encodeToString(io.silencelen.andvari.core.model.PushResponse.serializer(), io.silencelen.andvari.core.model.PushResponse(server.rev, results)), HttpStatusCode.OK, headers)
+        }
+        routes["/sync"] = { request ->
+            val since = request.url.parameters["since"]?.toLongOrNull() ?: 0L
+            val body = io.silencelen.andvari.core.model.SyncResponse(++server.rev, since == 0L, server.vaults.values.toList(), server.grants.values.toList(), rows.filter { it.rev > since }, emptyList())
+            respond(json.encodeToString(io.silencelen.andvari.core.model.SyncResponse.serializer(), body), HttpStatusCode.OK, headers)
+        }
+        return server
+    }
+
+    /**
+     * Export for another password manager: a sync first, then what the CSV would hold, with what it leaves out named; a
+     * cell a spreadsheet would run as a formula holds the file back until it is acknowledged, and the file is made only
+     * for the folder chosen, as exactly the logins the screen counted.
+     */
+    @Test
+    fun aCsvExportNamesWhatItLeavesOutAndIsMadeOnlyOnceTheFormulaCellsAreAcknowledged() = test {
+        unlockedWithAPersonalVault()
+        syncedVaultServer()
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Sheet", "me", "=HYPERLINK(1)", listOf("https://sheet.example"), "", "", false)))
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Shopping", "milk", false)))
+        assertEquals(ActionResult.Ok, controller.openExport(ExportKind.CSV))
+        val screen = assertNotNull(controller.state.exporting)
+        assertEquals(ExportKind.CSV, screen.kind)
+        assertNull(screen.offlineNote, "the sync reached the server")
+        assertTrue(screen.vaults.single().personal && screen.vaults.single().included)
+        assertEquals(2, screen.count, "Example and Sheet")
+        assertEquals(listOf("Shopping"), screen.warnings.single { it.title == ExportCopy.NOTES_LEFT_OUT }.names)
+        assertEquals(listOf("Password of \u201CSheet\u201D"), screen.formulaCells)
+
+        assertNull(controller.csvFile(acknowledged = false), "not without the tick")
+        assertEquals(ExportCopy.FORMULA_ACK_NEEDED, controller.state.exporting?.error)
+        val file = assertNotNull(controller.csvFile(acknowledged = true))
+        assertTrue(Regex("andvari-export-\\d{4}-\\d{2}-\\d{2}\\.csv").matches(file.fileName), file.fileName)
+        val text = file.bytes.decodeToString()
+        assertTrue(text.startsWith(io.silencelen.andvari.core.client.ExportCsv.HEADER + "\r\n"))
+        assertTrue(text.contains("Sheet,https://sheet.example,me,=HYPERLINK(1),"), "written as is, never mangled")
+        assertFalse(text.contains("Shopping"))
+        controller.exportSaved(file.fileName, "On My iPhone")
+        assertEquals(ExportCopy.csvSaved(file.fileName, "On My iPhone", 2), controller.state.exporting?.done)
+
+        // A vault that changed after the tick: nothing is made, and the screen lists the cells again.
+        assertEquals(ActionResult.Ok, controller.saveLogin(null, LoginInput("Sum", "+SUM(A1)", "pw", emptyList(), "", "", false)))
+        assertNull(controller.csvFile(acknowledged = true))
+        val again = assertNotNull(controller.state.exporting)
+        assertEquals(ExportCopy.VAULT_CHANGED, again.error)
+        assertEquals(2, again.formulaCells.size)
+        assertNotNull(controller.csvFile(acknowledged = true), "acknowledged again, for the cells now listed")
+        controller.exportNotSaved(written = true)
+        assertEquals(ExportCopy.READ_BACK_FAILED, controller.state.exporting?.error)
+
+        controller.lock()
+        assertNull(controller.state.exporting, "a lock closes the export screen")
+    }
+
+    /**
+     * A backup is made in memory under a passphrase typed twice and at least "good", opened again before it is handed
+     * over, and holds the vault's items; offline, the screen says it holds the vault as of the last sync.
+     */
+    @Test
+    fun aBackupIsMadeUnderAGoodPassphraseAndOpensAgain() = test {
+        unlockedWithAPersonalVault()
+        syncedVaultServer()
+        assertEquals(ActionResult.Ok, controller.refresh())
+        assertEquals(ActionResult.Ok, controller.saveNote(null, NoteInput("Shopping", "milk", false)))
+        routes["/sync"] = { throw IOException("unreachable") }
+        assertEquals(ActionResult.Ok, controller.openExport(ExportKind.BACKUP))
+        val screen = assertNotNull(controller.state.exporting)
+        assertNotNull(screen.offlineNote, "offline: the vault as of the last sync")
+        assertEquals(2, screen.count, "Example and Shopping")
+
+        val good = "Brisk-Otter-Lamp-41-Quiet-Maple"
+        assertNull(controller.backupFile("", ""))
+        assertEquals(ExportCopy.PASSPHRASE_REQUIRED, controller.state.exporting?.error)
+        assertNull(controller.backupFile(good, good + "x"))
+        assertEquals(ExportCopy.PASSPHRASES_DIFFER, controller.state.exporting?.error)
+        assertNull(controller.backupFile("password", "password"))
+        assertEquals(ExportCopy.PASSPHRASE_WEAK, controller.state.exporting?.error)
+
+        val file = assertNotNull(controller.backupFile(good, good))
+        assertTrue(file.fileName.startsWith("andvari-backup-") && file.fileName.endsWith(".andvari"))
+        val opened = io.silencelen.andvari.core.client.Backup.open(crypto, good, file.bytes)
+        assertEquals(setOf("Example", "Shopping"), opened.payload.items.map { it.doc.name }.toSet())
+        assertEquals(reg.userId, opened.payload.userId)
+        assertTrue(runCatching { io.silencelen.andvari.core.client.Backup.open(crypto, "Another-Passphrase-99-Long", file.bytes) }.isFailure, "only under its passphrase")
+        controller.exportSaved(file.fileName, "iCloud Drive")
+        assertEquals(ExportCopy.backupSaved(file.fileName, "iCloud Drive", 2, 1, 0), controller.state.exporting?.done)
+        controller.closeExport()
+        assertNull(controller.state.exporting)
     }
 
     // ---- vaults: where a new item goes, moving and copying ----

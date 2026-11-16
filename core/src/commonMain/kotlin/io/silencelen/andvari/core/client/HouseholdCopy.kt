@@ -220,6 +220,10 @@ object HouseholdCopy {
      *  into it. The review card ("Review your shared vaults") is where the member accepts it or leaves. */
     const val VAULT_NOT_VERIFIED = "This shared vault isn't verified on this device yet, so it is read-only. Review it under Shared vaults first."
 
+    /** Sharing review 2026-11 (item 4): a vault is handed only to someone verified on this device, with the key the
+     *  server serves now ([MemberNotVerifiedException] from the engine). */
+    const val MEMBER_NOT_VERIFIED = "Verify them on this device first, by comparing codes with them in person or on a call you trust."
+
     /** INV-EDIT (root cause A §5.1, branch A1b): the item now lives in another vault than the one its editor opened on.
      *  Nothing is saved and nothing is re-targeted. TWIN of web `ItemChangedVaultsError`, byte-equal (vault-copy.test.ts). */
     const val ITEM_CHANGED_VAULTS = "This item changed vaults; reopen it."
@@ -386,6 +390,15 @@ object HouseholdCopy {
     fun leftUnprovenNotice(vaultName: String): String = "You left “$vaultName”. Didn't do this? Tell your admin."
 
     /**
+     * Sharing review 2026-11 (finding 1): a completed transfer whose proof checks under the vault's key, which every member
+     * holds, for an offer this account did not make or had cancelled. The account's ownership record is kept. Warning.
+     * TWIN of web Vault.tsx noticeBody, byte-equal.
+     */
+    fun transferNotOfferedNotice(vaultName: String): String =
+        "The server says “$vaultName” has a new owner, from an offer you didn't make or had cancelled. Your devices keep their record that you own it. " +
+            "If you didn't hand it over, tell your admin — the server, or a member of the vault, may be misbehaving."
+
+    /**
      * A7 review MEDIUM-2: a genuine removal whose nonce another of this user's devices already consumed (it is in
      * account state, not in this device's own set). Calm. TWIN of web Vault.tsx noticeBody, byte-equal.
      */
@@ -453,6 +466,7 @@ object HouseholdCopy {
         t is KdfPolicyViolationException -> WEAK_KDF_ACTION
         isIdentityMismatch(t) -> IDENTITY_MISMATCH
         t is VaultKeyDamagedException -> ACCOUNT_KEYS_DAMAGED // H67: never the password, never a retry
+        t is MemberNotVerifiedException -> MEMBER_NOT_VERIFIED // sharing review 2026-11, item 4
         t is ApiException -> apiCopy(t)
         t is IOException -> UNREACHABLE
         else -> SOMETHING_WENT_WRONG

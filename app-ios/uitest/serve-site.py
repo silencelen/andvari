@@ -6,15 +6,55 @@ usage: serve-site.py <dir> <https port> <http port> <cert.pem> <key.pem>
 A POST is answered with a page that says what was submitted (field names, a digest of each value, and a
 one-time code), so a form submission navigates like a real sign-in, the browser's save offer has something
 to follow, and a test can check what was submitted without the page showing a value.
+
+POST /control/vault-create|vault-delete|vault-restore?name=… let a test act as another device of the test
+account (tools/uitest-seed `vault`), and POST /control/share-read-only?name=…&item=… as a second account that
+shares a vault read-only with it, accepted on another device (tools/uitest-seed `share`), to see what the app
+learns at its next sync. Both ports listen on loopback only and the accounts are throwaway ones.
+
+GET <page>.html?uitest-events serves the page with a passive event log at the end of its body (presses, focus
+moves with the page's user activation and focus, window focus), so a test can read what the page saw.
 """
 import functools
 import hashlib
 import http.server
+import os
+import subprocess
 import ssl
 import sys
 import threading
 import time
 import urllib.parse
+
+# Listens only (capture, passive) and writes into its own line after the page's content, never over it.
+EVENTS = """<pre id="uitest-events" style="font: 12px/1.3 monospace; white-space: pre-wrap; margin: 24px 0 0">events:</pre>
+<script>
+(function () {
+  var out = document.getElementById("uitest-events");
+  var lines = [];
+  var t0 = performance.now();
+  function name(t) { return t && t.id ? "#" + t.id : t && t.tagName ? t.tagName.toLowerCase() : String(t); }
+  function log(s) {
+    lines.push(Math.round(performance.now() - t0) + " " + s);
+    if (lines.length > 16) lines.shift();
+    out.textContent = "events: " + lines.join("; ");
+  }
+  ["touchstart", "pointerdown", "mousedown", "click"].forEach(function (type) {
+    document.addEventListener(type, function (e) { log(type + " " + name(e.composedPath()[0])); }, { capture: true, passive: true });
+  });
+  document.addEventListener("focusin", function (e) {
+    var ua = navigator.userActivation;
+    log("focusin " + name(e.target) + " activation=" + (ua ? ua.isActive : "none") + " hasFocus=" + document.hasFocus());
+  }, true);
+  document.addEventListener("focusout", function (e) {
+    var t = name(e.target);
+    setTimeout(function () { log("focusout " + t + " hasFocus=" + document.hasFocus() + " now=" + name(document.activeElement)); }, 0);
+  }, true);
+  window.addEventListener("blur", function () { log("window-blur"); });
+  window.addEventListener("focus", function () { log("window-focus"); });
+})();
+</script>
+"""
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -22,7 +62,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # abandons do not pile up, and a stalled TLS handshake ends with a line in the log instead of hanging.
     timeout = 20
 
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.endswith(".html") and "uitest-events" in urllib.parse.parse_qs(parsed.query, keep_blank_values=True):
+            return self.with_events(parsed.path)
+        return super().do_GET()
+
+    def with_events(self, path):
+        try:
+            with open(self.translate_path(path), "rb") as page:
+                text = page.read().decode("utf-8")
+        except OSError:
+            self.send_error(404)
+            return
+        body = (text.replace("</body>", EVENTS + "</body>", 1) if "</body>" in text else text + EVENTS).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
+        if self.path.startswith("/control/"):
+            return self.control()
         length = int(self.headers.get("Content-Length") or 0)
         fields = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         names = ", ".join(sorted(fields)) or "nothing"
@@ -41,6 +103,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def control(self):
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        name = (query.get("name") or [""])[0]
+        item = (query.get("item") or [""])[0]
+        account = [os.environ["UITEST_SERVER_ORIGIN"], os.environ["UITEST_EMAIL"], os.environ["UITEST_PASSWORD"]]
+        vault_action = {"/control/vault-create": "create", "/control/vault-delete": "delete", "/control/vault-restore": "restore"}.get(parsed.path)
+        if vault_action and name:
+            args = ["vault", vault_action] + account + [name]
+        elif parsed.path == "/control/share-read-only" and name and item:
+            args = ["share"] + account + [name, item]
+        else:
+            self.send_error(404)
+            return
+        command = ["java", "-jar", os.environ["UITEST_SEED_JAR"]] + args
+        try:
+            # Each sign-in or enrollment is a key derivation, slow on a runner busy with the simulator: the share makes three.
+            done = subprocess.run(command, capture_output=True, text=True, timeout=300)
+            ok, out = done.returncode == 0, (done.stdout + done.stderr)[-2000:]
+        except subprocess.TimeoutExpired:
+            ok, out = False, "timed out"
+        sys.stderr.write("control %s %r: %s\n" % (parsed.path, name, "ok" if ok else out))
+        body = out.encode()
+        self.send_response(200 if ok else 500)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

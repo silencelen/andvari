@@ -72,7 +72,9 @@ object SelfIdentityPin {
     /**
      * The pin logic over ONE origin's string key-value namespace (Android prefs; the desktop keeps files with the
      * same semantics). Keys: `selfIdentityPub.<userId>` (the pre-A11 pin, unchanged) and
-     * `selfIdentityByEmail.<normalised email>` (the [Binding]). Both are written once and never overwritten.
+     * `selfIdentityByEmail.<normalised email>` (the [Binding]). Both are written once and never overwritten. Nothing here
+     * removes one: they go only with their whole origin, when the device that ran an account's deletion forgets that
+     * account's server (spec 03 §13; [io.silencelen.andvari.core.client.session.SessionPersistence.forgetServer]).
      */
     class KeyValueStore(private val get: (String) -> String?, private val put: (String, String) -> Unit) {
         private fun legacyKey(userId: String) = "selfIdentityPub.$userId"

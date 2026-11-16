@@ -5,13 +5,16 @@
  * A card goes only into a payment provider's card document, and only into a frame where the person chose a card field
  * themselves: the newest choice, and with it only the quick taps of the same split card form (same provider origin,
  * same chain of documents, each within 30 s of the next; round-12 review). No frame is ever filled because of where it
- * sits. No fill happens while more than one provider card frame in the tab asks for the same card detail (an invisible
- * frame over the real one, or an extra one beside it), nor while a provider frame the page shows has not reported.
+ * sits. No fill happens while the person's choices sit in more than one payment form (round-13 review: another
+ * provider origin, another chain of documents, or another merchant account), nor while more than one provider card
+ * frame in the tab asks for the same card detail (an invisible frame over the real one, or an extra one beside it),
+ * nor while a provider frame the page shows has not reported.
  *
  * Every input is a fact the browser reports, or a report of the content script running in that provider's own frame:
  * each frame's origin from its own messages (`sender.origin`; the origin of `sender.url` for the top frame only), its
- * frameId, its ancestor origins and whether it is collapsed, the card forms it holds and the field the person chose in
- * it. The shop's page's own word (the provider srcs its top frame shows) can only refuse a fill, never release one.
+ * frameId, its ancestor origins (or, on Firefox, its parent's frameId), the merchant account its own URL names, whether
+ * it is collapsed, the card forms it holds and the field the person chose in it. The shop's page's own word (the
+ * provider srcs its top frame shows) can only refuse a fill, never release one.
  *
  * LEAF module (no chrome import): background.ts feeds it, node --test pins it (cardrelease.test.ts).
  */
@@ -46,8 +49,27 @@ export interface CardFrameRecord {
    * script in this frame); null where the browser has no such list (Firefox).
    */
   ancestors?: readonly string[] | null;
-  /** False while the frame is collapsed: zero size, or nowhere in the top-level viewport (its content script asks). */
+  /**
+   * Firefox, which lists no ancestors: the frameId of this frame's parent, as the browser gives it to the content script
+   * in this frame (`runtime.getFrameId(window.parent)`); null where it could not say.
+   */
+  parent?: number | null;
+  /** The merchant account the frame's own URL names (cardproviders.ts providerAccountOf); null where it names none. */
+  account?: string | null;
+  /**
+   * False while the frame is collapsed: it has never shown in the top-level viewport with a size, or it has no size now
+   * ([frameCounts]; its content script asks). A frame scrolled out of view after it showed keeps counting.
+   */
   shown?: boolean;
+}
+
+/**
+ * Whether a provider's card frame counts (round-13 review, rule 5): once it has shown in the top-level viewport with a
+ * size, it keeps counting wherever the page is scrolled, until it has no size (or is removed, which ends its script).
+ * Before it has shown it is collapsed: a second payment method's frame, or a stored card's, kept out of sight.
+ */
+export function frameCounts(everShown: boolean, width: number, height: number): boolean {
+  return everShown && width > 0 && height > 0;
 }
 
 /** How long a choice stands (round-12 review: 2 minutes): a fill later than that is a new decision, and asks for a new press. */
@@ -82,6 +104,8 @@ export interface ChosenCardFrame {
   origin: string;
   /** The kinds of the form holding the chosen field. */
   kinds: CardFieldKind[];
+  /** The frame's ancestor origins, nearest first, where the browser lists them (the popup names those below the top). */
+  ancestors?: readonly string[] | null;
 }
 
 /** The live choice a record holds, or null: an index into its forms, made within [CHOICE_TTL_MS]. */
@@ -94,42 +118,65 @@ function liveChoice(r: CardFrameRecord, now: number): CardFieldKind[] | null {
   return Array.isArray(kinds) && kinds.length > 0 ? kinds : null;
 }
 
-/** Whether two frames sit in the same chain of documents: the same ancestor origins, where the browser lists them. */
-function sameAncestors(a: readonly string[] | null | undefined, b: readonly string[] | null | undefined): boolean {
-  const listed = (x: readonly string[] | null | undefined): x is readonly string[] => Array.isArray(x);
-  if (!listed(a) && !listed(b)) return true; // the browser lists none (Firefox): nothing to compare
-  if (!listed(a) || !listed(b) || a.length !== b.length) return false;
-  return a.every((o, i) => o === b[i]);
+/**
+ * The payment form a provider frame belongs to (round-13 review): its provider origin, its chain of documents (its
+ * ancestor origins, or on Firefox its parent frame) and the merchant account its URL names. [chainKnown] is false
+ * where the browser said neither ancestors nor parent: then nothing tells two such frames' forms apart.
+ */
+export function formGroupOf(r: CardFrameRecord): { key: string; chainKnown: boolean } {
+  const chain = Array.isArray(r.ancestors) ? `a:${JSON.stringify(r.ancestors)}` : typeof r.parent === "number" ? `p:${r.parent}` : null;
+  return { key: `${r.origin}|${chain ?? "?"}|${r.account ?? ""}`, chainKnown: chain !== null };
 }
 
-/**
- * The provider frames one fill reaches, newest first (round-12 review): the frame of the person's newest choice, and
- * with it only the choices that are of the same provider origin, sit in the same chain of documents (the same
- * `location.ancestorOrigins`, where the browser lists them), and were made within [CHOICE_CHAIN_MS] of the next newer
- * choice kept: the quick taps of one split card form. Any other choice (a field typed into for something else, a frame
- * of another widget) is dropped, and a choice that covers a kind a newer one covers is too. A choice made in any other
- * document is never one.
- */
-export function chosenCardFrames(records: Readonly<Record<string, CardFrameRecord>>, now: number): ChosenCardFrame[] {
-  const live: (ChosenCardFrame & { at: number; ancestors: readonly string[] | null | undefined })[] = [];
+type LiveChoice = ChosenCardFrame & { at: number; group: string; chainKnown: boolean };
+
+/** The live choices of a tab's provider card frames, newest first. */
+function liveChoices(records: Readonly<Record<string, CardFrameRecord>>, now: number): LiveChoice[] {
+  const live: LiveChoice[] = [];
   for (const [fid, r] of Object.entries(records)) {
     if (!mayReceiveCard(r)) continue;
     const kinds = liveChoice(r, now);
-    if (kinds !== null) live.push({ frameId: Number(fid), origin: r.origin, kinds, at: r.anchorAt!, ancestors: r.ancestors });
+    if (kinds === null) continue;
+    const g = formGroupOf(r);
+    live.push({ frameId: Number(fid), origin: r.origin, kinds, at: r.anchorAt!, ancestors: r.ancestors ?? null, group: g.key, chainKnown: g.chainKnown });
   }
-  live.sort((x, y) => y.at - x.at || x.frameId - y.frameId);
+  return live.sort((x, y) => y.at - x.at || x.frameId - y.frameId);
+}
+
+/**
+ * Whether the person's live choices sit in more than one payment form (round-13 review): another provider origin,
+ * another chain of documents, or another merchant account. A choice is never let go for being older or for being in
+ * the other form: the person says which form they meant by tapping it again (after Start over). Where the browser says
+ * no chain for a frame, choices in two frames are taken as two forms.
+ */
+export function choicesSpanForms(records: Readonly<Record<string, CardFrameRecord>>, now: number): boolean {
+  const live = liveChoices(records, now);
+  if (live.length < 2) return false;
+  if (live.some((c) => !c.chainKnown)) return true;
+  return new Set(live.map((c) => c.group)).size > 1;
+}
+
+/**
+ * The provider frames one fill reaches, newest first (round-12 review), when the person's choices sit in one payment
+ * form ([choicesSpanForms]; none otherwise): the frame of the newest choice, and with it the choices made within
+ * [CHOICE_CHAIN_MS] of the next newer choice kept, the quick taps of one split card form. A choice that covers a kind a
+ * newer one covers is dropped. A choice made in any other document is never one.
+ */
+export function chosenCardFrames(records: Readonly<Record<string, CardFrameRecord>>, now: number): ChosenCardFrame[] {
+  if (choicesSpanForms(records, now)) return [];
+  const live = liveChoices(records, now);
   const newest = live[0];
   if (newest === undefined) return [];
   const covered = new Set<CardFieldKind>(newest.kinds);
   const kept = [newest];
   for (const c of live.slice(1)) {
-    if (c.origin !== newest.origin || !sameAncestors(c.ancestors, newest.ancestors)) continue;
+    if (c.group !== newest.group) continue; // never: one form only, above
     if (kept[kept.length - 1]!.at - c.at > CHOICE_CHAIN_MS) break; // older still: every one after is further back
     if (c.kinds.some((k) => covered.has(k))) continue;
     for (const k of c.kinds) covered.add(k);
     kept.push(c);
   }
-  return kept.map(({ frameId, origin, kinds }) => ({ frameId, origin, kinds }));
+  return kept.map(({ frameId, origin, kinds, ancestors }) => ({ frameId, origin, kinds, ancestors }));
 }
 
 /** The newest live choice, or null (the popup names its frame's origin). */
@@ -138,13 +185,25 @@ export function chosenCardFrame(records: Readonly<Record<string, CardFrameRecord
 }
 
 /**
- * The frames whose choice a new choice in [frameId] of [kinds] replaces: every other frame of the tab with a choice
- * whose form covers any of the same kinds. The worker clears them, and tells each frame to let its choice go.
+ * The frames whose choice a new choice in [frameId] of [kinds] replaces: every other frame of the same payment form
+ * ([formGroupOf]) with a choice whose form covers any of the same kinds. The worker clears them, and tells each frame to
+ * let its choice go. A choice in another form is left standing (round-13 review): the fill then refuses until the person
+ * starts over, rather than the newest tap deciding which form gets the card.
  */
 export function supersededChoices(records: Readonly<Record<string, CardFrameRecord>>, frameId: number, kinds: readonly CardFieldKind[], now: number): number[] {
   const mine = new Set(kinds);
+  const self = records[String(frameId)];
+  if (self === undefined) return [];
+  const group = formGroupOf(self).key;
   return Object.entries(records)
-    .filter(([fid, r]) => Number(fid) !== frameId && (liveChoice(r, now)?.some((k) => mine.has(k)) ?? false))
+    .filter(([fid, r]) => Number(fid) !== frameId && formGroupOf(r).key === group && (liveChoice(r, now)?.some((k) => mine.has(k)) ?? false))
+    .map(([fid]) => Number(fid));
+}
+
+/** The frames of a tab holding a choice: what "Start over" lets go (round-13 review). */
+export function framesWithChoices(records: Readonly<Record<string, CardFrameRecord>>): number[] {
+  return Object.entries(records)
+    .filter(([, r]) => typeof r.anchor === "number")
     .map(([fid]) => Number(fid));
 }
 
@@ -173,20 +232,40 @@ export type CardFillPlan =
   | { ok: true; targets: ChosenCardFrame[] }
   | { ok: false; reason: "unreported"; origin: string }
   | { ok: false; reason: "duplicate_kind"; kinds: CardFieldKind[] }
+  | { ok: false; reason: "mixed_forms" }
   | { ok: false; reason: "no_choice" };
 
 /**
  * The frames one fill reaches ([chosenCardFrames]), each with the form holding its chosen field. None while a provider
  * frame the page shows has not reported ([unreported]: its origin, from the page's own srcs, which can only refuse,
- * never release; round-12 review), so that a card kind it might offer cannot be counted; and none while any card kind is
- * offered by more than one provider card frame ([kindsOfferedTwice]).
+ * never release; round-12 review), so that a card kind it might offer cannot be counted; none while any card kind is
+ * offered by more than one provider card frame ([kindsOfferedTwice]); and none while the person's choices sit in more
+ * than one payment form ([choicesSpanForms], round-13 review).
  */
 export function cardFillPlan(records: Readonly<Record<string, CardFrameRecord>>, now: number, unreported: string | null = null): CardFillPlan {
   if (unreported !== null) return { ok: false, reason: "unreported", origin: unreported };
   const twice = kindsOfferedTwice(records);
   if (twice.length > 0) return { ok: false, reason: "duplicate_kind", kinds: twice };
+  if (choicesSpanForms(records, now)) return { ok: false, reason: "mixed_forms" };
   const targets = chosenCardFrames(records, now);
   return targets.length > 0 ? { ok: true, targets } : { ok: false, reason: "no_choice" };
+}
+
+/**
+ * Where a fill goes, in words (round-13 review): each target's provider host, with the documents it sits in below the
+ * top one ("js.stripe.com inside rewards.example"), so a provider frame inside another site's widget says so. Ancestors
+ * are nearest first; the last is the top document, which the popup does not repeat.
+ */
+export function fillDestination(frames: readonly { origin: string; ancestors?: readonly string[] | null }[]): string {
+  const hostOf = (o: string): string => {
+    try {
+      return new URL(o).host;
+    } catch {
+      return o;
+    }
+  };
+  const parts = frames.map((f) => [hostOf(f.origin), ...(Array.isArray(f.ancestors) ? f.ancestors.slice(0, -1) : []).map(hostOf)].join(" inside "));
+  return [...new Set(parts)].join(", ");
 }
 
 /** Whether [shown] (what the popup showed, as it sends it back) names exactly the frames, origins and card details of

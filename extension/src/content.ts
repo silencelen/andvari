@@ -22,9 +22,16 @@ import {
 import { ReuseCustody, shouldAskReuse } from "./reusealert.ts";
 import { deriveCardWrite, parseExpiryParts, radioIndexFor, splitPan, verifyLanded, verifySplitPanLanded, type CardTargetMeta, type CardWrite } from "./cardfill";
 import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
-import { bumpLabelGeneration, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
-import { isCardEntryDocument, isCardProviderOrigin } from "./cardproviders";
-import { CARD_FILL } from "./cardfillflag";
+import { bumpLabelGeneration, chooseEnteredCapture, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
+import { isCardEntryDocument, isCardProviderOrigin, providerAccountOf } from "./cardproviders";
+import { frameCounts } from "./cardrelease";
+/**
+ * In-page card fill is in this build (cardfillflag.ts), read straight from build.mjs's define as the worker reads it: every
+ * card chip, choice, report and fill path below is gated on it, so esbuild folds each gate and a build without card fill
+ * bundles none of them (cardfillflag.test.ts and build.mjs check). Card capture (a card typed into a checkout, offered
+ * for saving) and the login fill's card-field guards are not in-page card fill, and stay in every build.
+ */
+declare const __ANDVARI_CARDFILL__: boolean;
 import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
 import {
   send,
@@ -166,7 +173,8 @@ function formFor(input: HTMLInputElement): LoginForm | null {
     // H04: the capture field joins the membership test — on the hintless change-password shape it
     // is passwords[1], which is neither the fill target nor in newPasswords, and a field formFor
     // does not know is a field whose keystrokes never snapshot and whose Enter never captures.
-    scanForms().find((f) => f.username === input || f.password === input || f.capturePassword === input || f.newPasswords.includes(input)) ?? null
+    // And every password field of the form: the capture reads the one the person entered (captureField), whichever it is.
+    scanForms().find((f) => f.username === input || f.password === input || f.capturePassword === input || f.newPasswords.includes(input) || f.passwords.includes(input)) ?? null
   );
 }
 
@@ -303,6 +311,7 @@ function fillForm(f: LoginForm, s: RevealedSecret): FillOutcome {
     }
     if (live.password && s.password && !(guard && isCardField(live.password))) {
       setValue(live.password, s.password);
+      entered.add(live.password); // the person's own choice of login: the capture reads this field, not a trap beside it
       wrotePass = true;
     }
   } finally {
@@ -354,36 +363,77 @@ async function scheduleClipboardClear(): Promise<void> {
  *  kinds of element from it, its own path (round-12 review: Stripe's Address Element is no card frame): where a field
  *  can be chosen, the chip can show, and a form holding only some of a card's fields (a security code alone, one field
  *  of a split form) is a card form. The worker checks the origin the browser reports before anything is filled. */
-const cardBox = CARD_FILL && isCardEntryDocument(location.origin, location.pathname);
+const cardBox = __ANDVARI_CARDFILL__ && isCardEntryDocument(location.origin, location.pathname);
 
 /** A provider's document that is not a card document (an address or a sign-in element): it reports no card form. */
-const providerNonCardDocument = !cardBox && isCardProviderOrigin(location.origin);
+const providerNonCardDocument = __ANDVARI_CARDFILL__ && !cardBox && isCardProviderOrigin(location.origin);
+
+/**
+ * A provider's hosted page (its card document as the top-level page, as Stripe's Checkout is): only fields the page
+ * marks with a card autocomplete hint are card fields there, one per kind, never one named by its label (round-13
+ * review: a field the page labels "Card number" may be anything).
+ */
+const hostedCardPage = cardBox && isTop;
+
+/**
+ * The merchant account this provider document works for, where its own URL names one (cardproviders.ts
+ * providerAccountOf), read once as the document loaded: two documents of one provider on two accounts are two payment
+ * forms (round-13 review). Null elsewhere.
+ */
+const providerAccount: string | null = __ANDVARI_CARDFILL__ && cardBox ? providerAccountOf(location.href) : null;
 
 /** The origins of the documents this frame is nested in, nearest first, as the browser lists them for it
  *  (`location.ancestorOrigins`; the page around this frame cannot change the list). Null where the browser has no such
  *  list (Firefox). The choices of one fill share them (round-12 review). */
-const ancestorChain: string[] | null = (() => {
+const ancestorChain: string[] | null = !__ANDVARI_CARDFILL__ ? null : (() => {
   const list = (location as Location & { ancestorOrigins?: DOMStringList }).ancestorOrigins;
   if (list === undefined || list === null) return null;
   return Array.from({ length: list.length }, (_, i) => list.item(i) ?? "null");
 })();
 
 /**
- * A provider's card document only: whether this frame shows in the top-level viewport with a size, as an
- * IntersectionObserver from inside it sees its document (round-12 review: a collapsed frame, of zero size or nowhere in
- * the viewport, such as a second payment method or a stored card's code beside the new-card form, neither counts nor
- * can be chosen). Null until the browser first answers.
+ * Firefox, which has no `location.ancestorOrigins`: the frameId of this frame's parent, as the browser gives it to this
+ * script (`runtime.getFrameId(window.parent)`), so the worker tells two frames of one form from frames of two forms
+ * (round-13 review). Null where the browser lists ancestor origins, in the top frame, or where it cannot say: then the
+ * worker refuses a fill whose choices span frames.
+ */
+const parentFrameId: number | null = !__ANDVARI_CARDFILL__ ? null : (() => {
+  if (ancestorChain !== null || isTop || !cardBox) return null;
+  try {
+    const rt = (globalThis as { browser?: { runtime?: { getFrameId?: (target: unknown) => unknown } } }).browser?.runtime;
+    const id = rt?.getFrameId?.(window.parent);
+    return typeof id === "number" && Number.isInteger(id) && id >= 0 ? id : null;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * A provider's card document only: whether this frame counts (cardrelease.ts frameCounts; round-12 and round-13 review).
+ * A frame that has never shown in the top-level viewport with a size (a second payment method, a stored card's code
+ * beside the new-card form, kept out of sight) neither counts nor can be chosen; once it has shown, it keeps counting
+ * wherever the page is scrolled, until it has no size (or is removed). Null until the browser first answers.
  */
 let frameShown: boolean | null = null;
-if (cardBox && typeof IntersectionObserver === "function") {
+/** This frame has shown in the top-level viewport with a size, as an IntersectionObserver from inside it saw. */
+let everShown = false;
+
+function noteFrameShown(): void {
+  const shown = frameCounts(everShown, window.innerWidth, window.innerHeight);
+  if (shown === frameShown) return;
+  frameShown = shown;
+  reportCardForm();
+}
+
+if (__ANDVARI_CARDFILL__ && cardBox && typeof IntersectionObserver === "function") {
   new IntersectionObserver((entries) => {
     const e = entries[entries.length - 1];
     if (e === undefined) return;
-    const shown = e.isIntersecting && e.intersectionRect.width > 0 && e.intersectionRect.height > 0;
-    if (shown === frameShown) return;
-    frameShown = shown;
-    reportCardForm();
+    if (e.isIntersecting && e.intersectionRect.width > 0 && e.intersectionRect.height > 0) everShown = true;
+    noteFrameShown();
   }).observe(document.documentElement);
+  // A frame the page shrinks to nothing reports at once; one it grows back counts again.
+  window.addEventListener("resize", noteFrameShown);
 }
 
 /** Top frame only: the payment providers' origins of the frames this page shows, by their src. The page's own word, so
@@ -416,7 +466,7 @@ let lastCardSig: string | null = null;
  *  our record. Idempotent: a stable structure never re-sends. */
 function reportCardForm(): void {
   // A build without in-page card fill (cardfillflag.ts) reports no card form: the worker records no card choice.
-  if (!CARD_FILL) return;
+  if (!__ANDVARI_CARDFILL__) return;
   const all = providerNonCardDocument ? [] : allCardForms();
   const forms: CardFieldKind[][] = all.map((f) => f.fields.map((x) => x.kind));
   // Round-6 review M2: which of them holds the field the person chose, so the worker builds a fill's grant from that
@@ -434,6 +484,7 @@ function reportCardForm(): void {
   chipOffer = null; // [K13] the registry the gate answers about just changed — never replay across it
   void safeSend({
     type: "cardFormInfo", forms, anchor, choseNow, ancestors: ancestorChain,
+    ...(parentFrameId !== null ? { parentFrameId } : {}), ...(providerAccount !== null ? { account: providerAccount } : {}),
     ...(isTop ? { providerOrigins } : {}), ...(cardBox && frameShown !== null ? { shown: frameShown } : {}),
   });
 }
@@ -550,6 +601,7 @@ function chosenFieldSeen(t: FillableControl): boolean {
 /** A trusted focusin ([focus]) or click on [t]: it chooses [t] when the person put it there ([cardFocus]). Every
  *  focusin is counted, after it is looked at, so a Tab's choice can tell whether focus moved since the key went down. */
 function noteCardFocus(t: EventTarget | null, focus?: FocusEvent): void {
+  if (!__ANDVARI_CARDFILL__) return; // no card field is ever chosen in a build without card fill
   try {
     chooseIfPersonPut(t, focus);
   } finally {
@@ -617,7 +669,7 @@ function deepActiveElement(): Element | null {
  * or out of the window (the popup opening) keeps the choice.
  */
 function noteFocusLeft(): void {
-  if (cardFocus === null || filling) return;
+  if (!__ANDVARI_CARDFILL__ || cardFocus === null || filling) return;
   setTimeout(() => {
     if (filling || cardFocus === null || !document.hasFocus()) return;
     const now = deepActiveElement();
@@ -634,7 +686,7 @@ function cardFormHolding(anchor: FillableControl): CardForm | null {
 
 /** Every card form of this frame, scanned now (no cache). */
 function freshCardForms(): CardForm[] {
-  return scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox }));
+  return scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox, hintsOnly: hostedCardPage }));
 }
 
 function cardSigOf(form: CardForm): string {
@@ -878,7 +930,7 @@ function consumeTrustedGesture(): boolean {
  *  redemption path, which deliberately forces a FRESH scan. */
 function allCardForms(): CardForm[] {
   if (!cardFormsCache) {
-    cardFormsCache = scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox }));
+    cardFormsCache = scanScopes().flatMap((s) => findCardForms(s, { numberless: cardBox, hintsOnly: hostedCardPage }));
     requestAnimationFrame(() => {
       cardFormsCache = null;
     });
@@ -1001,6 +1053,7 @@ function offerCardBanner(pending: PendingCardSave): void {
 /** [K8] the one dismissal path: drops OUR mirror, invalidates any offer still in flight ([K12] —
  *  a late answer must never resurrect what the user just dismissed), and clears the surface. */
 function dismissCardChip(): void {
+  if (!__ANDVARI_CARDFILL__) return; // no chip ever shows in a build without card fill
   chipAnchor = null;
   chipGen++;
   closeCardChip();
@@ -1024,58 +1077,63 @@ async function activateCardChip(): Promise<void> {
 /** The chip trigger. `viaClick` distinguishes the two call sites [K15] folds into one retarget
  *  each: a fresh CLICK on an Esc-dismissed field re-offers, its focusin does not. */
 async function maybeCardChip(target: EventTarget | null, viaClick = false): Promise<void> {
-  if (filling) return;
-  // Owner decision 2026-11-14: the chip shows only in a payment provider's card document, the only place a card is
-  // filled; the SW checks the origin the browser reports. Everywhere else this returns before any SW wake, so a page
-  // that focus-loops a fake card form at rAF rate pays for nothing.
-  if (!cardBox) return;
-  if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
-  // [K16] a brand RADIO is excluded: one member of a group is a poor anchor, and it is never a
-  // text entry point the user tabs into expecting help.
-  if (target instanceof HTMLInputElement && target.type === "radio") return;
-  if (chipEscaped === target && !viaClick) return; // [K3] Escape's refocus must not reopen
-  // [K1] LOGIN PRECEDENCE (binding): a field the login engine claims keeps the DROPDOWN — EXCEPT
-  // a suppressSave claim, which is a checkout CVV misread as a login ({password:<cvv>,
-  // username:<expiry/PAN/name>}). maybeOpen cedes those fields (the owner-reported 2026-07-26
-  // checkout fix), so the chip takes them over: mutual exclusion per anchor is preserved, and one
-  // card form no longer shows the chip on PAN/cardholder but the login dropdown on CVV/expiry.
-  // The condition is deliberately the BLUNT suppressSave, not maybeOpen's destination-local
-  // cardMisreadAsLogin: the two agree exactly on the anchors that reach the card-form check below
-  // (maybeOpen's second leg is card-form membership of this same anchor), and a claimed anchor that
-  // is NOT a card field never renders a chip anyway. formFor reads the per-frame scanForms cache.
-  if (target instanceof HTMLInputElement) {
-    const lf = formFor(target);
-    if (lf !== null && !lf.suppressSave) return;
+  // A build without in-page card fill (cardfillflag.ts) shows no chip. The body is a block under the build's define, not
+  // an early return: esbuild drops an async function's code after a folded return only once it has bundled what it
+  // reaches, so only the block keeps the chip's helpers out of such a build.
+  if (__ANDVARI_CARDFILL__) {
+    if (filling) return;
+    // Owner decision 2026-11-14: the chip shows only in a payment provider's card document, the only place a card is
+    // filled; the SW checks the origin the browser reports. Everywhere else this returns before any SW wake, so a page
+    // that focus-loops a fake card form at rAF rate pays for nothing.
+    if (!cardBox) return;
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return;
+    // [K16] a brand RADIO is excluded: one member of a group is a poor anchor, and it is never a
+    // text entry point the user tabs into expecting help.
+    if (target instanceof HTMLInputElement && target.type === "radio") return;
+    if (chipEscaped === target && !viaClick) return; // [K3] Escape's refocus must not reopen
+    // [K1] LOGIN PRECEDENCE (binding): a field the login engine claims keeps the DROPDOWN — EXCEPT
+    // a suppressSave claim, which is a checkout CVV misread as a login ({password:<cvv>,
+    // username:<expiry/PAN/name>}). maybeOpen cedes those fields (the owner-reported 2026-07-26
+    // checkout fix), so the chip takes them over: mutual exclusion per anchor is preserved, and one
+    // card form no longer shows the chip on PAN/cardholder but the login dropdown on CVV/expiry.
+    // The condition is deliberately the BLUNT suppressSave, not maybeOpen's destination-local
+    // cardMisreadAsLogin: the two agree exactly on the anchors that reach the card-form check below
+    // (maybeOpen's second leg is card-form membership of this same anchor), and a claimed anchor that
+    // is NOT a card field never renders a chip anyway. formFor reads the per-frame scanForms cache.
+    if (target instanceof HTMLInputElement) {
+      const lf = formFor(target);
+      if (lf !== null && !lf.suppressSave) return;
+    }
+    // Review #6: the CHEAP dedupe runs before the O(page) card scan. The focusin+click pair arrives
+    // 50-300 ms apart — a different animation frame, so the [K2] cache is cold and the second call
+    // would re-walk every scope for a result the guard is about to discard.
+    const now = Date.now();
+    if (lastChip && lastChip.input === target && now - lastChip.t < 400) return; // focusin+click pair
+    if (cardFormForInput(target) === null) return;
+    lastChip = { input: target, t: now };
+    // [K12] the gate is a round-trip, so every fact is re-checked at RENDER time, not trigger time.
+    const gen = ++chipGen;
+    // [K13] one wake per window per DOCUMENT, not per field. The awaited branch is unchanged; the
+    // replay branch simply skips the message, so every re-check below still runs.
+    const cached = chipOffer !== null && now - chipOffer.t < CHIP_OFFER_CACHE_MS ? chipOffer.answer : null;
+    const r = cached ?? (await safeSend({ type: "cardChipOffer" }));
+    if (r && cached === null) chipOffer = { t: Date.now(), answer: { fillable: r.fillable, locked: r.locked } };
+    if (gen !== chipGen) return; // superseded by a newer focus, or dismissed while in flight
+    // [K5] applyCardFill focuses each field (a trusted focusin per field), so a request issued
+    // before a fill and answered after `filling` flipped back would pop a chip on top of a
+    // just-completed fill — re-read it here, not only at trigger time.
+    if (filling) return;
+    if (!r?.fillable || !target.isConnected) return;
+    // NOT document.activeElement: that is the shadow HOST for a field inside a shadow root, so the
+    // document-level form would silently disable the chip on exactly the shadow-DOM checkouts
+    // Tier 2 was built for.
+    if ((target.getRootNode() as Document | ShadowRoot).activeElement !== target) return;
+    chipAnchor = target;
+    // [K8] onDismiss is the surface's way back into the ONE dismissal path: content-ui closes the
+    // chip from four places this module cannot observe (outside-mousedown, Escape, and the two
+    // positionChip auto-closes), and each of those left `chipAnchor` set and `chipGen` un-bumped.
+    showCardChip(target, { locked: r.locked }, { onActivate: () => void activateCardChip(), onDismiss: dismissCardChip });
   }
-  // Review #6: the CHEAP dedupe runs before the O(page) card scan. The focusin+click pair arrives
-  // 50-300 ms apart — a different animation frame, so the [K2] cache is cold and the second call
-  // would re-walk every scope for a result the guard is about to discard.
-  const now = Date.now();
-  if (lastChip && lastChip.input === target && now - lastChip.t < 400) return; // focusin+click pair
-  if (cardFormForInput(target) === null) return;
-  lastChip = { input: target, t: now };
-  // [K12] the gate is a round-trip, so every fact is re-checked at RENDER time, not trigger time.
-  const gen = ++chipGen;
-  // [K13] one wake per window per DOCUMENT, not per field. The awaited branch is unchanged; the
-  // replay branch simply skips the message, so every re-check below still runs.
-  const cached = chipOffer !== null && now - chipOffer.t < CHIP_OFFER_CACHE_MS ? chipOffer.answer : null;
-  const r = cached ?? (await safeSend({ type: "cardChipOffer" }));
-  if (r && cached === null) chipOffer = { t: Date.now(), answer: { fillable: r.fillable, locked: r.locked } };
-  if (gen !== chipGen) return; // superseded by a newer focus, or dismissed while in flight
-  // [K5] applyCardFill focuses each field (a trusted focusin per field), so a request issued
-  // before a fill and answered after `filling` flipped back would pop a chip on top of a
-  // just-completed fill — re-read it here, not only at trigger time.
-  if (filling) return;
-  if (!r?.fillable || !target.isConnected) return;
-  // NOT document.activeElement: that is the shadow HOST for a field inside a shadow root, so the
-  // document-level form would silently disable the chip on exactly the shadow-DOM checkouts
-  // Tier 2 was built for.
-  if ((target.getRootNode() as Document | ShadowRoot).activeElement !== target) return;
-  chipAnchor = target;
-  // [K8] onDismiss is the surface's way back into the ONE dismissal path: content-ui closes the
-  // chip from four places this module cannot observe (outside-mousedown, Escape, and the two
-  // positionChip auto-closes), and each of those left `chipAnchor` set and `chipGen` un-bumped.
-  showCardChip(target, { locked: r.locked }, { onActivate: () => void activateCardChip(), onDismiss: dismissCardChip });
 }
 
 // ---- dropdown ----
@@ -1184,7 +1242,10 @@ async function useStrongPassword(f: LoginForm): Promise<void> {
   }
   filling = true;
   try {
-    for (const t of targets) setValue(t, r.password);
+    for (const t of targets) {
+      setValue(t, r.password);
+      entered.add(t); // the password the person asked for: the capture reads it, not a trap beside it
+    }
   } finally {
     filling = false;
   }
@@ -1269,6 +1330,20 @@ function snapKey(f: LoginForm): object {
   return f.form ?? f.container;
 }
 
+/** The fields the person ENTERED a value into: a trusted input event (typed, pasted, the browser's own autofill; the input
+ *  listener records it), or an andvari fill or generated password they asked for (fillForm, useStrongPassword). Nobody
+ *  enters anything into a honeypot trap, which is why the capture prefers these ([chooseEnteredCapture]). A page's own
+ *  scripted value never lands here: its events are not trusted. */
+const entered = new WeakSet<HTMLInputElement>();
+
+/** The password field the capture reads now: among the form's password fields, which passed the detection visibility rules
+ *  when it was scanned (every frame), the one the person entered ([chooseEnteredCapture]); detection's pick when they entered
+ *  none. Read at each snapshot, so a keystroke this frame counts even where the form scan is a frame old. */
+function captureField(f: LoginForm): HTMLInputElement | null {
+  if (f.password === null) return f.capturePassword;
+  return chooseEnteredCapture(f.passwords, f.newPasswords, f.password, (el) => entered.has(el));
+}
+
 function updateSnapshot(f: LoginForm): void {
   const key = snapKey(f);
   const s = snapshots.get(key) ?? { username: "", password: "" };
@@ -1278,7 +1353,9 @@ function updateSnapshot(f: LoginForm): void {
   // the OLD password — and the generator's value, written only into newPasswords, never reached
   // the banner at all. Every capture path (Enter, submit, click, the post-fill/post-generate
   // snapshots) funnels through here, so this is the one read that has to be right.
-  const p = f.capturePassword?.value ?? "";
+  // 0.30.0 release check: and the field the person ENTERED, among the form's passwords. A trap drawn under another field
+  // passes the detection rules, and two of them beside the real password made the capture read the second field: a trap.
+  const p = captureField(f)?.value ?? "";
   if (u !== "") s.username = u;
   if (p !== "") s.password = p;
   snapshots.set(key, s);
@@ -1410,8 +1487,10 @@ function onMutations(records: MutationRecord[]): void {
     // Review #13: a live chip also RE-ANCHORS on this tick. Inline validation ("Card number is
     // invalid") inserted above a field shifts it without any scroll or resize, and a fixed-position
     // chip would stay put — ending up overlapping the field it was placed above.
-    if (chipAnchor && !chipAnchor.isConnected) dismissCardChip();
-    else if (chipAnchor) repositionCardChip();
+    if (__ANDVARI_CARDFILL__) {
+      if (chipAnchor && !chipAnchor.isConnected) dismissCardChip();
+      else if (chipAnchor) repositionCardChip();
+    }
     reportCardForm(); // S3: a checkout card form may have just rendered (or gone away)
     // Multi-step: step 1 was captured and the password page/fragment just rendered with
     // focus already on the password field — offer without another user gesture.
@@ -1455,25 +1534,27 @@ function init(): void {
   // same task); a trusted Tab records its event, the element focused when it went down and the focus moves seen so
   // far. noteCardFocus (focusin, click) reads them, with the page's user activation. Passive: nothing here changes
   // what the page does with the event.
-  const notePress = (e: Event): void => {
-    if (!e.isTrusted) return;
-    const t = e.composedPath()[0] ?? null;
-    const press = { target: t, at: performance.now(), sameTask: true };
-    lastPress = press;
-    setTimeout(() => {
-      press.sameTask = false;
-    }, 0);
-  };
-  for (const type of ["pointerdown", "touchstart", "mousedown", "click"]) document.addEventListener(type, notePress, { capture: true, passive: true });
-  document.addEventListener(
-    "keydown",
-    (e) => {
-      if (e.isTrusted && e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey) {
-        lastTab = { event: e, from: document.activeElement, moves: focusMoves, at: performance.now() };
-      }
-    },
-    true,
-  );
+  if (__ANDVARI_CARDFILL__) {
+    const notePress = (e: Event): void => {
+      if (!e.isTrusted) return;
+      const t = e.composedPath()[0] ?? null;
+      const press = { target: t, at: performance.now(), sameTask: true };
+      lastPress = press;
+      setTimeout(() => {
+        press.sameTask = false;
+      }, 0);
+    };
+    for (const type of ["pointerdown", "touchstart", "mousedown", "click"]) document.addEventListener(type, notePress, { capture: true, passive: true });
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.isTrusted && e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey) {
+          lastTab = { event: e, from: document.activeElement, moves: focusMoves, at: performance.now() };
+        }
+      },
+      true,
+    );
+  }
 
   // Signup reuse alert (2026-08-22): BLUR, not input — one question per settled password, so a
   // typed value never streams to the SW keystroke by keystroke. checkPasswordReuse re-checks
@@ -1511,22 +1592,24 @@ function init(): void {
   // one — so cardChipIsOpen() is still true when it reads it. Escape moves no focus (the chip is
   // never focusable), so no focusout follows to clear the sentinel: it survives exactly until the
   // user leaves the field, suppressing the refocus focusin but never a fresh click.
-  document.addEventListener(
-    "keydown",
-    (e) => {
-      if (!e.isTrusted || e.key !== "Escape") return;
-      // Review #1: bump UNCONDITIONALLY — the dangerous window is the one where NO chip is
-      // rendered yet but an offer is in flight (a cold SW start is hundreds of ms). Gating this on
-      // cardChipIsOpen() let both Escape handlers early-return, so nothing invalidated the
-      // generation and every [K12] guard still passed (Escape moves no focus) — the chip popped up
-      // on the field the user had just dismissed. Chip-private, so [K4] is untouched.
-      chipGen++;
-      if (!cardChipIsOpen()) return;
-      chipEscaped = chipAnchor;
-      chipAnchor = null;
-    },
-    true,
-  );
+  if (__ANDVARI_CARDFILL__) {
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (!e.isTrusted || e.key !== "Escape") return;
+        // Review #1: bump UNCONDITIONALLY — the dangerous window is the one where NO chip is
+        // rendered yet but an offer is in flight (a cold SW start is hundreds of ms). Gating this on
+        // cardChipIsOpen() let both Escape handlers early-return, so nothing invalidated the
+        // generation and every [K12] guard still passed (Escape moves no focus) — the chip popped up
+        // on the field the user had just dismissed. Chip-private, so [K4] is untouched.
+        chipGen++;
+        if (!cardChipIsOpen()) return;
+        chipEscaped = chipAnchor;
+        chipAnchor = null;
+      },
+      true,
+    );
+  }
 
   document.addEventListener(
     "focusout",
@@ -1555,6 +1638,7 @@ function init(): void {
     (e) => {
       const t = e.composedPath()[0] ?? e.target;
       if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
+      entered.add(t); // the person entered this field (captureField prefers it); recorded before the snapshot reads it
       const f = formFor(t);
       if (f) updateSnapshot(f);
     },
@@ -1678,8 +1762,10 @@ function init(): void {
   // SPA route changes: an open dropdown (or chip) is anchored to nodes that may be on their way out.
   window.addEventListener("popstate", closeDropdown);
   window.addEventListener("hashchange", closeDropdown);
-  window.addEventListener("popstate", dismissCardChip); // [K8]
-  window.addEventListener("hashchange", dismissCardChip);
+  if (__ANDVARI_CARDFILL__) {
+    window.addEventListener("popstate", dismissCardChip); // [K8]
+    window.addEventListener("hashchange", dismissCardChip);
+  }
 
   new MutationObserver(onMutations).observe(document.documentElement, OBSERVE_OPTS);
 
@@ -1714,7 +1800,7 @@ function init(): void {
         void fillItem(msg.itemId, f).then(sendResponse);
         return true; // keep the channel open for the async outcome
       }
-      if (msg.type === "fillCard") {
+      if (__ANDVARI_CARDFILL__ && msg.type === "fillCard") {
         // S3: the SW sent this to THIS frame only (frameId-targeted), one where the person chose a card
         // field. We redeem this frame's one-shot card grant and write the returned fields; the SW
         // re-verifies the frameId and the provider origin the browser reports for this frame. [U12]:
@@ -1727,16 +1813,19 @@ function init(): void {
         // back-navigation, so without the reset the rescan's own report would be swallowed by its
         // own sig guard and the offer lost for the document's life. formsCache drops too (the SPA
         // that warranted a rescan invalidated the login scan as well).
-        lastCardSig = null;
-        formsCache = null;
-        cardFormsCache = null;
-        reportCardForm();
+        if (__ANDVARI_CARDFILL__) {
+          lastCardSig = null;
+          formsCache = null;
+          cardFormsCache = null;
+          reportCardForm();
+        }
         sendResponse({ ok: true });
         return undefined;
       }
       if (msg.type === "dropCardChoice") {
-        // Round-11 review: a newer choice in another frame covers a kind of this frame's chosen form.
-        setCardFocus(null);
+        // Round-11 review: a newer choice in another frame of the same payment form covers a kind of this frame's chosen
+        // form. Round-13 review: or the person pressed Start over in the popup.
+        if (__ANDVARI_CARDFILL__) setCardFocus(null);
         sendResponse({ ok: true });
         return undefined;
       }

@@ -103,17 +103,18 @@ targets:
         # The handler's one file, a captured login for the save queue, sets its own class (SafariWebExtensionHandler.swift).
         com.apple.developer.default-data-protection: NSFileProtectionComplete
     postBuildScripts:
-      # The extension's UI-test build (extension/build.mjs, UITEST=1) lists the test site's stand-in payment provider.
-      # A Release build, which is what an archive is, must never carry it: this fails one whose bundled files name the
-      # test domain, so a local archive cannot ship it either (CI checks the same in ios-unsigned.yml).
-      - name: No UI-test domain in a Release build
+      # The extension's UI-test build (extension/build.mjs, UITEST=1) lists the test site's stand-in payment provider,
+      # and its DEBUG=1 build the payment providers' test hosts. A Release build, which is what an archive is, must
+      # never carry any of them: this fails one whose bundled files name one, so a local archive cannot ship it either
+      # (CI checks the same in ios-unsigned.yml; round-13 review).
+      - name: No test host in a Release build
         basedOnDependencyAnalysis: false
         script: |
           if [ "${CONFIGURATION}" = "Release" ]; then
-            if grep -rIl "andvari-uitest" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}"; then
-              echo "error: the Safari extension's files name the UI-test domain (andvari-uitest): build them without UITEST=1 (app-ios/scripts/prepare.sh) before archiving"
+            "${SRCROOT}/scripts/check-no-test-hosts.sh" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}" || {
+              echo "error: build the Safari extension's files without UITEST=1 or DEBUG=1 (app-ios/scripts/prepare.sh) before archiving"
               exit 1
-            fi
+            }
           fi
     settings:
       base:

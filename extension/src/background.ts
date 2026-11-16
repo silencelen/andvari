@@ -38,7 +38,7 @@ import { CARD_FILL_OFF } from "./cardfillflag";
 /** In-page card fill in this build (build.mjs defines it for every target; cardfillflag.ts). Read here as the define
  *  itself, never through a constant, so that esbuild drops the card path's handlers from a build without it. */
 declare const __ANDVARI_CARDFILL__: boolean;
-import { cardFillPlan, chosenCardFrames, frameOriginOf, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease";
+import { cardFillPlan, choicesSpanForms, chosenCardFrames, frameOriginOf, framesWithChoices, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease";
 import type {
   CardFillFields,
   CardFillOutcome,
@@ -63,11 +63,11 @@ import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
-import { captureBinding, derivedPageOrigin, requestHost, type OriginSource } from "./senderorigin";
+import { captureBinding, derivedPageOrigin, requestHost, webOriginOfUrl, type OriginSource } from "./senderorigin";
 import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
 import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
-import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, setServerUrl } from "./serverurl";
+import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, SERVER_URL_KEY, setServerUrl } from "./serverurl";
 import { idbKv, openBoundedIdb, trustedStore, type KvArea } from "./trustedkv";
 import { plainSessionArea, SEAL_DB_NAME, SessionSeal } from "./sessionseal";
 import { A15_OWED_KEY, attestsPreA15Upgrade, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail, UNATTESTED_SERVER_KEY, type InstallSignal, type MigrationOutcome } from "./trustmigrate";
@@ -79,7 +79,7 @@ import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
 import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
-import { appServerToAdopt, askAppServerDetailed, nativeSender, parseAppServerReply, type AppServerAnswer } from "./appserver";
+import { appServerToAdopt, appServerToForget, askAppServerDetailed, nativeSender, parseAppServerReply, type AppServerAnswer } from "./appserver";
 import { queueSaveToApp, savesThroughApp } from "./appsave";
 import { AppVault, vaultFromApp, type AppVaultCardFields, type CardFieldName } from "./appvault";
 
@@ -420,7 +420,7 @@ interface TabState {
    *  card-entry origin (cardproviders.ts) ever receives a card (owner decision 2026-11-14); the others' records only
    *  let the popup say why it copies instead. Cleared with the tab (onRemoved / lock). [U14]: a persisted pre-update
    *  `{fields}` record is DISCARDED on read (ensureLoaded) — fail-closed, the rescan broadcast restores fresh records. */
-  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number; ancestors?: string[] | null; shown?: boolean }>;
+  cardForms?: Record<number, { origin: string; forms: CardFieldKind[][]; anchor?: number | null; anchorAt?: number; ancestors?: string[] | null; parent?: number | null; account?: string | null; shown?: boolean }>;
   /** V4 badge: the top frame's BROWSER-SET sender.origin, recorded at pageInfo — the badge's only
    *  origin source ([A4]: never tab.url outside the popup window). Cleared with the registry. */
   topOrigin?: string;
@@ -1123,6 +1123,8 @@ atLoad("runtime.onMessage", () => chrome.runtime.onMessage.addListener((msg: Req
 /** Safari: how often each source gave a page's origin, and the last message that needed one (the popup's Details). */
 const pageOriginSeen: Record<OriginSource, number> = { origin: 0, url: 0, none: 0 };
 let pageOriginLast: string | null = null;
+/** Safari Details (round-13 review): whether the browser set `sender.origin` for the last payment provider frame. */
+let providerFrameDiag: string | null = null;
 
 /**
  * Safari (L8): a tab sender with no browser-set `origin` gets its top frame's origin from that frame's own browser-set
@@ -1344,6 +1346,7 @@ function serverDiag(): ServerDiag {
     stage: startStage, migration: startMigration, block: dialBlock?.kind ?? null, store: trustedStoreOk, url: serverUrl, ...appServerDiag,
     vaultOpen: APP_VAULT?.diag.open ?? null, vaultSecret: APP_VAULT?.diag.secret ?? null,
     pageOrigin: pageOriginLast === null ? null : `last from ${pageOriginLast} (origin ${pageOriginSeen.origin}, frame url ${pageOriginSeen.url}, none ${pageOriginSeen.none})`,
+    providerFrame: providerFrameDiag,
   };
 }
 
@@ -1359,6 +1362,35 @@ async function adoptAppServerUnkept(canonical: string): Promise<boolean> {
   await switchChain;
   if (serverUrl !== canonical) return false;
   dialBlock = null;
+  await registerAutofillScripts();
+  return true;
+}
+
+/**
+ * Safari: the app has no server now, so the one this extension adopted from it goes too (spec 03 §13: an account deleted
+ * in the app leaves the device as a fresh install, with nothing of the account's server). The kept choice goes FIRST: if
+ * the store holds it and will not let it go, nothing changes and the next ask tries again. Then the worker returns to
+ * the build's placeholder origin through the origin-clean switch, whatever it kept under the old origin is removed
+ * (purgeOriginNamespace), the app's vault is closed, and the block a first install starts with stands again until the
+ * app names a server. True when no server is in effect afterwards.
+ */
+async function forgetAppServer(): Promise<boolean> {
+  const oldKey = currentOriginKey;
+  try {
+    await trusted.remove([SERVER_URL_KEY]);
+  } catch {
+    if (trustedStoreOk) return false;
+    // No store in this worker life: the server was never kept, only used ([adoptAppServerUnkept]).
+  }
+  APP_VAULT?.close();
+  switchChain = switchChain.then(() => applyServerChange(DEFAULT_SERVER_URL)).catch(() => {});
+  await switchChain;
+  if (!noServerChosen()) return false;
+  await purgeOriginNamespace(oldKey).catch(() => {});
+  dialBlock = { kind: "unsettled" };
+  // A block that stands dials nothing, a live socket included (as at worker start, applyServerState).
+  events?.close();
+  events = null;
   await registerAutofillScripts();
   return true;
 }
@@ -1417,6 +1449,13 @@ function adoptAppAnswer(answer: AppServerAnswer, via: string, askedAt: number): 
     newestAppAnswerAt = askedAt;
     const adopt = appServerToAdopt(answer, dialBlock === null ? serverUrl : null, BUILD_TARGET);
     if (adopt === null) {
+      // The app has no server (an account deleted in it leaves the device as a fresh install): the one adopted from it
+      // goes from here too.
+      if (appServerToForget(answer, !noServerChosen(), BUILD_TARGET)) {
+        const forgotten = await forgetAppServer();
+        appServerDiag.adopt = `${forgotten ? "forgotten: the app has no server" : "the app has no server, but this one could not be forgotten"}${via}`;
+        return { app: "none" };
+      }
       if (answer.kind === "set") appServerDiag.adopt = `already in effect${via}`;
       else if (via === "") appServerDiag.adopt = null;
       return { app: answer.kind };
@@ -2667,6 +2706,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return openPopupForSearch(sender); // root cause B hand-off — a real, visibility-guarded click; NOT passive
     case "cardFillOffers":
       return __ANDVARI_CARDFILL__ ? cardFillOffers(sender) : ({ fillable: false, origin: null, frames: [], pageFormOnly: false, fillOff: true } satisfies Res<"cardFillOffers">);
+    case "clearCardChoices":
+      return __ANDVARI_CARDFILL__ ? clearCardChoices(sender) : ({ ok: false } satisfies Res<"clearCardChoices">);
     case "fillCardFromPopup":
       return __ANDVARI_CARDFILL__ ? fillCardFromPopup(msg.itemId, msg.frames, sender) : ({ ok: false, code: "fill_off", error: CARD_FILL_OFF } satisfies Res<"fillCardFromPopup">);
     case "revealCardForFill":
@@ -4294,6 +4335,12 @@ async function cardFormInfo(
   const frameId = sender.frameId;
   const origin = frameOriginOf(sender);
   if (tabId === undefined || frameId === undefined) return { ok: false };
+  if (frameId !== 0) {
+    // Round-13 review: whether the browser named this provider frame's site, for the popup's Details (display only: the
+    // frame's own URL is looked at here for that and nothing else).
+    const byUrl = webOriginOfUrl(sender.url);
+    if (byUrl !== null && isCardProviderOrigin(byUrl)) providerFrameDiag = `${byUrl}: sender.origin ${sender.origin === undefined ? "not set" : sender.origin === byUrl ? "set" : "set, to another origin"}`;
+  }
   let heard = cardReports.get(tabId);
   if (heard === undefined) cardReports.set(tabId, (heard = { top: false, origins: new Set(), hints: [] }));
   if (frameId === 0) {
@@ -4328,17 +4375,16 @@ async function cardFormInfo(
     reg[frameId] = {
       origin, forms: msg.forms, anchor, ...(anchorAt !== undefined ? { anchorAt } : {}),
       // Round-12 review: the frame's own report of its ancestor origins (a fill's chain of choices must share them) and
-      // whether it is collapsed (then it neither counts nor can be chosen).
-      ancestors: ancestorsOf(msg.ancestors), ...(typeof msg.shown === "boolean" ? { shown: msg.shown } : {}),
+      // whether it is collapsed (then it neither counts nor can be chosen). Round-13 review: on Firefox, its parent's
+      // frameId in their place; and the merchant account its URL names. Together with the origin they say which payment
+      // form the frame belongs to.
+      ancestors: ancestorsOf(msg.ancestors), parent: parentOf(msg.parentFrameId), account: accountOf(msg.account),
+      ...(typeof msg.shown === "boolean" ? { shown: msg.shown } : {}),
     };
-    // Round-11 review: a new choice of a kind clears the choices of that kind in every other frame, which are told.
+    // Round-11 review: a new choice of a kind clears the choices of that kind in the other frames of its payment form,
+    // which are told. Round-13 review: never in another form; the fill then refuses until the person starts over.
     if (msg.choseNow === true && anchor !== null && anchorAt !== undefined && mayReceiveCard(reg[frameId])) {
-      for (const other of supersededChoices(reg, frameId, msg.forms[anchor]!, anchorAt)) {
-        const r = reg[other]!;
-        reg[other] = { origin: r.origin, forms: r.forms, anchor: null, ...(r.ancestors !== undefined ? { ancestors: r.ancestors } : {}), ...(r.shown !== undefined ? { shown: r.shown } : {}) };
-        const drop: TabMsg = { type: "dropCardChoice" };
-        void chrome.tabs.sendMessage(tabId, drop, { frameId: other }).catch(() => {});
-      }
+      for (const other of supersededChoices(reg, frameId, msg.forms[anchor]!, anchorAt)) letChoiceGo(tabId, reg, other);
     }
   }
   st.cardForms = reg;
@@ -4398,6 +4444,44 @@ async function pruneGoneCardFrames(tabId: number): Promise<void> {
 function ancestorsOf(v: unknown): string[] | null {
   if (!Array.isArray(v) || v.length > 32) return null;
   return v.every((o) => typeof o === "string" && o.length <= 2048) ? (v as string[]) : null;
+}
+
+/** Firefox: the parent frameId a frame's content script reported (round-13 review); null for anything else. */
+function parentOf(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+}
+
+/** The merchant account a provider frame's content script read from its own URL (cardproviders.ts providerAccountOf),
+ *  bounded; null for none or anything malformed. */
+function accountOf(v: unknown): string | null {
+  return typeof v === "string" && v.length <= 300 && /^[a-z]+:[A-Za-z0-9_/-]+$/.test(v) ? v : null;
+}
+
+/** The frame [frameId] of [tabId] lets its choice go: its record keeps everything else, and the frame is told. */
+function letChoiceGo(tabId: number, reg: Record<string, CardFrameRecord>, frameId: number): void {
+  const r = reg[frameId];
+  if (r === undefined) return;
+  const { anchorAt: _gone, ...kept } = r;
+  reg[frameId] = { ...kept, anchor: null };
+  const drop: TabMsg = { type: "dropCardChoice" };
+  void chrome.tabs.sendMessage(tabId, drop, { frameId }).catch(() => {});
+}
+
+/**
+ * Popup ONLY: "Start over" (round-13 review). Every frame of the active tab lets its chosen card field go, so the person
+ * taps the one payment form they mean before filling.
+ */
+async function clearCardChoices(sender: chrome.runtime.MessageSender): Promise<Res<"clearCardChoices">> {
+  if (sender.tab !== undefined) return { ok: false };
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id === undefined) return { ok: false };
+  const st = tabs.get(tab.id);
+  const reg = st?.cardForms;
+  if (st === undefined || reg === undefined) return { ok: true };
+  for (const frameId of framesWithChoices(reg)) letChoiceGo(tab.id, reg, frameId);
+  tabs.set(tab.id, st);
+  persistTabs();
+  return { ok: true };
 }
 
 /**
@@ -4657,7 +4741,9 @@ async function cardFillOffers(sender: chrome.runtime.MessageSender): Promise<Res
   if (allow !== null) return originless ? { ...none, noFrameOrigin: true } : { ...none, allowOrigin: allow };
   if (provider.length > 0) {
     if (kindsOfferedTwice(records).length > 0) return { ...none, doubled: true };
-    const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin, kinds }) => ({ frameId, origin, kinds }));
+    // Round-13 review: card fields tapped in two payment forms fill neither; the popup offers Start over.
+    if (choicesSpanForms(records, Date.now())) return { ...none, mixed: true };
+    const frames = chosenCardFrames(records, Date.now()).map(({ frameId, origin, kinds, ancestors }) => ({ frameId, origin, kinds, ancestors: ancestors ?? null }));
     return { fillable: true, origin: frames[0]?.origin ?? provider[0]!.origin, frames, pageFormOnly: false };
   }
   if (originless) return { ...none, noFrameOrigin: true };
@@ -4721,6 +4807,7 @@ async function fillCardFromPopup(itemId: string, shown: unknown, sender: chrome.
       return { ok: false, code: "provider_not_allowed", allowOrigin: plan.origin, error: "a payment provider's frame on the page has not reported" };
     }
     if (plan.reason === "duplicate_kind") return { ok: false, code: "duplicate_fields", error: `more than one provider card frame asks for ${plan.kinds.join(", ")}` };
+    if (plan.reason === "mixed_forms") return { ok: false, code: "mixed_forms", error: "card fields tapped in two different payment forms" };
     if (eligibleCardFrames(tabId).length > 0) return { ok: false, code: "no_focus", error: "no card field chosen in a payment provider's card box" };
     if (cardReports.get(tabId)?.originless === true) return { ok: false, code: "no_frame_origin", error: "this browser does not say which site a frame comes from" };
     if (pageCardFormsOnly(records())) return { ok: false, code: "page_form", error: "andvari fills a card only into a payment provider's card box" };
