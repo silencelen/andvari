@@ -260,6 +260,9 @@ export class AppVault {
       const reply = await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want, name: item.name }), APP_VAULT_PROMPT_TIMEOUT_MS);
       this.diag.secret = describeDiag(reply);
       const result = parseSecretReply(reply, want);
+      // Work that outlives a lock goes no further: a Lock (or a new open) while the handler was answering ended the
+      // vault this ask was made under, so what it answered is dropped here, never handed to a page or the popup.
+      if (this.opened !== live) return { state: "cancelled" };
       // The app's gates refuse now (signed out, policy, Face ID off): this vault is over. A cancel, or a handler
       // that had to prompt again, changes nothing here.
       if (result.state === "openApp") this.close();
@@ -293,6 +296,7 @@ export class AppVault {
       const reply = await bounded(this.send({ type: "vaultSecret", ticket: live.ticket, itemId, want: "card", name: card.name, fields: asked }), APP_VAULT_PROMPT_TIMEOUT_MS);
       this.diag.secret = describeDiag(reply);
       const result = parseCardReply(reply, asked);
+      if (this.opened !== live) return { state: "cancelled" }; // ended while the handler answered: as [secret]
       if (result.state === "openApp") this.close();
       return result;
     } catch {

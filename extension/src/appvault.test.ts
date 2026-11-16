@@ -321,3 +321,37 @@ test("the Safari worker fills a card only into a payment provider's box, only by
   const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf("function appVaultCards("));
   assert.match(lane, /case "revealCardField": \{[\s\S]*?if \(sender\.tab !== undefined\) return \{ ok: false, error: "not allowed from a page" \}/);
 });
+
+// ---- work that outlives a lock (release 0.30.0 port of the overhaul's fix 56292bb6) ----
+
+test("a Lock while the handler answers drops its answer: no login or card goes on under a vault that ended", async () => {
+  let release: (() => void) | null = null;
+  const all = { ok: true, type: "vaultSecret", state: "secret", username: "fam", password: "hunter2", card: { number: "4242424242424242", cvv: "123" } };
+  const vault = new AppVault(async (m) => {
+    if (m.type === "vaultOpen") return { ...opened, cards: [card] };
+    if (m.type === "vaultClose") return { ok: true, type: "vaultClose" };
+    await new Promise<void>((r) => (release = r)); // Face ID is up in the handler
+    return all;
+  });
+  for (const ask of [() => vault.secret("i1", "login"), () => vault.cardFields("c1", ["number", "cvv"])] as const) {
+    await vault.open();
+    const pending = ask();
+    await new Promise((r) => setTimeout(r, 0));
+    vault.close(); // the person pressed Lock
+    release!();
+    assert.deepEqual(await pending, { state: "cancelled" }, "the answer is dropped");
+  }
+  // A new open while the first ask waited is another vault too.
+  await vault.open();
+  const first = vault.secret("i1", "login");
+  await new Promise((r) => setTimeout(r, 0));
+  const r1 = release!;
+  await vault.open();
+  r1();
+  assert.deepEqual(await first, { state: "cancelled" });
+  // Unchanged when nothing ended it.
+  const ok = vault.secret("i1", "login");
+  await new Promise((r) => setTimeout(r, 0));
+  release!();
+  assert.equal((await ok).state, "login");
+});

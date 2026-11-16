@@ -15,9 +15,10 @@ const LOGINS: Record<string, { name: string; username: string; password: string;
   "item-forum": { name: "forum", username: "al", password: "forum-pw", uris: ["https://forum.example"] },
 };
 
-async function safariWorld() {
+async function safariWorld(gate: { hold: Promise<void> | null } = { hold: null }) {
   const wd = new World();
-  wd.native = (msg: { type: string; itemId?: string }) => {
+  wd.native = async (msg: { type: string; itemId?: string }) => {
+    if (msg.type === "vaultSecret" && gate.hold) await gate.hold; // Face ID is up in the app
     if (msg.type === "vaultOpen") {
       const items = Object.entries(LOGINS).map(([itemId, l]) => ({ itemId, name: l.name, username: l.username, uris: l.uris, hasTotp: false }));
       return { ok: true, type: "vaultOpen", state: "open", ticket: TICKET, email: "alice@example.com", items, cards: [] };
@@ -70,4 +71,19 @@ test("Safari: once the tab moved off the page shown, neither a pick nor a confir
   assert.deepEqual(wd.tabMessages, [], "no fill request reached the tab");
   assert.deepEqual(redeemed, []);
   assert.equal(wd.nativeLog.filter((m: { type: string }) => m.type === "vaultSecret").length, 0, "the app was asked for no secret");
+});
+
+test("Safari: a Lock pressed while the app's Face ID prompt is up drops the login the app returns afterwards", async () => {
+  let release: () => void = () => {};
+  const gate = { hold: new Promise<void>((r) => (release = r)) as Promise<void> | null };
+  const { wd, w, redeemed } = await safariWorld(gate);
+  wd.tabs.set(3, { id: 3, url: `${BANK}/login`, active: true });
+  const filling = w.popup({ type: "fillFromPopup", itemId: "item-bank", page: BANK });
+  for (let i = 0; i < 400 && !wd.nativeLog.some((m: { type: string }) => m.type === "vaultSecret"); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(wd.nativeLog.some((m: { type: string }) => m.type === "vaultSecret"), "the app was asked, and its prompt is up");
+  assert.equal((await w.popup({ type: "lock" })).ok, true, "the person pressed Lock");
+  release();
+  const r = await filling;
+  assert.deepEqual(redeemed, [{ origin: BANK, secret: undefined }], `the page got nothing, got ${JSON.stringify(redeemed)}`);
+  assert.equal(r.ok, false);
 });
