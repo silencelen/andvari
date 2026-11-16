@@ -584,7 +584,7 @@ fun Application.andvariModule(services: Services) {
             // §2.2: fetched pre-login by all four clients on boot/unlock/switch/landing — the
             // most-hammered anonymous route on a public instance, so it gets a per-IP bucket
             // (generous: a legitimate client re-fetches a handful of times a minute at worst).
-            if (!limiter.allow("client_policy:${call.rateIp(config)}",60, 60_000)) throw RateLimited()
+            if (!limiter.allow("client_policy:${call.rateIp(config)}", 60, 60_000)) throw RateLimited()
             // Per-origin overlay (§2.2): the break-glass twin origin always answers
             // signupMode="closed" — same isPublicOrigin authority the login route uses.
             call.respond(service.policy(call.isPublicOrigin(config)))
@@ -627,7 +627,7 @@ fun Application.andvariModule(services: Services) {
 
         // ---- auth ----
         post("/api/v1/auth/prelogin") {
-            if (!limiter.allow("prelogin:${call.rateIp(config)}",10, 60_000)) throw RateLimited()
+            if (!limiter.allow("prelogin:${call.rateIp(config)}", 10, 60_000)) throw RateLimited()
             val req = call.receive<PreloginRequest>()
             call.respond(service.prelogin(req.email))
         }
@@ -637,7 +637,7 @@ fun Application.andvariModule(services: Services) {
             // opens a write tx on the ONE SQLite connection the whole process serializes on — cheap
             // requests converted into contention on every authenticated sync. Same 5/min per-IP shape
             // as its login/recovery siblings; a household enrolls devices, not floods.
-            if (!limiter.allow("register:${call.rateIp(config)}",5, 60_000)) throw RateLimited()
+            if (!limiter.allow("register:${call.rateIp(config)}", 5, 60_000)) throw RateLimited()
             enforceVersion(call, service)
             if (call.isPublicOrigin(config)) throw Forbidden("register_public_disabled")
             val req = call.receive<RegisterRequest>()
@@ -649,7 +649,7 @@ fun Application.andvariModule(services: Services) {
             // relaxation to 10/min is revoked (unsetting ANDVARI_PUBLIC_HOSTNAME must not loosen
             // online-guessing resistance). ANDVARI_LOGIN_RATE_PER_MIN tunes it (default 5); the
             // email-keyed exponential backoff inside Service.login is the per-account half.
-            if (!limiter.allow("login:${call.rateIp(config)}",config.loginRatePerMin, 60_000)) throw RateLimited()
+            if (!limiter.allow("login:${call.rateIp(config)}", config.loginRatePerMin, 60_000)) throw RateLimited()
             enforceVersion(call, service)
             val req = call.receive<LoginRequest>()
             call.respond(service.login(req, call.clientIp(config), publicOrigin, call.declaredClientVersion()))
@@ -660,7 +660,7 @@ fun Application.andvariModule(services: Services) {
             // F22: per-IP like its siblings, but with headroom — a multi-device household waking at
             // once (or a fleet whose access tokens expire together) legitimately bursts here, and a
             // refresh token is a 256-bit secret, so this bounds resource use, not guessing.
-            if (!limiter.allow("refresh:${call.rateIp(config)}",30, 60_000)) throw RateLimited()
+            if (!limiter.allow("refresh:${call.rateIp(config)}", 30, 60_000)) throw RateLimited()
             val req = call.receive<RefreshRequest>()
             call.respond(service.refresh(req.refreshToken, call.clientIp(config), call.declaredClientVersion()))
         }
@@ -1137,19 +1137,19 @@ fun Application.andvariModule(services: Services) {
         // call these paths.
         post("/api/v1/recovery/self/verify") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
-            if (!limiter.allow("recovery_verify:${call.rateIp(config)}",5, 60_000)) throw RateLimited()
+            if (!limiter.allow("recovery_verify:${call.rateIp(config)}", 5, 60_000)) throw RateLimited()
             call.respond(service.recoverySelfVerify(call.receive<RecoveryVerifyRequest>(), call.clientIp(config)))
         }
         post("/api/v1/recovery/self/commit") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
-            if (!limiter.allow("recovery_commit:${call.rateIp(config)}",5, 60_000)) throw RateLimited()
+            if (!limiter.allow("recovery_commit:${call.rateIp(config)}", 5, 60_000)) throw RateLimited()
             val recovered = service.recoverySelfCommit(call.receive<RecoveryCommitRequest>(), call.clientIp(config))
             services.notifier.notifyRevokedUser(recovered) // M8: self-recovery revoked all this user's sessions
             call.respondText("ok")
         }
         put("/api/v1/recovery/self-setup") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
-            if (!limiter.allow("recovery_setup:${call.rateIp(config)}",5, 60_000)) throw RateLimited()
+            if (!limiter.allow("recovery_setup:${call.rateIp(config)}", 5, 60_000)) throw RateLimited()
             val p = requirePrincipal(call, service)
             val pieceId = service.recoverySelfSetup(p, call.receive<RecoverySelfSetupRequest>(), call.clientIp(config))
             // Piece-binding (design 2026-07-13 §1.4): the response carries the fresh pieceId (was the
@@ -1166,7 +1166,7 @@ fun Application.andvariModule(services: Services) {
         // acceptance); non-blank ⇒ RecoverySelfConfirmRequest, decode failure ⇒ 400 bad_request.
         post("/api/v1/recovery/self/confirm") {
             if (call.isPublicOrigin(config)) throw Forbidden("recovery_public_disabled")
-            if (!limiter.allow("recovery_confirm:${call.rateIp(config)}",5, 60_000)) throw RateLimited()
+            if (!limiter.allow("recovery_confirm:${call.rateIp(config)}", 5, 60_000)) throw RateLimited()
             val p = requirePrincipal(call, service)
             val text = call.receiveText()
             val pieceId = if (text.isBlank()) null else runCatching {
