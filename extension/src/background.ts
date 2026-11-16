@@ -2553,7 +2553,7 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "revealCardField":
       return revealCardField(msg, sender);
     case "fillFromPopup":
-      return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null);
+      return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null, typeof msg.page === "string" ? msg.page : null);
     case "capturedCredential":
       return capturedCredential(msg, sender);
     case "captureCard":
@@ -4253,7 +4253,7 @@ function asFillOutcome(v: unknown): FillOutcome | null {
  *  Cut M (v2 #14): `ok` used to mean sendMessage DELIVERY, so the popup closed over a fill
  *  that wrote nothing — now the content script answers its real FillOutcome and ok is true
  *  only when something actually landed in a field. */
-async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender, confirmedOtherSite: string | null = null): Promise<Res<"fillFromPopup">> {
+async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSender, confirmedOtherSite: string | null = null, shownPage: string | null = null): Promise<Res<"fillFromPopup">> {
   if (sender.tab !== undefined) return { ok: false, code: "not_allowed", error: "not allowed from a page" };
   // Safari: the open list of the app's vault stands in for the session's items; the secret is fetched at the reveal.
   const unlockedNow = APP_VAULT !== null ? APP_VAULT.unlocked : session !== null;
@@ -4268,6 +4268,13 @@ async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSende
   // window); an opaque or unreadable top is never eligible, the card grant's [A1] rule.
   const top = await topOrigin(tab.id);
   if (top === null) return { ok: false, code: "not_allowed", error: "this page cannot be filled" };
+  // The tab must still be on the page the popup showed ([shownPage], the origin its "This site" list was drawn for). A
+  // tab can move to another site while the popup is open (the page that opened it may navigate it at any moment), and
+  // the person's pick was made for the page the popup named: without this the grant below would be minted for the new
+  // site, whose own content script then redeems it. Compared at the same read the grant binds to, so a later move
+  // cannot get past it either (the redeeming document must then be at [top]). Before the Safari confirm below, so a
+  // confirmation never fills a page the popup did not show.
+  if (shownPage === null || shownPage !== top) return { ok: false, code: "not_allowed", error: "the page changed since the popup showed it" };
   // Safari: this popup is the only fill surface and lists the whole vault, so a login saved for another site is
   // filled here only after the person confirmed it, with both hosts named (a look-alike domain is the case).
   if (APP_VAULT !== null) {

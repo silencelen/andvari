@@ -407,7 +407,7 @@ export type Req =
    *  whatever tab is ACTIVE, which need not be the sender's): user explicitly picked an item to
    *  fill into the active tab → SW mints a one-shot grant for (tabId,itemId) and forwards
    *  {type:"fillItem"} to that tab's top frame. */
-  | { type: "fillFromPopup"; itemId: string; /** Safari: the person confirmed filling a login saved for another site, on THIS page host (the worker requires the active tab to still be on it). */ confirmedOtherSite?: string }
+  | { type: "fillFromPopup"; itemId: string; /** Safari: the person confirmed filling a login saved for another site, on THIS page host (the worker requires the active tab to still be on it). */ confirmedOtherSite?: string; /** The origin of the page the popup showed (its "This site" list): the worker fills only while the active tab's top origin is still this one, and refuses without it. */ page?: string }
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
    *  for a copy — the value goes straight to the popup's clipboard write, never into a page
    *  or the popup DOM. Cards are deliberately not uri-bound, so there is no host gate; the
