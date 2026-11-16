@@ -57,7 +57,7 @@ class NewPasswordSignalTest {
             "the ONE password-target helper must go through the signal",
         )
         assertTrue(db.contains("private fun fillPasswordFields(form: ParsedForm): List<ParsedField> = FillPlan.fillPasswordFields(form)"))
-        assertTrue(plan.contains("fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }"), "the rows' passFields come from the helper")
+        assertTrue(plan.contains("fillPasswordFields(form).filter { fieldMatches(login.uris, it, form, trusted) }"), "the rows' passFields come from the helper")
         assertTrue(db.contains("val fillable = fillPasswordFields(form)"), "the inline-presentation leg reads the same set")
         val filters = Regex("form\\.fields\\.filter \\{ it\\.kind == FieldKind\\.PASSWORD \\}").findAll(db + plan).count()
         assertEquals(2, filters, "exactly two raw password filters: fillPasswordFields (the source) and saveInfoFor (a count, not a fill)")
