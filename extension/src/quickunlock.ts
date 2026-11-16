@@ -251,12 +251,19 @@ export interface EnrollArgs {
   /** COPIED from the live session's surviving full-password stamp — never `now()` (breaker A4). */
   lastFullUnlockAt: number;
   autoLockSeconds: number;
+  /** Whether the session this enrolment was asked under is still the one in front (background: the same session
+   *  object). Asked before anything is wiped and again just before the record is written: an enrolment takes seconds
+   *  (the bench and the PIN derivation, or the biometric prompt for as long as the person leaves it up), and a lock, a
+   *  sign-out, a server switch or a new browser session in that time must not be followed by a record sealing the
+   *  dropped session's UVK under its account. */
+  stillCurrent: () => boolean;
 }
-export type EnrollResult = { ok: true } | { ok: false; code: "weak_pin"; reason: PinWeakReason };
+/** `ended`: the session it was asked under ended meanwhile (stillCurrent); nothing was written. */
+export type EnrollResult = { ok: true } | { ok: false; code: "weak_pin"; reason: PinWeakReason } | { ok: false; code: "ended" };
 /** enrollBio outcome. `bio_unsupported` = no platform authenticator / no PRF (prfEnabled false or a
  *  non-32-byte secret); `bio_cancelled` = the ceremony threw (user cancel / timeout / no gesture). In
- *  BOTH failure cases NOTHING is wiped (amendment 3 — the ceremony runs before any wipe). */
-export type EnrollBioResult = { ok: true } | { ok: false; code: "bio_unsupported" | "bio_cancelled" };
+ *  BOTH failure cases NOTHING is wiped (amendment 3 — the ceremony runs before any wipe). `ended`: as for enroll. */
+export type EnrollBioResult = { ok: true } | { ok: false; code: "bio_unsupported" | "bio_cancelled" | "ended" };
 
 /** doLock armed-branch verdict. `not-enrolled` → the caller stays byte-identical to today's full
  *  erase; `declined` (ineligible record OR a read that threw — fail-closed) → full erase + wipe. */
@@ -360,18 +367,29 @@ export class QuickUnlock {
   }
 
   /** Enroll (breaker A1/A2/A4/A8). Caller has already gated: session unlocked, uvk in memory
-   *  (breaker B1), mustChangePassword===false (§8.1-A5). Wipes any prior blob + co-key FIRST, then
-   *  mints a FRESH co-key so the new blob is bound to fresh key material. */
+   *  (breaker B1), mustChangePassword===false (§8.1-A5). The slow part (the bench and the PIN derivation) runs first;
+   *  then, only while the session is still the one in front, any prior blob + co-key is wiped and a FRESH co-key minted
+   *  so the new blob is bound to fresh key material; the record is written only if the session is still current after
+   *  that. */
   async enroll(args: EnrollArgs): Promise<EnrollResult> {
     const pv = validatePin(args.pin);
     if (!pv.ok) return { ok: false, code: "weak_pin", reason: pv.reason };
     const kdfParams = await this.deps.benchPinParams();
     assertPinKdfParams(kdfParams); // never persist sub-floor/above-ceiling params (breaker A8)
-    await this.wipe(); // #11: wipe prior blob + co-key before re-enroll
-    const kNonExp = await this.deps.coKey.generate();
     const salt = this.deps.randomBytes(16);
     const kPin = await this.deps.deriveKPin(args.pin, kdfParams, salt);
+    if (!args.stillCurrent()) {
+      kPin.fill(0);
+      return { ok: false, code: "ended" };
+    }
+    await this.wipe(); // #11: wipe prior blob + co-key before re-enroll
+    const kNonExp = await this.deps.coKey.generate();
     const ct = await sealDoubleWrap(kPin, kNonExp, args.uvk, args.userId);
+    kPin.fill(0);
+    if (!args.stillCurrent()) {
+      await this.deps.coKey.delete(); // the co-key minted above wraps nothing
+      return { ok: false, code: "ended" };
+    }
     const blob: QuBlobPin = { v: 1, kind: "pin", salt: toB64(salt), kdfParams, ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
     await this.deps.store.write({
       v: 1,
@@ -412,10 +430,19 @@ export class QuickUnlock {
     }
     const kBio = deriveKBio(secret, args.userId);
     secret.fill(0); // zeroize the raw PRF secret the moment K_bio is derived
+    // The prompt stays up for as long as the person leaves it: the session may have ended under it (stillCurrent).
+    if (!args.stillCurrent()) {
+      kBio.fill(0);
+      return { ok: false, code: "ended" };
+    }
     await this.wipe(); // commit point — from here it's all-or-nothing on a fresh co-key
     const kNonExp = await this.deps.coKey.generate();
     const ct = await sealDoubleWrap(kBio, kNonExp, args.uvk, args.userId, adQuickUnlockBio(args.userId));
     kBio.fill(0);
+    if (!args.stillCurrent()) {
+      await this.deps.coKey.delete(); // the co-key minted above wraps nothing
+      return { ok: false, code: "ended" };
+    }
     const blob: QuBlobBio = { v: 1, kind: "biometric", credentialId, prfSalt: toB64(prfSalt), ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
     await this.deps.store.write({
       v: 1,

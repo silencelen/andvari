@@ -132,7 +132,7 @@ for (const [label, end] of [
   ["a sign-out", { type: "signOut" }],
   ["a lock", { type: "lock" }],
 ] as const) {
-  test.skip(`a PIN enrolment overtaken by ${label} writes no quick-unlock record for the session that ended`, async () => {
+  test(`a PIN enrolment overtaken by ${label} writes no quick-unlock record for the session that ended`, async () => {
     const { world, w, acct } = await signedInWorld();
     const kdf = holdKdf(world);
     const enrolling = w.popup({ type: "enrollQuickUnlock", pin: PIN });

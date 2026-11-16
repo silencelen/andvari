@@ -43,7 +43,6 @@ import type {
   CardFillFields,
   CardFillOutcome,
   CardItem,
-  EnrollCode,
   FillOutcome,
   MatchItem,
   PendingCardSave,
@@ -3305,9 +3304,19 @@ async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">>
     pin,
     lastFullUnlockAt: session.lastFullUnlockAt, // COPIED — never Date.now() from a QUICK session (breaker A4)
     autoLockSeconds,
+    stillCurrent: enrolledUnder(session),
   });
-  if (!r.ok) return { ok: false, code: r.code as EnrollCode, reason: r.reason };
+  if (!r.ok) return r.code === "ended" ? { ok: false, code: "locked" } : { ok: false, code: r.code, reason: r.reason };
   return { ok: true };
+}
+
+/** An enrolment belongs to the session it was asked under. A lock, a sign-out, a server switch (which locks) and a new
+ *  browser session all drop `session`. Any of them during the seconds an enrolment takes (or the minutes a biometric
+ *  prompt may stay up) and the enrolment writes nothing: before, it went on to seal that session's UVK into a fresh
+ *  record (after a sign-out had wiped the old one), so the account's quick-unlock record and its email outlived the
+ *  sign-out, and the next password sign-in to that account switched quick unlock back on. */
+function enrolledUnder(s: Session): () => boolean {
+  return () => session === s;
 }
 
 /** Enroll biometric quick-unlock (0.17.0) — same gates as enrollQuickUnlock (unlocked, in-memory UVK,
@@ -3329,10 +3338,11 @@ async function enrollQuickUnlockBio(): Promise<Res<"enrollQuickUnlockBio">> {
     email: session.email,
     lastFullUnlockAt: session.lastFullUnlockAt, // COPIED — never Date.now() from a QUICK session (breaker A4)
     autoLockSeconds,
+    stillCurrent: enrolledUnder(session),
   });
   dropEnrollSecretCache(); // whether or not evalPrf consumed it
   const enrolled = takeLastBioEnroll(); // read + clear the dep-set record (defeats TS closure-narrowing)
-  if (!r.ok) return { ok: false, code: r.code };
+  if (!r.ok) return { ok: false, code: r.code === "ended" ? "locked" : r.code };
   // amendment 4: persist the credential the engine committed to, for reuse on a later re-enroll.
   if (enrolled) await writeBioCred({ credentialId: enrolled.credentialId, prfSalt: enrolled.prfSaltB64, userId });
   return { ok: true };

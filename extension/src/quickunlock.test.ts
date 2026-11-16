@@ -97,7 +97,25 @@ const enrollArgs = (over: Partial<Parameters<QuickUnlock["enroll"]>[0]> = {}) =>
   pin: "correct horse",
   lastFullUnlockAt: 1_000_000_000_000,
   autoLockSeconds: 900,
+  stillCurrent: () => true,
   ...over,
+});
+
+test("an enrolment whose session ended during the PIN derivation writes nothing (and wipes nothing)", async () => {
+  let current = true;
+  const { qu, s, c } = makeEngine({ deriveKPin: (pin) => ((current = false), fakeDerive(pin)) });
+  assert.deepEqual(await qu.enroll(enrollArgs({ stillCurrent: () => current })), { ok: false, code: "ended" });
+  assert.equal(s.peek(), null, "no record for the session that ended");
+  assert.equal(c.state.generated, 0, "no co-key minted");
+});
+
+test("an enrolment whose session ended after the commit point writes no record and leaves no co-key behind", async () => {
+  const { qu, s, c } = makeEngine();
+  let asked = 0;
+  // Current at the first ask (before the wipe), gone at the second (just before the write).
+  assert.deepEqual(await qu.enroll(enrollArgs({ stillCurrent: () => ++asked === 1 })), { ok: false, code: "ended" });
+  assert.equal(s.peek(), null);
+  assert.equal(c.present(), false, "the co-key it minted is deleted again");
 });
 
 // ---------------------------------------------------------------- assertPinKdfParams (breaker A8)
@@ -484,7 +502,17 @@ function fakeBiometric(over: Partial<{ prfEnabled: boolean; enrollThrows: boolea
   };
   return { bio, state };
 }
-const bioArgs = () => ({ uvk: UVK, userId: "user-A", email: "a@example.com", lastFullUnlockAt: 1_000_000_000_000, autoLockSeconds: 900 });
+const bioArgs = (stillCurrent: () => boolean = () => true) => ({ uvk: UVK, userId: "user-A", email: "a@example.com", lastFullUnlockAt: 1_000_000_000_000, autoLockSeconds: 900, stillCurrent });
+
+test("bio: a session that ended while the prompt was up gets no record, and a prior enrolment is not wiped for it", async () => {
+  const { bio } = fakeBiometric();
+  const { qu, s, c } = makeEngine({ biometric: bio });
+  await qu.enroll(enrollArgs());
+  const before = s.peek();
+  assert.deepEqual(await qu.enrollBio(bioArgs(() => false)), { ok: false, code: "ended" });
+  assert.deepEqual(s.peek(), before, "nothing written, nothing wiped");
+  assert.equal(c.present(), true);
+});
 
 test("bio: enrollBio → arm → beginRedeemBio round-trips the UVK, and the attempt counter never moves", async () => {
   const { bio } = fakeBiometric();
