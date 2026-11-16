@@ -1028,6 +1028,9 @@ function clearPendingTotp(): void {
 /** owns() generation (breaker A5⊕B4): bumped by every lock / sign-out / full unlock. A redeem that
  *  reads a different value after its async KDF/network discards itself rather than clobber new state. */
 let redeemGen = 0;
+/** Bumped whenever a sign-in, a redeem or a snapshot restore puts its own pair into the module `api`: one that gives
+ *  way clears the api's pair only while it is still its own (another that set its pair since owns it). */
+let tokenOwner = 0;
 
 /** onTokensChanged custodian. Unlocked → the full SessionSnapshot. Mid-redeem (session still null) →
  *  the quick-unlock locked-token stash (breaker A5/AM1). Otherwise (locked, not redeeming) → nothing:
@@ -1710,6 +1713,7 @@ function ensureLoaded(): Promise<void> {
     const snapHomes = snap && !session ? (snap.homes ? new Map(Object.entries(snap.homes)) : await loadHomes(snap.userId)) : null;
     if (gen !== hydrateGen) return; // a lock or a browser-start report ran meanwhile: install nothing read before it
     if (snap && !session && snapHomes) {
+      tokenOwner++; // the restored session's pair now owns the api
       api.setTokens(snap.access || null, snap.refresh);
       session = {
         userId: snap.userId,
@@ -3106,6 +3110,7 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
  *  on ANY non-install exit the freshly-minted token pair is cleared so it never lingers while locked. */
 async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array, gen: number): Promise<Res<"unlock">> {
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" }; // superseded before we touched `api`
+  const mine = ++tokenOwner; // this sign-in's pair now owns the api
   api.setTokens(s.accessToken, s.refreshToken);
   try {
     // H67: STRUCTURE first, secret second — a wrappedUvk that isn't a well-formed envelope is a
@@ -3138,7 +3143,9 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
 
     const sync = await api.sync(0);
     if (gen !== redeemGen || session) {
-      api.setTokens(null, null); // a switch/lock landed during sync — drop the tokens, install nothing
+      // A switch/lock landed during sync: drop this sign-in's tokens (only its own: a quick unlock that superseded it
+      // owns the api now) and install nothing.
+      if (tokenOwner === mine) api.setTokens(null, null);
       return { ok: false, code: "aborted" };
     }
     const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, uvk, s.userId);
@@ -3146,7 +3153,7 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
     const personalVaultId = await pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys, sync.vaults);
     const homed = await homeAndDecrypt(sync, vaultKeys, s.userId);
     if (gen !== redeemGen || session) {
-      api.setTokens(null, null); // a switch/lock landed meanwhile — install nothing (the sync-time rule above)
+      if (tokenOwner === mine) api.setTokens(null, null); // a switch/lock landed meanwhile — install nothing (the sync-time rule above)
       return { ok: false, code: "aborted" };
     }
     const items = homed.items;
@@ -3184,7 +3191,8 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
     reofferPendingSaves();
     return { ok: true };
   } catch (e) {
-    if (!session) api.setTokens(null, null); // never leave live tokens in the api while locked (doUnlockWithPin:1597 parity)
+    // Never leave live tokens in the api while locked (doUnlockWithPin:1597 parity), but only this sign-in's own pair.
+    if (!session && tokenOwner === mine) api.setTokens(null, null);
     throw e;
   }
 }
@@ -3357,7 +3365,17 @@ async function doUnlockWithBio(): Promise<Res<"unlockWithBio">> {
   if (!begin.ok) return { ok: false, code: begin.code }; // not_armed | expired | corrupt | bio_cancelled
   // owns() guard: a lock / sign-out / full unlock landed during the ceremony → discard silently.
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
-  return finishRedeem(begin, gen);
+  return finishRedeem(begin, supersedeSignIns());
+}
+
+/** A quick unlock that has just proved its factor supersedes a password sign-in already under way, as a password
+ *  sign-in supersedes a quick unlock (unlock's own `redeemGen++`): the later action wins. Before, the redeem left the
+ *  generation alone, so a sign-in started earlier (say on the master-password form while the PIN was being checked) and
+ *  the redeem both ran to the end: the sign-in installed its session with its pair, and the redeem then installed its
+ *  own session over it while the worker's one client still held the sign-in's pair, so one account's session ran on
+ *  another account's tokens. Returns the redeem's own generation. */
+function supersedeSignIns(): number {
+  return ++redeemGen;
 }
 
 async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
@@ -3372,7 +3390,7 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
   }
   // owns() guard: a lock / sign-out / full unlock intervened during the PIN KDF → discard silently.
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
-  return finishRedeem(begin, gen);
+  return finishRedeem(begin, supersedeSignIns());
 }
 
 /** The shared quick-unlock server dance — byte-identical for the PIN and biometric lanes (spec §5).
@@ -3381,6 +3399,7 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
  *  → sync → session build under withRedeemInFlight, GUARANTEEING api tokens clear on any locked exit.
  *  Its failure codes are exactly the subset both PinUnlockCode and BioUnlockCode carry. */
 async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDanceResult> {
+  const mine = ++tokenOwner; // the redeem's pair now owns the api
   api.setTokens(begin.tokens.access, begin.tokens.refresh);
   // withRedeemInFlight sets redeemInFlight for the server dance and GUARANTEES it clears on EVERY exit
   // (success / owns()-abort return / throw) — a mid-redeem switch/lock that bumps redeemGen and aborts
@@ -3485,7 +3504,10 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
       },
     );
   } finally {
-    if (!session) api.setTokens(null, null); // a failed redeem must never leave tokens live in the api while locked
+    // A failed redeem must never leave tokens live in the api while locked, but only its own pair: a sign-in that set its
+    // pair since (and is still in its sync, so no session yet) owns the api now, and clearing it left that sign-in to
+    // install a session with no token at all.
+    if (!session && tokenOwner === mine) api.setTokens(null, null);
   }
 }
 

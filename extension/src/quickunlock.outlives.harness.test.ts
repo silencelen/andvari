@@ -154,7 +154,7 @@ for (const [label, end] of [
 
 // ---------------------------------------------------------------- 4. a redeem and a password sign-in at once (aca13f82)
 
-test.skip("a PIN unlock that proves its PIN after a password sign-in began supersedes it: one session, on its own account's tokens", async () => {
+test("a PIN unlock that proves its PIN after a password sign-in began supersedes it: one session, on its own account's tokens", async () => {
   const { world, server, acct: alice, w } = await signedInWorld();
   const bob = server.addAccount({ email: "bob@example.com", password: "bob horse" });
   assert.equal((await w.popup({ type: "enrollQuickUnlock", pin: PIN })).ok, true);
@@ -183,7 +183,7 @@ test.skip("a PIN unlock that proves its PIN after a password sign-in began super
   assert.equal(lastSyncBearer(world), `Bearer at-${alice.userId}`, `the open session syncs on its own account's token, not the other sign-in's (that sign-in answered ${JSON.stringify(bobResult)})`);
 });
 
-test.skip("a PIN unlock given up while a password sign-in is in its sync leaves that sign-in its tokens", async () => {
+test("a PIN unlock given up while a password sign-in is in its sync leaves that sign-in its tokens", async () => {
   const { world, server, acct: alice, w } = await signedInWorld();
   const bob = server.addAccount({ email: "bob@example.com", password: "bob horse" });
   assert.equal((await w.popup({ type: "enrollQuickUnlock", pin: PIN })).ok, true);
@@ -206,7 +206,7 @@ test.skip("a PIN unlock given up while a password sign-in is in its sync leaves 
   assert.equal(lastSyncBearer(world), `Bearer at-${bob.userId}`, "the sign-in's session kept its tokens");
 });
 
-test.skip("a password sign-in in its sync, superseded by a PIN unlock that proved its PIN, leaves the PIN unlock its tokens", async () => {
+test("a password sign-in in its sync, superseded by a PIN unlock that proved its PIN, leaves the PIN unlock its tokens", async () => {
   const { world, server, acct: alice, w } = await signedInWorld();
   const bob = server.addAccount({ email: "bob@example.com", password: "bob horse" });
   assert.equal((await w.popup({ type: "enrollQuickUnlock", pin: PIN })).ok, true);
