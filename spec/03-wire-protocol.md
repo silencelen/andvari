@@ -156,6 +156,13 @@ cache OFF.
   `sha256(token)`. Access: 1 h. Refresh: 30 d, **rotating** — `POST /auth/refresh
   { refreshToken }` → new pair, old refresh token single-use; reuse of a consumed
   refresh token revokes the whole device session (theft signal, audited).
+  **Refresh grace (60 s, since 0.30.0):** a repeat of the same refresh within 60 s of the
+  rotation is answered with the identical reply (a lost reply, a request timed out after
+  the server answered, two refreshes of one token at the same moment), audited
+  `refresh_grace`, but only while the pair it minted is untouched: its access token has
+  authenticated no request, and its session is neither revoked nor itself refreshed.
+  Anything else is reuse, as above. In memory only (a restart forgets every entry; the
+  pair is held for at most the window); the reply shape is unchanged.
 - `POST /auth/logout` revokes the device session. Admin device-revocation: §7.
 - AuthN header: `Authorization: Bearer <accessToken>`.
 - **Server-TOTP management** (authenticated): `GET /account/totp` → `{ enrolled,

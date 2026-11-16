@@ -944,18 +944,45 @@ class Service(
         return block
     }
 
-    // ---- refresh (rotating; reuse of a consumed token revokes the device) ----
+    /**
+     * The 60-second refresh grace (spec 03 §2, [RefreshGrace]): a repeat of a refresh whose reply the client never
+     * received is answered with the identical reply instead of revoking the device. In memory only.
+     */
+    internal val refreshGrace = RefreshGrace()
+
+    /**
+     * The reply a repeat of the refresh that spent [hash] may get: the pair that refresh minted, while it is within the
+     * grace window, its access token has authenticated nothing, and its session is neither revoked nor refreshed. Reads
+     * the successor's row on [c] (inside the caller's tx when it has one). Audited as `refresh_grace`.
+     */
+    private fun graceReply(c: java.sql.Connection, hash: String, s: SessionRow, ip: String): TokenPair? {
+        val e = refreshGrace.lookup(hash) ?: return null
+        if (e.deviceId != s.deviceId) return null
+        val untouched = c.queryOne(
+            "SELECT 1 FROM sessions WHERE sessionId=? AND deviceId=? AND revokedAt IS NULL AND refreshConsumedAt IS NULL",
+            e.successorSessionId, s.deviceId,
+        ) { 1 } != null
+        if (!untouched) return null
+        repo.auditOn(c, "refresh_grace", s.userId, s.deviceId, ip)
+        return e.pair
+    }
+
+    // ---- refresh (rotating; reuse of a consumed token revokes the device, after the grace above) ----
     fun refresh(refreshToken: String, ip: String, clientVersion: String? = null): TokenPair {
         val hash = ServerCrypto.hashToken(refreshToken)
         val s = repo.sessionByRefreshHash(hash) ?: throw Unauthorized("invalid_refresh")
         if (s.revokedAt != null) throw Unauthorized("session_revoked")
         if (s.refreshConsumedAt != null) {
-            // Token reuse → theft signal: revoke the whole device session (commit, then fail).
-            repo.db.tx { c ->
-                c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), s.deviceId)
-                repo.auditOn(c, "refresh_reuse", s.userId, s.deviceId, ip)
+            // A repeat inside the grace gets the identical reply; anything else is token reuse → theft signal: revoke
+            // the whole device session (commit, then fail).
+            val replay = repo.db.tx { c ->
+                graceReply(c, hash, s, ip) ?: run {
+                    c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), s.deviceId)
+                    repo.auditOn(c, "refresh_reuse", s.userId, s.deviceId, ip)
+                    null
+                }
             }
-            throw Unauthorized("refresh_reuse")
+            return replay ?: throw Unauthorized("refresh_reuse")
         }
         if (s.refreshExpiresAt < now()) throw Unauthorized("refresh_expired")
 
@@ -973,18 +1000,25 @@ class Service(
                 now(), s.sessionId,
             )
             if (consumed != 1) {
+                // Two refreshes of one token at the same moment: the winner's reply is the loser's too, inside the
+                // grace (the winner recorded it in its own tx, which SQLite serialized before this one).
+                graceReply(c, hash, s, ip)?.let { return@tx it }
                 c.exec("UPDATE sessions SET revokedAt=? WHERE deviceId=? AND revokedAt IS NULL", now(), s.deviceId)
                 repo.auditOn(c, "refresh_reuse", s.userId, s.deviceId, ip)
                 throw Unauthorized("refresh_reuse")
             }
             val newAccess = ServerCrypto.newToken()
             val newRefresh = ServerCrypto.newToken()
+            val newSessionId = uuid()
             c.exec(
                 """INSERT INTO sessions(sessionId,deviceId,userId,accessHash,accessExpiresAt,refreshHash,refreshExpiresAt,createdAt)
                    VALUES(?,?,?,?,?,?,?,?)""",
-                uuid(), s.deviceId, s.userId, ServerCrypto.hashToken(newAccess), now() + accessTtlMs,
+                newSessionId, s.deviceId, s.userId, ServerCrypto.hashToken(newAccess), now() + accessTtlMs,
                 ServerCrypto.hashToken(newRefresh), now() + refreshTtlMs, now(),
             )
+            // Recorded inside the tx, so a racing repeat (serialized after this commit) finds it; a tx that fails to
+            // commit leaves an entry whose session does not exist, which graceReply refuses.
+            refreshGrace.record(hash, TokenPair(newAccess, newRefresh), newSessionId, s.deviceId)
             // F23: the build rides along with lastSeenAt — a device that updates itself reports its
             // NEW version on its next refresh (roughly hourly), so the Admin device list answers
             // "which build is that phone on?" without waiting for a fresh login. COALESCE, not a
@@ -1159,6 +1193,8 @@ class Service(
         if (s.revokedAt != null || s.accessExpiresAt < now()) return null
         val u = repo.userById(s.userId) ?: return null
         if (u.status != "active") return null
+        // A pair that has been used was received: a later repeat of the refresh that minted it is reuse, not a lost reply.
+        refreshGrace.accessUsed(hash)
         return Principal(
             s.userId, s.deviceId, s.sessionId, u.isAdmin,
             // §2.6 restricted session, computed from LIVE state (env stance + enrollment row) so
