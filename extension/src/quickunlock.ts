@@ -327,7 +327,11 @@ export class QuickUnlock {
   /** A successful full-PASSWORD unlock (breaker A6 + A11 + the fail-closed "a full unlock re-stamps"
    *  rule): wipe a different-user blob (account switch), and for a surviving same-user blob RE-STAMP
    *  the 24 h window to `at` (the fresh full-password time — the ONLY place besides enroll that moves
-   *  the stamp, and never from a QUICK session) and refresh the attempt budget to full. */
+   *  the stamp, and never from a QUICK session) and refresh the attempt budget to full.
+   *  The locked-token stash goes too: a password sign-in from the locked-armed screen made a NEW server
+   *  session, and the stash still held the previous one's live pair. Kept, that pair sat in storage for
+   *  the whole unlocked session, beside the one in the snapshot, against this record's own rule ("null
+   *  while unlocked-armed"); the next lock stashes the pair in use then. */
   async onFullUnlock(userId: string, at: number): Promise<void> {
     await this.reconcileUser(userId);
     try {
@@ -335,6 +339,7 @@ export class QuickUnlock {
       if (rec && rec.userId === userId) {
         rec.blob.lastFullUnlockAt = at;
         rec.attemptsRemaining = MAX_PIN_ATTEMPTS;
+        rec.lockedTokens = null;
         await this.deps.store.write(rec);
       }
     } catch {
