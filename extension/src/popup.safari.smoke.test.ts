@@ -247,6 +247,32 @@ test("when the worker's ask of the app got no answer, the popup asks the app and
   page.dispose();
 });
 
+test("when the worker's ask got no answer and the app has no server, the popup tells the worker, which forgets the one it kept", async () => {
+  let told: unknown = null;
+  const answer: Answer = (msg) => {
+    switch (msg.type) {
+      case "appServer": return { app: "unavailable" }; // the worker's own native ask timed out
+      case "appServerAnswer": told = msg; return { app: "none" };
+      // Until it is told, the worker still uses the server it adopted before the account was deleted in the app.
+      case "serverInfo": return told ? { url: "https://no-server.invalid", trustedStore: true, block: { kind: "unsettled" } } : { url: "https://home.example", trustedStore: true, block: null };
+      case "status": return { ...lockedStatus };
+      default: return undefined;
+    }
+  };
+  const page = await loadPopup(answer, { native: { ok: true, type: "appServer", url: null, nativeSave: false } });
+  await page.settle(300);
+  assert.deepEqual(page.errors, []);
+  const relayed = { ...(told as { askedAt?: unknown }) };
+  assert.equal(typeof relayed.askedAt, "number", "stamped with when the popup asked");
+  delete relayed.askedAt;
+  assert.deepEqual(relayed, { type: "appServerAnswer", url: null, nativeSave: false });
+  assert.ok(page.sent.indexOf("appServerAnswer") < page.sent.indexOf("serverInfo"), "told before anything shows a server");
+  assert.equal(page.byId("confirm-server").hidden, false);
+  assert.equal(page.byId("confirm-server-h").textContent, "No server yet");
+  assert.equal(page.byId("server-origin").textContent, "No server yet", "not the server of the deleted account");
+  page.dispose();
+});
+
 test("with no server from the app, the popup says to choose it in the app, and offers no Options and no default", async () => {
   const answer: Answer = (msg) => {
     switch (msg.type) {

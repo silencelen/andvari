@@ -25,6 +25,8 @@ class PrefsSessionPersistenceTest {
             if (value != null) written += value
             inner.putString(key, value)
         }
+
+        override fun keysWithPrefix(prefix: String) = inner.keysWithPrefix(prefix)
     }
 
     private class SpySecrets(var accept: Boolean = true) : SecretStore {
@@ -151,6 +153,87 @@ class PrefsSessionPersistenceTest {
         val pins = store.origin(homeKey).identityPins()
         assertNull(pins.pinFor("u@example.com", "u1"))
         assertNull(store.origin(OriginCanon.originKey("https://other.example")).identityPins().pinFor("u@example.com", "u1"))
+    }
+
+    // ---- forgetting a server (spec 03 §13: an account deletion leaves the device as a fresh install) ----
+
+    @Test
+    fun forgettingTheServerLeavesNoOriginNoSessionAndNothingKeptUnderIt() {
+        val other = "https://other.example"
+        val otherKey = OriginCanon.originKey(other)
+        store.save(session())
+        store.mustChangePassword = true
+        store.lastSyncAt = 7
+        store.pendingServer = PendingServer(origin = home, previousOrigin = other, ts = 1)
+        val keys = AccountKeys("salt", KdfParams(), "w", "s", "p", "fp")
+        val origin = store.origin(homeKey)
+        origin.cacheAllowed = false
+        origin.autoLockSeconds = 120
+        origin.policyFetchedAt = 99
+        origin.bumpServerTimeFloor(500)
+        // Two accounts used this device at that server: the one being deleted, and one signed out earlier.
+        for (user in listOf("u1", "u2")) {
+            origin.saveAccountKeys(user, keys)
+            origin.setPasswordStamp(user, PasswordStamp(10, 5, 5, "7"))
+        }
+        prefs.inner.putString("ns.$homeKey.selfIdentityPub.u2", "pin")
+        prefs.inner.putString("ns.$homeKey.selfIdentityByEmail.other@example.com", "u2\npin")
+        // Another server's namespace, left by an earlier switch.
+        store.origin(otherKey).saveAccountKeys("u9", keys)
+        store.origin(otherKey).policyFetchedAt = 5
+        store.bumpHighWater(50)
+
+        store.forgetServer(homeKey)
+
+        assertNull(store.baseUrl, "no origin chosen: the next start asks which server")
+        assertNull(store.load())
+        assertNull(secrets.read("session.tokens"))
+        assertFalse(store.mustChangePassword)
+        assertNull(store.pendingServer)
+        assertEquals(0, store.lastSyncAt)
+        assertEquals(emptyList(), prefs.keysWithPrefix("ns.$homeKey."), "nothing kept under that origin, whoever's")
+        assertTrue(store.origin(homeKey).cacheAllowed, "the policy mirrors read as on a first launch")
+        assertEquals(0, store.origin(homeKey).serverTimeFloorMs)
+        // §4.2: another origin's namespace is never touched; nor is the device's own clock.
+        assertEquals(keys, store.origin(otherKey).loadAccountKeys("u9"))
+        assertEquals(5, store.origin(otherKey).policyFetchedAt)
+        assertEquals(50, store.highWaterWallMs)
+    }
+
+    @Test
+    fun forgettingAServerTheClientDoesNotDialKeepsItsOriginAndItsSession() {
+        val otherKey = OriginCanon.originKey("https://other.example")
+        store.save(session())
+        store.origin(otherKey).policyFetchedAt = 5
+        store.lastSyncAt = 7
+        val marker = PendingServer(origin = home, previousOrigin = "https://other.example", ts = 1)
+        store.pendingServer = marker
+        store.forgetServer(otherKey)
+        assertEquals(home, store.baseUrl)
+        assertEquals(session(), store.load(), "the session is another server's")
+        assertEquals(0, store.origin(otherKey).policyFetchedAt)
+        // What belongs to the server the client dials stays.
+        assertEquals(7, store.lastSyncAt)
+        assertEquals(marker, store.pendingServer)
+    }
+
+    @Test
+    fun forgettingTheServerRemovesThePublishedCopyToo() {
+        val own = InMemoryPrefs()
+        val shared = InMemoryPrefs()
+        val app = PrefsSessionPersistence(PublishingPrefs(own, shared), secrets)
+        app.moveOrigin(home)
+        app.save(session())
+        app.origin(homeKey).policyFetchedAt = 1234
+        app.origin(homeKey).saveAccountKeys("u1", AccountKeys("salt", KdfParams(), "w", "s", "p", "fp"))
+        // A key only the copy holds (an older build's, or another process's) goes as well.
+        shared.putString("ns.$homeKey.left-behind", "x")
+        assertTrue(shared.keysWithPrefix("ns.$homeKey.").isNotEmpty())
+        app.forgetServer(homeKey)
+        assertEquals(emptyList(), own.keysWithPrefix("ns.$homeKey."))
+        assertEquals(emptyList(), shared.keysWithPrefix("ns.$homeKey."), "the extensions' copy holds nothing of the server")
+        assertNull(shared.getString("baseUrl"))
+        assertNull(shared.getString("session"))
     }
 
     // ---- the published copy (iOS: the app's private defaults, published to the App Group) ----

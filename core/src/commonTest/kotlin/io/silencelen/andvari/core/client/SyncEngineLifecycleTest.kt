@@ -15,6 +15,8 @@ import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.LifecycleProof
 import io.silencelen.andvari.core.crypto.createCryptoProvider
+import io.silencelen.andvari.core.model.AccountStatePut
+import io.silencelen.andvari.core.model.AccountStateResponse
 import io.silencelen.andvari.core.model.AttachmentMeta
 import io.silencelen.andvari.core.model.DeletedVaultSummary
 import io.silencelen.andvari.core.model.DeletedItem
@@ -32,6 +34,8 @@ import io.silencelen.andvari.core.model.RemovedGrantInfo
 import io.silencelen.andvari.core.model.SyncResponse
 import io.silencelen.andvari.core.model.TransferOfferRequest
 import io.silencelen.andvari.core.model.TransferRecord
+import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultMemberSummary
 import io.silencelen.andvari.core.model.WireGrant
 import io.silencelen.andvari.core.model.WireItem
 import io.silencelen.andvari.core.model.WireVault
@@ -109,6 +113,17 @@ class SyncEngineLifecycleTest {
         var deletedList: List<DeletedVaultSummary> = emptyList()
         val calls = mutableListOf<String>()
         val transferOffers = mutableListOf<TransferOfferRequest>() // captured offer POST bodies
+
+        /** Opt-in: serve `/account/state` (a test that needs this account's record read back, or pins written). */
+        var accountStateOn = false
+        var accountSealed: String? = null
+        var accountSeq = 0L
+
+        /** What `/vaults/{id}/members` lists, by vault. */
+        val members = HashMap<String, List<VaultMemberSummary>>()
+
+        /** Refuse every transfer offer POST with a 409. */
+        var refuseOffers = false
 
         fun emptySync(rev: Long) = SyncResponse(rev, false, emptyList(), emptyList(), emptyList(), emptyList())
 
@@ -196,7 +211,24 @@ class SyncEngineLifecycleTest {
                     path.endsWith("/delete") -> { calls.add("deleteVault"); ok("""{"rev":${++rev},"purgeAt":${testNowMs() + 7L * 86_400_000}}""") }
                     path.endsWith("/restore") -> { calls.add("restoreVault"); ok("""{"rev":${++rev}}""") }
                     path.endsWith("/leave") -> { calls.add("leaveVault"); ok("""{"rev":${++rev}}""") }
+                    path == "/api/v1/account/state" && accountStateOn -> {
+                        if (req.method.value == "PUT") {
+                            val put = json.decodeFromString(AccountStatePut.serializer(), req.body.toByteArray().decodeToString())
+                            if (put.baseSeq != accountSeq) {
+                                return@MockEngine respond("""{"error":"stale_state","message":"stale"}""", HttpStatusCode.Conflict, jsonHeaders)
+                            }
+                            accountSealed = put.sealedState
+                            accountSeq += 1
+                        }
+                        ok(json.encodeToString(AccountStateResponse.serializer(), AccountStateResponse(accountSealed, accountSeq)))
+                    }
+                    path.startsWith("/api/v1/vaults/") && path.endsWith("/members") && req.method.value == "GET" -> {
+                        val id = path.removePrefix("/api/v1/vaults/").removeSuffix("/members")
+                        ok(json.encodeToString(ListSerializer(VaultMemberSummary.serializer()), members[id].orEmpty()))
+                    }
                     path.endsWith("/transfer/accept") -> { calls.add("acceptTransfer"); ok("""{"rev":${++rev}}""") }
+                    path.endsWith("/transfer") && req.method.value == "POST" && refuseOffers ->
+                        respond("""{"error":"transfer_pending","message":"refused"}""", HttpStatusCode.Conflict, jsonHeaders)
                     path.endsWith("/transfer") && req.method.value == "POST" -> {
                         calls.add("offerTransfer")
                         transferOffers.add(json.decodeFromString(TransferOfferRequest.serializer(), req.body.toByteArray().decodeToString()))
@@ -225,7 +257,7 @@ class SyncEngineLifecycleTest {
     )
 
     /** A member holding a shared vault (owner-created, VK sealed to the member) at cursor 5. */
-    private fun seededMember(role: String = "writer"): Seed {
+    private fun seededMember(role: String = "writer", accept: Boolean = true): Seed {
         val owner = enroll("owner@example.com")
         val member = enroll("member@example.com")
         val nv = owner.buildCreateSharedVault("Family")
@@ -241,8 +273,9 @@ class SyncEngineLifecycleTest {
         server.queue.add(SyncResponse(5, true, listOf(vault), listOf(grant), listOf(item), emptyList()))
         runBlocking { engine.sync() }
         // Root cause A §8.2 (A6): a key only a v1 seal vouches for is read-only until the member accepts it (or a
-        // verified v2 grant / pre-upgrade evidence vouches for it). These lifecycle tests model an accepted vault.
-        runBlocking { engine.acceptLegacyVault(vaultId) }
+        // verified v2 grant / pre-upgrade evidence vouches for it). These lifecycle tests model an accepted vault, unless
+        // [accept] is false (a vault awaiting review).
+        if (accept) runBlocking { engine.acceptLegacyVault(vaultId) }
         return Seed(owner, member, engine, server, cache, vaultId, itemId, vault, grant, item)
     }
 
@@ -631,6 +664,206 @@ class SyncEngineLifecycleTest {
         assertFalse("transfer-anomaly" in kinds)
     }
 
+    // ==== sharing review 2026-11: whose handover it is (finding 1), the offer shown (item 2), untrusted keys (item 3) ====
+
+    /** This account owns [Seed.vaultId] by its own record, and [target] is a member verified on this device. */
+    private fun Seed.asOwnerWithVerifiedMember(target: Account) = runBlocking {
+        server.accountStateOn = true
+        engine.accountState.update { AccountState.withOwned(it, vaultId, 1) }
+        server.members[vaultId] = listOf(VaultMemberSummary(target.userId, "t@example.com", "Tess", "writer", Bytes.toB64(target.identityPub), 1))
+        assertNotNull(engine.verifyMemberTyped(UserLookupResponse(target.userId, "Tess", Bytes.toB64(target.identityPub)), target.identityFingerprintShort()))
+    }
+
+    /** The server reports [offerId] to [to] completed at [seq], with an accept proof that checks under the vault's key. */
+    private fun Seed.completed(offerId: String, to: String, seq: Long = 1, rev: Long = 20) {
+        val wrapHash = "00".repeat(32)
+        val accept = LifecycleProof.acceptFromHash(crypto, key(), vaultId, offerId, to, seq, wrapHash)
+        server.queue.add(SyncResponse(rev, false, listOf(vault.copy(rev = rev, lastTransfer = TransferRecord(offerId, to, accept, seq, wrapHash))), emptyList(), emptyList(), emptyList()))
+    }
+
+    @Test
+    fun aHandoverOfAnOfferThisAccountMadeEndsItsOwnership() = runBlocking<Unit> {
+        val s = seededMember()
+        val tess = enroll("t@example.com")
+        s.asOwnerWithVerifiedMember(tess)
+        s.engine.offerTransfer(s.vaultId, tess.userId)
+        val offer = s.server.transferOffers.single()
+        assertTrue(s.engine.isOwnLiveOffer(s.vaultId, offer.offerId, tess.userId), "on record before it was sent")
+        assertTrue(s.engine.accountState.doc.ownOffers.any { it.offerId == offer.offerId && it.cancelledAt == null }, "in account state too")
+
+        s.completed(offer.offerId, tess.userId)
+        s.engine.sync()
+        assertEquals("transfer-complete", s.engine.notices().single { it.vaultId == s.vaultId }.kind)
+        assertFalse(s.engine.ownsVault(s.vaultId), "this account's ownership record ends with its own handover")
+    }
+
+    @Test
+    fun aHandoverOfAnOfferThisAccountCancelledIsWarnedOfAndTheOwnershipRecordIsKept() = runBlocking<Unit> {
+        // Finding 1(a): the owner cancels; the server keeps serving the unexpired offer and the target accepts it.
+        val s = seededMember()
+        val tess = enroll("t@example.com")
+        s.asOwnerWithVerifiedMember(tess)
+        s.engine.offerTransfer(s.vaultId, tess.userId)
+        val offer = s.server.transferOffers.single()
+        s.engine.cancelTransfer(s.vaultId)
+        assertTrue("cancelTransfer" in s.server.calls)
+        assertFalse(s.engine.isOwnLiveOffer(s.vaultId, offer.offerId, tess.userId), "on record as cancelled")
+
+        s.completed(offer.offerId, tess.userId)
+        s.engine.sync()
+        val n = s.engine.notices().single { it.vaultId == s.vaultId }
+        assertEquals("transfer-anomaly", n.kind)
+        assertEquals(SyncEngine.TRANSFER_NOT_OFFERED, n.reason)
+        assertEquals(tess.userId, n.newOwnerUserId)
+        assertTrue(s.engine.ownsVault(s.vaultId), "kept on this account's devices")
+        assertEquals(0L, s.cache.lastVerifiedTransferSeq(s.vaultId), "not taken as a verified handover")
+        assertTrue(LifecycleNoticeCopy.body(n).second, "a warning")
+    }
+
+    @Test
+    fun aHandoverOfAnOfferThisAccountNeverMadeIsWarnedOf() = runBlocking<Unit> {
+        // Finding 1(b): a member holds the vault's key, so it can make an owner-to-itself offer and accept it.
+        val s = seededMember()
+        val tess = enroll("t@example.com")
+        s.asOwnerWithVerifiedMember(tess)
+        s.completed(uuid(), tess.userId)
+        s.engine.sync()
+        assertEquals(SyncEngine.TRANSFER_NOT_OFFERED, s.engine.notices().single { it.vaultId == s.vaultId }.reason)
+        assertTrue(s.engine.ownsVault(s.vaultId))
+        // To another member than the offer named: not this account's offer either.
+        val s2 = seededMember()
+        val other = enroll("o@example.com")
+        s2.asOwnerWithVerifiedMember(tess)
+        s2.server.members[s2.vaultId] = s2.server.members.getValue(s2.vaultId) + VaultMemberSummary(other.userId, "o@example.com", "O", "writer", Bytes.toB64(other.identityPub), 1)
+        s2.engine.offerTransfer(s2.vaultId, tess.userId)
+        s2.completed(s2.server.transferOffers.single().offerId, other.userId)
+        s2.engine.sync()
+        assertEquals(SyncEngine.TRANSFER_NOT_OFFERED, s2.engine.notices().single { it.vaultId == s2.vaultId }.reason)
+        assertTrue(s2.engine.ownsVault(s2.vaultId))
+    }
+
+    @Test
+    fun aHandoverWaitsForTheAccountsOwnRecordOfItsOffers() = runBlocking<Unit> {
+        // The offer was made on another device of this account: this device learns of it from account state, read after
+        // the pull that reported the handover. It is decided then, never warned of first.
+        val s = seededMember()
+        val tess = enroll("t@example.com")
+        s.asOwnerWithVerifiedMember(tess)
+        val offerId = uuid()
+        val other = assertNotNull(s.server.accountSealed).let { s.member.openAccountState(it) }
+        s.server.accountSealed = s.member.sealAccountState(AccountState.withOwnOffers(other, listOf(OwnOffer(s.vaultId, offerId, tess.userId, 5))).copy(seq = other.seq + 1))
+        s.server.accountSeq += 1
+        assertFalse(s.engine.isOwnLiveOffer(s.vaultId, offerId, tess.userId), "not on this device yet")
+
+        s.completed(offerId, tess.userId)
+        s.engine.sync()
+        assertEquals("transfer-complete", s.engine.notices().single { it.vaultId == s.vaultId }.kind)
+        assertFalse(s.engine.ownsVault(s.vaultId))
+
+        // While the record cannot be read, the handover is not decided: neither applied nor warned of.
+        val s2 = seededMember()
+        s2.asOwnerWithVerifiedMember(tess)
+        s2.server.accountStateOn = false
+        s2.completed(uuid(), tess.userId)
+        s2.engine.sync()
+        assertTrue(s2.engine.notices().none { it.vaultId == s2.vaultId })
+        assertTrue(s2.engine.ownsVault(s2.vaultId))
+    }
+
+    @Test
+    fun anOfferTheServerRefusesIsOnRecordAsCancelledAndOnlyVerifiedMembersAreOffered() = runBlocking<Unit> {
+        val s = seededMember()
+        val tess = enroll("t@example.com")
+        s.asOwnerWithVerifiedMember(tess)
+        // Item 4: someone the server lists but this device never verified is refused before anything is recorded or sent.
+        val stranger = enroll("x@example.com")
+        s.server.members[s.vaultId] = s.server.members.getValue(s.vaultId) + VaultMemberSummary(stranger.userId, "x@example.com", "X", "writer", Bytes.toB64(stranger.identityPub), 1)
+        assertFailsWith<MemberNotVerifiedException> { s.engine.offerTransfer(s.vaultId, stranger.userId) }
+        // A verified member whose key the server now serves differently is refused too.
+        s.server.members[s.vaultId] = listOf(VaultMemberSummary(tess.userId, "t@example.com", "Tess", "writer", Bytes.toB64(stranger.identityPub), 1))
+        assertFailsWith<MemberNotVerifiedException> { s.engine.offerTransfer(s.vaultId, tess.userId) }
+        assertTrue(s.server.transferOffers.isEmpty())
+        assertTrue(s.engine.ownOffers().isEmpty())
+
+        // An offer the server refuses does not stand: it is on record as cancelled, so a handover of it is warned of.
+        s.server.members[s.vaultId] = listOf(VaultMemberSummary(tess.userId, "t@example.com", "Tess", "writer", Bytes.toB64(tess.identityPub), 1))
+        s.server.refuseOffers = true
+        assertFailsWith<ApiException> { s.engine.offerTransfer(s.vaultId, tess.userId) }
+        val refused = s.engine.ownOffers().single()
+        assertEquals(tess.userId, refused.toUserId)
+        assertNotNull(refused.cancelledAt)
+        assertNotNull(s.engine.accountState.doc.ownOffers.single().cancelledAt, "in account state too")
+    }
+
+    @Test
+    fun acceptingTakesTheOfferShownAndNoOther() = runBlocking<Unit> {
+        // Item 2: the offer accepted is the one listed, newer than the last handover this device verified.
+        val s = seededMember()
+        val expiresAt = testNowMs() + 14L * 86_400_000
+        fun offer(offerId: String, seq: Long) = PendingTransfer(s.member.userId, offerId, LifecycleProof.offer(crypto, s.key(), s.vaultId, offerId, s.member.userId, expiresAt, seq), expiresAt, seq)
+        val first = offer(uuid(), 1)
+        s.server.queue.add(SyncResponse(6, false, listOf(s.vault.copy(rev = 6, pendingTransfer = first)), emptyList(), emptyList(), emptyList()))
+        s.engine.sync()
+        assertEquals(first.offerId, s.engine.incomingTransfers().single().offerId)
+        assertFailsWith<ApiException> { s.engine.acceptTransfer(s.vaultId, uuid()) }
+        assertTrue("acceptTransfer" !in s.server.calls)
+
+        // The server swaps the offer: the one shown before is no longer the one pending, and is not accepted.
+        val second = offer(uuid(), 1)
+        s.server.queue.add(SyncResponse(7, false, listOf(s.vault.copy(rev = 7, pendingTransfer = second)), emptyList(), emptyList(), emptyList()))
+        s.engine.sync()
+        assertFailsWith<ApiException> { s.engine.acceptTransfer(s.vaultId, first.offerId) }
+        assertTrue("acceptTransfer" !in s.server.calls)
+        s.engine.acceptTransfer(s.vaultId, second.offerId)
+        assertTrue("acceptTransfer" in s.server.calls)
+
+        // An offer whose seq is not past the last verified handover is never listed, so never accepted.
+        val s2 = seededMember()
+        s2.completed(uuid(), uuid(), seq = 3, rev = 6) // another member's handover
+        s2.engine.sync()
+        assertEquals(3L, s2.cache.lastVerifiedTransferSeq(s2.vaultId))
+        val staleId = uuid()
+        val stale = PendingTransfer(s2.member.userId, staleId, LifecycleProof.offer(crypto, s2.key(), s2.vaultId, staleId, s2.member.userId, expiresAt, 3), expiresAt, 3)
+        s2.server.queue.add(SyncResponse(8, false, listOf(s2.vault.copy(rev = 8, pendingTransfer = stale)), emptyList(), emptyList(), emptyList()))
+        s2.engine.sync()
+        assertTrue(s2.engine.incomingTransfers().isEmpty())
+        assertFailsWith<ApiException> { s2.engine.acceptTransfer(s2.vaultId, stale.offerId) }
+    }
+
+    @Test
+    fun underAKeyAwaitingReviewNoOfferIsListedAndNoProofVerifies() = runBlocking<Unit> {
+        // Item 3: a vault awaiting review holds a key only an unconfirmed v1 seal vouches for: proofs under it prove nothing.
+        val s = seededMember(accept = false)
+        val expiresAt = testNowMs() + 14L * 86_400_000
+        val offerId = uuid()
+        val pt = PendingTransfer(s.member.userId, offerId, LifecycleProof.offer(crypto, s.key(), s.vaultId, offerId, s.member.userId, expiresAt, 1), expiresAt, 1)
+        s.server.queue.add(SyncResponse(6, false, listOf(s.vault.copy(rev = 6, pendingTransfer = pt)), emptyList(), emptyList(), emptyList()))
+        s.engine.sync()
+        assertTrue(s.engine.incomingTransfers().isEmpty(), "no offer listed")
+        assertFailsWith<ApiException> { s.engine.acceptTransfer(s.vaultId, offerId) }
+
+        s.completed(uuid(), uuid(), rev = 7)
+        s.engine.sync()
+        assertEquals("transfer-anomaly", s.engine.notices().single { it.vaultId == s.vaultId }.kind, "a completion is not verified")
+        assertNull(s.engine.notices().single { it.vaultId == s.vaultId }.reason)
+        assertEquals(0L, s.cache.lastVerifiedTransferSeq(s.vaultId))
+
+        // A delete proof that would check is not taken as the owner's either.
+        val deleteId = uuid()
+        s.server.queue.add(
+            SyncResponse(
+                9, false, emptyList(), emptyList(), emptyList(), listOf(s.vaultId),
+                listOf(RemovedGrantInfo(s.vaultId, "deleted", purgeAt = testNowMs() + 1000, deleteId = deleteId, deleteProof = LifecycleProof.delete(crypto, s.key(), s.vaultId, deleteId))),
+            ),
+        )
+        s.engine.sync()
+        assertEquals("anomaly", s.engine.notices().last { it.vaultId == s.vaultId }.kind)
+        val held = assertNotNull(s.engine.heldVaultInfos().singleOrNull { it.vaultId == s.vaultId })
+        assertFalse(held.verified)
+        assertEquals(SyncEngine.PROOF_ANOMALY, held.proof)
+        assertTrue(HeldVaultCopy.sentence(held).second, "Recently removed warns")
+    }
+
     // ==== transfer actions on the DURABLE cache (v3 wireJson row) ====
 
     @Test
@@ -671,7 +904,7 @@ class SyncEngineLifecycleTest {
         val engine2 = SyncEngine(server.api(), member, cache2)
         engine2.hydrate()
         assertEquals(listOf(vaultId), engine2.incomingTransfers().map { it.vaultId }, "hydrate must rebuild the consent surface")
-        engine2.acceptTransfer(vaultId) // must NOT throw transfer_not_pending
+        engine2.acceptTransfer(vaultId, offerId) // must NOT throw transfer_not_pending
         assertTrue(server.calls.contains("acceptTransfer"))
         assertTrue(engine2.incomingTransfers().isEmpty())
         engine2.close()
@@ -708,11 +941,16 @@ class SyncEngineLifecycleTest {
         )
         engine.sync()
         // A6b: the accept was made on another device of this account, which recorded the ownership in account state.
+        server.accountStateOn = true
         engine.accountState.update { AccountState.withOwned(it, vaultId, 1) }
+        // Sharing review 2026-11 (item 4): the next owner is someone verified on this device.
+        val next = enroll("next@example.com")
+        server.members[vaultId] = listOf(VaultMemberSummary(next.userId, "next@example.com", "Next", "writer", Bytes.toB64(next.identityPub), 1))
+        assertNotNull(engine.verifyMemberTyped(UserLookupResponse(next.userId, "Next", Bytes.toB64(next.identityPub)), next.identityFingerprintShort()))
 
-        engine.offerTransfer(vaultId, "next-owner")
+        engine.offerTransfer(vaultId, next.userId)
         val sent = server.transferOffers.single()
-        val expected = LifecycleProof.offer(crypto, key, vaultId, sent.offerId, "next-owner", sent.expiresAt, 2)
+        val expected = LifecycleProof.offer(crypto, key, vaultId, sent.offerId, next.userId, sent.expiresAt, 2)
         assertTrue(LifecycleProof.verify(expected, sent.proof), "the offer proof must bind seq=2 (lastTransfer.seq+1)")
         engine.close()
         deleteDir(tmp)
@@ -988,6 +1226,9 @@ class SyncEngineLifecycleTest {
         s.server.queue.add(SyncResponse(8, false, listOf(s.vault.copy(rev = 8)), listOf(s.grant.copy(rev = 8)), listOf(s.item.copy(rev = 8)), emptyList()))
         s.engine.sync()
         assertNotNull(s.engine.item(s.itemId))
+        // Re-added under the older kind of sharing, the vault awaits review again: accepted, its key's proofs count
+        // (sharing review 2026-11, item 3: under a key awaiting review no proof verifies).
+        s.engine.acceptLegacyVault(s.vaultId)
 
         // A LATER genuine delete must park + notice — never a silent self-initiated drop.
         val deleteId = uuid()

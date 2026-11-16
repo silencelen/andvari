@@ -130,6 +130,7 @@ export type CardFillFailCode =
   | "duplicate_fields" // two provider card frames in the tab ask for the same card detail: nothing is filled (round-11 review)
   | "changed" //       the frames to fill are not the ones the popup showed: the page changed since
   | "fill_off" //      this build has no in-page card fill (cardfillflag.ts; owner decision 2026-11-14)
+  | "mixed_forms" //   the person tapped card fields in two different payment forms: they start over and tap one (round-13 review)
   | "no_frame_origin"; // this browser does not say which site a frame comes from (Firefox before 126): no card in a frame
 
 /** The content script's honest card-fill outcome (F9, Tier 1 §5) — `card` = EVERY declared kind
@@ -507,8 +508,14 @@ export type Req =
        *  (`location.ancestorOrigins`); null where the browser has no such list (Firefox). The choices of one fill share
        *  them (cardrelease.ts chosenCardFrames). */
       ancestors?: string[] | null;
-      /** A provider's card document only: whether the frame shows anywhere in the top-level viewport with a size (an
-       *  IntersectionObserver from inside it); a collapsed one neither counts nor can be chosen (round-12 review). */
+      /** Firefox, which lists no ancestor origins: the frameId of this frame's parent, as the browser gives it to the
+       *  content script (`runtime.getFrameId(window.parent)`); absent where it could not say (round-13 review). */
+      parentFrameId?: number;
+      /** A provider's card document only: the merchant account its own URL names, read as it loaded
+       *  (cardproviders.ts providerAccountOf); absent where it names none. Two accounts are two payment forms. */
+      account?: string;
+      /** A provider's card document only: whether the frame counts (cardrelease.ts frameCounts): it has shown in the
+       *  top-level viewport with a size, and has a size now; a collapsed one neither counts nor can be chosen. */
       shown?: boolean;
     }
   /** Content (C1 chip, design 2026-07-26 §C2): may THIS frame render the offer chip? EXACTLY this
@@ -539,12 +546,15 @@ export type Req =
    *  active tab, and to which origin? `fillable` iff a payment provider's card document (by the
    *  origin the browser reports for the frame) with a card form is in the tab. */
   | { type: "cardFillOffers" }
+  /** Popup ONLY: "Start over" (round-13 review): every frame of the active tab lets its chosen card field go, so the
+   *  person can tap the one payment form they mean. */
+  | { type: "clearCardChoices" }
   /** Popup ONLY: user clicked Fill on a card row → the SW mints one one-shot CARD grant per frame the
    *  fill reaches (a store SEPARATE from login `grants`, [A5]): every provider frame where the person
    *  chose a card field, each bound to (tabId,itemId,frameId,origin) with the form holding its chosen
    *  field; and sends {type:"fillCard"} to each. [frames]: the frames and origins the popup showed
    *  (cardFillOffers): the fill goes to exactly those, or to none (round-11 review). */
-  | { type: "fillCardFromPopup"; itemId: string; frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[] }
+  | { type: "fillCardFromPopup"; itemId: string; frames: { frameId: number; origin: string; kinds: CardFieldKind[]; ancestors?: readonly string[] | null }[] }
   /** Content (S3 redemption): a granted frame redeems ITS card grant. The SW verifies, all
    *  fail-closed-on-undefined ([A3]): a live card grant for (tabId, sender.frameId, itemId); the
    *  origin the browser reports for the frame now equals the grant's, a payment provider's
@@ -676,6 +686,8 @@ export type Res<T extends Req["type"]> = T extends "status"
                                       ? { ok: boolean; clearSeconds: number }
                                       : T extends "cardFormInfo"
                                         ? { ok: boolean }
+                                        : T extends "clearCardChoices"
+                                          ? { ok: boolean }
                                         : T extends "cardFillOffers"
                                           ? {
                                               /** A payment provider's card box is in the active tab: the rows offer Fill. */
@@ -685,12 +697,15 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               /** The provider frames a Fill reaches, each with the card details it would fill
                                                *  there (the popup names them), sent back with the Fill so it reaches exactly
                                                *  those. */
-                                              frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[];
+                                              frames: { frameId: number; origin: string; kinds: CardFieldKind[]; ancestors?: readonly string[] | null }[];
                                               /** This browser does not say which site a frame comes from: no card in a frame. */
                                               noFrameOrigin?: boolean;
                                               /** This build has no in-page card fill (cardfillflag.ts): the popup says to fill
                                                *  cards from the andvari app. */
                                               fillOff?: boolean;
+                                              /** The person tapped card fields in two different payment forms: no Fill; the
+                                               *  popup says so and offers Start over (round-13 review). */
+                                              mixed?: boolean;
                                               /** Two provider card frames ask for the same card detail: no Fill, and the popup
                                                *  says why. */
                                               doubled?: boolean;
@@ -794,4 +809,7 @@ export type ServerDiag = {
   vaultSecret: string | null;
   /** Safari: where pages' origins came from — the browser's `origin`, the frame's own URL, or none (L8). */
   pageOrigin: string | null;
+  /** Whether the browser set `sender.origin` for the last payment provider frame that reported (round-13 review):
+   *  the device tells whether Safari names a frame's site. */
+  providerFrame: string | null;
 };

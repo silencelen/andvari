@@ -30,7 +30,7 @@ type UnlockCode =
 type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
 type TotpAddCode = "locked" | "no_personal_vault" | "invalid" | "exists" | "not_allowed" | "conflict" | "failed" | "read_only";
 type FillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "no_secret" | "unreachable";
-type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields" | "changed" | "fill_off" | "no_frame_origin";
+type CardFillFailCode = "locked" | "not_allowed" | "no_form" | "no_fields" | "unreachable" | "no_focus" | "not_visible" | "closed_form" | "page_form" | "provider_not_allowed" | "duplicate_fields" | "changed" | "fill_off" | "mixed_forms" | "no_frame_origin";
 type RevealFailCode = "locked" | "not_allowed";
 // Structural twins of the messages.ts quick-unlock seam types (spec 01 §8.4). Kept literal-identical.
 type PinUnlockCode =
@@ -282,8 +282,19 @@ export const CARD_DUPLICATE_FIELDS = "This page shows more than one payment form
  *  filled into a payment form inside a frame. */
 export const CARD_NO_FRAME_ORIGIN = "This browser doesn't tell andvari which site a payment form's frame comes from, so andvari fills no card into one. Update the browser to fill cards here.";
 
-/** The popup's line over the cards in a build without in-page card fill (cardfillflag.ts; owner decision 2026-11-14). */
+/** The popup's line over the cards in a build without in-page card fill (cardfillflag.ts; owner decision 2026-11-14), in
+ *  the Safari build, whose popup copies no card number or code: the app does. */
 export const CARD_FILL_FROM_APP = "andvari fills no cards here: copy a card's number and code in the andvari app.";
+/** The same line in a Chrome or Firefox build made with CARDFILL=0, whose popup copies every card detail itself. */
+export const CARD_FILL_OFF_COPY = "This build of andvari fills no cards into pages: copy a card's details with the buttons below.";
+
+/** The line for a build without in-page card fill, by target: only the Safari popup sends the person to the app. */
+export function cardFillOffLine(safari: boolean): string {
+  return safari ? CARD_FILL_FROM_APP : CARD_FILL_OFF_COPY;
+}
+/** The person tapped card fields in two different payment forms (round-13 review): nothing is filled until they start
+ *  over and tap the one they mean. */
+export const CARD_MIXED_FORMS = "You tapped card fields in two different payment forms; tap the one you want to pay with, then Fill.";
 
 /** A card fill that wrote nothing: the refusals in words, the rest as for a login fill. */
 export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigin?: string, safari = false): string {
@@ -297,7 +308,9 @@ export function cardFillErrorCopy(code: CardFillFailCode | undefined, allowOrigi
     case "changed":
       return "The payment form changed after andvari opened. Open andvari again and fill.";
     case "fill_off":
-      return CARD_FILL_FROM_APP;
+      return cardFillOffLine(safari);
+    case "mixed_forms":
+      return CARD_MIXED_FORMS;
     case "no_frame_origin":
       return CARD_NO_FRAME_ORIGIN;
     case "no_focus":

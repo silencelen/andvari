@@ -116,7 +116,7 @@ class RemovalProofV2Test {
         fun notice() = engine.notices().last { it.vaultId == vaultId }
     }
 
-    private fun seeded(cache: VaultCache = InMemoryVaultCache()): Seed {
+    private fun seeded(cache: VaultCache = InMemoryVaultCache(), accept: Boolean = true): Seed {
         val owner = enroll("owner@example.com")
         val member = enroll("member@example.com")
         val nv = owner.buildCreateSharedVault("Family")
@@ -128,7 +128,7 @@ class RemovalProofV2Test {
         val server = FakeServer()
         val engine = SyncEngine(server.api(), member, cache)
         server.queue.add(SyncResponse(5, true, listOf(vault), listOf(grant), listOf(item), emptyList()))
-        runBlocking { engine.sync(); engine.acceptLegacyVault(vaultId) }
+        runBlocking { engine.sync(); if (accept) engine.acceptLegacyVault(vaultId) }
         server.rev = 5
         return Seed(owner, member, server, cache, engine, vaultId, vault, grant, item)
     }
@@ -142,7 +142,11 @@ class RemovalProofV2Test {
         s.deliver(info)
         assertEquals("removed", s.notice().kind)
         assertNull(s.notice().reason)
-        assertNotNull(s.engine.heldVaultInfos().singleOrNull { it.vaultId == s.vaultId }, "holding area, as before")
+        val held = assertNotNull(s.engine.heldVaultInfos().singleOrNull { it.vaultId == s.vaultId }, "holding area, as before")
+        // Sharing review 2026-11 (item 6): the verdict is kept with the held copy; a verified removal reads as verified.
+        assertTrue(held.verified)
+        assertEquals("VALID", held.proof)
+        assertEquals("Your access was removed. Kept until ${LifecycleNoticeCopy.englishDay(held.expungeAt)}." to false, HeldVaultCopy.sentence(held))
         assertFalse(s.member.hasVault(s.vaultId))
         assertEquals<List<String?>?>(listOf(info.removeNonce), s.cache.consumedNonces()[s.vaultId]?.map { it.nonce })
         assertEquals(info.issuedAt, s.cache.consumedNonces()[s.vaultId]?.single()?.issuedAt)
@@ -163,7 +167,20 @@ class RemovalProofV2Test {
         s.deliver(s.removedV2(target = s.owner.userId))
         assertEquals("anomaly", s.notice().kind)
         assertTrue(s.cache.consumedNonces().isEmpty(), "nothing is consumed on a failed verdict")
-        assertNotNull(s.engine.heldVaultInfos().singleOrNull { it.vaultId == s.vaultId }, "same data handling")
+        val held = assertNotNull(s.engine.heldVaultInfos().singleOrNull { it.vaultId == s.vaultId }, "same data handling")
+        assertFalse(held.verified)
+        assertEquals("ANOMALY", held.proof)
+        assertTrue(HeldVaultCopy.sentence(held).second, "Recently removed warns")
+    }
+
+    @Test
+    fun underAKeyAwaitingReviewARemovalProofVerifiesNothing() {
+        // Sharing review 2026-11 (item 3): the key only an unconfirmed v1 seal vouches for proves nothing.
+        val s = seeded(accept = false)
+        s.deliver(s.removedV2())
+        assertEquals("anomaly", s.notice().kind)
+        assertTrue(s.cache.consumedNonces().isEmpty())
+        assertEquals("ANOMALY", s.engine.heldVaultInfos().single { it.vaultId == s.vaultId }.proof)
     }
 
     @Test

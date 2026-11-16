@@ -5,10 +5,11 @@
 // provider card frames in the tab ask for the same card detail.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { CHOICE_CHAIN_MS, CHOICE_TTL_MS, cardFillPlan, chosenCardFrame, chosenCardFrames, frameOriginOf, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease.ts";
+import { CHOICE_CHAIN_MS, CHOICE_TTL_MS, cardFillPlan, choicesSpanForms, chosenCardFrame, chosenCardFrames, fillDestination, formGroupOf, frameCounts, frameOriginOf, framesWithChoices, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease.ts";
 
 const NOW = 1_800_000_000_000;
 const SHOP = "https://shop.example";
+const WIDGET = "https://rewards.example";
 const STRIPE = "https://js.stripe.com";
 const BRAINTREE = "https://assets.braintreegateway.com";
 const FULL = ["cardnumber", "cardexpiry", "cardcvv"] as const;
@@ -38,8 +39,8 @@ test("the origin is the browser's: sender.origin, else the top frame's own URL; 
 test("a provider's frame with the person's choice in it fills", () => {
   const records = { 0: rec(SHOP, []), 3: rec(STRIPE, [[...FULL]], 0) };
   assert.deepEqual(providerCardFrames(records), [{ frameId: 3, origin: STRIPE }]);
-  assert.deepEqual(chosenCardFrame(records, NOW), { frameId: 3, origin: STRIPE, kinds: [...FULL] });
-  assert.deepEqual(cardFillPlan(records, NOW), { ok: true, targets: [{ frameId: 3, origin: STRIPE, kinds: [...FULL] }] });
+  assert.deepEqual(chosenCardFrame(records, NOW), { frameId: 3, origin: STRIPE, kinds: [...FULL], ancestors: [SHOP] });
+  assert.deepEqual(cardFillPlan(records, NOW), { ok: true, targets: [{ frameId: 3, origin: STRIPE, kinds: [...FULL], ancestors: [SHOP] }] });
   assert.ok(!pageCardFormsOnly(records));
   // The same frame with no choice in it fills nothing: the person taps the field first.
   assert.equal(plan({ 0: rec(SHOP, []), 3: rec(STRIPE, [[...FULL]]) }), "no_choice");
@@ -100,7 +101,7 @@ test("more than one provider card frame offering a kind stops every fill, whatev
   assert.deepEqual(plan({ 3: rec(STRIPE, [["cardnumber", "cardnumber", "cardnumber", "cardnumber", "cardexpiry", "cardexpiry", "cardcvv"]], 0) }), [3]);
 });
 
-test("a new choice of a kind lets go of the older choices of that kind in every other frame", () => {
+test("a new choice of a kind lets go of the older choices of that kind in the other frames of its payment form only", () => {
   const records = {
     1: rec(BRAINTREE, [["cardnumber"]], 0, NOW - 5_000),
     2: rec(BRAINTREE, [["cardexpiry"]], 0, NOW - 4_000),
@@ -110,33 +111,138 @@ test("a new choice of a kind lets go of the older choices of that kind in every 
   assert.deepEqual(supersededChoices(records, 2, ["cardexpiry"], NOW), []);
   // Should the worker not have heard of it yet, a newer choice still outranks an older one of the same kind.
   assert.deepEqual(chosenCardFrames(records, NOW).map((c) => c.frameId), [3, 2]);
+  // Round-13 review: a choice in another payment form (another chain of documents, another merchant account, another
+  // provider) is never let go by a new one; it stands, and the fill refuses until the person starts over.
+  assert.deepEqual(supersededChoices({ ...records, 5: rec(BRAINTREE, [["cardnumber"]], 0, NOW - 6_000, [WIDGET, SHOP]) }, 3, ["cardnumber", "cardcvv"], NOW), [1]);
+  const keyed = (r: CardFrameRecord, account: string | null): CardFrameRecord => ({ ...r, account });
+  const stripe = { 1: keyed(rec(STRIPE, [["cardnumber"]], 0, NOW - 5_000), "stripe:pk_live_SHOPSHOPSHOP"), 3: keyed(rec(STRIPE, [["cardnumber", "cardcvv"]], 0, NOW - 3_000), "stripe:pk_live_OTHEROTHER") };
+  assert.deepEqual(supersededChoices(stripe, 3, ["cardnumber", "cardcvv"], NOW), [], "another merchant account");
+  assert.deepEqual(supersededChoices({ ...stripe, 3: keyed(stripe[3], "stripe:pk_live_SHOPSHOPSHOP") }, 3, ["cardnumber", "cardcvv"], NOW), [1], "the same account");
+  assert.deepEqual(supersededChoices({ ...records, 7: rec(STRIPE, [["cardnumber"]], 0, NOW - 6_000) }, 3, ["cardnumber", "cardcvv"], NOW), [1], "another provider");
+  assert.deepEqual(supersededChoices(records, 9, ["cardnumber"], NOW), [], "a frame the worker has no record of lets nothing go");
 });
 
-test("the round-12 lure: fields typed into for something else never join a later fill", () => {
+test("the round-12 and round-13 lures: card fields tapped in two payment forms fill neither, in either order", () => {
   // A saved-card checkout asks only for the security code, in a Stripe frame on the shop's page. A cross-origin rewards
-  // widget mounts the attacker's own Stripe number and expiry elements ("Rewards number", "Valid thru"); the person
-  // typed into them, and later taps the shop's code and presses Fill.
-  const WIDGET = "https://rewards.example";
-  const page = {
-    1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), // the shop's code, tapped last
-    5: rec(STRIPE, [["cardnumber"]], 0, NOW - 90_000, [WIDGET, SHOP]), // "Rewards number", inside the widget
-    6: rec(STRIPE, [["cardexpiry"]], 0, NOW - 80_000, [WIDGET, SHOP]), // "Valid thru"
-  };
-  assert.deepEqual(plan(page), [1], "only the code: another chain of documents, and long before");
-  // The same lures typed into just now still sit in another chain of documents.
-  assert.deepEqual(plan({ ...page, 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 3_000, [WIDGET, SHOP]), 6: rec(STRIPE, [["cardexpiry"]], 0, NOW - 2_000, [WIDGET, SHOP]) }), [1]);
-  // Lures on the shop's own page (its own script: same chain) are dropped once more than 30 s older than the newer tap.
+  // widget mounts the attacker's own Stripe number and expiry elements ("Rewards number", "Valid thru"), and the person
+  // types into them as well as tapping the shop's code.
+  const code = (at: number): CardFrameRecord => rec(STRIPE, [["cardcvv"]], 0, at); // the shop's code
+  const lureNumber = (at: number): CardFrameRecord => rec(STRIPE, [["cardnumber"]], 0, at, [WIDGET, SHOP]); // "Rewards number"
+  const lureExpiry = (at: number): CardFrameRecord => rec(STRIPE, [["cardexpiry"]], 0, at, [WIDGET, SHOP]); // "Valid thru"
+  // Round 12: the lures typed into first, the shop's code tapped last.
+  assert.equal(plan({ 1: code(NOW - 1_000), 5: lureNumber(NOW - 90_000), 6: lureExpiry(NOW - 80_000) }), "mixed_forms");
+  assert.equal(plan({ 1: code(NOW - 1_000), 5: lureNumber(NOW - 3_000), 6: lureExpiry(NOW - 2_000) }), "mixed_forms");
+  // Round 13: the shop's code tapped first, the lures after. The newest choice used to decide, and sent the card to the
+  // widget's frames; now no order of taps decides between two forms.
+  assert.equal(plan({ 1: code(NOW - 20_000), 5: lureNumber(NOW - 3_000), 6: lureExpiry(NOW - 2_000) }), "mixed_forms");
+  assert.equal(plan({ 1: code(NOW - 100_000), 5: lureNumber(NOW - 1_000) }), "mixed_forms", "however long before, while the older choice stands");
+  assert.ok(choicesSpanForms({ 1: code(NOW - 20_000), 5: lureNumber(NOW - 3_000) }, NOW));
+  assert.deepEqual(chosenCardFrames({ 1: code(NOW - 20_000), 5: lureNumber(NOW - 3_000) }, NOW), [], "and no frame is chosen meanwhile");
+  // A choice past its time is none: the other form's choice then fills alone, and the popup's Fill line names the widget
+  // it sits in (fillDestination, below).
+  assert.deepEqual(plan({ 1: code(NOW - CHOICE_TTL_MS - 1), 5: lureNumber(NOW - 1_000) }), [5]);
+  // Lures on the shop's own page (its own script, on the shop's account: one form) are dropped once more than 30 s older
+  // than the newer tap.
+  const page = { 1: code(NOW - 1_000) };
   assert.deepEqual(plan({ ...page, 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 1_000 - CHOICE_CHAIN_MS - 1), 6: rec(STRIPE, [["cardexpiry"]], 0, NOW - 1_000 - CHOICE_CHAIN_MS - 2) }), [1]);
-  // What stays: quick taps on the same page, which the popup names detail by detail before the Fill (the residual).
+  // What stays: quick taps in one form, which the popup names detail by detail before the Fill (the residual; on another
+  // merchant account they are another form, below).
   assert.deepEqual(plan({ ...page, 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 20_000), 6: rec(STRIPE, [["cardexpiry"]], 0, NOW - 10_000) }), [1, 6, 5]);
   // Each tap must be within 30 s of the next newer one kept: a gap ends the chain.
   assert.deepEqual(plan({ ...page, 6: rec(STRIPE, [["cardexpiry"]], 0, NOW - 10_000), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 10_000 - CHOICE_CHAIN_MS - 1) }), [1, 6]);
-  // Another provider origin never joins, however quick.
-  assert.deepEqual(plan({ 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 2: rec(BRAINTREE, [["cardnumber"]], 0, NOW - 2_000) }), [1]);
-  // Where the browser lists no ancestors (Firefox), the time and origin rules still hold.
-  assert.deepEqual(plan({ 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000, null), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 90_000, null) }), [1]);
-  // A record from before the round (no list) never chains with one that has a list.
-  assert.deepEqual(plan({ 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 2_000, null) }), [1]);
+  // Another provider origin is another form.
+  assert.equal(plan({ 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 2: rec(BRAINTREE, [["cardnumber"]], 0, NOW - 2_000) }), "mixed_forms");
+  // A record from before the round (no list) and one with a list: nothing says they are one form.
+  assert.equal(plan({ 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 2_000, null) }), "mixed_forms");
+});
+
+test("mixed Stripe keys in one document: two merchant accounts are two payment forms (round-13 review)", () => {
+  // The shop's own script (or one it loads) mounts the attacker's Stripe number and expiry elements, on the attacker's
+  // account, beside the shop's code in the same document: same provider origin, same chain of documents. The publishable
+  // key each frame's own URL carries (cardproviders.ts providerAccountOf) tells the forms apart.
+  const SHOP_KEY = "stripe:pk_live_SHOPSHOPSHOP";
+  const OTHER_KEY = "stripe:pk_live_OTHEROTHER";
+  const keyed = (r: CardFrameRecord, account: string | null): CardFrameRecord => ({ ...r, account });
+  const page = {
+    0: rec(SHOP, [], null, NOW, []),
+    1: keyed(rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), SHOP_KEY),
+    5: keyed(rec(STRIPE, [["cardnumber"]], 0, NOW - 20_000), OTHER_KEY),
+    6: keyed(rec(STRIPE, [["cardexpiry"]], 0, NOW - 10_000), OTHER_KEY),
+  };
+  assert.equal(plan(page), "mixed_forms", "quick taps on one page, but on two accounts");
+  assert.equal(plan({ ...page, 1: keyed(rec(STRIPE, [["cardcvv"]], 0, NOW - 30_000), SHOP_KEY) }), "mixed_forms", "in either order");
+  assert.deepEqual(plan({ ...page, 1: keyed(page[1], OTHER_KEY) }), [1, 6, 5], "one account: one form");
+  // A connected account is an account of its own; a frame whose URL names none is not taken for one that names one.
+  assert.equal(plan({ 1: keyed(page[1], `${SHOP_KEY}/acct_1SHOP`), 5: keyed(page[5], `${SHOP_KEY}/acct_1OTHER`) }), "mixed_forms");
+  assert.equal(plan({ 1: keyed(page[1], SHOP_KEY), 5: keyed(page[5], null) }), "mixed_forms");
+  assert.notEqual(formGroupOf(page[1]).key, formGroupOf(page[5]).key);
+  assert.equal(formGroupOf(page[5]).key, formGroupOf(page[6]).key);
+});
+
+test("Start over lets go of every choice in the tab, in every form (round-13 review)", () => {
+  const page = {
+    0: rec(SHOP, [], null, NOW, []),
+    1: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000),
+    3: rec(STRIPE, [["cardexpiry"]]),
+    5: rec(STRIPE, [["cardnumber"]], 0, NOW - 3_000, [WIDGET, SHOP]),
+    7: rec(BRAINTREE, [["cardpostal"]], 0, NOW - CHOICE_TTL_MS - 5),
+  };
+  assert.equal(plan(page), "mixed_forms");
+  assert.deepEqual(framesWithChoices(page), [1, 5, 7], "every frame holding a choice, an expired one too; none that holds none");
+  const cleared: Record<number, CardFrameRecord> = { ...page };
+  for (const fid of framesWithChoices(page)) {
+    const { anchorAt: _gone, ...kept } = page[fid as 1 | 5 | 7];
+    cleared[fid] = { ...kept, anchor: null };
+  }
+  assert.equal(plan(cleared), "no_choice");
+  assert.deepEqual(framesWithChoices(cleared), []);
+  // The person then taps the one form they mean.
+  assert.deepEqual(plan({ ...cleared, 1: rec(STRIPE, [["cardcvv"]], 0, NOW - 100) }), [1]);
+});
+
+test("Firefox, which lists no ancestors: the parent frame tells the forms apart; where nothing does, choices in two frames refuse", () => {
+  const ff = (kinds: string[], at: number, parent: number | null): CardFrameRecord => ({ ...rec(BRAINTREE, [kinds], 0, at, null), parent });
+  // A split form whose frames sit in the shop's page (frame 0): one fill.
+  assert.deepEqual(plan({ 1: ff(["cardnumber"], NOW - 3_000, 0), 2: ff(["cardexpiry"], NOW - 2_000, 0) }), [2, 1]);
+  // One of them inside a widget's frame (frame 4): two forms, in either order.
+  assert.equal(plan({ 1: ff(["cardnumber"], NOW - 3_000, 4), 2: ff(["cardexpiry"], NOW - 2_000, 0) }), "mixed_forms");
+  assert.equal(plan({ 1: ff(["cardnumber"], NOW - 2_000, 4), 2: ff(["cardexpiry"], NOW - 3_000, 0) }), "mixed_forms");
+  // Where the browser could not say (runtime.getFrameId threw, or Firefox before it), choices in two frames refuse, a
+  // long-gone lure as much as a split form; a choice in one frame fills.
+  assert.equal(plan({ 1: ff(["cardnumber"], NOW - 3_000, null), 2: ff(["cardexpiry"], NOW - 2_000, null) }), "mixed_forms");
+  assert.equal(plan({ 1: ff(["cardcvv"], NOW - 1_000, null), 5: ff(["cardnumber"], NOW - 90_000, null) }), "mixed_forms");
+  assert.equal(plan({ 1: ff(["cardnumber"], NOW - 3_000, 0), 2: ff(["cardexpiry"], NOW - 2_000, null) }), "mixed_forms");
+  assert.deepEqual(plan({ 1: ff(["cardnumber", "cardexpiry", "cardcvv"], NOW - 3_000, null) }), [1]);
+  assert.deepEqual(formGroupOf(ff(["cardcvv"], NOW, null)), { key: `${BRAINTREE}|?|`, chainKnown: false });
+  assert.deepEqual(formGroupOf(ff(["cardcvv"], NOW, 0)), { key: `${BRAINTREE}|p:0|`, chainKnown: true });
+  // Where the browser lists ancestors, they say it.
+  assert.deepEqual(formGroupOf(rec(BRAINTREE, [["cardcvv"]], 0, NOW, [WIDGET, SHOP])), { key: `${BRAINTREE}|a:["${WIDGET}","${SHOP}"]|`, chainKnown: true });
+});
+
+test("a frame counts once it has shown, wherever the page is scrolled, until it has no size (round-13 review, rule 5)", () => {
+  assert.ok(frameCounts(true, 320, 44), "shown, then scrolled out of view: it still counts");
+  assert.ok(!frameCounts(false, 320, 44), "never shown in the viewport: collapsed");
+  assert.ok(!frameCounts(true, 0, 44) && !frameCounts(true, 320, 0), "shrunk to nothing");
+  // The scrolled-out case: a second number frame the page scrolls away before the Fill still stops it...
+  const real = rec(STRIPE, [[...FULL]], 0);
+  assert.equal(plan({ 3: real, 9: rec(STRIPE, [["cardnumber"]], null, NOW, [SHOP], frameCounts(true, 320, 44)) }), "duplicate_kind");
+  // ...a lure tapped, then scrolled away, still holds its choice...
+  assert.equal(plan({ 3: rec(STRIPE, [["cardcvv"]], 0, NOW - 1_000), 9: rec(STRIPE, [["cardnumber"]], 0, NOW - 2_000, [WIDGET, SHOP], frameCounts(true, 320, 44)) }), "mixed_forms");
+  // ...and one never shown neither counts nor can be chosen.
+  assert.deepEqual(plan({ 3: real, 9: rec(STRIPE, [["cardnumber"]], 0, NOW, [SHOP], frameCounts(false, 320, 44)) }), [3]);
+});
+
+test("the Fill line names the documents a provider frame sits in below the top one (round-13 review)", () => {
+  assert.equal(fillDestination([{ origin: STRIPE, ancestors: [WIDGET, SHOP] }]), "js.stripe.com inside rewards.example");
+  assert.equal(fillDestination([{ origin: STRIPE, ancestors: [SHOP] }]), "js.stripe.com", "directly in the shop's page");
+  assert.equal(fillDestination([{ origin: "https://checkout.stripe.com", ancestors: [] }]), "checkout.stripe.com", "a hosted page");
+  assert.equal(fillDestination([{ origin: STRIPE, ancestors: null }]), "js.stripe.com", "a browser that lists none");
+  assert.equal(fillDestination([{ origin: STRIPE, ancestors: ["https://a.example", "https://b.example:8443", SHOP] }]), "js.stripe.com inside a.example inside b.example:8443");
+  assert.equal(fillDestination([{ origin: BRAINTREE, ancestors: [SHOP] }, { origin: BRAINTREE, ancestors: [SHOP] }]), "assets.braintreegateway.com", "once for a split form");
+  // What a plan fills is what the line names.
+  const p = cardFillPlan({ 5: rec(STRIPE, [["cardnumber"]], 0, NOW - 1_000, [WIDGET, SHOP]) }, NOW);
+  assert.ok(p.ok);
+  assert.equal(fillDestination(p.targets), "js.stripe.com inside rewards.example");
 });
 
 test("a choice stands 2 minutes", () => {
@@ -150,7 +256,7 @@ test("a provider frame the page shows that has not reported refuses the fill, na
   // not run there): its card kinds cannot be counted, so nothing is filled anywhere in the tab. The hint can only refuse.
   const records = { 3: rec(STRIPE, [[...FULL]], 0) };
   assert.deepEqual(cardFillPlan(records, NOW, "https://assets.braintreegateway.com"), { ok: false, reason: "unreported", origin: "https://assets.braintreegateway.com" });
-  assert.deepEqual(cardFillPlan(records, NOW, null), { ok: true, targets: [{ frameId: 3, origin: STRIPE, kinds: [...FULL] }] });
+  assert.deepEqual(cardFillPlan(records, NOW, null), { ok: true, targets: [{ frameId: 3, origin: STRIPE, kinds: [...FULL], ancestors: [SHOP] }] });
 });
 
 test("a collapsed provider frame neither counts nor can be chosen", () => {
@@ -188,7 +294,7 @@ test("a provider frame nested under the shop's own same-origin frame fills where
 
 test("a security code alone, in a provider's frame, is a fill of its own (saved-card re-authentication)", () => {
   const records = { 7: rec(STRIPE, [["cardcvv"]], 0) };
-  assert.deepEqual(chosenCardFrame(records, NOW), { frameId: 7, origin: STRIPE, kinds: ["cardcvv"] });
+  assert.deepEqual(chosenCardFrame(records, NOW), { frameId: 7, origin: STRIPE, kinds: ["cardcvv"], ancestors: [SHOP] });
 });
 
 test("a choice past its time is none; one never made is none", () => {

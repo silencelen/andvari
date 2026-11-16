@@ -360,6 +360,37 @@ class DesktopSessionStore(
     /** §4.2: per-origin — clearing keys for one origin never touches another's namespace. */
     fun clearAccountKeys(key: String, userId: String) { accountKeysFile(key, userId).delete() }
 
+    /**
+     * Account deletion (spec 03 §13: this computer is left as a fresh install): forget the server at [key]. Its whole
+     * namespace goes, whoever's it is: `ns/<key>/` with every user's vault cache, cached keys, device state and
+     * self-identity pin, and the email bindings beside them; its entry in the per-origin prefs (the policy mirrors, the
+     * cache consent); and the session when it is that origin's. A computer that dials that origin goes back to the
+     * default one, as a first launch has it, and the pending-switch marker and the last sync and backup times, which
+     * were that account's, go with the address. What is the device's own stays: the theme, the update channel's anti-rollback floor, the one-shot migration
+     * flags, the diagnostic log, and another origin's namespace (§4.2). Nothing else ever removes a self-identity record
+     * (see [loadSelfIdentityPub]).
+     */
+    fun forgetServer(key: String) {
+        val s = load()
+        if (s == null || originKey(s.baseUrl) == key) {
+            memorySession = null
+            file.delete()
+        }
+        val ns = File(File(dir, "ns"), pathSafe(key))
+        // Windows: a straggler handle (AV, the indexer) can defeat an unlink; what is left goes at JVM exit, files
+        // before the directories that hold them (deleteOnExit runs in reverse order of registration).
+        if (!ns.deleteRecursively()) ns.walkTopDown().forEach { if (it.exists()) it.deleteOnExit() }
+        val p = prefs()
+        if (originKey(p.baseUrl) != key) {
+            writePrefs(p.copy(origins = p.origins - key))
+            return
+        }
+        // The server this computer dials: its address, the switch that was pending on it, and the times that were its
+        // account's.
+        pendingFile.delete()
+        writePrefs(p.copy(baseUrl = DEFAULT_BASE_URL, origins = p.origins - key, lastExportAt = 0, lastSyncAt = 0))
+    }
+
     // A12 (row 81): the session held for THIS run when at-rest storage is declined. Never written
     // anywhere; dies with the process, so the next launch signs in again.
     @Volatile

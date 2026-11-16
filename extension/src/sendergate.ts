@@ -80,6 +80,7 @@ export const SENDER_CLASS = {
   setTotp: "extension",
   updateStatus: "extension",
   cardFillOffers: "extension",
+  clearCardChoices: "extension",
   fillCardFromPopup: "extension",
   // A15: the server choice is a message now, not a storage write a content script could also make.
   serverInfo: "extension",
@@ -142,6 +143,7 @@ const REFUSALS: { [K in ExtensionOnly]: Res<K> } = {
   setTotp: { ok: false, code: "not_allowed", error: "popup only" },
   updateStatus: { current: "", latest: null, chromeUrl: null, firefoxUrl: null, quietReason: null },
   cardFillOffers: { fillable: false, origin: null, frames: [], pageFormOnly: false },
+  clearCardChoices: { ok: false },
   fillCardFromPopup: { ok: false, code: "not_allowed", error: "not allowed from a page" },
   serverInfo: { url: "", trustedStore: false, block: null },
   setServerUrl: { ok: false, code: "not_allowed" },

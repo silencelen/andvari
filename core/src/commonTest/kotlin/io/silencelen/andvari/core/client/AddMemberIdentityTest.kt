@@ -207,6 +207,24 @@ class AddMemberIdentityTest {
     }
 
     @Test
+    fun `a pin another device made shows a changed key as changed and never as merely unverified`() = runBlocking {
+        // Sharing review 2026-11 (item 9): the pin is in account state but not confirmed on this device.
+        val owner = enroll("q00-owner")
+        val bea = enroll("q00-bea")
+        val (engine, _, _) = ownerWithCreatedVault(owner)
+        engine.accountState.updateLocal { AccountState.withContact(it, Contact(bea.userId, bea.reg.identityPub, "Bea", 1_000, Contact.METHOD_TYPED, emailOf(bea).lowercase())) }
+        assertEquals(SyncEngine.MemberPinState.NEEDS_VERIFICATION, engine.memberPinState(bea.userId, bea.reg.identityPub), "the same key: verify here too")
+        val other = enroll("q00-other").reg.identityPub
+        assertEquals(SyncEngine.MemberPinState.KEY_CHANGED, engine.memberPinState(bea.userId, other), "another key than the one verified")
+        assertEquals(SyncEngine.MemberPinState.NEEDS_VERIFICATION, engine.memberPinState(enroll("q00-carl").userId, other), "no pin at all")
+        // Verified again on this device without typing the address: the address recorded on the other device stays.
+        assertEquals(emailOf(bea).lowercase(), engine.accountState.doc.contact(bea.userId)?.email)
+        verify(engine, bea, "Bea", null)
+        assertEquals(SyncEngine.MemberPinState.PINNED, engine.memberPinState(bea.userId, bea.reg.identityPub))
+        assertEquals(emailOf(bea).lowercase(), engine.accountState.doc.contact(bea.userId)?.email, "kept (item 7)")
+    }
+
+    @Test
     fun `pure check - match - mismatch - legacy - another pin claiming the typed email`() {
         val b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         val c = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"

@@ -32,7 +32,8 @@ work the usage ledger and the signup reuse alert come out of
 ```bash
 cd extension
 npm ci --ignore-scripts   # exactly the committed lockfile, and no dependency install hooks (.npmrc sets it too)
-npm run build        # → dist/ dev build (readable, sourcemaps; esbuild — 0 wasm, 0 eval; copies the pages, popup.css, theme-boot.js, icons, INSTALL.txt)
+npm run build        # → dist/ release build (minified, no payment-provider test hosts; esbuild — 0 wasm, 0 eval; copies the pages, popup.css, theme-boot.js, icons, INSTALL.txt)
+DEBUG=1 npm run build  # → dist/ dev build (readable, sourcemaps, the providers' test hosts listed)
 npm run typecheck    # tsc --noEmit
 npm run test         # node --test over src/**/*.test.ts
 npm run package      # → artifacts/andvari-extension-{chrome,firefox}-<ver>.zip (minified release)

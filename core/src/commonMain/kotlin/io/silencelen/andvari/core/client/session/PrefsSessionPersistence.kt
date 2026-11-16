@@ -15,6 +15,9 @@ interface KeyValuePrefs {
 
     /** Store [value] under [key]; null removes the key. */
     fun putString(key: String, value: String?)
+
+    /** The keys this store holds that start with [prefix]: what a wipe of one origin's namespace removes. */
+    fun keysWithPrefix(prefix: String): List<String>
 }
 
 /** Secret values: the iOS Keychain. Only the session's tokens go here. */
@@ -45,6 +48,10 @@ class PublishingPrefs(
         own.putString(key, value)
         if (publish(key)) shared.putString(key, value)
     }
+
+    /** This process's keys and the published copy's: a wipe removes a key from both, wherever it is left. The published
+     *  copy is only listed here, to be removed; nothing it holds is ever read back as state. */
+    override fun keysWithPrefix(prefix: String): List<String> = (own.keysWithPrefix(prefix) + shared.keysWithPrefix(prefix)).distinct()
 }
 
 /**
@@ -63,6 +70,8 @@ class InMemoryPrefs : KeyValuePrefs {
     override fun putString(key: String, value: String?) {
         synchronized(lock) { if (value == null) map.remove(key) else map[key] = value }
     }
+
+    override fun keysWithPrefix(prefix: String): List<String> = synchronized(lock) { map.keys.filter { it.startsWith(prefix) } }
 }
 
 /** [SecretStore] in memory (tests, and a host that persists nothing). */
@@ -147,6 +156,22 @@ class PrefsSessionPersistence(
 
     override fun clearSessionTokens() {
         synchronized(lock) { dropSessionLocked() }
+    }
+
+    override fun forgetServer(originKey: String) {
+        synchronized(lock) {
+            val sessionOrigin = prefs.getString(SESSION)?.let { runCatching { json.decodeFromString(SessionMeta.serializer(), it) }.getOrNull() }?.baseUrl
+            // The stored session is that server's (or names none): it goes, with its tokens.
+            if (sessionOrigin.isNullOrEmpty() || OriginCanon.originKey(sessionOrigin) == originKey) dropSessionLocked()
+            for (key in prefs.keysWithPrefix("ns.$originKey.")) prefs.putString(key, null)
+            // The server the client dials: no origin chosen, as on a first launch (the next start asks which server), and
+            // the switch that was pending on it and its account's last sync go with the address.
+            if (baseUrl?.let(OriginCanon::originKey) == originKey) {
+                prefs.putString(PENDING, null)
+                prefs.putString(LAST_SYNC, null)
+                prefs.putString(BASE_URL, null)
+            }
+        }
     }
 
     override var mustChangePassword: Boolean

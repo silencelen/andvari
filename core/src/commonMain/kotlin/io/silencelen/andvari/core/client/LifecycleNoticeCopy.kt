@@ -37,11 +37,15 @@ object LifecycleNoticeCopy {
                 if (n.becameMine) "You are now the owner of “$name”." else "“$name” now has a new owner.",
                 false,
             )
-            "transfer-anomaly" -> Pair(
-                "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
-                    "If nobody in your household did this, tell your admin — the server may be misbehaving.",
-                true,
-            )
+            "transfer-anomaly" -> if (n.reason == SyncEngine.TRANSFER_NOT_OFFERED) {
+                Pair(HouseholdCopy.transferNotOfferedNotice(name), true)
+            } else {
+                Pair(
+                    "The server says “$name” changed owners, but this couldn’t be verified with the vault’s own key. " +
+                        "If nobody in your household did this, tell your admin — the server may be misbehaving.",
+                    true,
+                )
+            }
             "replay-denied" -> if (n.reason == SyncEngine.REMOVAL_REPLAY) Pair(HouseholdCopy.removalReplayDeniedNotice(name), true)
                 else Pair(HouseholdCopy.replayDeniedNotice(n.parkedCount ?: 0, name), false)
             "added" -> Pair(HouseholdCopy.addedNotice(name, n.byLabel), false)
@@ -67,5 +71,72 @@ object LifecycleNoticeCopy {
         if (ms == null || ms <= 0) return "soon"
         val date = Instant.fromEpochMilliseconds(ms).toLocalDateTime(TimeZone.UTC).date
         return "${MONTHS[date.monthNumber - 1]} ${date.dayOfMonth}"
+    }
+}
+
+/**
+ * What "Recently removed" says of a vault in the holding area (sharing review 2026-11, item 6), by the reason the server
+ * gave and how its proof checked on this device ([HeldVaultInfo.proof]), and whether the line is a warning. [sentence]
+ * is the iOS wording; [fragment] the Android and desktop lists'. A removal whose proof verified no longer reads as
+ * unverified.
+ */
+object HeldVaultCopy {
+    private enum class What { DELETED, DELETE_UNVERIFIED, LEFT, LEFT_UNPROVEN, LEFT_UNVERIFIED, REMOVED, REMOVED_LEGACY, REMOVED_ELSEWHERE, REMOVAL_REPLAYED, REMOVAL_UNVERIFIED }
+
+    private fun what(h: HeldVaultInfo): What = when (h.reason) {
+        "deleted" -> if (h.verified) What.DELETED else What.DELETE_UNVERIFIED
+        // An entry kept before the verdict was recorded (null) said "you left", as it does now.
+        "left" -> when (h.proof) {
+            null, "VALID", "ALREADY_RECORDED" -> What.LEFT
+            "LEFT_UNPROVEN" -> What.LEFT_UNPROVEN
+            else -> What.LEFT_UNVERIFIED
+        }
+        else -> when (h.proof) {
+            "VALID" -> What.REMOVED
+            "VALID_LEGACY" -> What.REMOVED_LEGACY
+            "ALREADY_RECORDED" -> What.REMOVED_ELSEWHERE
+            "REPLAY_DENIED" -> What.REMOVAL_REPLAYED
+            else -> if (h.proof == null && h.verified) What.REMOVED else What.REMOVAL_UNVERIFIED
+        }
+    }
+
+    private fun warns(w: What): Boolean = w in setOf(What.DELETE_UNVERIFIED, What.LEFT_UNPROVEN, What.LEFT_UNVERIFIED, What.REMOVAL_REPLAYED, What.REMOVAL_UNVERIFIED)
+
+    /** The line under the vault's name, as a sentence (iOS), and whether it is a warning. */
+    fun sentence(h: HeldVaultInfo, day: (Long?) -> String = LifecycleNoticeCopy::englishDay): Pair<String, Boolean> {
+        val w = what(h)
+        val kept = "Kept until ${day(h.expungeAt)}."
+        val line = when (w) {
+            What.DELETED -> "Deleted by its owner. Kept sealed until ${day(h.purgeAt ?: h.expungeAt)}."
+            What.DELETE_UNVERIFIED -> "The server says it was deleted, but this couldn't be verified. $kept"
+            What.LEFT -> "You left. $kept"
+            What.LEFT_UNPROVEN -> "The server says you left, with no proof from your device. Didn't do this? Tell your admin. $kept"
+            What.LEFT_UNVERIFIED -> "The server says you left, but this couldn't be verified. $kept"
+            What.REMOVED -> "Your access was removed. $kept"
+            What.REMOVED_LEGACY -> "Your access was removed (sent by an older app version). $kept"
+            What.REMOVED_ELSEWHERE -> "Your access was removed, as another of your devices already recorded. $kept"
+            What.REMOVAL_REPLAYED -> "The server sent a removal notice that was already used once, so andvari did not trust it. $kept"
+            What.REMOVAL_UNVERIFIED -> "The server says your access was removed, but this couldn't be verified. $kept"
+        }
+        return line to warns(w)
+    }
+
+    /** The line under the vault's name, in the Android and desktop lists' style, and whether it is a warning. */
+    fun fragment(h: HeldVaultInfo, day: (Long?) -> String): Pair<String, Boolean> {
+        val w = what(h)
+        val kept = "kept until ${day(h.expungeAt)}"
+        val line = when (w) {
+            What.DELETED -> "deleted by its owner · kept sealed until ${day(h.purgeAt ?: h.expungeAt)}"
+            What.DELETE_UNVERIFIED -> "unverified deletion · $kept"
+            What.LEFT -> "you left · $kept"
+            What.LEFT_UNPROVEN -> "you left, says the server, with no proof · $kept"
+            What.LEFT_UNVERIFIED -> "unverified leave · $kept"
+            What.REMOVED -> "access removed · $kept"
+            What.REMOVED_LEGACY -> "access removed (older app version) · $kept"
+            What.REMOVED_ELSEWHERE -> "access removed, recorded on another of your devices · $kept"
+            What.REMOVAL_REPLAYED -> "replayed removal notice, not trusted · $kept"
+            What.REMOVAL_UNVERIFIED -> "unverified removal · $kept"
+        }
+        return line to warns(w)
     }
 }

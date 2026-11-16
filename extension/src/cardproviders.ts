@@ -36,14 +36,20 @@ export interface CardProviderOrigin {
 }
 
 export const CARD_PROVIDER_ORIGINS: readonly CardProviderOrigin[] = [
-  // The Card Element family (card, cardNumber, cardExpiry, cardCvc) and the Payment Element. Not the Address, Link,
-  // Express Checkout or controller frames of the same origin. Stripe documents no frame names; these are the ones
-  // Stripe.js loads (js.stripe.com/v3/elements-inner-card-<hash>.html, elements-inner-payment-<hash>.html).
+  // The Card Element family (card, cardNumber, cardExpiry, cardCvc) and the Payment Element, with the Payment
+  // Element's autofill control and the card details re-collection modal. Not the Address, Link, Express Checkout or
+  // controller frames of the same origin. Stripe documents no frame names: these come from Stripe.js's own bundle
+  // (js.stripe.com/v3/, fetched 2026-11-14), not from documentation: elements-inner-card-<hash>.html,
+  // elements-inner-payment-<hash>.html, elements-inner-payment-af-control-<hash>.html and
+  // card-details-recollection-modal-<hash>.html.
   {
     provider: "Stripe",
     origin: "https://js.stripe.com",
     source: "https://docs.stripe.com/security/guide#content-security-policy",
-    cardPaths: [/^\/v3\/elements-inner-(card|payment)-[0-9a-f]+\.html$/],
+    cardPaths: [
+      /^\/v3\/elements-inner-(card|payment|payment-af-control)-[0-9a-f]+\.html$/,
+      /^\/v3\/card-details-recollection-modal-[0-9a-f]+\.html$/,
+    ],
   },
   // Checkout's hosted page.
   { provider: "Stripe", origin: "https://checkout.stripe.com", source: "https://docs.stripe.com/security/guide#content-security-policy" },
@@ -138,4 +144,81 @@ export function isCardEntryDocument(origin: string | null | undefined, pathname:
   const p = cardProviderOf(origin);
   if (p === null) return false;
   return p.cardPaths === undefined || p.cardPaths.some((re) => re.test(pathname));
+}
+
+/**
+ * The merchant account a provider's card document works for, where its own URL names one (round-13 review): two card
+ * documents of one provider that name two accounts are two payment forms, never one fill. Read by the content script
+ * inside the provider's document, from that document's own URL as it loaded. The page that made the frame wrote that
+ * URL, so this is the page's word: two different accounts can only keep two forms apart (a refusal), and the same
+ * account named twice proves nothing. Null where the URL names none.
+ *
+ * Read from each provider's own client bundle, 2026-11-14, not from documentation:
+ * - Stripe: the publishable key (`apiKey`, pk_live_ or pk_test_) and the connected account (`stripeAccount`) in the
+ *   fragment Stripe.js gives each Elements frame (js.stripe.com/v3/).
+ * - Adyen: the client key in the Secured Fields path, `/checkoutshopper/securedfields/<clientKey>/<version>/...`
+ *   (adyen-web 5.66.1).
+ * - Checkout.com Frames: the public key in the query, `?publicKey=pk_...` (framesv2.min.js 2.69.1). Flow's card field
+ *   frames carry none (its key goes to its controller frame).
+ * - Recurly: the public key in the JSON of the fragment, `#config=<json>`, at `recurly.publicKey` (recurly.js v4).
+ * - Worldpay eProtect: the Pay Page ID in the path, `/eProtect/eProtect_<paypageId>_<style>_api2.html` (or in the
+ *   `paypageid` query of eProtect.html) (eProtect-iframe-client.min.js).
+ * - Worldpay Access Checkout: the checkout ID in the `id` query (access-checkout-web 2.5.0).
+ * - Cybersource Flex Microform: the capture context's key id in the `keyId` query (flex-microform 2.0.2): one
+ *   Microform's own, narrower than an account, so two Microforms are two forms even for one merchant.
+ * - None: Braintree (the fragment names a channel, the settings arrive by message), Square, and Authorize.net (Accept
+ *   Hosted is loaded by a form post; Accept UI's frame is told only the page's origin).
+ * The providers' test hosts are not named here, since a release build must name none: their frames, which only the
+ * debug and UI-test builds list, are grouped by origin and chain alone (Adyen's, matched by a pattern, are read like its
+ * live ones).
+ */
+export function providerAccountOf(href: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(href);
+  } catch {
+    return null;
+  }
+  const safe = (v: unknown, re: RegExp): string | null => (typeof v === "string" && re.test(v) ? v : null);
+  const tagged = (tag: string, v: string | null): string | null => (v === null ? null : `${tag}:${v}`);
+  if (u.origin === "https://js.stripe.com") {
+    const params = new URLSearchParams(u.hash.replace(/^#/, ""));
+    const key = safe(params.get("apiKey") ?? params.get("key"), /^pk_(live|test)_[A-Za-z0-9]{8,200}$/);
+    if (key === null) return null;
+    const account = safe(params.get("stripeAccount"), /^acct_[A-Za-z0-9]{4,64}$/);
+    return account === null ? `stripe:${key}` : `stripe:${key}/${account}`;
+  }
+  if (/^https:\/\/checkoutshopper-[a-z0-9-]+\.adyen\.com$/.test(u.origin)) {
+    const m = /^\/checkoutshopper\/securedfields\/([^/]+)\//.exec(u.pathname);
+    return tagged("adyen", safe(m?.[1], /^(live|test)_[A-Za-z0-9]{8,200}$/));
+  }
+  if (u.origin === "https://js.checkout.com") {
+    return tagged("checkout", safe(u.searchParams.get("publicKey"), /^pk_[A-Za-z0-9_-]{8,200}$/));
+  }
+  if (u.origin === "https://api.recurly.com" || u.origin === "https://api.eu.recurly.com") {
+    if (u.hash.length > 16_384) return null;
+    const config = new URLSearchParams(u.hash.replace(/^#/, "")).get("config");
+    if (config === null) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(config);
+    } catch {
+      return null;
+    }
+    const recurly = typeof parsed === "object" && parsed !== null ? (parsed as { recurly?: unknown }).recurly : undefined;
+    const key = typeof recurly === "object" && recurly !== null ? (recurly as { publicKey?: unknown }).publicKey : undefined;
+    return tagged("recurly", safe(key, /^[A-Za-z0-9][A-Za-z0-9_-]{7,199}$/));
+  }
+  if (u.origin === "https://request.eprotect.vantivcnp.com") {
+    const m = /^\/eProtect\/eProtect_([A-Za-z0-9]+)_/.exec(u.pathname);
+    const id = m?.[1] ?? (u.pathname === "/eProtect/eProtect.html" ? u.searchParams.get("paypageid") : null);
+    return tagged("eprotect", safe(id, /^[A-Za-z0-9]{4,64}$/));
+  }
+  if (u.origin === "https://access.worldpay.com" && u.pathname.startsWith("/access-checkout/")) {
+    return tagged("wpaccess", safe(u.searchParams.get("id"), /^[A-Za-z0-9-]{8,100}$/));
+  }
+  if (u.origin === "https://flex.cybersource.com" && u.pathname.startsWith("/microform/")) {
+    return tagged("cybersource", safe(u.searchParams.get("keyId"), /^[A-Za-z0-9_-]{2,300}$/));
+  }
+  return null;
 }

@@ -586,6 +586,146 @@ final class AppModel: ObservableObject {
         await run { try await $0.checkAccountDeletion() }
     }
 
+    // MARK: - Vault health
+
+    func openHealth() {
+        controller.openHealth()
+    }
+
+    func closeHealth() {
+        controller.closeHealth()
+    }
+
+    func refreshHealth() {
+        controller.refreshHealth()
+    }
+
+    func setHealthShowSnoozed(_ show: Bool) {
+        controller.setHealthShowSnoozed(show: show)
+    }
+
+    func dismissHealthMessage() {
+        controller.dismissHealthMessage()
+    }
+
+    /// Only the first 5 characters of each password's SHA-1 hash go to the server; the match is made here.
+    func checkBreaches() async -> Outcome {
+        await run { try await $0.checkBreaches() }
+    }
+
+    func mergeDuplicates(_ signature: String) async -> Outcome {
+        await run { try await $0.mergeDuplicates(signature: signature) }
+    }
+
+    func keepDuplicate(_ signature: String, keep itemId: String) async -> Outcome {
+        await run { try await $0.keepDuplicate(signature: signature, keepId: itemId) }
+    }
+
+    func markNotDuplicates(_ signature: String) async -> Outcome {
+        await run { try await $0.markNotDuplicates(signature: signature) }
+    }
+
+    func restoreDuplicates(_ signature: String) async -> Outcome {
+        await run { try await $0.restoreDuplicates(signature: signature) }
+    }
+
+    func startCheckRun(neverCheckedOnly: Bool) {
+        controller.startCheckRun(neverCheckedOnly: neverCheckedOnly)
+    }
+
+    func checkLogin(_ itemId: String) {
+        controller.checkLogin(itemId: itemId)
+    }
+
+    func skipCheck() {
+        controller.skipCheck()
+    }
+
+    func stopCheckRun() {
+        controller.stopCheckRun()
+    }
+
+    /// "ok", "bad", "gone" or "blocked": what the person found when they signed in themselves.
+    func recordCheck(_ itemId: String, result: String) async -> Outcome {
+        await run { try await $0.recordCheck(itemId: itemId, result: result) }
+    }
+
+    func unsnoozeLogin(_ itemId: String) async -> Outcome {
+        await run { try await $0.unsnoozeLogin(itemId: itemId) }
+    }
+
+    func trashGoneLogin() async -> Outcome {
+        await run { try await $0.trashGoneLogin() }
+    }
+
+    func keepGoneLogin() {
+        controller.keepGoneLogin()
+    }
+
+    func answerBadOffer(opening: Bool) {
+        controller.answerBadOffer(opening: opening)
+    }
+
+    // MARK: - Importing a CSV export
+
+    /// The file's bytes, read whole (within core's limit): parsed and planned on this device, nothing sent yet.
+    func importCsv(_ data: Data) async -> Outcome {
+        await run { try await $0.importCsvData(data: data) }
+    }
+
+    func setImportVault(_ vaultId: String) async -> Outcome {
+        await run { try await $0.setImportVault(vaultId: vaultId) }
+    }
+
+    func confirmImport() async -> Outcome {
+        await run { try await $0.confirmImport() }
+    }
+
+    func closeImport() {
+        controller.closeImport()
+    }
+
+    // MARK: - Export and backup
+
+    /// A sync, then what the export would hold, by vault (spec 07). Nothing is made until a folder is chosen.
+    func openExport(_ kind: ExportKind) async -> Outcome {
+        await run { try await $0.openExport(kind: kind) }
+    }
+
+    func setExportVault(_ vaultId: String, included: Bool) {
+        controller.setExportVault(vaultId: vaultId, included: included)
+    }
+
+    func setExportAttachments(_ include: Bool) {
+        controller.setExportAttachments(include: include)
+    }
+
+    func closeExport() {
+        controller.closeExport()
+    }
+
+    /// The CSV for the folder chosen, or nil (the export screen says why). Plaintext: written once there, then wiped.
+    func exportCsv(acknowledged: Bool) -> ExportData? {
+        controller.exportCsvData(acknowledged: acknowledged)
+    }
+
+    /// The backup for the folder chosen, made, opened again and checked by core; nil when nothing is to be written.
+    func exportBackup(passphrase: String, confirm: String) async -> ExportData? {
+        do {
+            return try await controller.exportBackupData(passphrase: passphrase, confirm: confirm)
+        } catch {
+            return nil
+        }
+    }
+
+    func exportSaved(fileName: String, folder: String) {
+        controller.exportSaved(fileName: fileName, folder: folder)
+    }
+
+    func exportNotSaved(written: Bool) {
+        controller.exportNotSaved(written: written)
+    }
+
     // MARK: - Shared vaults awaiting review
 
     /// Trust on first use: the vault's key as the server delivered it is vouched for, and the vault opens for saving.

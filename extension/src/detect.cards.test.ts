@@ -8,7 +8,7 @@
 // directions ([A8]) and the capture/save gate ([A7]) are anchored here.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { bumpLabelGeneration, classifyCardField, classifyCardRadio, classifyCardSelect, demoteCsc, formlessGroups, isCvvNameOrId, labelSourcesOf, postalIsAmbiguous } from "./detect.ts";
+import { bumpLabelGeneration, classifyCardField, classifyCardRadio, classifyCardSelect, demoteCsc, formlessGroups, hostedCardKind, hostedCardKinds, isCvvNameOrId, labelSourcesOf, postalIsAmbiguous } from "./detect.ts";
 import type { FieldSignal } from "./urimatch.ts";
 
 const sig = (over: Partial<FieldSignal>): FieldSignal => ({ hints: [], htmlType: "text", htmlNameOrId: null, ...over });
@@ -585,4 +585,26 @@ test("[U6] labelSourcesOf — WeakMap cache holds within a sweep generation, inv
   bumpLabelGeneration(); // content.ts calls this on childList-bearing ticks ([U16] cadence)
   labelSourcesOf(el);
   assert.equal(reads, 2); // invalidated per sweep generation
+});
+
+test("a provider's hosted page: card fields by their cc-* autocomplete hint only, exactly one per kind (round-13 review)", () => {
+  assert.equal(hostedCardKind("cc-number"), "cardnumber");
+  assert.equal(hostedCardKind("section-pay billing cc-exp"), "cardexpiry");
+  assert.equal(hostedCardKind("CC-CSC"), "cardcvv");
+  assert.equal(hostedCardKind("cc-exp-month"), "cardexpmonth");
+  assert.equal(hostedCardKind("cc-exp-year"), "cardexpyear");
+  assert.equal(hostedCardKind("cc-name"), "cardname");
+  for (const none of [null, "", "off", "on", "cardnumber", "card-number", "postal-code", "one-time-code", "cc-given-name", "email"]) {
+    assert.equal(hostedCardKind(none), null, String(none));
+  }
+  // The hosted-page custom-field case: a hosted checkout shows fields its merchant adds and labels ("Card number",
+  // "Security code"); they carry no card hint, so they are never card fields there, whatever their name or label says
+  // (classifyCardField would take "cardNumber" for one: the hosted page never asks it).
+  assert.equal(classifyCardField(sig({ htmlNameOrId: "cardNumber" })), "cardnumber");
+  assert.deepEqual(hostedCardKinds(["email", "cc-number", "cc-exp", "cc-csc", "cc-name", null, "off"]), [null, "cardnumber", "cardexpiry", "cardcvv", "cardname", null, null]);
+  // Two fields that claim one kind: nothing tells which the page means, so the page has no card form.
+  assert.equal(hostedCardKinds(["cc-number", "cc-number", "cc-csc"]), null);
+  assert.equal(hostedCardKinds(["cc-number", "section-x cc-number"]), null);
+  assert.equal(hostedCardKinds([null, "off", "email"]), null, "no card field at all");
+  assert.equal(hostedCardKinds([]), null);
 });

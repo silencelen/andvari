@@ -7,7 +7,7 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, CARD_FILL_FROM_APP, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, cardFillOffLine, CARD_MIXED_FORMS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
 import { wrongVaultLine } from "./itemhome";
 import { clearLiveMsg, setLiveMsg } from "./livemsg";
 import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
@@ -16,6 +16,7 @@ import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { BUILD_TARGET } from "./buildtarget";
 import { CARD_FILL } from "./cardfillflag";
+import { fillDestination } from "./cardrelease";
 import { askAppServerDetailed, nativeSender } from "./appserver";
 import { displaySite, safeSiteUrl } from "./siteurl";
 import { reuseWarning } from "./reusealert";
@@ -49,7 +50,7 @@ let cardFill: {
   origin: string | null;
   /** The provider frames a Fill reaches, with the card details it fills there: shown as the Fill's destination (the
    *  details by name, round-12 review), and sent back with it. */
-  frames: { frameId: number; origin: string; kinds: CardFieldKind[] }[];
+  frames: { frameId: number; origin: string; kinds: CardFieldKind[]; ancestors?: readonly string[] | null }[];
   pageFormOnly: boolean;
   allowOrigin?: string;
   allowEverywhere?: boolean;
@@ -57,6 +58,8 @@ let cardFill: {
   noFrameOrigin?: boolean;
   /** This build has no in-page card fill (cardfillflag.ts). */
   fillOff?: boolean;
+  /** The person tapped card fields in two different payment forms (round-13 review): Start over. */
+  mixed?: boolean;
 } = { fillable: false, origin: null, frames: [], pageFormOnly: false };
 let totpTimer: number | undefined;
 let searchTimer: number | undefined;
@@ -431,7 +434,7 @@ async function loadUnlocked(): Promise<void> {
       const o2 = cardFillOf(await ask({ type: "cardFillOffers" }));
       // [U21] pinned: the re-query diffs the reasons too — a late report from a provider's frame must surface its Fill,
       // and a late one from the page's own form the line that says why the rows copy instead.
-      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || JSON.stringify(o2.frames) !== JSON.stringify(cardFill.frames) || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere || o2.doubled !== cardFill.doubled || o2.noFrameOrigin !== cardFill.noFrameOrigin) {
+      if (o2.fillable !== cardFill.fillable || o2.origin !== cardFill.origin || JSON.stringify(o2.frames) !== JSON.stringify(cardFill.frames) || o2.pageFormOnly !== cardFill.pageFormOnly || o2.allowOrigin !== cardFill.allowOrigin || o2.allowEverywhere !== cardFill.allowEverywhere || o2.doubled !== cardFill.doubled || o2.noFrameOrigin !== cardFill.noFrameOrigin || o2.mixed !== cardFill.mixed) {
         cardFill = o2;
         const c2 = await ask({ type: "cardItems" });
         if (c2 && !c2.locked) renderCards(c2.items);
@@ -449,7 +452,10 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
   const frames = Array.isArray(offer.frames)
     ? offer.frames
         .filter((f) => typeof f?.frameId === "number" && typeof f?.origin === "string" && Array.isArray(f?.kinds))
-        .map((f) => ({ frameId: f.frameId, origin: f.origin, kinds: f.kinds.filter((k): k is CardFieldKind => typeof k === "string" && k in CARD_DETAIL_NAME) }))
+        .map((f) => ({
+          frameId: f.frameId, origin: f.origin, kinds: f.kinds.filter((k): k is CardFieldKind => typeof k === "string" && k in CARD_DETAIL_NAME),
+          ancestors: Array.isArray(f.ancestors) && f.ancestors.every((a) => typeof a === "string") ? f.ancestors : null,
+        }))
     : [];
   return {
     fillable: offer.fillable,
@@ -461,6 +467,7 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
     ...(offer.doubled === true ? { doubled: true } : {}),
     ...(offer.noFrameOrigin === true ? { noFrameOrigin: true } : {}),
     ...(offer.fillOff === true ? { fillOff: true } : {}),
+    ...(offer.mixed === true ? { mixed: true } : {}),
   };
 }
 
@@ -1020,7 +1027,24 @@ cardsList.hidden = true;
 const cardsPspNote = document.createElement("div");
 cardsPspNote.className = "empty slim";
 cardsPspNote.hidden = true;
-el("all-list").after(cardsLabel, cardsPspNote, cardsList);
+/** Round-13 review: card fields tapped in two payment forms fill neither; Start over lets every choice go, and the person
+ *  taps the one form they mean. */
+const cardsStartOver = document.createElement("button");
+cardsStartOver.type = "button";
+cardsStartOver.className = "link";
+cardsStartOver.textContent = "Start over";
+cardsStartOver.hidden = true;
+cardsStartOver.addEventListener("click", () => {
+  void (async () => {
+    cardsStartOver.disabled = true;
+    await ask({ type: "clearCardChoices" });
+    cardFill = cardFillOf(await ask({ type: "cardFillOffers" }));
+    const cards = await ask({ type: "cardItems" });
+    cardsStartOver.disabled = false;
+    if (cards && !cards.locked) renderCards(cards.items);
+  })();
+});
+el("all-list").after(cardsLabel, cardsPspNote, cardsStartOver, cardsList);
 
 /** What to do instead of a fill: the copy buttons, or in the Safari build (which copies no card number or code) the app. */
 function cardCopyRemedy(): string {
@@ -1029,7 +1053,8 @@ function cardCopyRemedy(): string {
 
 /** The one line that says why the rows copy instead of filling; null while they fill. */
 function cardCopyReason(safari: boolean): string | null {
-  if (cardFill.fillOff === true) return CARD_FILL_FROM_APP;
+  if (cardFill.fillOff === true) return cardFillOffLine(safari);
+  if (cardFill.mixed === true) return CARD_MIXED_FORMS;
   if (cardFill.fillable) return null;
   if (cardFill.doubled === true) return CARD_DUPLICATE_FIELDS;
   if (cardFill.noFrameOrigin === true) return CARD_NO_FRAME_ORIGIN;
@@ -1046,8 +1071,9 @@ function renderCards(items: CardItem[]): void {
   // The line needs rows to point at ("use the copy buttons") — a cardless hoard stays bare.
   const why = cardCopyReason(BUILD_TARGET === "safari");
   cardsPspNote.hidden = items.length === 0 || why === null;
-  // Without card fill in the build, the line is the remedy itself.
-  if (why !== null) cardsPspNote.textContent = cardFill.fillOff === true ? why : `${why} ${cardCopyRemedy()}`;
+  // Without card fill in the build, the line is the remedy itself; so it is for two forms, whose remedy is Start over.
+  if (why !== null) cardsPspNote.textContent = cardFill.fillOff === true || cardFill.mixed === true ? why : `${why} ${cardCopyRemedy()}`;
+  cardsStartOver.hidden = items.length === 0 || cardFill.mixed !== true;
   cardsList.replaceChildren();
   for (const it of items) cardsList.append(cardRow(it));
 }
@@ -1081,7 +1107,8 @@ function cardRow(it: CardItem): HTMLElement {
     // chosen yet (the Fill then asks for a tap).
     const dest = document.createElement("div");
     dest.className = "card-fill-dest";
-    dest.textContent = cardFill.frames.length > 0 ? `Fill → ${[...new Set(cardFill.frames.map((f) => new URL(f.origin).host))].join(", ")}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;
+    // Round-13 review: and the documents a frame sits in below the top one ("js.stripe.com inside rewards.example").
+    dest.textContent = cardFill.frames.length > 0 ? `Fill → ${fillDestination(cardFill.frames)}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;
     body.append(dest);
   }
 
@@ -1797,6 +1824,7 @@ async function fillServerDetails(body: HTMLElement, serverInfoSilent: boolean): 
       `Handler at unlock: ${d.vaultOpen ?? "–"}`,
       `Handler at last fill or copy: ${d.vaultSecret ?? "–"}`,
       `Page origin: ${d.pageOrigin ?? "no page has asked yet"}`,
+      `Payment frame origin: ${d.providerFrame ?? "no payment frame has reported yet"}`,
     );
   }
   show();
@@ -2023,7 +2051,9 @@ let appAnswered: "set" | "none" | "unavailable" | null = null;
 /**
  * Safari: have the worker adopt the app's server before anything shows a server; whether the app has none. The worker
  * asks the app itself; when that ask got no answer (on a device it timed out while this page's, a moment later,
- * resolved), this page asks the app and relays what it said, which the worker adopts the same way.
+ * resolved), this page asks the app and relays what it said, which the worker adopts the same way. That the app has no
+ * server is relayed too: the worker then forgets one it still keeps from the app (an account deleted in the app leaves
+ * the device with none).
  */
 async function adoptAppServer(): Promise<boolean> {
   if (BUILD_TARGET !== "safari") return false;
@@ -2036,7 +2066,8 @@ async function adoptAppServer(): Promise<boolean> {
       const relayed = await ask({ type: "appServerAnswer", url: own.answer.url, nativeSave: own.nativeSave, askedAt });
       appAnswered = relayed?.app ?? "unavailable";
     } else if (own.answer.kind === "none") {
-      appAnswered = "none";
+      await ask({ type: "appServerAnswer", url: null, nativeSave: own.nativeSave, askedAt });
+      appAnswered = "none"; // the app said so itself, whatever the worker made of it
     }
   }
   return appAnswered === "none";
