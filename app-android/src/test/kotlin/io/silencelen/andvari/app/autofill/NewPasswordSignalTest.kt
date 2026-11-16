@@ -49,14 +49,17 @@ class NewPasswordSignalTest {
      *  the one helper (and saveInfoFor, which counts fields rather than filling them). */
     @Test
     fun datasetBuilderFillsOnlyTheFillablePasswordFields() {
+        // Android review 1: the rows are planned in FillPlan; the builder's helper delegates to it.
         val db = code("src/main/kotlin/io/silencelen/andvari/app/autofill/DatasetBuilder.kt")
+        val plan = code("src/main/kotlin/io/silencelen/andvari/app/autofill/FillPlan.kt")
         assertTrue(
-            db.contains("private fun fillPasswordFields(form: ParsedForm): List<ParsedField> =\n        NewPasswordSignal.fillablePasswordFields(form.fields.filter { it.kind == FieldKind.PASSWORD }) { it.isNewPassword }"),
+            plan.contains("fun <I> fillPasswordFields(form: FormOf<I>): List<FieldOf<I>> =\n        NewPasswordSignal.fillablePasswordFields(form.fields.filter { it.kind == FieldKind.PASSWORD }) { it.isNewPassword }"),
             "the ONE password-target helper must go through the signal",
         )
-        assertTrue(db.contains("fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }"), "the dataset's passFields come from the helper")
+        assertTrue(db.contains("private fun fillPasswordFields(form: ParsedForm): List<ParsedField> = FillPlan.fillPasswordFields(form)"))
+        assertTrue(plan.contains("fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }"), "the rows' passFields come from the helper")
         assertTrue(db.contains("val fillable = fillPasswordFields(form)"), "the inline-presentation leg reads the same set")
-        val filters = Regex("form\\.fields\\.filter \\{ it\\.kind == FieldKind\\.PASSWORD \\}").findAll(db).count()
+        val filters = Regex("form\\.fields\\.filter \\{ it\\.kind == FieldKind\\.PASSWORD \\}").findAll(db + plan).count()
         assertEquals(2, filters, "exactly two raw password filters: fillPasswordFields (the source) and saveInfoFor (a count, not a fill)")
     }
 

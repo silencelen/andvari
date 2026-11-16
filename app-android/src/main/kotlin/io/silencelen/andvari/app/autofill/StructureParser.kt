@@ -21,9 +21,15 @@ import io.silencelen.andvari.core.client.autofill.isCardKind
  * [autofillType] is the node's `View.AUTOFILL_TYPE_*` and [options] a LIST node's choice
  * labels — both METADATA describing the input control (CardFill's type-pinning consumes
  * them: forText only on TEXT nodes, forList only on LIST nodes), never anything typed.
+ *
+ * Generic over the id type ([FieldOf], [FormOf]) only so the fill rules can be pure functions a JVM test calls with
+ * plain ids (an `AutofillId` cannot be built there); the app itself always uses [ParsedField] and [ParsedForm].
  */
-data class ParsedField(
-    val id: AutofillId,
+typealias ParsedField = FieldOf<AutofillId>
+
+/** See [ParsedField]. */
+data class FieldOf<I>(
+    val id: I,
     val kind: FieldKind,
     val webDomain: String?,
     val signal: String = "",
@@ -47,16 +53,19 @@ data class ParsedField(
  * app; [allIds] is what the locked-path `setAuthentication` covers — login AND card
  * fields, so unlock-and-refill works from a card-only checkout too.
  */
-data class ParsedForm(
-    val fields: List<ParsedField>,
+typealias ParsedForm = FormOf<AutofillId>
+
+/** See [ParsedForm]. */
+data class FormOf<I>(
+    val fields: List<FieldOf<I>>,
     override val appPackage: String,
-    val ccFields: List<ParsedField> = emptyList(),
+    val ccFields: List<FieldOf<I>> = emptyList(),
     val formKind: FormKind = FormKind.LOGIN,
     /** The view the fill request is for — the SYSTEM's `FillContext.getFocusedId()`, never a
      *  structure flag the requesting app could set. Null when unknown: card fill then fails closed. */
-    val focusedId: AutofillId? = null,
+    val focusedId: I? = null,
 ) : PackageBound {
-    val allIds: List<AutofillId> get() = (fields + ccFields).map { it.id }
+    val allIds: List<I> get() = (fields + ccFields).map { it.id }
 
     /**
      * Security review 2026-10 (root cause E): the ONE frame card values may enter — the frame of the
@@ -64,8 +73,11 @@ data class ParsedForm(
      * a processor's card iframe the user taps into fills, a third-party frame beside it that
      * declares its own cc-number gets nothing. Null (focus unknown, or not one of our classified
      * fields) → no card datasets at all.
+     *
+     * Android review 1, ruling 1: card rows are offered only when the field in focus is ITSELF a card field, so
+     * only [ccFields] are searched: a focused user-name or password field offers no card at all.
      */
-    val cardFillFrame: FillFrame? get() = (fields + ccFields).firstOrNull { it.id == focusedId }?.let { FillFrame(it.webDomain) }
+    val cardFillFrame: FillFrame? get() = ccFields.firstOrNull { it.id == focusedId }?.let { FillFrame(it.webDomain) }
 
     /** Anything for the fill path to act on? Login fields, or a PAN-ANCHORED card form —
      *  [formKind] != LOGIN ⟺ some frame cluster holds a CC_NUMBER (CardForm.refine), so a

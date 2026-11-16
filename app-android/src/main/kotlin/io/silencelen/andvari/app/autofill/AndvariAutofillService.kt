@@ -128,8 +128,10 @@ class AndvariAutofillService : AutofillService() {
         } else {
             PendingIntent.FLAG_CANCEL_CURRENT
         }
+        // Android review 1, ruling 1: a nonce in the base intent, retired when the unlock delivers a result, so the
+        // requesting app cannot fire the same sender again for a second result (UnlockNonces).
         val pi = PendingIntent.getActivity(
-            this, nextRequestCode(), FillBinding.bake(Intent(this, AutofillUnlockActivity::class.java), form), flags,
+            this, nextRequestCode(), FillBinding.bake(UnlockNonces.bake(Intent(this, AutofillUnlockActivity::class.java)), form), flags,
         )
         val menu = DatasetBuilder.lockedPresentation(this, "Unlock andvari")
         val inline = if (Build.VERSION.SDK_INT >= 30) DatasetBuilder.lockedInline(this, inlineRequest) else null

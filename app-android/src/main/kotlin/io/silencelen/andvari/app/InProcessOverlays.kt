@@ -46,6 +46,8 @@ object InProcessOverlays {
         "io.silencelen.andvari.app.autofill.TrustBrowserActivity",
         // A14 (F7): the one-tap confirm before a package-only app fill — another in-process overlay.
         "io.silencelen.andvari.app.autofill.AppFillConfirmActivity",
+        // Android review 1, ruling 1: the card confirm.
+        "io.silencelen.andvari.app.autofill.CardFillConfirmActivity",
     )
 
     @Volatile

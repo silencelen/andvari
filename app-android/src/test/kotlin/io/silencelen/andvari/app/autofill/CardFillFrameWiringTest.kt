@@ -34,11 +34,16 @@ class CardFillFrameWiringTest {
 
     @Test
     fun everyCardPlanIsScopedToTheFocusedFrame() {
-        val db = code("DatasetBuilder.kt")
-        val calls = Regex("CardFill\\.plan\\(([^)]*)\\)").findAll(db).map { it.groupValues[1] }.toList()
-        assertTrue(calls.size >= 2, "both the dataset build and the headroom count plan cards")
+        // Android review 1, ruling 1: the card rows (and so the headroom count) and the card confirm's result are
+        // planned in FillPlan, the one place CardFill.plan is called.
+        val plan = code("FillPlan.kt")
+        val calls = Regex("CardFill\\.plan\\(([^)]*)\\)").findAll(plan).map { it.groupValues[1] }.toList()
+        assertTrue(calls.size >= 2, "both the card rows and the confirm's result plan cards")
         for (args in calls) assertTrue(args.endsWith("frame.domain"), "CardFill.plan($args) must pass the focused frame")
-        assertTrue(Regex("val frame = form\\.cardFillFrame \\?: return\\b").findAll(db).count() >= 2, "unknown focus fails closed in both")
-        assertFalse(db.contains("groupBy { it.frameDomain }"), "no frame clustering may be re-derived app-side")
+        assertTrue(Regex("val frame = form\\.cardFillFrame \\?: return\\b").findAll(plan).count() >= 2, "unknown focus fails closed in both")
+        for (name in listOf("DatasetBuilder.kt", "FillPlan.kt")) {
+            assertFalse(code(name).contains("groupBy { it.frameDomain }"), "no frame clustering may be re-derived app-side ($name)")
+        }
+        assertFalse(code("DatasetBuilder.kt").contains("CardFill.plan("), "the builder plans no card itself")
     }
 }
