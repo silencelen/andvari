@@ -355,6 +355,19 @@ cache OFF.
   crash-retry therefore observes the identical outcome it would have on first
   success — the client's state converges the same way. (There is no distinct
   `duplicate` status code; the replayed status is whatever the original was.)
+  The journal holds **no vault content** (spec 02 §5): a row keeps the status, rev and
+  reason, and for a conflict the stored item's ids and revs. A replayed `conflict` reads
+  its item's blob at answer time, from the live row while it is still at that rev, else
+  from the item's history, and only while the account still holds a grant on the vault;
+  gone from both, the result carries no `serverItem`, and a replayed item carries
+  `attachmentIds: []`. A delete of an item that never existed is not journaled. The
+  window is the device's newest 1,000 journaled mutations, each kept at most 180 days.
+- Echo bound: one answer carries each stored item (an `itemId` at one `rev`) at most
+  once per op and status, and the stored items it carries total at most the push
+  request's own body cap (8 MiB). A result past either limit carries no `serverItem`.
+  Clients read `serverItem` only from a conflicting put (the conflict copy) and pull
+  after every push, so a missing one costs at most that copy; the displaced version
+  stays in the item's history.
 - `denied` — role violation (reader pushing to a shared vault), no grant, or an fv
   downgrade (`item.formatVersion` below the stored row's — the monotonic-fv guard; no
   fielded client legitimately downgrades, an invariant future clients MUST preserve;

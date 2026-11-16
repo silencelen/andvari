@@ -111,7 +111,7 @@ class ServerScan1026Test : P4TestSupport() {
         val journaled = services.repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM mutations WHERE deviceId<>''") { it.getInt(1) } ?: 0 }
         assertEquals(0, journaled, "a rejected mutation is never written to the idempotency journal")
 
-        // The boundary: a 64-char id is accepted (and journaled), a 65-char one is not, an empty one is not.
+        // The boundary: a 64-char id is accepted, a 65-char one is not, an empty one is not.
         assertEquals("applied", client.push(vc, Mutation("a".repeat(MUTATION_ID_MAX_CHARS), "delete", vc.newItemId(), vc.personalVaultId, 0)).results[0].status)
         assertEquals("rejected", client.push(vc, Mutation("a".repeat(MUTATION_ID_MAX_CHARS + 1), "delete", vc.newItemId(), vc.personalVaultId, 0)).results[0].status)
         assertEquals("rejected", client.push(vc, Mutation("", "delete", vc.newItemId(), vc.personalVaultId, 0)).results[0].status)
