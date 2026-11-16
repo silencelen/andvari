@@ -1377,7 +1377,8 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
     // `fillFromPopup(msg.itemId)` and `linkUri(msg.itemId, msg.host)` were the only two effectful
     // cases in the switch that never saw who was calling.
     // (2026-11: the popup's confirmed other-site fill rides a third argument; the sender is still the second.)
-    expect(bg).toContain('return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null);');
+    // (Release 0.30.0: and the page the popup showed rides a fourth; the worker fills only while the tab is still on it.)
+    expect(bg).toContain('return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null, typeof msg.page === "string" ? msg.page : null);');
     expect(bg).toContain("return linkUri(msg, sender);");
   });
 
@@ -1392,7 +1393,7 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
     expect(f.indexOf("const confirmed =")).toBeLessThan(f.indexOf("grants.set(tab.id,"));
     // The popup sends it only from the confirmation's own Fill button, naming the page the worker named.
     const popup = readFileSync(extensionSrc + "popup.ts", "utf-8");
-    expect(popup).toContain('const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId } : { type: "fillFromPopup", itemId, confirmedOtherSite });');
+    expect(popup).toContain('const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId, page } : { type: "fillFromPopup", itemId, confirmedOtherSite, page });');
     expect(popup).toContain("confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);");
     expect(popup.match(/void fillItem\(itemId, page\);/g), "one caller passes a confirmation").toHaveLength(1);
     expect(spanOf(popup, "function confirmOtherSite(", "/** The list payload already carries the username")).toContain("void fillItem(itemId, page);");

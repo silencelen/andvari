@@ -40,6 +40,9 @@ async function ask<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promi
 }
 
 let tabHost: string | null = null;
+/** The origin of the page the "This site" list was drawn for: a fill names it, and the worker fills only while the
+ *  active tab is still on it (the tab may have moved to another site while the popup was open). */
+let tabPage: string | null = null;
 /** S3: whether the active tab has a payment provider's card form we may Fill into, and to which origin (owner decision
  *  2026-11-14: andvari fills a card only there). Fetched once per unlocked render — the active tab can't change while
  *  the popup is open. When it is not fillable, `allowOrigin` (a provider's form, shown by the page, on a site andvari may
@@ -390,8 +393,10 @@ function relocked(): void {
 }
 
 async function loadUnlocked(): Promise<void> {
-  const host = await activeTabHost();
+  const page = await activeTabPage();
+  const host = page === null ? null : new URL(page).hostname;
   tabHost = host;
+  tabPage = page;
   const siteLabel = el("site-label");
   const siteList = el("site-list");
   if (host) {
@@ -471,12 +476,13 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
   };
 }
 
-/** activeTab (granted by opening the popup) exposes the page URL on http/https only. */
-async function activeTabHost(): Promise<string | null> {
+/** activeTab (granted by opening the popup) exposes the page URL on http/https only. The page's origin (its host is
+ *  what the list matches on). */
+async function activeTabPage(): Promise<string | null> {
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const u = new URL(tabs[0]?.url ?? "");
-    return (u.protocol === "https:" || u.protocol === "http:") && u.hostname ? u.hostname : null;
+    return (u.protocol === "https:" || u.protocol === "http:") && u.hostname ? u.origin : null;
   } catch {
     return null;
   }
@@ -843,7 +849,9 @@ async function scheduleClipboardClear(): Promise<void> {
 }
 
 async function fillItem(itemId: string, confirmedOtherSite?: string): Promise<void> {
-  const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId } : { type: "fillFromPopup", itemId, confirmedOtherSite });
+  // The page this popup showed rides along: the worker fills only while the tab is still on it (the tab may have moved).
+  const page = tabPage ?? undefined;
+  const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId, page } : { type: "fillFromPopup", itemId, confirmedOtherSite, page });
   if (r?.needsConfirm) {
     confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);
     return;
