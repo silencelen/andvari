@@ -1,9 +1,20 @@
 package io.silencelen.andvari.server
 
+import io.ktor.client.request.delete
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
+import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.model.InviteRequest
+import io.silencelen.andvari.core.model.InviteResponse
 import io.silencelen.andvari.core.model.Mutation
+import io.silencelen.andvari.core.model.UserLookupRequest
+import io.silencelen.andvari.core.model.UserLookupResponse
+import io.silencelen.andvari.core.model.VaultMemberAdd
 import io.silencelen.andvari.core.model.MutationResult
 import io.silencelen.andvari.core.model.PushResponse
 import kotlin.test.Test
@@ -128,6 +139,49 @@ class PushJournalTest : P4TestSupport() {
         // The newest are the ones kept: a re-send of the last batch is answered from the journal.
         val ids = services.repo.db.read { c -> c.queryAll("SELECT mutationId FROM mutations WHERE userId=?", vc.userId!!) { it.getString(1) } }.toSet()
         assertTrue(last.last().all { it.mutationId in ids })
+    }
+
+    /**
+     * A replayed conflict reads its item's blob only while the account still holds a grant on the vault: a member
+     * removed from a shared vault who re-sends a journaled conflicting put gets the journaled status and rev, and no
+     * blob of that vault.
+     */
+    @Test
+    fun replayAfterTheMemberWasRemoved_carriesNoItem() = testApplication {
+        val services = buildServices(config(), Notifier())
+        application { andvariModule(services) }
+        val client = jsonClient(this)
+        val owner = VirtualClient("journal-owner@x.com", "push journal owner password", fast = true)
+        client.register(owner, bootstrapToken)
+        val invite = client.post("/api/v1/admin/users") {
+            authed(owner); contentType(ContentType.Application.Json); setBody(InviteRequest("journal-member@x.com", isAdmin = false))
+        }
+        val member = VirtualClient("journal-member@x.com", "push journal member password", fast = true)
+        client.register(member, json.decodeFromString(InviteResponse.serializer(), invite.bodyAsText()).inviteToken)
+
+        // A shared vault with one item of the owner's, and the member added as a writer.
+        val (createReq, handle) = owner.buildCreateSharedVault()
+        assertEquals(HttpStatusCode.Created, client.post("/api/v1/vaults") { authed(owner); contentType(ContentType.Application.Json); setBody(createReq) }.status)
+        val itemId = owner.newItemId()
+        client.push(owner, Mutation(uuid(), "put", itemId, handle.vaultId, 0, owner.encItemIn(handle.vaultId, handle.vk, itemId, "the owner's value")))
+        val lookup = client.post("/api/v1/users/lookup") { authed(owner); contentType(ContentType.Application.Json); setBody(UserLookupRequest(member.email)) }
+        val pub = Bytes.fromB64(json.decodeFromString(UserLookupResponse.serializer(), lookup.bodyAsText()).identityPub)
+        val add = VaultMemberAdd(member.userId!!, "writer", owner.sealVkFor(pub, handle.vaultId, handle.vk))
+        assertEquals(HttpStatusCode.Created, client.post("/api/v1/vaults/${handle.vaultId}/members") { authed(owner); contentType(ContentType.Application.Json); setBody(add) }.status)
+
+        // The member's stale put wins and carries the owner's displaced value; it is journaled by reference.
+        val put = Mutation(uuid(), "put", itemId, handle.vaultId, 0, member.encItemIn(handle.vaultId, handle.vk, itemId, "the member's value"))
+        val answered = client.push(member, put).results.single()
+        assertEquals("conflict", answered.status)
+        assertEquals("the owner's value", owner.decItemIn(handle.vaultId, handle.vk, itemId, answered.serverItem!!.blob!!))
+        assertNotNull(client.push(member, put).results.single().serverItem, "while a member, the re-send carries the item")
+
+        // Removed from the vault, the member re-sends the same mutation: the journaled outcome, no blob.
+        assertEquals(HttpStatusCode.OK, client.delete("/api/v1/vaults/${handle.vaultId}/members/${member.userId}") { authed(owner) }.status)
+        val replayed = client.push(member, put).results.single()
+        assertEquals("conflict", replayed.status)
+        assertEquals(answered.newItemRev, replayed.newItemRev)
+        assertNull(replayed.serverItem, "no blob of the vault reaches an account removed from it")
     }
 
     @Test
