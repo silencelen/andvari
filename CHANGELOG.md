@@ -8,7 +8,8 @@ operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
 *This release adds account deletion on the web, Android and desktop, changes where the browser extension fills a
 payment card, and moves the Android app's sign-in, unlock and session handling onto shared code that the coming iPhone
-app also uses. It also closes four weaknesses a security review found in the server. Nothing in it lets the server read
+app also uses. It also closes four weaknesses a security review found in the server and two that a review of the
+Android app found in its autofill, and stops a lost answer from signing a device out. Nothing in it lets the server read
 your passwords. The changes you will see are listed first.*
 
 **What you will notice**
@@ -38,6 +39,20 @@ your passwords. The changes you will see are listed first.*
   session (the device was signed out from another device, or the account was deleted), the app now locks, removes this
   device's copy of the vault and returns to the sign-in screen straight away instead of at the next unlock. Changes
   made on that device while offline and not yet synced are lost in that case.
+- **Android: a payment card goes into an app only after you confirm it in andvari.** In an app that is not a browser
+  andvari trusts, tapping a card in the autofill list opens andvari's own window. It names the app (its name, package,
+  where it was installed from and its signer) and the card (its name, brand and last four digits), and fills that one
+  card when you tap Fill. It asks every time; no app is remembered for cards. In Chrome and the other browsers andvari
+  trusts, one tap on a card still fills it.
+- **Android: cards are offered only when you tap a card field**, in apps and in browsers. Tapping a user-name or
+  password field shows your logins only.
+- **Android: a login saved for an app is no longer offered on a web page shown inside that app** (for example a page
+  opened in the app's own browser), unless the page belongs to one of the same login's own web addresses. The app's own
+  sign-in screen fills as before.
+- **A device is no longer signed out because an answer was lost.** When an app asks the server to renew its sign-in and
+  the answer does not arrive (a dropped connection, a timeout, two requests at the same moment), the server now gives
+  the same answer again for 60 seconds instead of treating the repeat as a stolen token. Before, the device was signed
+  out, and the Android app then removed its copy of the vault, with any offline changes not yet synced.
 - **Android: moving and copying items between vaults.** An item in a vault you can only read now offers "Copy to
   vault…". A vault whose key this device has not verified is no longer offered as a destination. A move cut short by a
   lock or a lost connection is finished later, and only once a sync shows the copy is in the destination vault; the
@@ -68,6 +83,16 @@ your passwords. The changes you will see are listed first.*
   program shown as a document). Those characters are no longer shown, and are not used in the suggested save name.
 - **Android:** the account's keys are wiped from memory when the vault locks or the account is replaced, and a sign-in
   that the app never stores is ended at the server instead of being left open until it expires.
+- **Android autofill, found by a security review on 2026-11-15:**
+  - **Payment cards:** any app that is not a browser could receive every saved card (number, expiry, security code,
+    cardholder name and postal code) after one unlock, without the person picking one. An app could show card fields
+    nobody sees on a sign-in screen, and could later ask andvari again for the same answer, without a prompt while the
+    vault was open. Now no answer to such an app carries a card's details: each card goes only through andvari's own
+    confirm, one card at a time; the unlock's answer carries only what the app may fill without a confirm (its own
+    logins, for an app andvari vets); and an unlock answer can be used once only.
+  - **An app's login on a web page:** a login saved for an app was offered to any web page that app showed, so a link
+    opened in the app's own browser could collect it. It is now offered there only for a page of the same login's own
+    web addresses.
 - **Server, found by a security review on 2026-11-15** (none of these lets anyone read a vault; they are about keeping the
   server up and the guessing limits real):
   - A sync request could make the server build a very large answer in memory, and store copies of an item's encrypted
@@ -98,6 +123,10 @@ your passwords. The changes you will see are listed first.*
   Rows written before the upgrade keep their item until they age out. Each device keeps its newest 1,000 rows (the
   180-day limit still applies), and a delete of an item that never existed is not journaled.
 - **Request metrics:** a request that matches no route is tagged `route="n/a"`, and an unknown method `method="OTHER"`.
+- **Refresh grace (spec 03 §2):** a repeat of the same `POST /auth/refresh` within 60 seconds of the rotation gets the
+  identical reply, audited `refresh_grace`, while the pair it minted is untouched (its access token unused, its session
+  neither revoked nor refreshed). Anything else is reuse and revokes the device, as before. Held in memory only: a
+  restart forgets it. The reply's shape is unchanged.
 - No new settings, and the minimum client version is not raised: 0.29.1 apps and extensions keep working against this
   server. Update the server first; the web app's delete page needs it.
 
