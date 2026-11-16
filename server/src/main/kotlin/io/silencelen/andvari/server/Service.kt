@@ -1212,7 +1212,13 @@ class Service(
         val quota = ItemQuota(principal.userId)
         val results = try {
             repo.db.tx { c ->
-                mutations.map { m -> applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas, quota) }
+                // The stored items one answer echoes are bounded (each once, at most the push body cap in
+                // all), and each result is trimmed as soon as its mutation is decided, so the answer never
+                // holds more than that much item content in memory.
+                val echo = PushEcho(BODY_CAP_PUSH_BYTES)
+                val out = mutations.map { m -> echo.attach(applyMutation(c, principal, m, affectedUsers, filesToUnlink, deniedMetas, quota), m.op) }
+                capJournal(c, principal.deviceId)
+                out
             }
         } finally {
             if (deniedMetas.isNotEmpty()) {
@@ -1320,10 +1326,11 @@ class Service(
         if (m.mutationId.isEmpty() || m.mutationId.length > MUTATION_ID_MAX_CHARS) {
             return MutationResult(m.mutationId.take(MUTATION_ID_MAX_CHARS), "rejected", reason = "bad_mutation_id")
         }
-        // Idempotency: replay the stored result verbatim.
+        // Idempotency: replay the stored result. A row keeps no vault content (spec 02 §5); a conflict's
+        // stored item is read back at answer time (see [replay]).
         c.queryOne("SELECT resultJson FROM mutations WHERE deviceId=? AND mutationId=?", principal.deviceId, m.mutationId) { rs ->
             rs.getString(1)
-        }?.let { return json.decodeFromString(MutationResult.serializer(), it) }
+        }?.let { return replay(c, principal, json.decodeFromString(JournalRow.serializer(), it)) }
 
         // Security review 2026-10 (root cause D): an itemId is a path segment on every OTHER
         // member's device — /items/deleted and /sync hand it out, and their clients put it into
@@ -1367,14 +1374,45 @@ class Service(
         // The same rule for `rejected` (H03): nothing was written, and a replay of the same
         // mutationId must be re-evaluated against the live attachment rows — a client that
         // re-uploads the missing attachment and re-sends the SAME put must be allowed to land.
-        if (result.status != "denied" && result.status != "rejected") {
+        // Nor a delete of an item that never existed: it changed nothing, and a re-send is answered afresh
+        // (a later item with that id would make the stale delete a conflict, never a delete).
+        if (result.status != "denied" && result.status != "rejected" && (existing != null || m.op == "put")) {
             // userId (schema v17): the journal outlives a pruned device row, and account deletion finds the rows by account.
+            // The row keeps the outcome and, for a conflict, the stored item's ids and revs, never its blob: the journal
+            // lives 180 days outside every quota, and spec 02 §5 says it holds no vault content.
             c.exec(
                 "INSERT INTO mutations(deviceId,mutationId,resultJson,createdAt,userId) VALUES(?,?,?,?,?)",
-                principal.deviceId, m.mutationId, json.encodeToString(MutationResult.serializer(), result), now(), principal.userId,
+                principal.deviceId, m.mutationId, json.encodeToString(JournalRow.serializer(), JournalRow.of(result)), now(), principal.userId,
             )
         }
         return result
+    }
+
+    /**
+     * A journaled result, answered again. A row written before 0.30.0 still carries its item and is replayed
+     * verbatim. A newer one names the item it carried by id and rev only; its blob is read now, from the live
+     * row when it is still at that rev, else from the item's history, and only while this account still holds
+     * a grant on the vault. Gone from both (pruned past the ten kept versions, purged), the result carries no
+     * item: clients treat a conflict without one as "pull for the winner", which they do anyway.
+     */
+    private fun replay(c: Connection, principal: Principal, row: JournalRow): MutationResult {
+        val r = MutationResult(row.mutationId, row.status, row.newItemRev, row.serverItem, row.reason)
+        val ref = row.item ?: return r
+        if (repo.grantRole(c, principal.userId, ref.vaultId) == null) return r
+        if (ref.deleted) return r.copy(serverItem = ref.toWire(null))
+        val live = repo.itemById(c, ref.itemId)?.takeIf { it.vaultId == ref.vaultId && it.rev == ref.rev && it.blob != null }
+        val blob = live?.blob
+            ?: c.queryOne("SELECT blob FROM item_versions WHERE itemId=? AND rev=?", ref.itemId, ref.rev) { it.getString(1) }
+            ?: return r
+        return r.copy(serverItem = ref.toWire(blob))
+    }
+
+    /** Keep a device's newest [JOURNAL_PER_DEVICE] journal rows (the dedup window; the janitor's 180 days still apply). */
+    private fun capJournal(c: Connection, deviceId: String) {
+        c.exec(
+            "DELETE FROM mutations WHERE deviceId=? AND rowid NOT IN (SELECT rowid FROM mutations WHERE deviceId=? ORDER BY rowid DESC LIMIT ?)",
+            deviceId, deviceId, JOURNAL_PER_DEVICE,
+        )
     }
 
     private fun applyPut(c: Connection, m: Mutation, existing: io.silencelen.andvari.core.model.WireItem?, affected: MutableSet<String>, deniedMetas: MutableList<String>, quota: ItemQuota): MutationResult {
