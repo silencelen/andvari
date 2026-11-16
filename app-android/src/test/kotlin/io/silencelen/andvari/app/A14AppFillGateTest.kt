@@ -7,6 +7,7 @@ import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -40,10 +41,14 @@ class A14AppFillGateTest {
     fun aGatedLoginReleasesNothingUntilTheConfirm() {
         val builder = src("autofill/DatasetBuilder.kt")
         assertTrue(builder.contains("val appGate = appGateFor(context, form)"), "the verdict is computed once per request, service-side")
-        assertTrue(builder.contains("if (appGate != null && appGate.verdict != AppFillGate.Verdict.SILENT)"), "a non-silent verdict builds the confirm row")
-        val confirm = builder.substring(builder.indexOf("private fun confirmDataset("), builder.indexOf("// ---- no-match fallback row ----"))
-        assertTrue(confirm.contains("b.setValue(f.id, null)"), "the confirm row carries no credential value")
-        assertTrue(confirm.contains("AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, item.itemId)"))
+        // Android review 1: which row is a confirm is FillPlan's (CardFillRulingTest runs it); the builder maps it.
+        val plan = src("autofill/FillPlan.kt")
+        assertTrue(plan.contains("if (asker is Asker.App && asker.verdict != AppFillGate.Verdict.SILENT)"), "a non-silent verdict builds the confirm row")
+        assertTrue(builder.contains("is FillRow.LoginConfirm -> appGate?.let { confirmDataset(context, row, form, it, spec) }"))
+        val confirm = builder.substring(builder.indexOf("private fun confirmDataset("), builder.indexOf("fun appLoginResultDataset("))
+        assertTrue(confirm.contains("b.setValue(id, null)"), "the confirm row carries no credential value")
+        assertFalse(confirm.contains("AutofillValue.forText"), "no value is set on a confirm row")
+        assertTrue(confirm.contains("AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, row.itemId)"))
         assertTrue(confirm.contains("b.setAuthentication(pi.intentSender)"))
     }
 

@@ -38,7 +38,9 @@ import io.silencelen.andvari.core.client.autofill.UriMatch
  * so login rows can't consume every slot on a card-eligible form: every `type=="card"` item is offered
  * (deliberately NOT UriMatch-bound — wallet posture), values planned by the pure core
  * [CardFill.plan] (focused-frame-only fill + type-pinning), gated by an EXPLICIT browser-trust
- * check (a known-but-untrusted browser gets ZERO card datasets). Provides a dropdown
+ * check (a known-but-untrusted browser gets ZERO card datasets). Since Android review 1 (ruling 1)
+ * WHAT each row holds is [FillPlan]'s: card values ride a row only in a verified browser; in any
+ * other app a card row carries no value and leads to [CardFillConfirmActivity]. Provides a dropdown
  * (RemoteViews) menu presentation always, plus an inline presentation when an
  * InlineSuggestionsRequest is present (API 30+). Item plaintext is read only from the
  * already-decrypted VaultItems; card presentations show brand + last4 + expiry ONLY.
@@ -241,115 +243,45 @@ object DatasetBuilder {
     ): List<Dataset> {
         val specs = inlineSpecs(inlineRequest)
         val maxInline = if (Build.VERSION.SDK_INT >= 30 && inlineRequest != null) inlineRequest.maxSuggestionCount else 0
-        // [U20] headroom: count the card datasets this form can actually yield BEFORE the login
-        // loop, so a login-heavy vault can't fill every slot and shut cards out of their own
-        // checkout. Zero buildable cards → cap stays MAX_DATASETS (logins are never starved
-        // for cards that don't exist); the counting rail degrades to exactly that.
-        val loginCap = loginDatasetCap(runCatching { countBuildableCardDatasets(items, form, trusted) }.getOrDefault(0))
         // A14 (F7): a non-browser app can only match `androidapp://` logins (package-only); whether
         // they fill silently is decided once, here, from PackageManager (never the host's structure).
         val appGate = appGateFor(context, form)
+        // Android review 1, ruling 1: WHAT each row holds is FillPlan's (pure, JVM-tested); this only
+        // turns each row into a Dataset. The same rows serve the direct response and the unlock's result.
+        val rows = FillPlan.rows(items, form, FillPlan.asker(form.appPackage, trusted, appGate?.verdict))
         val out = ArrayList<Dataset>()
-        for (item in items) {
-            if (out.size >= loginCap) break
-            if (item.doc.type != "login") continue
-            val login = item.doc.login ?: continue
-            val username = login.username?.takeIf { it.isNotEmpty() }
-            val password = login.password?.takeIf { it.isNotEmpty() }
-            if (username == null && password == null) continue
-
-            // Per-field matching: a field is fillable by this item only when the item matches
-            // THAT field's own target (which carries the field's frame domain).
-            val userFields = if (username != null) {
-                form.fields.filter { it.kind == FieldKind.USERNAME && UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
-            } else emptyList()
-            val passFields = if (password != null) {
-                fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
-            } else emptyList()
-            if (userFields.isEmpty() && passFields.isEmpty()) continue
-
+        for (row in rows) {
             val spec = specForIndex(specs, out.size, maxInline)
-            val dataset = if (appGate != null && appGate.verdict != AppFillGate.Verdict.SILENT) {
-                // Not a system app, not Play-installed, not a confirmed (package, signer), or a lookup
-                // failed: the row carries no credential; the tap opens the one-tap confirm.
-                confirmDataset(context, item, form, userFields + passFields, appGate, spec)
-            } else {
-                buildDataset(context, item, username, password, userFields, passFields, spec)
-            }
+            // Per-row rail: one row that fails to build is a skip, never a lost fill.
+            val dataset = runCatching {
+                when (row) {
+                    is FillRow.Login -> buildDataset(context, row, spec)
+                    // Not a system app, not Play-installed, not a confirmed (package, signer), or a lookup
+                    // failed: the row carries no credential; the tap opens the one-tap confirm.
+                    is FillRow.LoginConfirm -> appGate?.let { confirmDataset(context, row, form, it, spec) }
+                    is FillRow.Card -> buildCardDataset(context, row, spec)
+                    // Any app that is not a verified browser: no card value leaves until the card confirm.
+                    is FillRow.CardConfirm -> appGate?.let { cardConfirmDataset(context, row, form, it, spec) }
+                }
+            }.getOrNull()
             if (dataset != null) out.add(dataset)
         }
-        // Card datasets ride AFTER the login datasets, under the same cap. runCatching rail:
-        // a card-path failure degrades to "login datasets only", never a lost fill.
-        runCatching { appendCardDatasets(context, items, form, trusted, specs, maxInline, out) }
         return out
     }
 
-    /**
-     * Card datasets (0.7.0): one per `type=="card"` item whose [CardFill.plan] fills anything on
-     * this form. Cards are deliberately NOT UriMatch-bound (wallet posture — any checkout in a
-     * trusted surface may summon the card list), which is exactly why the browser-trust gate must
-     * be EXPLICIT here: the login path's UriMatch would have nulled an untrusted browser's web
-     * host, but cards never consult it. A KNOWN browser that is not trusted gets ZERO card
-     * datasets; native apps (not in the pin table) and trusted browsers pass. The hostile-iframe
-     * zero-fill + LIST/TEXT type-pinning live in core (CardFill.plan, vector-tested).
-     */
-    private fun appendCardDatasets(
-        context: Context,
-        items: List<VaultItem>,
-        form: ParsedForm,
-        trusted: Boolean,
-        specs: List<InlinePresentationSpec>,
-        maxInline: Int,
-        out: MutableList<Dataset>,
-    ) {
-        if (form.ccFields.isEmpty()) return
-        if (form.appPackage in BrowserCertPins.TABLE && !trusted) return // explicit trust gate
-        val frame = form.cardFillFrame ?: return // focus unknown → no card values anywhere
-        val ccFields = ccFillFields(form)
-        for (item in items) {
-            if (out.size >= MAX_DATASETS) break
-            if (item.doc.type != "card") continue
-            val card = item.doc.card ?: continue
-            // Per-item rail: one malformed card degrades to a skip, not a dead response.
-            runCatching {
-                val plan = CardFill.plan(ccFields, card, frame.domain)
-                if (plan.isEmpty()) return@runCatching
-                val spec = specForIndex(specs, out.size, maxInline)
-                buildCardDataset(context, item, form, plan, spec)?.let { out.add(it) }
-            }
-        }
-    }
-
-    private fun ccFillFields(form: ParsedForm): List<CardFill.CcField> = form.ccFields.mapIndexed { i, f ->
-        CardFill.CcField(index = i, kind = f.kind, frameDomain = f.webDomain, autofillType = f.autofillType, options = f.options, maxLength = f.maxLength)
-    }
-
-    /**
-     * [U20] pre-count for the headroom cap: how many card datasets [appendCardDatasets] would
-     * build — same eligibility gates (classified cc fields + explicit browser trust) and the
-     * same per-item test (a non-empty [CardFill.plan]), WITHOUT constructing framework
-     * Datasets. Deliberately uncapped: the caller's `min(builtCards, 3)` does the clamping.
-     */
-    private fun countBuildableCardDatasets(items: List<VaultItem>, form: ParsedForm, trusted: Boolean): Int {
-        if (form.ccFields.isEmpty()) return 0
-        if (form.appPackage in BrowserCertPins.TABLE && !trusted) return 0
-        val frame = form.cardFillFrame ?: return 0
-        val ccFields = ccFillFields(form)
-        return items.count { item ->
-            item.doc.type == "card" && item.doc.card?.let { card ->
-                runCatching { CardFill.plan(ccFields, card, frame.domain).isNotEmpty() }.getOrDefault(false)
-            } == true
-        }
-    }
+    // The card rows themselves (which cards, which fields, which frame, and whether values ride them) are
+    // FillPlan.cardRows'; CardFill.plan is called there for the focused frame only. Cards are deliberately NOT
+    // UriMatch-bound (wallet posture), so the browser-trust gate is explicit there: a KNOWN browser that is not
+    // trusted gets ZERO card rows. The hostile-iframe zero-fill + LIST/TEXT type-pinning live in core.
 
     /**
      * [U20] the pure headroom rule (unit-tested — framework Datasets can't be constructed in a
      * JVM test, so the cap must stand alone): login rows on a card-eligible form leave room
      * for up to 3 card rows. The reserve never trims below what cards will consume (cards
      * append under [MAX_DATASETS] after logins, so ≥ min(builtCards, 3) slots remain) and a
-     * zero-card form keeps the full [MAX_DATASETS] for logins.
+     * zero-card form keeps the full [MAX_DATASETS] for logins. [FillPlan.rows] applies it.
      */
-    internal fun loginDatasetCap(builtCards: Int): Int = MAX_DATASETS - minOf(builtCards, 3)
+    internal fun loginDatasetCap(builtCards: Int): Int = FillPlan.loginRowCap(builtCards, MAX_DATASETS)
 
     /**
      * One card dataset. Presentation: [CardFill.presentationLine] — brand + masked last4
@@ -361,23 +293,14 @@ object DatasetBuilder {
     @Suppress("DEPRECATION") // 2-arg setValue at 33 (Presentations ctor companion) + legacy overloads pre-33
     private fun buildCardDataset(
         context: Context,
-        item: VaultItem,
-        form: ParsedForm,
-        plan: List<CardFill.Planned>,
+        row: FillRow.Card<AutofillId>,
         inlineSpec: InlinePresentationSpec?,
     ): Dataset? {
-        val title = CardFill.presentationLine(item.doc)
-        val subtitle = item.doc.name.takeIf { it.isNotBlank() }
+        val title = row.title
+        val subtitle = row.subtitle
         val menu = presentationRow(context, title, subtitle)
         val inline = if (inlineSpec != null) buildInline(context, title, subtitle, inlineSpec) else null
-        val values = plan.mapNotNull { p ->
-            val f = form.ccFields.getOrNull(p.index) ?: return@mapNotNull null
-            f.id to when (val v = p.value) {
-                is CardFill.Value.Text -> AutofillValue.forText(v.text)
-                is CardFill.Value.ListIndex -> AutofillValue.forList(v.index)
-                is CardFill.Value.DateMs -> AutofillValue.forDate(v.ms)
-            }
-        }
+        val values = row.values.map { (id, v) -> id to autofillValue(v) }
         if (values.isEmpty()) return null
         return if (Build.VERSION.SDK_INT >= 33) {
             val presBuilder = Presentations.Builder().setMenuPresentation(menu)
@@ -404,66 +327,55 @@ object DatasetBuilder {
      * current-password field exists (the extension's primary rule); [annotate]'s match counts
      * go through the same seam so the status screen can't contradict what actually filled.
      */
-    private fun fillPasswordFields(form: ParsedForm): List<ParsedField> =
-        NewPasswordSignal.fillablePasswordFields(form.fields.filter { it.kind == FieldKind.PASSWORD }) { it.isNewPassword }
+    private fun fillPasswordFields(form: ParsedForm): List<ParsedField> = FillPlan.fillPasswordFields(form)
 
-    private fun targetFor(field: ParsedField, form: ParsedForm, trusted: Boolean): FillTarget =
-        FillTarget(webHost = if (trusted) field.webDomain else null, packageName = form.appPackage)
+    private fun targetFor(field: ParsedField, form: ParsedForm, trusted: Boolean): FillTarget = FillPlan.targetFor(field, form, trusted)
+
+    /** CardFill's value shapes, mapped MECHANICALLY (forList on a TEXT node or forText on a LIST node crashes the fill). */
+    private fun autofillValue(v: CardFill.Value): AutofillValue = when (v) {
+        is CardFill.Value.Text -> AutofillValue.forText(v.text)
+        is CardFill.Value.ListIndex -> AutofillValue.forList(v.index)
+        is CardFill.Value.DateMs -> AutofillValue.forDate(v.ms)
+    }
 
     private fun buildDataset(
         context: Context,
-        item: VaultItem,
-        username: String?,
-        password: String?,
-        userFields: List<ParsedField>,
-        passFields: List<ParsedField>,
+        row: FillRow.Login<AutofillId>,
         inlineSpec: InlinePresentationSpec?,
     ): Dataset? {
-        val label = item.doc.name.ifBlank { username ?: "login" }
-        val menu = presentationRow(context, label, username)
-        val inline = if (inlineSpec != null) buildInline(context, label, username, inlineSpec) else null
+        val menu = presentationRow(context, row.title, row.subtitle)
+        val inline = if (inlineSpec != null) buildInline(context, row.title, row.subtitle, inlineSpec) else null
         return if (Build.VERSION.SDK_INT >= 33) {
-            buildDataset33(username, password, userFields, passFields, menu, inline)
+            buildDataset33(row.values, menu, inline)
         } else {
-            buildDatasetLegacy(username, password, userFields, passFields, menu, inline)
+            buildDatasetLegacy(row.values, menu, inline)
         }
     }
 
     @RequiresApi(33)
     @Suppress("DEPRECATION") // 2-arg setValue is the companion to the Presentations constructor
     private fun buildDataset33(
-        username: String?,
-        password: String?,
-        userFields: List<ParsedField>,
-        passFields: List<ParsedField>,
+        values: List<Pair<AutofillId, String>>,
         menu: RemoteViews,
         inline: InlinePresentation?,
     ): Dataset? {
+        if (values.isEmpty()) return null
         val presBuilder = Presentations.Builder().setMenuPresentation(menu)
         if (inline != null) presBuilder.setInlinePresentation(inline)
         // Dataset-wide presentations (menu + inline) via the constructor; there is no
         // setValue(id, value, Presentations) overload — values use the 2-arg setValue.
         val b = Dataset.Builder(presBuilder.build())
-        var any = false
-        if (username != null) for (f in userFields) { b.setValue(f.id, AutofillValue.forText(username)); any = true }
-        if (password != null) for (f in passFields) { b.setValue(f.id, AutofillValue.forText(password)); any = true }
-        if (!any) return null
+        for ((id, value) in values) b.setValue(id, AutofillValue.forText(value))
         return runCatching { b.build() }.getOrNull()
     }
 
     @Suppress("DEPRECATION") // RemoteViews/inline setValue overloads deprecated at 33; guarded above
     private fun buildDatasetLegacy(
-        username: String?,
-        password: String?,
-        userFields: List<ParsedField>,
-        passFields: List<ParsedField>,
+        values: List<Pair<AutofillId, String>>,
         menu: RemoteViews,
         inlinePresentation: InlinePresentation?,
     ): Dataset? {
         val b = Dataset.Builder(menu) // dataset-wide menu presentation (API 26+)
-        val values = ArrayList<Pair<AutofillId, String>>()
-        if (username != null) userFields.forEach { values.add(it.id to username) }
-        if (password != null) passFields.forEach { values.add(it.id to password) }
         if (values.isEmpty()) return null
         val useInline = Build.VERSION.SDK_INT >= 30 && inlinePresentation != null
         for ((id, value) in values) {
@@ -499,16 +411,45 @@ object DatasetBuilder {
     @Suppress("DEPRECATION") // legacy setValue overloads pre-33, as in buildDatasetLegacy
     private fun confirmDataset(
         context: Context,
-        item: VaultItem,
+        row: FillRow.LoginConfirm<AutofillId>,
         form: ParsedForm,
-        fields: List<ParsedField>,
         appGate: AppFillBinding.AppGate,
         inlineSpec: InlinePresentationSpec?,
+    ): Dataset? = valuelessAuthDataset(
+        context, row.title, row.subtitle, row.fieldIds, inlineSpec,
+        AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, row.itemId),
+    )
+
+    /**
+     * Android review 1, ruling 1: a card row in any app that is not a verified browser. No value; the tap opens
+     * [CardFillConfirmActivity], whose base intent carries the parsed form, the service's identity verdict for the
+     * app and the one card it names (root cause G: nothing the host app delivers is read).
+     */
+    private fun cardConfirmDataset(
+        context: Context,
+        row: FillRow.CardConfirm<AutofillId>,
+        form: ParsedForm,
+        appGate: AppFillBinding.AppGate,
+        inlineSpec: InlinePresentationSpec?,
+    ): Dataset? = valuelessAuthDataset(
+        context, row.title, row.subtitle, row.fieldIds, inlineSpec,
+        AppFillBinding.bake(FillBinding.bake(Intent(context, CardFillConfirmActivity::class.java), form), appGate, row.itemId),
+    )
+
+    /**
+     * A row that carries NO value for any of [fields] and whose tap fires [launch] (result-returning, so no NEW_TASK;
+     * MUTABLE for the same platform reason as the other dataset-auth rows, while the activity reads only the bake).
+     */
+    @Suppress("DEPRECATION") // legacy setValue overloads pre-33, as in buildDatasetLegacy
+    private fun valuelessAuthDataset(
+        context: Context,
+        title: String,
+        subtitle: String?,
+        fields: List<AutofillId>,
+        inlineSpec: InlinePresentationSpec?,
+        launch: Intent,
     ): Dataset? = runCatching {
         if (fields.isEmpty()) return null
-        val username = item.doc.login?.username?.takeIf { it.isNotEmpty() }
-        val title = item.doc.name.ifBlank { username ?: "login" }
-        val subtitle = if (appGate.verdict == AppFillGate.Verdict.CONFIRM_SIGNER_CHANGED) "This app's signer changed — tap to check" else "Tap to confirm this app"
         val menu = presentationRow(context, title, subtitle)
         val inline = if (Build.VERSION.SDK_INT >= 30 && inlineSpec != null) buildInline(context, title, subtitle, inlineSpec) else null
         val flags = if (Build.VERSION.SDK_INT >= 31) {
@@ -516,7 +457,6 @@ object DatasetBuilder {
         } else {
             PendingIntent.FLAG_CANCEL_CURRENT
         }
-        val launch = AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, item.itemId)
         val pi = PendingIntent.getActivity(context, CONFIRM_REQUEST_BASE + confirmCounter.getAndIncrement(), launch, flags)
         val b = if (Build.VERSION.SDK_INT >= 33) {
             val pres = Presentations.Builder().setMenuPresentation(menu)
@@ -525,11 +465,11 @@ object DatasetBuilder {
         } else {
             Dataset.Builder(menu)
         }
-        for (f in fields) {
+        for (id in fields) {
             when {
-                Build.VERSION.SDK_INT >= 33 -> b.setValue(f.id, null)
-                Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(f.id, null, menu, inline)
-                else -> b.setValue(f.id, null)
+                Build.VERSION.SDK_INT >= 33 -> b.setValue(id, null)
+                Build.VERSION.SDK_INT >= 30 && inline != null -> b.setValue(id, null, menu, inline)
+                else -> b.setValue(id, null)
             }
         }
         b.setAuthentication(pi.intentSender)
@@ -543,16 +483,21 @@ object DatasetBuilder {
      */
     @Suppress("DEPRECATION") // 2-arg setValue (Dataset.Field is API 33+)
     fun appLoginResultDataset(item: VaultItem, form: ParsedForm): Dataset? {
-        if (item.doc.type != "login" || form.appPackage in BrowserCertPins.TABLE) return null
-        val login = item.doc.login ?: return null
-        val username = login.username?.takeIf { it.isNotEmpty() }
-        val password = login.password?.takeIf { it.isNotEmpty() }
-        val userFields = if (username != null) form.fields.filter { it.kind == FieldKind.USERNAME && UriMatch.matchLogins(login.uris, targetFor(it, form, false)) } else emptyList()
-        val passFields = if (password != null) fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, false)) } else emptyList()
-        if (userFields.isEmpty() && passFields.isEmpty()) return null
+        val values = FillPlan.appLoginResult(item, form) ?: return null
         val b = Dataset.Builder()
-        if (username != null) for (f in userFields) b.setValue(f.id, AutofillValue.forText(username))
-        if (password != null) for (f in passFields) b.setValue(f.id, AutofillValue.forText(password))
+        for ((id, value) in values) b.setValue(id, AutofillValue.forText(value))
+        return runCatching { b.build() }.getOrNull()
+    }
+
+    /**
+     * The authentication RESULT for a confirmed card ([CardFillConfirmActivity]): that one card's values for the baked
+     * form's focused card frame ([FillPlan.cardResult]), and nothing else. Null when nothing would fill.
+     */
+    @Suppress("DEPRECATION") // 2-arg setValue (Dataset.Field is API 33+)
+    fun cardResultDataset(item: VaultItem, form: ParsedForm): Dataset? {
+        val values = FillPlan.cardResult(item, form) ?: return null
+        val b = Dataset.Builder()
+        for ((id, v) in values) b.setValue(id, autofillValue(v))
         return runCatching { b.build() }.getOrNull()
     }
 

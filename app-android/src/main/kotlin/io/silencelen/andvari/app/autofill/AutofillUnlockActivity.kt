@@ -86,6 +86,9 @@ class AutofillUnlockActivity : FragmentActivity() {
     private var busy by mutableStateOf(false)
     private var errorText by mutableStateOf<String?>(null)
 
+    /** This launch's one-use nonce ([UnlockNonces]); retired when a result is delivered. */
+    private var nonce: String? = null
+
     /** Per-launch diagnostic trace (see AutofillDebugLog) — terminal events only, no values. */
     private val trace = AutofillDebugLog.FillTrace(origin = "unlock")
 
@@ -100,6 +103,13 @@ class AutofillUnlockActivity : FragmentActivity() {
         // Root cause G: identity comes from the service's bake, never from the host-delivered structure.
         val form = FillBinding.resolve(intent)
         if (form == null) {
+            trace.finish(applicationContext, AutofillDebugLog.FillReason.BINDING_REFUSED)
+            finish(); return
+        }
+        // Ruling 1: a sender that already delivered a result (or one this process never minted) shows nothing and
+        // returns nothing. A cancelled prompt left its nonce live, so the same row can be tried again.
+        nonce = UnlockNonces.of(intent)
+        if (!UnlockNonces.tokens.isLive(nonce)) {
             trace.finish(applicationContext, AutofillDebugLog.FillReason.BINDING_REFUSED)
             finish(); return
         }
@@ -265,6 +275,13 @@ class AutofillUnlockActivity : FragmentActivity() {
     }
 
     private fun finishWithResponse(response: android.service.autofill.FillResponse?) {
+        // Ruling 1: the sender is used up by its first result. Retired before anything is set, and only the call that
+        // retires it may deliver: a second launch racing this one gets nothing.
+        if (!UnlockNonces.tokens.retire(nonce)) {
+            setResult(RESULT_CANCELED)
+            finish()
+            return
+        }
         if (response != null) {
             setResult(RESULT_OK, Intent().putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, response))
         } else {

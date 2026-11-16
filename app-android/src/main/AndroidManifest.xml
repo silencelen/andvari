@@ -119,6 +119,14 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@style/Theme.Andvari.Translucent" />
+        <!-- Android review 1, ruling 1: the confirm before a payment card fills an app that is not a verified
+             browser. Result-returning dataset auth, like the app-fill confirm. -->
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.CardFillConfirmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.Andvari.Translucent" />
         <!-- "Trust {browser} to fill here" confirm, launched from the autofill dropdown row. -->
         <activity
             android:name="io.silencelen.andvari.app.autofill.TrustBrowserActivity"
