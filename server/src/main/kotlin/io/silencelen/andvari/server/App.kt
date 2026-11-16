@@ -62,6 +62,7 @@ import io.ktor.server.response.respondFile
 import io.ktor.server.response.respondOutputStream
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readRemaining
+import io.micrometer.core.instrument.config.MeterFilter
 import io.micrometer.prometheusmetrics.PrometheusConfig
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry
 import io.silencelen.andvari.core.model.PasswordChangeRequest
@@ -221,6 +222,9 @@ internal const val WS_MAX_FRAME_BYTES = 4L * 1024
 /** The /events WebSocket path — TIGHT for the declared-length layer, skipped by the receive layer. */
 internal const val EVENTS_PATH = "/api/v1/events"
 
+/** The method tag values the request metrics keep; any other method token is tagged `OTHER`. */
+internal val METRIC_METHODS = setOf("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
 /** The request-body cap for [path], or null when exempt (the streamed attachment upload). The
  *  /events upgrade answers TIGHT here; the receive layer skips it (see [EVENTS_PATH]). */
 internal fun bodyCapBytes(path: String): Long? = when {
@@ -257,7 +261,10 @@ fun buildServices(config: Config, notifier: Notifier): Services {
     purgeRetiredEscrowLegacy(repo, config)
     val http = HttpClient(Java)
     val service = Service(repo, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
-    val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
+    val metrics = PrometheusMeterRegistry(PrometheusConfig.DEFAULT).also { r ->
+        // The method tag is the token as sent; any method outside the standard ones is tagged OTHER.
+        r.config().meterFilter(MeterFilter.replaceTagValues("method", { v -> if (v in METRIC_METHODS) v else "OTHER" }))
+    }
     registerPurgeGauges(metrics, db)
     val janitor = Janitor(repo, service.attachments, config) { userIds, rev -> notifier.notifyRev(userIds, rev) }
     // cut 4: pick the transport — Graph (preferred, durable) when configured, else SMTP; null = OFF.
@@ -398,7 +405,14 @@ fun Application.andvariModule(services: Services) {
         timeoutMillis = 60_000
         maxFrameSize = WS_MAX_FRAME_BYTES
     }
-    install(MicrometerMetrics) { registry = services.metrics }
+    // A request that matches no route is tagged `n/a`, not with its raw path (Ktor 3.0.3 defaults
+    // distinctNotRegisteredRoutes to true), and [buildServices] folds unknown method tokens into
+    // `OTHER`: otherwise every unknown path or method minted a permanent timer, a heap leak any
+    // peer could drive without a session.
+    install(MicrometerMetrics) {
+        registry = services.metrics
+        distinctNotRegisteredRoutes = false
+    }
     // quality-perf--1: for the streamed file responses (respondFileContent) these turn the file's
     // Last-Modified version into 304 revalidation and add Range support (resumable installer
     // downloads). No-ops for the API routes — JSON responses carry no versions and the attachment
