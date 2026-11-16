@@ -448,8 +448,10 @@ class Service(
         // §2.5: per-account exponential backoff keyed on the NORMALIZED submitted email — existing
         // account or not (the prelogin fake-salt anti-enumeration discipline: a throttle that only
         // guarded real accounts would itself be an account oracle). Checked before verifier work;
-        // a blocked attempt neither reveals anything nor extends the lock.
-        if (loginBackoff.blocked(req.email)) throw RateLimited()
+        // a blocked attempt neither reveals anything nor extends the lock. The attempt is RESERVED
+        // (counted as a failure) before the verify and cleared by `success` below, so requests sent at
+        // the same moment cannot all pass the check: every failure branch below stays counted.
+        if (!loginBackoff.reserve(req.email)) throw RateLimited()
         val user = repo.userByEmail(req.email)
         if (user == null || user.status != "active") {
             ServerCrypto.verify(DUMMY_VERIFIER, req.authKey) // uniform cost
@@ -472,12 +474,10 @@ class Service(
             // Same for the wrong-password branch below: known account, attributed, no meta.
             if (user == null) repo.audit("login_fail", null, null, ip)
             else repo.audit("login_fail", user.userId, null, ip, "inactive")
-            loginBackoff.fail(req.email)
             throw Unauthorized()
         }
         if (!ServerCrypto.verify(user.verifier, req.authKey)) {
             repo.audit("login_fail", user.userId, null, ip)
-            loginBackoff.fail(req.email)
             throw Unauthorized()
         }
         var mustEnrollTotp = false
@@ -487,14 +487,10 @@ class Service(
             // only via the public origin — the latent gap this closes: a tailnet login never
             // challenged an enrolled second factor.) Missing/wrong/replayed codes count toward the
             // email backoff: the code is guessing surface exactly like the password.
-            val code = req.totp ?: run {
-                loginBackoff.fail(req.email)
-                throw Unauthorized("totp_required")
-            }
+            val code = req.totp ?: throw Unauthorized("totp_required")
             val step = verifyTotpCode(secret, code, user.totpLastStep)
             if (step == null) {
                 repo.audit("login_fail", user.userId, null, ip, "totp")
-                loginBackoff.fail(req.email)
                 throw Unauthorized()
             }
             // Guarded consume: the WHERE clause makes step acceptance atomic, so two
@@ -504,7 +500,6 @@ class Service(
             }
             if (consumed != 1) {
                 repo.audit("login_fail", user.userId, null, ip, "totp_replay")
-                loginBackoff.fail(req.email)
                 throw Unauthorized()
             }
         } else if (publicOrigin) {
@@ -525,7 +520,6 @@ class Service(
             // The enrolled-account `totp_required` half of F7 remains: it is the signal every client
             // uses to show the code field, so it waits for the always-ask-for-code wire change.
             repo.audit("login_fail_totp", user.userId, null, ip, "not_enrolled")
-            loginBackoff.fail(req.email)
             throw Forbidden("public_login_requires_totp")
         } else if (config.totpRequired) {
             // Row 4: instance requires TOTP, user not yet enrolled → the login SUCCEEDS into a
