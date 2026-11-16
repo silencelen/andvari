@@ -698,7 +698,10 @@ strips them degrades every client to the poll path (correct, just slower).
   client-sent header, never trusting it), which is exactly the entry taken. An
   all-Cloudflare deployment MAY re-add `CF-Connecting-IP` through the operator-configurable
   `ANDVARI_TRUSTED_IP_HEADERS`; a deployment that is not all-Cloudflare MUST NOT.
-  `/metrics` never trusts forwarded headers.
+  `/metrics` never trusts forwarded headers. **Every per-IP rate bucket keys an IPv6
+  client on its /64** (an IPv4-mapped address on its IPv4 address): one subscriber is
+  routinely handed a whole /64, so a key on the full address was no limit for it. Audit
+  rows keep the full address.
 - Errors: `{ "error": "<machine_code>", "message": "<human>" }`; 401 uniform for
   auth, 403 role, 404 hidden-as-403 for cross-tenant probes, 409 never used for sync
   (conflicts are 200-with-status), 410 resync, 413 attachment/user/item quota,

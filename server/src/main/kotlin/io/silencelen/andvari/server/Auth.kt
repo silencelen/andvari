@@ -226,6 +226,22 @@ fun ApplicationCall.hasForwardedHeader(extraTrusted: List<String> = emptyList())
 fun ApplicationCall.clientIp(config: Config): String =
     pickClientIp(peerIsTrustedProxy(config), { request.headers.getAll(it) }, config.trustedIpHeaders, peerAddress())
 
+/** The key of every per-IP rate bucket: [rateKeyOf] the client IP. Audit rows keep [clientIp] itself. */
+fun ApplicationCall.rateIp(config: Config): String = rateKeyOf(clientIp(config))
+
+/**
+ * The per-IP rate key of a client address: an IPv6 address's /64, written as its first four groups and
+ * `::/64`; an IPv4-mapped IPv6 address as its IPv4 address; anything else as is. One subscriber is
+ * routinely handed a whole /64, so a key on the full address made every per-IP limit no limit for it.
+ */
+internal fun rateKeyOf(ip: String): String {
+    if (!ip.contains(':') || !isIpLiteral(ip)) return ip
+    val bytes = runCatching { java.net.InetAddress.getByName(ip).address }.getOrNull() ?: return ip
+    if (bytes.size == 4) return java.net.InetAddress.getByAddress(bytes).hostAddress // IPv4-mapped, unwrapped by the JDK
+    if (bytes.size != 16) return ip
+    return (0 until 4).joinToString(":") { g -> Integer.toHexString(((bytes[2 * g].toInt() and 0xff) shl 8) or (bytes[2 * g + 1].toInt() and 0xff)) } + "::/64"
+}
+
 /**
  * Pure header selection: the first trusted header bearing a non-loopback IP LITERAL wins.
  * X-Forwarded-For contributes only its RIGHTMOST entry (the one appended by the trusted
