@@ -250,7 +250,7 @@ export class Account {
 }
 
 /** A fake andvari server at one origin. `override(method, path, body)` may answer any request first; `hold(method,
- *  path)` may return a promise the answer waits for (the answer is computed after it settles). */
+ *  path, body, headers)` may return a promise the answer waits for (the answer is computed after it settles). */
 export class Server {
   constructor(origin) {
     this.origin = origin;
@@ -268,7 +268,7 @@ export class Server {
     return this.accounts.find((a) => token === `Bearer at-${a.userId}`) ?? null;
   }
   async handle(method, path, body, headers) {
-    const h = this.hold?.(method, path, body);
+    const h = this.hold?.(method, path, body, headers);
     if (h) await h;
     const o = this.override?.(method, path, body);
     if (o) return o;
@@ -322,6 +322,7 @@ export class World {
     this.tabAnswer = null; // (tabId, msg) => the content script's answer
     this.native = null; // (msg) => the Safari app handler's answer (a promise may hold it back)
     this.nativeLog = [];
+    this.kdfHook = null; // async () => void, runs while the KDF stand-in "derives" (a test can hold it)
   }
   serve(origin) {
     const s = new Server(origin);
@@ -344,6 +345,7 @@ export class World {
     g.Worker = class {
       postMessage(data) {
         void (async () => {
+          await world.kdfHook?.();
           this.onmessage?.({ data: { ok: true, mk: fastKdf(data.password, data.salt) } });
         })();
       }

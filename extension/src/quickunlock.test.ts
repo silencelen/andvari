@@ -399,14 +399,29 @@ test("onFullUnlock re-stamps the same-user window + refreshes the budget, and wi
   await qu.onFullUnlock("user-A", clock.now);
   assert.equal(s.peek()!.blob.lastFullUnlockAt, clock.now, "the 24 h window re-stamped to the fresh full unlock");
   assert.equal(s.peek()!.attemptsRemaining, MAX_PIN_ATTEMPTS, "budget refreshed by the master-password proof");
-  // Now redeem is fresh again even though enroll was >24 h before this moment:
+  // Now redeem is fresh again even though enroll was >24 h before this moment (after the next lock arms):
   clock.now += 60_000;
+  await qu.arm({ access: "a2", refresh: "r2" });
   const r = await qu.beginRedeem("correct horse");
   assert.ok(r.ok, "the re-stamp kept quick unlock alive past the original enroll window");
   // A different-user full unlock wipes it (account switch):
   await qu.onFullUnlock("user-B", clock.now);
   assert.equal(s.peek(), null);
   assert.equal(c.present(), false);
+});
+
+test("a password sign-in from the locked-armed screen drops the previous session's stashed pair (null while unlocked)", async () => {
+  const { qu, s, clock } = makeEngine();
+  await qu.enroll(enrollArgs({ userId: "user-A", lastFullUnlockAt: clock.now }));
+  assert.equal(await qu.arm({ access: "old-access", refresh: "old-refresh" }), "armed");
+  // The person types the master password instead of the PIN: a new server session, the record re-stamped.
+  clock.now += 1000;
+  await qu.onFullUnlock("user-A", clock.now);
+  assert.equal(s.peek()!.lockedTokens, null, "the old session's live pair is not kept beside the new one");
+  assert.equal((await qu.status()).armed, false, "unlocked-armed, not locked-armed");
+  assert.equal(s.peek()!.blob.lastFullUnlockAt, clock.now, "the enrolment itself stays");
+  assert.equal(await qu.arm({ access: "new-access", refresh: "new-refresh" }), "armed", "the next lock stashes the pair in use then");
+  assert.deepEqual(s.peek()!.lockedTokens, { access: "new-access", refresh: "new-refresh" });
 });
 
 // ---------------------------------------------------------------- corrupt-params + missing co-key → wipe
