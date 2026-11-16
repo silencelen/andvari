@@ -653,7 +653,10 @@ strips them degrades every client to the poll path (correct, just slower).
   throttling is not an account oracle), an exponential delay `2^(n-5)` s capped at
   900 s applies uniformly, reset on success; a wrong password, a missing/wrong/replayed TOTP
   code and the break-glass origin's `public_login_requires_totp` refusal all count as a
-  failure (§2 — the last since server scan 2026-10-26 F7). `/client-policy` carries a per-IP bucket
+  failure (§2 — the last since server scan 2026-10-26 F7). Each attempt is counted
+  **before** the verifier runs and cleared once the password and any code verified, so
+  requests for one address sent at the same moment cannot all pass the lock check.
+  `/client-policy` carries a per-IP bucket
   (~60/min, §1.1). Per-account keys also exist on vault-create, user-lookup, the
   §11 lifecycle buckets (`vault_destructive`/`vault_recovery`) and account deletion
   (`account_delete`, 5/h, §13). On the **opt-in

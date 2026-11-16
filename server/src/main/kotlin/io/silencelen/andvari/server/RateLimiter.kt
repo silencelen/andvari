@@ -114,6 +114,28 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
         }
     }
 
+    /**
+     * Reserve one attempt BEFORE any verifier work: atomically, false while the key is locked, else the
+     * attempt is counted as a failure now (arming the lock at the threshold). A verified attempt then calls
+     * [success], which clears it; an attempt that fails stays counted. Checking with [blocked] first and
+     * counting with [fail] after the verify let every request sent at the same moment pass the check, so a
+     * caller with many client addresses got five guesses per address per lock period instead of one.
+     */
+    fun reserve(email: String): Boolean {
+        prune()
+        val s = states.computeIfAbsent(key(email)) { State() }
+        synchronized(s) {
+            if (clock() < s.lockedUntil) return false
+            s.failures++
+            s.touchedAt = clock()
+            if (s.failures >= threshold) {
+                val exp = (s.failures - threshold).coerceAtMost(20)
+                s.lockedUntil = clock() + (1000L shl exp).coerceAtMost(capMs)
+            }
+            return true
+        }
+    }
+
     /** A successful attempt clears the consecutive-failure state entirely (§2.5: reset on success). */
     fun success(email: String) { states.remove(key(email)) }
 
