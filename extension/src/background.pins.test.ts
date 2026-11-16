@@ -234,7 +234,8 @@ test("H20 — all FOUR put paths treat a landed conflict as ok:true and material
     const span = spanOf(bg, from, to);
     assert.ok(span.includes("if (!putLanded(r)) return saveFailure(r?.status);"), `${name}: the landed test must be putLanded (applied OR conflict)`);
     assert.ok(!span.includes('status !== "applied"'), `${name}: a bare applied-only test reports a landed conflict as a failure`);
-    assert.ok(/await materializeConflictCopy\(r, (target\.vaultId|session\.personalVaultId)\);/.test(span), `${name}: must materialize the displaced version after persistSession()`);
+    // With the session the write was made under, so a copy never lands in a session that replaced it (outlives.harness).
+    assert.ok(/await materializeConflictCopy\(r, (target\.vaultId|owner\.personalVaultId), owner\);/.test(span), `${name}: must materialize the displaced version after persistSession()`);
     assert.ok(span.indexOf("persistSession();") < span.indexOf("await materializeConflictCopy("), `${name}: the landed write persists BEFORE the best-effort copy`);
   }
   // putLanded keeps both landed statuses; saveFailure keeps conflict's slot in the union (the
