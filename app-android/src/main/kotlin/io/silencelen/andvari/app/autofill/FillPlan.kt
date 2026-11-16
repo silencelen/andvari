@@ -6,6 +6,7 @@ import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import io.silencelen.andvari.core.client.autofill.CardFill
 import io.silencelen.andvari.core.client.autofill.FieldKind
 import io.silencelen.andvari.core.client.autofill.FillTarget
+import io.silencelen.andvari.core.client.autofill.SavedUri
 import io.silencelen.andvari.core.client.autofill.UriMatch
 
 /**
@@ -83,10 +84,10 @@ internal object FillPlan {
             // Per-field matching: a field is fillable by this item only when the item matches THAT field's own target
             // (which carries the field's frame domain).
             val userFields = if (username != null) {
-                form.fields.filter { it.kind == FieldKind.USERNAME && UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
+                form.fields.filter { it.kind == FieldKind.USERNAME && fieldMatches(login.uris, it, form, trusted) }
             } else emptyList()
             val passFields = if (password != null) {
-                fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, trusted)) }
+                fillPasswordFields(form).filter { fieldMatches(login.uris, it, form, trusted) }
             } else emptyList()
             if (userFields.isEmpty() && passFields.isEmpty()) continue
             val title = item.doc.name.ifBlank { username ?: "login" }
@@ -157,8 +158,8 @@ internal object FillPlan {
         val login = item.doc.login ?: return null
         val username = login.username?.takeIf { it.isNotEmpty() }
         val password = login.password?.takeIf { it.isNotEmpty() }
-        val userFields = if (username != null) form.fields.filter { it.kind == FieldKind.USERNAME && UriMatch.matchLogins(login.uris, targetFor(it, form, false)) } else emptyList()
-        val passFields = if (password != null) fillPasswordFields(form).filter { UriMatch.matchLogins(login.uris, targetFor(it, form, false)) } else emptyList()
+        val userFields = if (username != null) form.fields.filter { it.kind == FieldKind.USERNAME && fieldMatches(login.uris, it, form, false) } else emptyList()
+        val passFields = if (password != null) fillPasswordFields(form).filter { fieldMatches(login.uris, it, form, false) } else emptyList()
         val values = userFields.map { it.id to username!! } + passFields.map { it.id to password!! }
         return values.ifEmpty { null }
     }
@@ -169,6 +170,27 @@ internal object FillPlan {
      */
     fun <I> fillPasswordFields(form: FormOf<I>): List<FieldOf<I>> =
         NewPasswordSignal.fillablePasswordFields(form.fields.filter { it.kind == FieldKind.PASSWORD }) { it.isNewPassword }
+
+    /**
+     * Whether a login with addresses [uris] may fill [field]. The match is the usual one against the field's target
+     * ([targetFor]: its frame's web domain only in a verified browser, the requesting package always), with one more
+     * condition (Android review 1, ruling 3): in an app that is not a verified browser, a field that carries a web
+     * domain is a web page shown inside that app (an in-app browser, a sign-in web view). An `androidapp://` login
+     * matches it only when that domain ALSO matches one of the same login's own web addresses under the usual rule.
+     * So an app whose own sign-in screen is a web page keeps working when the login holds both addresses, and the
+     * page's claim can only narrow what the package match gives, never widen it (a web login still never fills an
+     * app: [targetFor] gives it no web host).
+     *
+     * Next step, not built: offer such a login through the app-fill confirm with the page's domain named, shown every
+     * time and never remembered.
+     */
+    fun <I> fieldMatches(uris: List<String>, field: FieldOf<I>, form: FormOf<I>, trusted: Boolean): Boolean {
+        if (!UriMatch.matchLogins(uris, targetFor(field, form, trusted))) return false
+        val pageDomain = field.webDomain
+        if (trusted || pageDomain == null) return true
+        val web = uris.filter { UriMatch.parseSavedUri(it) is SavedUri.Web }
+        return UriMatch.matchLogins(web, FillTarget(webHost = pageDomain, packageName = form.appPackage))
+    }
 
     /** A field's match target: its frame's web domain only in a verified browser, the requesting package always. */
     fun <I> targetFor(field: FieldOf<I>, form: FormOf<I>, trusted: Boolean): FillTarget =

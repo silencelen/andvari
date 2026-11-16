@@ -227,7 +227,7 @@ object DatasetBuilder {
                             FieldKind.PASSWORD -> !login.password.isNullOrEmpty() && f in fillable
                             else -> false
                         }
-                        hasCred && UriMatch.matchLogins(login.uris, targetFor(f, form, trusted))
+                        hasCred && FillPlan.fieldMatches(login.uris, f, form, trusted)
                     }
                 },
             )
@@ -328,8 +328,6 @@ object DatasetBuilder {
      * go through the same seam so the status screen can't contradict what actually filled.
      */
     private fun fillPasswordFields(form: ParsedForm): List<ParsedField> = FillPlan.fillPasswordFields(form)
-
-    private fun targetFor(field: ParsedField, form: ParsedForm, trusted: Boolean): FillTarget = FillPlan.targetFor(field, form, trusted)
 
     /** CardFill's value shapes, mapped MECHANICALLY (forList on a TEXT node or forText on a LIST node crashes the fill). */
     private fun autofillValue(v: CardFill.Value): AutofillValue = when (v) {
