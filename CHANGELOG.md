@@ -8,9 +8,9 @@ operational area. Read them as "recorded elsewhere", not as broken links.</sub>
 
 *This release adds account deletion on the web, Android and desktop, changes where the browser extension fills a
 payment card, and moves the Android app's sign-in, unlock and session handling onto shared code that the coming iPhone
-app also uses. It also closes four weaknesses a security review found in the server and two that a review of the
-Android app found in its autofill, and stops a lost answer from signing a device out. Nothing in it lets the server read
-your passwords. The changes you will see are listed first.*
+app also uses. It also closes four weaknesses a security review found in the server, two that a review of the
+Android app found in its autofill and seven that reviews found in the browser extension, and stops a lost answer from
+signing a device out. Nothing in it lets the server read your passwords. The changes you will see are listed first.*
 
 **What you will notice**
 - **Browser extension (Chrome, Firefox): a card is filled only into a payment provider's own card form, and only after
@@ -74,6 +74,13 @@ your passwords. The changes you will see are listed first.*
 - **Sharing: a vault handover is shown as verified only for an offer your account made.** If the server reports that a
   vault you own passed to someone else without such an offer, the apps keep your ownership record and warn you. "Make
   owner" is offered only for a member you verified on that device.
+- **Browser extension: the popup fills a login only into the page it showed.** If the tab moves to another address
+  while the popup is open (a redirect, or a switch from http to https), a click on a login fills nothing and the popup
+  says "andvari wouldn't release this login for this page — try again from the popup." Reopening the popup on the new
+  page works. In normal use nothing changes.
+- **Browser extension: setting up quick unlock stops if the vault locks meanwhile.** If you press Lock or Sign out, or
+  the vault locks by itself, during the second or two a PIN setup takes or while the Windows Hello / Touch ID prompt
+  is up, the setup does not finish and the popup says "Unlock andvari first to set up quick unlock."
 
 **Security fixes**
 - **Card fill:** a saved card could be filled into a shop page's own form, where every script on that page, including a
@@ -93,6 +100,48 @@ your passwords. The changes you will see are listed first.*
   - **An app's login on a web page:** a login saved for an app was offered to any web page that app showed, so a link
     opened in the app's own browser could collect it. It is now offered there only for a page of the same login's own
     web addresses.
+- **Browser extension, found by two reviews on 2026-11-16.** Three were found first (1 to 3); the other four are in
+  quick unlock (4 to 7). Fixes 1, 2 and 4 to 7 were in 0.29.1 too, in Chrome and Firefox. Fix 3 is in the Safari build
+  only, which is new since 0.29.1 and is not among this release's downloads. None of the four quick-unlock faults lets
+  a web page or an outside attacker read a password.
+  1. **A login could be filled into a page the popup never showed (Chrome, Firefox).** A web page you clicked on could
+     open a site's sign-in page in a new tab, and then move that tab to an address of its own while the andvari popup
+     was open on it. The login you then picked in the popup was filled into the moved page, which could read it. It
+     needed you to visit that page and click on it, open the popup on the tab it opened, and pick the login just after
+     the move. Fixed: the popup fills a login only while the tab is still on the page it showed.
+  2. **A save or a sync answered after a sign-out could land in the next account (Chrome, Firefox).** With two andvari
+     accounts in one browser: if the first account saved a new login and, while the save was on its way to the server,
+     signed out and the second signed in, the new login and its password were added to the second account's list and
+     offered on that site. A sync on its way at that moment emptied the second account's list until the next sync. It
+     needed the second sign-in to happen before the server answered: normally well under a second, but a server can
+     hold its answer back as long as it likes. Fixed: an answer that arrives after its session ended adds nothing; the
+     save itself still lands in the first account, which shows it at its next unlock.
+  3. **Safari: Lock did not cancel a fill or a copy waiting for Face ID.** If you pressed Lock while Face ID was up for
+     a fill or a copy, the login or card details were still filled or copied after the vault had closed. Nobody else
+     could cause it. Fixed: a Lock pressed during the prompt cancels the fill or the copy.
+  4. **Quick unlock kept an old sign-in after a master-password sign-in.** When you chose the master password instead
+     of the PIN, the quick-unlock storage kept the previous sign-in's tokens until the next lock. Nothing used them, and
+     only code running inside the extension can read that storage. It happened every time; nobody needed to do
+     anything. Fixed: they are removed at the sign-in.
+  5. **A late answer to a PIN unlock could replace a newer sign-in.** If the server answered a PIN unlock slowly and
+     you meanwhile used "Use your master password instead" and signed in, the late answer replaced the new sign-in's
+     tokens. The open vault then talked to the server as the earlier sign-in; if that was another account, the open
+     account's list emptied at the next sync and its saves failed until it signed in again. It needed the server's
+     answer to take longer than a whole master-password sign-in (a few seconds); a server that delays on purpose can
+     make that as long as it likes. Nothing of either account was disclosed. Fixed: the late answer is ignored.
+  6. **Setting up quick unlock went on after a lock or a sign-out.** A lock, a sign-out or the automatic lock during
+     the second or two a PIN setup takes, or while the Windows Hello / Touch ID prompt was up, did not stop the setup.
+     After a sign-out, which should remove all quick-unlock data, a new quick-unlock record for that account stayed in
+     the browser, and the next master-password sign-in to that account turned quick unlock back on without you
+     finishing its setup. It needed nothing from anyone else. Fixed: the setup writes nothing once the vault has
+     locked or signed out.
+  7. **A PIN unlock and a master-password sign-in at the same moment could mix two sign-ins.** One account's open vault
+     could run on another account's tokens (its list emptied at the next sync and its saves failed), or the sign-in
+     could open the vault with no connection to the server (nothing synced or saved until you signed in again, and
+     quick unlock switched off at the next lock). It needed both to be started in the same few seconds in one browser,
+     for example typing the PIN and then using "Use your master password instead" while the PIN unlock was slow; a
+     slow server widens that window. Nothing was disclosed. Fixed: the unlock that finishes last stays open, on its
+     own sign-in.
 - **Server, found by a security review on 2026-11-15** (none of these lets anyone read a vault; they are about keeping the
   server up and the guessing limits real):
   - A sync request could make the server build a very large answer in memory, and store copies of an item's encrypted
